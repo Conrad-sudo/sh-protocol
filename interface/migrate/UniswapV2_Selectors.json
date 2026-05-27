@@ -1,0 +1,14 @@
+{
+   
+    "swapETHForExactTokens": "0xfb3bdb41",
+    "swapExactTokensForTokens": "0x38ed1739",
+    "swapTokensForExactTokens": "0x8803dbee",
+    "swapExactTokensForETH": "0x18cbafe5",
+    "swapExactETHForTokens":"0x7ff36ab5",
+    "swapTokensForExactETH":"0x4a25d94a",
+    "addLiquidity": "0xe8e33700",
+    "addLiquidityETH": "0xf305d719",
+    "removeLiquidity": "0xbaa2abde",
+    "removeLiquidityETH": "0x02751cec"
+
+}

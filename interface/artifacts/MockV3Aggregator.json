@@ -1,0 +1,360 @@
+{
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        { "name": "_decimals", "type": "uint8", "internalType": "uint8" },
+        { "name": "_initialAnswer", "type": "int256", "internalType": "int256" }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "decimals",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "uint8", "internalType": "uint8" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "description",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "string", "internalType": "string" }],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "getAnswer",
+      "inputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "outputs": [{ "name": "", "type": "int256", "internalType": "int256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRoundData",
+      "inputs": [
+        { "name": "_roundId", "type": "uint80", "internalType": "uint80" }
+      ],
+      "outputs": [
+        { "name": "roundId", "type": "uint80", "internalType": "uint80" },
+        { "name": "answer", "type": "int256", "internalType": "int256" },
+        { "name": "startedAt", "type": "uint256", "internalType": "uint256" },
+        { "name": "updatedAt", "type": "uint256", "internalType": "uint256" },
+        {
+          "name": "answeredInRound",
+          "type": "uint80",
+          "internalType": "uint80"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getTimestamp",
+      "inputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "latestAnswer",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "int256", "internalType": "int256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "latestRound",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "latestRoundData",
+      "inputs": [],
+      "outputs": [
+        { "name": "roundId", "type": "uint80", "internalType": "uint80" },
+        { "name": "answer", "type": "int256", "internalType": "int256" },
+        { "name": "startedAt", "type": "uint256", "internalType": "uint256" },
+        { "name": "updatedAt", "type": "uint256", "internalType": "uint256" },
+        {
+          "name": "answeredInRound",
+          "type": "uint80",
+          "internalType": "uint80"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "latestTimestamp",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "updateAnswer",
+      "inputs": [
+        { "name": "_answer", "type": "int256", "internalType": "int256" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "updateRoundData",
+      "inputs": [
+        { "name": "_roundId", "type": "uint80", "internalType": "uint80" },
+        { "name": "_answer", "type": "int256", "internalType": "int256" },
+        { "name": "_timestamp", "type": "uint256", "internalType": "uint256" },
+        { "name": "_startedAt", "type": "uint256", "internalType": "uint256" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "version",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "stateMutability": "view"
+    }
+  ],
+  "bytecode": {
+    "object": "0x60803460bd57601f6104f638819003918201601f19168301916001600160401b0383118484101760c157808492604094855283398101031260bd5780519060ff821680920360bd57602001519060ff195f5416175f5580600155426002556003545f19811460a957600101806003555f52600460205260405f20556003545f5260056020524260405f20556003545f5260066020524260405f205560405161042090816100d68239f35b634e487b7160e01b5f52601160045260245ffd5b5f80fd5b634e487b7160e01b5f52604160045260245ffdfe6080806040526004361015610012575f80fd5b5f3560e01c908163313ce567146103b5575080634aa2011f1461034c57806350d25bcd1461032f57806354fd4d5014610315578063668a0f02146102f85780637284e4161461025e5780638205bf6a146102415780639a6fc8f5146101d2578063a87a20ce14610160578063b5ab58dc14610136578063b633620c1461010c5763feaf968c146100a0575f80fd5b34610108575f366003190112610108576003545f818152600460209081526040808320546006835281842054600584529382902054825169ffffffffffffffffffff90961680875293860191909152908401929092526060830191909152608082015260a090f35b5f80fd5b34610108576020366003190112610108576004355f526005602052602060405f2054604051908152f35b34610108576020366003190112610108576004355f526004602052602060405f2054604051908152f35b346101085760203660031901126101085760043580600155426002556003545f1981146101be57600101806003555f52600460205260405f20556003545f5260056020524260405f20556003545f5260066020524260405f20555f80f35b634e487b7160e01b5f52601160045260245ffd5b34610108576020366003190112610108576101eb6103d1565b69ffffffffffffffffffff165f818152600460209081526040808320546006835281842054600584529382902054825186815293840191909152908201929092526060810191909152608081019190915260a090f35b34610108575f366003190112610108576020600254604051908152f35b34610108575f366003190112610108576040516040810181811067ffffffffffffffff8211176102e457604052601f8152604060208201917f76302e362f74657374732f4d6f636b563341676772656761746f722e736f6c0083528151928391602083525180918160208501528484015e5f828201840152601f01601f19168101030190f35b634e487b7160e01b5f52604160045260245ffd5b34610108575f366003190112610108576020600354604051908152f35b34610108575f3660031901126101085760206040515f8152f35b34610108575f366003190112610108576020600154604051908152f35b34610108576080366003190112610108576103656103d1565b60243569ffffffffffffffffffff60443592168060035581600155826002555f52600460205260405f20556003545f52600560205260405f20556003545f52600660205260643560405f20555f80f35b34610108575f3660031901126101085760209060ff5f54168152f35b6004359069ffffffffffffffffffff821682036101085756fea26469706673582212209a4d333e0595d3a1f31876ad9bbb2ff0e5501e67bf9fc21312240c331eba7bde64736f6c63430008210033",
+    "sourceMap": "320:2091:71:-:0;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;-1:-1:-1;;;;;320:2091:71;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;320:2091:71;;;-1:-1:-1;320:2091:71;;;;917:15;899:33;320:2091;942:13;320:2091;;;;;;;;;;942:13;320:2091;-1:-1:-1;320:2091:71;965:9;320:2091;;;-1:-1:-1;320:2091:71;;942:13;320:2091;-1:-1:-1;320:2091:71;1007:12;320:2091;;917:15;320:2091;-1:-1:-1;320:2091:71;;942:13;320:2091;-1:-1:-1;320:2091:71;1060:12;320:2091;;917:15;320:2091;-1:-1:-1;320:2091:71;;;;;;;;;;;;;;;-1:-1:-1;320:2091:71;;;;;-1:-1:-1;320:2091:71;;-1:-1:-1;320:2091:71;;;;;;-1:-1:-1;320:2091:71;;;;;-1:-1:-1;320:2091:71",
+    "linkReferences": {}
+  },
+  "deployedBytecode": {
+    "object": "0x6080806040526004361015610012575f80fd5b5f3560e01c908163313ce567146103b5575080634aa2011f1461034c57806350d25bcd1461032f57806354fd4d5014610315578063668a0f02146102f85780637284e4161461025e5780638205bf6a146102415780639a6fc8f5146101d2578063a87a20ce14610160578063b5ab58dc14610136578063b633620c1461010c5763feaf968c146100a0575f80fd5b34610108575f366003190112610108576003545f818152600460209081526040808320546006835281842054600584529382902054825169ffffffffffffffffffff90961680875293860191909152908401929092526060830191909152608082015260a090f35b5f80fd5b34610108576020366003190112610108576004355f526005602052602060405f2054604051908152f35b34610108576020366003190112610108576004355f526004602052602060405f2054604051908152f35b346101085760203660031901126101085760043580600155426002556003545f1981146101be57600101806003555f52600460205260405f20556003545f5260056020524260405f20556003545f5260066020524260405f20555f80f35b634e487b7160e01b5f52601160045260245ffd5b34610108576020366003190112610108576101eb6103d1565b69ffffffffffffffffffff165f818152600460209081526040808320546006835281842054600584529382902054825186815293840191909152908201929092526060810191909152608081019190915260a090f35b34610108575f366003190112610108576020600254604051908152f35b34610108575f366003190112610108576040516040810181811067ffffffffffffffff8211176102e457604052601f8152604060208201917f76302e362f74657374732f4d6f636b563341676772656761746f722e736f6c0083528151928391602083525180918160208501528484015e5f828201840152601f01601f19168101030190f35b634e487b7160e01b5f52604160045260245ffd5b34610108575f366003190112610108576020600354604051908152f35b34610108575f3660031901126101085760206040515f8152f35b34610108575f366003190112610108576020600154604051908152f35b34610108576080366003190112610108576103656103d1565b60243569ffffffffffffffffffff60443592168060035581600155826002555f52600460205260405f20556003545f52600560205260405f20556003545f52600660205260643560405f20555f80f35b34610108575f3660031901126101085760209060ff5f54168152f35b6004359069ffffffffffffffffffff821682036101085756fea26469706673582212209a4d333e0595d3a1f31876ad9bbb2ff0e5501e67bf9fc21312240c331eba7bde64736f6c63430008210033",
+    "sourceMap": "320:2091:71:-:0;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;2047:11;320:2091;;;;;;;;;;;;;;;2109:12;320:2091;;;;;;2148:12;320:2091;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;571:47;320:2091;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;917:15;899:33;320:2091;942:13;320:2091;;;;;;;;;;942:13;320:2091;;;;;;;;;;942:13;320:2091;;;1007:12;320:2091;;917:15;320:2091;;;;942:13;320:2091;;;1060:12;320:2091;;917:15;320:2091;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;:::i;:::-;;;;;;;;;;;;;;;;;1706:12;320:2091;;;;;;1730:12;320:2091;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;453:30;320:2091;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;489:26;320:2091;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;421:26;320:2091;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;:::i;:::-;;;;;;;;;1231:22;320:2091;;;;;1295:28;320:2091;;;;;;;;;;1231:22;320:2091;;;1375:12;320:2091;;;;;;1231:22;320:2091;;;1423:12;320:2091;;;;;;;;;;;;;;;;;-1:-1:-1;;320:2091:71;;;;;;;;;;;;;;;;;;;;;;;;:::o",
+    "linkReferences": {}
+  },
+  "methodIdentifiers": {
+    "decimals()": "313ce567",
+    "description()": "7284e416",
+    "getAnswer(uint256)": "b5ab58dc",
+    "getRoundData(uint80)": "9a6fc8f5",
+    "getTimestamp(uint256)": "b633620c",
+    "latestAnswer()": "50d25bcd",
+    "latestRound()": "668a0f02",
+    "latestRoundData()": "feaf968c",
+    "latestTimestamp()": "8205bf6a",
+    "updateAnswer(int256)": "a87a20ce",
+    "updateRoundData(uint80,int256,uint256,uint256)": "4aa2011f",
+    "version()": "54fd4d50"
+  },
+  "rawMetadata": "{\"compiler\":{\"version\":\"0.8.33+commit.64118f21\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"uint8\",\"name\":\"_decimals\",\"type\":\"uint8\"},{\"internalType\":\"int256\",\"name\":\"_initialAnswer\",\"type\":\"int256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[],\"name\":\"decimals\",\"outputs\":[{\"internalType\":\"uint8\",\"name\":\"\",\"type\":\"uint8\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"description\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"pure\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"name\":\"getAnswer\",\"outputs\":[{\"internalType\":\"int256\",\"name\":\"\",\"type\":\"int256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint80\",\"name\":\"_roundId\",\"type\":\"uint80\"}],\"name\":\"getRoundData\",\"outputs\":[{\"internalType\":\"uint80\",\"name\":\"roundId\",\"type\":\"uint80\"},{\"internalType\":\"int256\",\"name\":\"answer\",\"type\":\"int256\"},{\"internalType\":\"uint256\",\"name\":\"startedAt\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"uint80\",\"name\":\"answeredInRound\",\"type\":\"uint80\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"name\":\"getTimestamp\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"latestAnswer\",\"outputs\":[{\"internalType\":\"int256\",\"name\":\"\",\"type\":\"int256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"latestRound\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"latestRoundData\",\"outputs\":[{\"internalType\":\"uint80\",\"name\":\"roundId\",\"type\":\"uint80\"},{\"internalType\":\"int256\",\"name\":\"answer\",\"type\":\"int256\"},{\"internalType\":\"uint256\",\"name\":\"startedAt\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"updatedAt\",\"type\":\"uint256\"},{\"internalType\":\"uint80\",\"name\":\"answeredInRound\",\"type\":\"uint80\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"latestTimestamp\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"int256\",\"name\":\"_answer\",\"type\":\"int256\"}],\"name\":\"updateAnswer\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint80\",\"name\":\"_roundId\",\"type\":\"uint80\"},{\"internalType\":\"int256\",\"name\":\"_answer\",\"type\":\"int256\"},{\"internalType\":\"uint256\",\"name\":\"_timestamp\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"_startedAt\",\"type\":\"uint256\"}],\"name\":\"updateRoundData\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"version\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"title\":\"MockV3Aggregator\",\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"notice\":\"Based on the FluxAggregator contractUse this contract when you need to test other contract's ability to read data from an aggregator contract, but how the aggregator got its answer is unimportant\",\"version\":1}},\"settings\":{\"compilationTarget\":{\"src/mocks/MockV3Aggregator.sol\":\"MockV3Aggregator\"},\"evmVersion\":\"prague\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[\":@account-abstraction/contracts/=lib/account-abstraction/contracts/\",\":@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/\",\":@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/\",\":account-abstraction/=lib/account-abstraction/contracts/\",\":chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/\",\":erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/\",\":forge-std/=lib/forge-std/src/\",\":halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/\",\":openzeppelin-contracts/=lib/openzeppelin-contracts/\",\":v2-core/=lib/v2-core/contracts/\",\":v2-periphery/=lib/v2-periphery/contracts/\"],\"viaIR\":true},\"sources\":{\"src/mocks/MockV3Aggregator.sol\":{\"keccak256\":\"0x9e9abd64db1c282f900c026bc8b8206a721819966f78229560c6f20680aca98a\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://ae1fda0354edf663c1e556c440d91a6d531052f801ccd8df33e7d4390cb959e2\",\"dweb:/ipfs/Qme3NVGV3xjfLrp4nehVooJpouu1g2mHFCg4eWjEzyEVYh\"]}},\"version\":1}",
+  "metadata": {
+    "compiler": { "version": "0.8.33+commit.64118f21" },
+    "language": "Solidity",
+    "output": {
+      "abi": [
+        {
+          "inputs": [
+            { "internalType": "uint8", "name": "_decimals", "type": "uint8" },
+            {
+              "internalType": "int256",
+              "name": "_initialAnswer",
+              "type": "int256"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "constructor"
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "decimals",
+          "outputs": [{ "internalType": "uint8", "name": "", "type": "uint8" }]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "pure",
+          "type": "function",
+          "name": "description",
+          "outputs": [
+            { "internalType": "string", "name": "", "type": "string" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getAnswer",
+          "outputs": [
+            { "internalType": "int256", "name": "", "type": "int256" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "uint80", "name": "_roundId", "type": "uint80" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getRoundData",
+          "outputs": [
+            { "internalType": "uint80", "name": "roundId", "type": "uint80" },
+            { "internalType": "int256", "name": "answer", "type": "int256" },
+            {
+              "internalType": "uint256",
+              "name": "startedAt",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "updatedAt",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint80",
+              "name": "answeredInRound",
+              "type": "uint80"
+            }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getTimestamp",
+          "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "latestAnswer",
+          "outputs": [
+            { "internalType": "int256", "name": "", "type": "int256" }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "latestRound",
+          "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "latestRoundData",
+          "outputs": [
+            { "internalType": "uint80", "name": "roundId", "type": "uint80" },
+            { "internalType": "int256", "name": "answer", "type": "int256" },
+            {
+              "internalType": "uint256",
+              "name": "startedAt",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "updatedAt",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint80",
+              "name": "answeredInRound",
+              "type": "uint80"
+            }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "latestTimestamp",
+          "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "int256", "name": "_answer", "type": "int256" }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "updateAnswer"
+        },
+        {
+          "inputs": [
+            { "internalType": "uint80", "name": "_roundId", "type": "uint80" },
+            { "internalType": "int256", "name": "_answer", "type": "int256" },
+            {
+              "internalType": "uint256",
+              "name": "_timestamp",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "_startedAt",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "updateRoundData"
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "version",
+          "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ]
+        }
+      ],
+      "devdoc": { "kind": "dev", "methods": {}, "version": 1 },
+      "userdoc": { "kind": "user", "methods": {}, "version": 1 }
+    },
+    "settings": {
+      "remappings": [
+        "@account-abstraction/contracts/=lib/account-abstraction/contracts/",
+        "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+        "account-abstraction/=lib/account-abstraction/contracts/",
+        "chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/",
+        "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-std/=lib/forge-std/src/",
+        "halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/",
+        "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+        "v2-core/=lib/v2-core/contracts/",
+        "v2-periphery/=lib/v2-periphery/contracts/"
+      ],
+      "optimizer": { "enabled": true, "runs": 200 },
+      "metadata": { "bytecodeHash": "ipfs" },
+      "compilationTarget": {
+        "src/mocks/MockV3Aggregator.sol": "MockV3Aggregator"
+      },
+      "evmVersion": "prague",
+      "libraries": {},
+      "viaIR": true
+    },
+    "sources": {
+      "src/mocks/MockV3Aggregator.sol": {
+        "keccak256": "0x9e9abd64db1c282f900c026bc8b8206a721819966f78229560c6f20680aca98a",
+        "urls": [
+          "bzz-raw://ae1fda0354edf663c1e556c440d91a6d531052f801ccd8df33e7d4390cb959e2",
+          "dweb:/ipfs/Qme3NVGV3xjfLrp4nehVooJpouu1g2mHFCg4eWjEzyEVYh"
+        ],
+        "license": "MIT"
+      }
+    },
+    "version": 1
+  },
+  "id": 71
+}

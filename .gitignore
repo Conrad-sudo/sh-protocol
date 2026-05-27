@@ -1,0 +1,31 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+.venv
+
+session_keys.db
+
+# OS / editor artifacts
+.DS_Store
+.vscode/
+
+# Claude Code config
+.claude/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+

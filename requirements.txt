@@ -1,0 +1,7 @@
+web3
+eth-account
+python-dotenv
+langchain
+langchain-anthropic
+langgraph
+python-telegram-bot[job-queue]

@@ -1,0 +1,9 @@
+{
+    "transfer":"0xa9059cbb",
+    "balanceOf":"0x70a08231",
+    "approve":"0x095ea7b3",
+    "allowance":"0xdd62ed3e",
+    "transferFrom":"0x23b872dd",
+    "deposit":"0xd0e30db0",
+    "withdraw":"0x2e1a7d4d"
+}
