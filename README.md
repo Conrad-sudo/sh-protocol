@@ -1,4 +1,4 @@
-# Session Key Infrastructure
+# 🔑⛓️ Session Key Infrastructure
 
 > **Proof of Concept — not audited. Do not use with real funds.**
 
@@ -276,7 +276,7 @@ The `SessionHandler` is an ERC-4337-compliant smart account (implements `IAccoun
 | Session time windows | 48-bit `validFrom` / `validUntil` timestamps |
 | Spending limits | USD-denominated per-session cumulative cap via `PriceOracle` |
 | Selector whitelisting | O(1) `mapping(address => mapping(bytes4 => bool))` lookup |
-| Uniswap V2 support | Assembly-based calldata parsing for all 6 swap functions plus `addLiquidity`, `addLiquidityETH`, `removeLiquidity`, `removeLiquidityETH` |
+| Uniswap V2 support | Assembly-based calldata parsing for 4 token-input swap functions plus `addLiquidity`, `addLiquidityETH`, `removeLiquidity`, `removeLiquidityETH`; ETH-input swaps (`swapETHForExactTokens`, `swapExactETHForTokens`) are budget-accounted via the `value` field |
 | Native ETH sends | `address(0)` session target sentinel — allows ETH transfers to arbitrary recipients |
 | Owner revocation | `revokeSessionKey` cleans up mappings and resets storage |
 | Owner withdrawal | `withdraw(token, amount)` allows the owner to pull ERC20 tokens or ETH from the wallet |
@@ -295,40 +295,38 @@ struct Session {
 }
 ```
 
-**`PendingSession` transient storage:**
+**EIP-1153 transient storage bridge:**
 
-`validateUserOp` and `execute` run as two separate calls within the same `handleOps` transaction. The budget update must happen in `execute` (after the inner call succeeds), not in `validateUserOp`. The `pendingSession` storage struct bridges the two steps by storing the session key, selector, and computed USD amounts derived in `validateUserOp` for retrieval in `execute`:
+`validateUserOp` and `execute` run as two separate calls within the same `handleOps` transaction. Two EIP-1153 transient slots bridge the two steps — storing just enough context for `execute` to identify which session is active and which selector was authorized:
 
 ```solidity
-struct PendingSession {
-    address sessionKey;
-    bytes4 selector;
-    uint256 amountToAddToBudget;       // USD to charge against spentAmount
-    uint256 amountToRemoveFromBudget;  // USD to credit back (removeLiquidity only)
-}
+address transient t_pendingSessionKey;
+bytes4  transient t_pendingSelector;
 ```
 
-`pendingSession` is cleared at the end of every `execute` call via `delete pendingSession`.
+USD computation is deferred entirely to `execute()` via `_computeUSDValue()`, because oracle reads (external storage) are forbidden during validation. The transient slots are zeroed automatically at transaction end — no manual cleanup required.
 
 **Signature validation flow (`validateUserOp`):**
 
 1. Recover the signer from the EIP-191 wrapped `userOpHash` using ECDSA.
-2. If signer is the **owner** — clear `pendingSession`, return `SIG_VALIDATION_SUCCESS` immediately.
-3. If signer is a **registered session key** — call `_validateSession`:
-   - If `data.length == 0 && value > 0` — this is a native ETH send; check the session target is `address(0)` and validate the USD value against the budget.
+2. If signer is the **owner** — set `t_pendingSessionKey = address(0)`, return `SIG_VALIDATION_SUCCESS` immediately.
+3. If signer is in `sessionExists` — call `_validateSession`:
+   - If `data.length == 0 && value > 0` — this is a native ETH send; assert the session target is `address(0)` and `_isSessionUsable` (budget check without oracle). Write `t_pendingSessionKey` and `bytes4(0)` to transient storage. Return packed validation data with time bounds.
    - Otherwise, decode `callData[4:]` to extract `dest`, `value`, and inner `data`.
    - Assert `dest` matches the session's whitelisted `target`.
    - Extract the 4-byte selector via inline assembly.
-   - Parse calldata via assembly for the relevant swap/liquidity function to extract the token amounts.
-   - Convert extracted amounts to USD via `PriceOracle`.
-   - Assert cumulative spend does not exceed `spendingLimit`.
-   - Write decoded values into `pendingSession`.
+   - Assert `_isSessionUsable(signer)` (own-storage only — no oracle, no `block.timestamp`) and `isSelectorAllowed[signer][selector]`.
+   - Write `t_pendingSessionKey` and `t_pendingSelector` to transient storage via `_setPendingSession`. No USD amounts are computed here.
    - Return packed validation data with time bounds.
 4. Otherwise — return `SIG_VALIDATION_FAILED`.
 
+**USD computation and budget enforcement (`execute`):**
+
+When `execute` is called by the EntryPoint and `t_pendingSessionKey != address(0)`, it calls `_computeUSDValue(dest, value, data, selector)` — which performs all oracle reads and assembly calldata parsing — to produce `(debitValueInUSD, creditValueInUSD)`. The spending limit is then checked and `spentAmount` updated before the inner call dispatches. This deferral to `execute` is necessary because `SLOAD` on external contracts (oracle) is forbidden during validation.
+
 **`removeLiquidity` budget accounting:**
 
-For `removeLiquidity` and `removeLiquidityETH`, the `amountToRemoveFromBudget` field is populated with the USD value of the minimum return amounts (`amountAMin`, `amountBMin`, `amountETHMin`). In `execute`, rather than charging the session, the system credits back up to the current `spentAmount`. This prevents LP removal from being double-counted as a spend, since the user is recovering value, not spending it.
+For `removeLiquidity` and `removeLiquidityETH`, `_computeUSDValue` returns a non-zero `creditValueInUSD` (computed from `amountAMin`/`amountBMin`/`amountETHMin`) and a zero `debitValueInUSD`. In `execute`, rather than charging the session, the system credits back up to the current `spentAmount`. This prevents LP removal from being double-counted as a spend, since the user is recovering value, not spending it.
 
 **Key functions:**
 
@@ -358,14 +356,14 @@ function getSession(address sessionKey) public view returns (Session memory);
 function isSessionActive(address sessionKey) public view returns (bool);
 function getRemainingBudget(address sessionKey) public view returns (uint256);
 function isSpendingWithinBudget(address sessionKey, address token, uint256 amount) public view returns (bool);
-function getPrice(address token) external view returns (uint256 price, uint8 decimals);
+function getPrice(address token) public view returns (uint256 price, uint8 decimals);
 ```
 
 ---
 
 ### `PriceOracle.sol`
 
-The `PriceOracle` converts ETH and ERC20 token amounts into real-time USD values using Chainlink price feeds. It is used by `SessionHandler._validateSession` to enforce USD-denominated spending limits rather than raw token amounts.
+The `PriceOracle` converts ETH and ERC20 token amounts into real-time USD values using Chainlink price feeds. It is used by `SessionHandler._computeUSDValue` (called from `execute()`) to enforce USD-denominated spending limits rather than raw token amounts.
 
 This design accounts for stablecoin depeg events (e.g., USDC at $0.87 during the March 2023 SVB crisis) by querying actual market prices rather than assuming a 1:1 peg.
 
