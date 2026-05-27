@@ -2,7 +2,7 @@
 
 > **Proof of Concept — not audited. Do not use with real funds.**
 
-A full-stack smart wallet system built on ERC-4337 account abstraction. The wallet is controlled by delegated session keys — scoped, time-limited, and spending-capped authorizations that allow an AI agent to sign transactions on behalf of the owner without ever exposing the owner's private key.
+A full-stack smart wallet system built on ERC-4337 account abstraction. The wallet is controlled by delegated session keys — scoped, time-limited, and spending-capped authorizations that allow an AI agent to sign transactions on behalf of the owner through natural language command without ever exposing the owner's private key.
 
 The system is composed of five layers: Solidity smart contracts, a Python blockchain interface, HashiCorp Vault (key custody), a LangChain AI agent, and a Telegram bot front end.
 
