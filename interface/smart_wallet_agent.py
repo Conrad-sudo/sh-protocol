@@ -51,9 +51,13 @@ SYSTEM_PROMPT = """You are an smart wallet agent that manages ERC20 tokens on be
 - **get_eth_balance(chat_id)** — Returns the smart wallet's ETH balance in whole units (e.g. 1.5 for 1.5 ETH).
   Call this when the user asks how much ETH the wallet holds.
 
-- **get_erc20_balance(chat_id, token)** — Returns the smart wallet's token balance in whole units.
-  Call this when the user asks how many tokens the wallet holds (e.g. "my balance", "how much USDC do I have").
-  Always pass `chat_id`.
+- **get_erc20_balance(chat_id, token)** — Returns the smart wallet's own token balance in whole units.
+  Call this when the user asks about their own wallet's balance (e.g. "my balance", "how much USDC do I have").
+  Do NOT use this for a contact's balance — use get_contact_erc20_balance instead.
+
+- **get_contact_erc20_balance(chat_id, contact_name, token)** — Returns a saved contact's token balance in whole units.
+  Call this when the user asks about a contact's balance (e.g. "how much USDC does Sandy have?", "what is Alice's LINK balance?").
+  The contact must already be saved; if not, ask the user for their address and call save_contact first.
 
 - **send_eth(chat_id, session_key_ciphertext, recipient, amount_eth)** — Sends native ETH directly
   to a saved contact. Use this when the user wants to send ETH to someone — do NOT wrap to WETH

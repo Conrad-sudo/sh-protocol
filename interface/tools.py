@@ -517,21 +517,46 @@ def preflight_check(
 @tool
 def get_erc20_balance(chat_id: int, token: str) -> float:
     """
-    Retrieves the ERC20 token balance for a specific address.
+    Retrieves the ERC20 token balance of the smart wallet contract.
 
-    Use this tool when the user asks how many tokens an address holds or wants
-    to check their balance before making a transfer.
+    Use this tool when the user asks about their own wallet's token balance
+    (e.g. "my balance", "how much USDC do I have"). Do NOT use this to check
+    a contact's balance — use get_contact_erc20_balance for that.
 
     Args:
         chat_id: The Telegram chat ID of the user making the request.
         token: The token ticker symbol to check (e.g. "usdc").
 
-
     Returns:
-        The wallet's token balance in whole units (e.g. 100.0 for 100 USDC).
+        The smart wallet's token balance in whole units (e.g. 100.0 for 100 USDC).
     """
     print("Running get_erc20_balance")
     address = load_session_handler(chat_id).address
+    erc20 = load_ierc20(chat_id=chat_id, token=token)
+    balance = erc20.functions.balanceOf(address).call()
+    decimals = erc20.functions.decimals().call()
+    return balance / (10**decimals)
+
+
+@tool
+def get_contact_erc20_balance(chat_id: int, contact_name: str, token: str) -> float:
+    """
+    Retrieves the ERC20 token balance of a saved contact's address.
+
+    Use this tool when the user asks about a contact's token balance
+    (e.g. "how much USDC does Sandy have?", "what is Alice's LINK balance?").
+    Do NOT use this to check the smart wallet's own balance — use get_erc20_balance for that.
+
+    Args:
+        chat_id: The Telegram chat ID of the user making the request.
+        contact_name: The name of the saved contact (e.g. "Sandy"). Case-insensitive.
+        token: The token ticker symbol to check (e.g. "usdc").
+
+    Returns:
+        The contact's token balance in whole units (e.g. 100.0 for 100 USDC).
+    """
+    print("Running get_contact_erc20_balance")
+    address = _get_contact(chat_id, contact_name)
     erc20 = load_ierc20(chat_id=chat_id, token=token)
     balance = erc20.functions.balanceOf(address).call()
     decimals = erc20.functions.decimals().call()
@@ -2163,6 +2188,7 @@ def get_tools(job_queue=None):
         get_price,
         get_usd_value,
         get_erc20_balance,
+        get_contact_erc20_balance,
         get_erc20_allowance,
         wrap_eth,
         is_derived_input_sufficient,
