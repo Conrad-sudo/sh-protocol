@@ -6,6 +6,7 @@ import {EntryPoint} from "@account-abstraction/contracts/core/EntryPoint.sol";
 import {ERC20Mock} from "../src/mocks/ERC20Mock.sol";
 import {MockWeth} from "../src/mocks/MockWeth.sol";
 import {MockV3Aggregator} from "../src/mocks/MockV3Aggregator.sol";
+import "../src/Constants.sol";
 
 /**
  * @title HelperConfig
@@ -313,18 +314,8 @@ contract HelperConfig is Script {
     /// @notice Heartbeat for volatile-asset Chainlink feeds that update every hour
     uint256 public constant HEARTBEAT_1H = 1 hours;
 
-    /// @notice Heartbeat for USDC/USD — Chainlink publishes updates approximately every 23 hours
-    uint256 public constant HEARTBEAT_23H = 23 hours;
-
     /// @notice Heartbeat for low-volatility feeds that publish updates approximately every 24 hours
     uint256 public constant HEARTBEAT_24H = 24 hours;
-
-    /**
-     * @notice Canonical ERC-4337 EntryPoint v0.9 address
-     * @dev Deployed at the same address on Ethereum mainnet, Sepolia, and most EVM-compatible chains.
-     *      Source: https://github.com/eth-infinitism/account-abstraction/releases
-     */
-    address public constant ENTRYPOINT_V07 = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
 
     /**
      * @dev Cached Anvil network config. Populated on first call to getOrCreateAnvilConfig.
@@ -374,24 +365,24 @@ contract HelperConfig is Script {
      *      Ensure SEPOLIA_ACCOUNT is funded with Sepolia ETH before broadcasting.
      * @return config NetworkConfig for Ethereum Sepolia
      */
-    function getEthSepoliaConfig() internal  view returns (NetworkConfig memory) {
+    function getEthSepoliaConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
             account: SEPOLIA_ACCOUNT,
             // Stablecoins
-            usdc: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238,
-            weth: 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14,
+            usdc: SEPOLIA_USDC,
+            weth: SEPOLIA_WETH,
             uniswapRouter: address(0), // No official UniswapV2 deployment on Sepolia
-            dai: 0x68194a729C2450ad26072b3D33ADaCbcef39D574,
-            usdt: 0x7169D38820dfd117C3FA1f22a697dBA58d90BA06,
+            dai: SEPOLIA_DAI,
+            usdt: SEPOLIA_USDT,
             // ERC-20 tokens — address(0) where no official Sepolia deployment exists
-            aave: 0x88541670E55cC00bEEFD87eB59EDd1b7C511AC9a, // Aave V3 Sepolia testnet token
-            link: 0x779877A7B0D9E8603169DdbD7836e478b4624789, // Chainlink official Sepolia faucet token
+            aave: SEPOLIA_AAVE,
+            link: SEPOLIA_LINK,
             oneinch: address(0), // No official Sepolia deployment
             ape: address(0), // No official Sepolia deployment
             arb: address(0), // No official Sepolia deployment
             bnb: address(0), // No official Sepolia deployment
-            wbtc: 0x29f2D40B0605204364af54EC677bD022dA425d03, // Aave V3 Sepolia testnet token
+            wbtc: SEPOLIA_WBTC,
             comp: address(0), // No official Sepolia deployment
             crv: address(0), // No official Sepolia deployment
             ens: address(0), // No official Sepolia deployment
@@ -399,7 +390,7 @@ contract HelperConfig is Script {
             sand: address(0), // No official Sepolia deployment
             sushi: address(0), // No official Sepolia deployment
             wtao: address(0), // No official Sepolia deployment
-            uni: 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984, // Uniswap official Sepolia deployment
+            uni: SEPOLIA_UNI,
             yfi: address(0), // No official Sepolia deployment
             wavax: address(0), // No official Sepolia deployment
             bat: address(0), // No official Sepolia deployment
@@ -407,17 +398,17 @@ contract HelperConfig is Script {
             knc: address(0), // No official Sepolia deployment
             rdnt: address(0), // No official Sepolia deployment
             // Chainlink price feeds — only ETH, USDC, DAI, LINK, BTC have feeds on Sepolia
-            ethUsdPriceFeed: 0x694AA1769357215DE4FAC081bf1f309aDC325306,
-            usdcUsdPriceFeed: 0xA2F78ab2355fe2f984D808B5CeE7FD0A93D5270E,
-            daiUsdPriceFeed: 0x14866185B1962B63C3Ea9E03Bc1da838bab34C19,
+            ethUsdPriceFeed: SEPOLIA_ETH_USD_PRICE_FEED,
+            usdcUsdPriceFeed: SEPOLIA_USDC_USD_PRICE_FEED,
+            daiUsdPriceFeed: SEPOLIA_DAI_USD_PRICE_FEED,
             usdtUsdPriceFeed: address(0), // No USDT/USD feed on Sepolia
             aaveUsdPriceFeed: address(0),
-            linkUsdPriceFeed: 0xc59E3633BAAC79493d908e63626716e204A45EdF,
+            linkUsdPriceFeed: SEPOLIA_LINK_USD_PRICE_FEED,
             oneinchUsdPriceFeed: address(0),
             apeUsdPriceFeed: address(0),
             arbUsdPriceFeed: address(0),
             bnbUsdPriceFeed: address(0),
-            btcUsdPriceFeed: 0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43,
+            btcUsdPriceFeed: SEPOLIA_BTC_USD_PRICE_FEED,
             compUsdPriceFeed: address(0),
             crvUsdPriceFeed: address(0),
             ensUsdPriceFeed: address(0),
@@ -471,64 +462,65 @@ contract HelperConfig is Script {
     function getMainnetConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
-            account: ANVIL_BURNER_WALLET, //swap for the deployer account on mainnet and ensure it's funded before broadcasting
-            uniswapRouter: 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D,
+            account: ANVIL_BURNER_WALLET,
+            //swap for the deployer account on mainnet and ensure it's funded before broadcasting
+            uniswapRouter: UNISWAP_V2_ROUTER_02,
             // Stablecoins
-            usdc: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,
-            dai: 0x6B175474E89094C44Da98b954EedeAC495271d0F,
-            usdt: 0xdAC17F958D2ee523a2206206994597C13D831ec7,
+            usdc: MNT_USDC,
+            dai: MNT_DAI,
+            usdt: MNT_USDT,
             // ERC-20 tokens
-            weth: 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2,
-            aave: 0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9,
-            link: 0x514910771AF9Ca656af840dff83E8264EcF986CA,
-            oneinch: 0x111111111117dC0aa78b770fA6A738034120C302,
-            ape: 0x4d224452801ACEd8B2F0aebE155379bb5D594381,
-            arb: 0xB50721BCf8d664c30412Cfbc6cf7a15145234ad1,
-            bnb: 0xB8c77482e45F1F44dE1745F52C74426C631bDD52,
-            wbtc: 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599,
-            comp: 0xc00e94Cb662C3520282E6f5717214004A7f26888,
-            crv: 0xD533a949740bb3306d119CC777fa900bA034cd52,
-            ens: 0xC18360217D8F7Ab5e7c516566761Ea12Ce7F9D72,
-            mkr: 0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2,
-            sand: 0x3845badAde8e6dFF049820680d1F14bD3903a5d0,
-            sushi: 0x6B3595068778DD592e39A122f4f5a5cF09C90fE2,
-            wtao: 0x77E06c9eCCf2E797fd462A92B6D7642EF85b0A44,
-            uni: 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984,
-            yfi: 0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e,
-            wavax: 0x85f138bfEE4ef8e540890CFb48F620571d67Eda3,
-            bat: 0x0D8775F648430679A709E98d2b0Cb6250d2887EF,
-            imx: 0xF57e7e7C23978C3cAEC3C3548E3D615c346e79fF,
-            knc: 0xdeFA4e8a7bcBA345F687a2f1456F5Edd9CE97202,
-            rdnt: 0x137dDB47Ee24EaA998a535Ab00378d6BFa84F893,
+            weth: MNT_WETH,
+            aave: MNT_AAVE,
+            link: MNT_LINK,
+            oneinch: MNT_ONEINCH,
+            ape: MNT_APE,
+            arb: MNT_ARB,
+            bnb: MNT_BNB,
+            wbtc: MNT_WBTC,
+            comp: MNT_COMP,
+            crv: MNT_CRV,
+            ens: MNT_ENS,
+            mkr: MNT_MKR,
+            sand: MNT_SAND,
+            sushi: MNT_SUSHI,
+            wtao: MNT_WTAO,
+            uni: MNT_UNI,
+            yfi: MNT_YFI,
+            wavax: MNT_WAVAX,
+            bat: MNT_BAT,
+            imx: MNT_IMX,
+            knc: MNT_KNC,
+            rdnt: MNT_RDNT,
             // Chainlink price feeds
-            ethUsdPriceFeed: 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419,
-            usdcUsdPriceFeed: 0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6,
-            daiUsdPriceFeed: 0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9,
-            usdtUsdPriceFeed: 0x3E7d1eAB13ad0104d2750B8863b489D65364e32D,
-            aaveUsdPriceFeed: 0x547a514d5e3769680Ce22B2361c10Ea13619e8a9,
-            linkUsdPriceFeed: 0x2c1d072e956AFFC0D435Cb7AC38EF18d24d9127c,
-            oneinchUsdPriceFeed: 0xc929ad75B72593967DE83E7F7Cda0493458261D9,
-            apeUsdPriceFeed: 0xD10aBbC76679a20055E167BB80A24ac851b37056,
-            arbUsdPriceFeed: 0x31697852a68433DbCc2Ff612c516d69E3D9bd08F,
-            bnbUsdPriceFeed: 0x14e613AC84a31f709eadbdF89C6CC390fDc9540A,
-            btcUsdPriceFeed: 0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c,
-            compUsdPriceFeed: 0xdbd020CAeF83eFd542f4De03e3cF0C28A4428bd5,
-            crvUsdPriceFeed: 0xCd627aA160A6fA45Eb793D19Ef54f5062F20f33f,
-            ensUsdPriceFeed: 0x5C00128d4d1c2F4f652C267d7bcdD7aC99C16E16,
-            mkrUsdPriceFeed: 0xec1D1B3b0443256cc3860e24a46F108e699484Aa,
-            sandUsdPriceFeed: 0x35E3f7E558C04cE7eEE1629258EcbbA03B36Ec56,
-            sushiUsdPriceFeed: 0xCc70F09A6CC17553b2E31954cD36E4A2d89501f7,
-            wtaoUsdPriceFeed: 0x1c88503c9A52aE6aaE1f9bb99b3b7e9b8Ab35459,
-            uniUsdPriceFeed: 0x553303d460EE0afB37EdFf9bE42922D8FF63220e,
-            yfiUsdPriceFeed: 0xA027702dbb89fbd58938e4324ac03B58d812b0E1,
-            wavaxUsdPriceFeed: 0xFF3EEb22B5E3dE6e705b44749C2559d704923FD7,
-            batUsdPriceFeed: 0x0d16d4528239e9ee52fa531af613AcdB23D88c94,
-            imxUsdPriceFeed: 0xBAEbEFc1D023c0feCcc047Bff42E75F15Ff213E6,
-            kncUsdPriceFeed: 0xf8fF43E991A81e6eC886a3D281A2C6cC19aE70Fc,
-            rdntUsdPriceFeed: 0x393CC05baD439c9B36489384F11487d9C8410471,
+            ethUsdPriceFeed: MNT_ETH_USD_PRICE_FEED,
+            usdcUsdPriceFeed: MNT_USDC_USD_PRICE_FEED,
+            daiUsdPriceFeed: MNT_DAI_USD_PRICE_FEED,
+            usdtUsdPriceFeed: MNT_USDT_USD_PRICE_FEED,
+            aaveUsdPriceFeed: MNT_AAVE_USD_PRICE_FEED,
+            linkUsdPriceFeed: MNT_LINK_USD_PRICE_FEED,
+            oneinchUsdPriceFeed: MNT_ONEINCH_USD_PRICE_FEED,
+            apeUsdPriceFeed: MNT_APE_USD_PRICE_FEED,
+            arbUsdPriceFeed: MNT_ARB_USD_PRICE_FEED,
+            bnbUsdPriceFeed: MNT_BNB_USD_PRICE_FEED,
+            btcUsdPriceFeed: MNT_BTC_USD_PRICE_FEED,
+            compUsdPriceFeed: MNT_COMP_USD_PRICE_FEED,
+            crvUsdPriceFeed: MNT_CRV_USD_PRICE_FEED,
+            ensUsdPriceFeed: MNT_ENS_USD_PRICE_FEED,
+            mkrUsdPriceFeed: MNT_MKR_USD_PRICE_FEED,
+            sandUsdPriceFeed: MNT_SAND_USD_PRICE_FEED,
+            sushiUsdPriceFeed: MNT_SUSHI_USD_PRICE_FEED,
+            wtaoUsdPriceFeed: MNT_WTAO_USD_PRICE_FEED,
+            uniUsdPriceFeed: MNT_UNI_USD_PRICE_FEED,
+            yfiUsdPriceFeed: MNT_YFI_USD_PRICE_FEED,
+            wavaxUsdPriceFeed: MNT_WAVAX_USD_PRICE_FEED,
+            batUsdPriceFeed: MNT_BAT_USD_PRICE_FEED,
+            imxUsdPriceFeed: MNT_IMX_USD_PRICE_FEED,
+            kncUsdPriceFeed: MNT_KNC_USD_PRICE_FEED,
+            rdntUsdPriceFeed: MNT_RDNT_USD_PRICE_FEED,
             // Heartbeats sourced from Chainlink reference data (feeds-mainnet.json)
             ethHeartbeat: HEARTBEAT_1H,
-            usdcHeartbeat: HEARTBEAT_23H,
+            usdcHeartbeat: HEARTBEAT_24H,
             daiHeartbeat: HEARTBEAT_1H,
             usdtHeartbeat: HEARTBEAT_24H,
             aaveHeartbeat: HEARTBEAT_1H,

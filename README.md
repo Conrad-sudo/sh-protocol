@@ -251,15 +251,28 @@ test/
 
 ### `Constants.sol`
 
-Shared Solidity constants for well-known mainnet contract addresses, importable by any contract or script:
+Shared Solidity constants for all well-known contract addresses used across the project, importable by any contract or script. Constants are grouped into four sections: Uniswap infrastructure, ERC-4337 EntryPoint, Sepolia tokens and price feeds (prefixed `SEPOLIA_`), and mainnet tokens and price feeds (prefixed `MNT_`).
 
 ```solidity
-address constant DAI                  = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
-address constant WETH                 = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-address constant MKR                  = 0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2;
+// ERC-4337
+address constant ENTRYPOINT_V07      = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
+
+// Uniswap
 address constant UNISWAP_V2_ROUTER_02 = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 address constant UNISWAP_V2_FACTORY   = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
-address constant SUSHISWAP_V2_ROUTER_02 = 0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506;
+
+// Sepolia tokens (representative sample)
+address constant SEPOLIA_USDC = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
+address constant SEPOLIA_WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
+address constant SEPOLIA_ETH_USD_PRICE_FEED = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
+// ... plus SEPOLIA_DAI, SEPOLIA_USDT, SEPOLIA_AAVE, SEPOLIA_LINK, SEPOLIA_WBTC, SEPOLIA_UNI
+// ... and SEPOLIA_USDC/DAI/LINK/BTC_USD_PRICE_FEED
+
+// Mainnet tokens (representative sample)
+address constant MNT_USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+address constant MNT_WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+address constant MNT_ETH_USD_PRICE_FEED = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
+// ... plus 23 more MNT_ token constants and 25 MNT_*_USD_PRICE_FEED constants
 ```
 
 ---
