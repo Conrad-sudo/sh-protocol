@@ -1076,7 +1076,11 @@ All write tools accept `session_key_ciphertext: str` — the opaque Vault cipher
 
 ## Section 3 — LangChain Agent Integration
 
-The `interface/smart_wallet_agent.py` script wraps the blockchain tools in a LangChain agent powered by Anthropic's Claude (`claude-sonnet-4-6`). The agent reasons over user instructions and decides which tools to call, in what order, and with what arguments.
+The `interface/smart_wallet_agent.py` script wraps the blockchain tools in a LangChain agent powered by Anthropic's Claude. The agent reasons over user instructions and decides which tools to call, in what order, and with what arguments.
+
+**Default model:** `claude-sonnet-4-6` (configured in `smart_wallet_agent.py`).
+
+The agent can be reconfigured to use any LLM supported by LangChain — including other Anthropic models, OpenAI, Gemini, Ollama, and more — by swapping the `llm` initialisation. See the [LangChain chat model integrations](https://python.langchain.com/docs/integrations/chat/) for the full list of supported providers and setup instructions.
 
 ### Agent Architecture
 
