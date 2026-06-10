@@ -1,14 +1,14 @@
-# Session Key Infrastructure 🔑⛓️ 
+# Agentic Wallet Infrastructure 🤖⛓️ 
 
-> **Proof of Concept — not audited. Do not use with real funds.**
+
 
 A full-stack smart wallet system built on ERC-4337 account abstraction. The wallet is controlled by delegated session keys — scoped, time-limited, and spending-capped authorizations that allow an AI agent to sign transactions on behalf of the owner through natural language command without ever exposing the owner's private key.
 
-The system is composed of five layers: Solidity smart contracts, a Python blockchain interface, HashiCorp Vault (key custody), a LangChain AI agent, and a Telegram bot front end.
+The system is composed of five layers: Solidity smart contracts, a Python blockchain interface, HashiCorp Vault (key custody), a LangChain AI agent, and a Telegram bot front end. It also integrates the **ERC-8004** canonical on-chain agent identity and reputation registries — the agent holds an ERC-721 identity NFT minted on the `AgentIdentityRegistry`, and users can post on-chain feedback through the `ReputationRegistry` via a dedicated session key.
 
 ```
 ┌─────────────────────────────────┐
-│         Telegram Bot            │  ← User sends natural language messages
+│         User Interface          │  ← User sends natural language messages
 ├─────────────────────────────────┤
 │       LangChain AI Agent        │  ← Claude LLM reasons and selects tools
 ├─────────────────────────────────┤
@@ -39,14 +39,19 @@ The system is composed of five layers: Solidity smart contracts, a Python blockc
 ## Clone and Install
 
 ```bash
-git clone https://github.com/Conrad-sudo/session-key-infra.git
+git clone https://github.com/Conrad-sudo/agentic-wallet-infra.git
 cd session-key-infra
 ```
 
 **Foundry dependencies:**
 
 ```bash
-forge install
+forge install foundry-rs/forge-std
+forge install OpenZeppelin/openzeppelin-contracts
+forge install eth-infinitism/account-abstraction
+forge install smartcontractkit/chainlink-brownie-contracts
+forge install Uniswap/v2-core
+forge install Uniswap/v2-periphery
 ```
 
 **Python dependencies:**
@@ -218,12 +223,16 @@ The smart contract layer implements ERC-4337 account abstraction with delegated,
 
 ```
 src/
-├── SessionHandler.sol        ← ERC-4337 smart account with session key logic
-├── PriceOracle.sol           ← Chainlink-based USD value converter
-├── Constants.sol             ← Shared mainnet contract addresses
+├── SessionHandler.sol           ← ERC-4337 smart account with session key logic
+├── PriceOracle.sol              ← Chainlink-based USD value converter
+├── Constants.sol                ← Shared mainnet/Sepolia contract addresses
+├── AgentIdentityRegistry.sol    ← Local ERC-8004 identity registry scaffold (Anvil)
+├── ReputationRegistry.sol       ← Local ERC-8004 reputation registry scaffold (Anvil)
 ├── interfaces/
-│   ├── IWETH.sol             ← WETH interface (extends IERC20Extended)
-│   └── IERC20Extended.sol    ← IERC20 + IERC20Metadata combined interface
+│   ├── IWETH.sol                ← WETH interface (extends IERC20Extended)
+│   ├── IERC20Extended.sol       ← IERC20 + IERC20Metadata combined interface
+│   ├── IIdentityRegistry.sol    ← ERC-8004 IIdentityRegistry interface
+│   └── IReputationRegistry.sol  ← ERC-8004 IReputationRegistry interface
 └── mocks/
     ├── ERC20Mock.sol         ← Mintable ERC20 for local testing
     ├── MockV3Aggregator.sol  ← Chainlink price feed mock for Anvil
@@ -231,6 +240,7 @@ src/
 
 script/
 ├── DeploySessionHandler.s.sol  ← Deployment entry point
+├── DeployAgentRegistry.s.sol   ← Deploys local AgentIdentityRegistry (Anvil)
 ├── HelperConfig.s.sol          ← Chain-specific configuration resolver
 ├── SendPackedUserOp.s.sol      ← UserOp construction and signing helper
 └── FundSessionHandler.s.sol    ← One-off ETH funding script
@@ -260,6 +270,12 @@ address constant ENTRYPOINT_V07      = 0x0000000071727De22E5E9d8BAf0edAc6f37da03
 // Uniswap
 address constant UNISWAP_V2_ROUTER_02 = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 address constant UNISWAP_V2_FACTORY   = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
+
+// ERC-8004 canonical registries
+address constant SEPOLIA_IDENTITY_REGISTRY   = 0x8004A818BFB912233c491871b3d84c89A494BD9e;
+address constant SEPOLIA_REPUTATION_REGISTRY = 0x8004B663056A597Dffe9eCcC1965A193B7388713;
+address constant MNT_IDENTITY_REGISTRY       = 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;
+address constant MNT_REPUTATION_REGISTRY     = 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63;
 
 // Sepolia tokens (representative sample)
 address constant SEPOLIA_USDC = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
@@ -396,6 +412,41 @@ constructor(
 function getUSDValue(address token, uint256 amount) external view returns (uint256);
 function getPrice(address token) external view returns (uint256 price, uint8 decimals);
 ```
+
+---
+
+### ERC-8004 Contracts
+
+The project includes on-chain agent identity and reputation infrastructure following the **ERC-8004** standard.
+
+**`src/AgentIdentityRegistry.sol`** — local scaffolding for a deployable ERC-8004 identity registry on Anvil. Inherits `ERC721` and `ERC721URIStorage`. On live networks (Sepolia, mainnet) the canonical UUPS-upgradeable registries already deployed by the ERC-8004 working group are used instead. The local version is deployed during `deploy_session_handler_anvil` so that Anvil-based flows can exercise the full registration path without requiring a network connection.
+
+**`src/ReputationRegistry.sol`** — local scaffolding for the ERC-8004 Reputation Registry on Anvil. Deployed alongside `AgentIdentityRegistry` on local networks.
+
+**`src/interfaces/IIdentityRegistry.sol`** — the canonical ERC-8004 identity interface. Exposes `register()` (three overloads — no URI, URI-only, and URI + metadata), `setAgentURI`, `setMetadata`, `getMetadata`, `setAgentWallet`, `getAgentWallet`, `unsetAgentWallet`, `tokenURI`, `ownerOf`, `balanceOf`, and `isAuthorizedOrOwner`.
+
+**`src/interfaces/IReputationRegistry.sol`** — the canonical ERC-8004 reputation interface. Exposes `giveFeedback` (stores a scored, tagged, hash-anchored feedback entry) and `getSummary` / `readAllFeedback` for querying aggregated or per-client scores.
+
+**`script/DeployAgentRegistry.s.sol`** — Foundry broadcast script that deploys `AgentIdentityRegistry` to Anvil for local testing.
+
+**Canonical network addresses:**
+
+| Contract | Sepolia | Mainnet |
+|---|---|---|
+| `IdentityRegistry` | `0x8004A818BFB912233c491871b3d84c89A494BD9e` | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
+| `ReputationRegistry` | `0x8004B663056A597Dffe9eCcC1965A193B7388713` | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` |
+
+**`interface/register_agent.py`** — one-time operator script that mints the agent's ERC-721 identity NFT. Signs with `SEPOLIA_PRIVATE_KEY` (or `ANVIL_PRIVATE_KEY` for local networks), calls `register(card_uri)` on the `AgentIdentityRegistry`, and saves the returned `agentId` to `wallet.db`. The `agentId` is used by `get_agent_identity` and `get_agent_reputation` tools at runtime.
+
+```bash
+# Register on Sepolia (one-time):
+python interface/register_agent.py
+
+# If already registered on-chain but DB is empty (e.g. after cloning):
+python interface/register_agent.py --save-id <agent_id> sepolia-fork
+```
+
+**`interface/agent_card.json`** — the agent card following the `erc-8004/v1` schema. Describes the agent's `name`, `description`, `version`, `walletAddress`, `capabilities`, `trustModel`, and `network`. Hosted publicly and referenced by the on-chain `tokenURI`.
 
 ---
 
@@ -580,7 +631,7 @@ The `interface/` directory contains the Python layer that bridges the AI agent t
 
 ```
 interface/
-├── constants.py           ← Chain IDs, addresses, Chainlink heartbeats
+├── constants.py           ← Chain IDs, addresses, Chainlink heartbeats, ERC-8004 registry addresses
 ├── db.py                  ← SQLite data layer (all reads/writes to wallet.db)
 ├── network_config.py      ← Web3 connection factory
 ├── contracts.py           ← Contract loading with per-chat_id caching
@@ -588,9 +639,11 @@ interface/
 ├── live_network.py        ← UserOp execution via Alchemy bundler (live networks)
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy.py              ← Deployment and session registration scripts
+├── register_agent.py      ← One-time script to mint the agent's ERC-8004 identity NFT
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
 ├── telebot.py             ← Telegram bot front end
+├── agent_card.json        ← ERC-8004/v1 agent card (hosted publicly, referenced by tokenURI)
 ├── artifacts/
 │   ├── SessionHandler.json        ← ABI for SessionHandler
 │   ├── EntryPoint.json            ← ABI for EntryPoint
@@ -600,12 +653,15 @@ interface/
 │   ├── IUniswapV2Factory.json     ← ABI for Uniswap V2 Factory
 │   ├── IUniswapV2Pair.json        ← ABI for Uniswap V2 Pair
 │   ├── ERC20Mock.json             ← ABI for ERC20Mock (Anvil deployment)
-│   └── MockV3Aggregator.json      ← ABI for MockV3Aggregator (Anvil deployment)
+│   ├── MockV3Aggregator.json      ← ABI for MockV3Aggregator (Anvil deployment)
+│   ├── IdentityRegistry.json      ← ABI for canonical ERC-8004 IdentityRegistry (Sepolia/mainnet)
+│   └── ReputationRegistry.json    ← ABI for canonical ERC-8004 ReputationRegistry (Sepolia/mainnet)
 └── migrate/
     ├── Chains.json                ← Chain name → chain ID mapping
     ├── RPC.json                   ← Chain name → RPC URL mapping
     ├── ERC20_Selectors.json       ← ERC20 function name → selector
     ├── UniswapV2_Selectors.json   ← Uniswap V2 function name → selector
+    ├── Registry_Selectors.json    ← ERC-8004 ReputationRegistry function name → selector
     ├── Mainnet_Tokens.json        ← Token ticker → mainnet address
     ├── Mainnet_Pricefeeds.json    ← Token → Chainlink feed address (mainnet)
     ├── Sepolia_Tokens.json        ← Token ticker → Sepolia address (WETH, LINK)
@@ -649,6 +705,12 @@ ENTRYPOINT_V07     = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
 HEARTBEAT_1H       = 3_600    # 1 hour  — ETH, BTC, AAVE, LINK, DAI, COMP, MKR, UNI, WETH
 HEARTBEAT_23H      = 82_800   # 23 hours — USDC
 HEARTBEAT_24H      = 86_400   # 24 hours — all other feeds
+
+# ERC-8004 canonical registry addresses
+IDENTITY_REGISTRY_MAINNET   = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+IDENTITY_REGISTRY_SEPOLIA   = "0x8004A818BFB912233c491871b3d84c89A494BD9e"
+REPUTATION_REGISTRY_MAINNET = "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63"
+REPUTATION_REGISTRY_SEPOLIA = "0x8004B663056A597Dffe9eCcC1965A193B7388713"
 ```
 
 ---
@@ -765,6 +827,24 @@ CREATE TABLE uniswapv2_selectors (
     selector  TEXT NOT NULL
 );
 
+CREATE TABLE reputation_registry_selectors (
+    name      TEXT PRIMARY KEY,
+    selector  TEXT NOT NULL
+);
+
+-- ERC-8004 identity and reputation registry addresses (per chain)
+CREATE TABLE agent_registries (
+    chain_id            INTEGER PRIMARY KEY,
+    identity_registry   TEXT NOT NULL,
+    reputation_registry TEXT NOT NULL
+);
+
+-- ERC-8004 agent token IDs (one per chain after registration)
+CREATE TABLE agent_ids (
+    chain_id INTEGER PRIMARY KEY,
+    agent_id INTEGER NOT NULL
+);
+
 -- Scheduled recurring transfers
 CREATE TABLE recurring_transfers (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -821,6 +901,8 @@ def load_ierc20(chat_id: int, token: str) -> Contract       # keyed by (chat_id,
 def load_iuniswap_router(chat_id: int) -> Contract
 def load_iuniswap_factory(chat_id: int) -> Contract          # Uniswap V2 Factory at 0x5C69bEe...
 def load_iuniswap_pair(chat_id: int, token_a: str, token_b: str) -> Contract  # resolves pair via factory.getPair()
+def load_identity_registry(chat_id: int) -> Contract         # ERC-8004 IdentityRegistry; local ABI on Anvil, canonical ABI on live networks
+def load_reputation_registry(chat_id: int) -> Contract       # ERC-8004 ReputationRegistry; same ABI fallback logic
 def load_calldata(instance: Contract, fn_name: str, args: list) -> bytes
 ```
 
@@ -952,7 +1034,8 @@ Deployment and session registration scripts. Run once per fresh environment or n
 5. SessionHandler
 6. Mint tokens into SessionHandler (20,000 USDC at 6 decimals; 2,000 of each other token at 18 decimals)
 7. Send 10 ETH to SessionHandler
-8. Persist all addresses to `wallet.db`
+8. Deploy local `AgentIdentityRegistry` and `ReputationRegistry` scaffolds; persist addresses to `wallet.db`
+9. Persist all remaining addresses to `wallet.db`
 
 **`deploy_session_handler(chat_id, network)`** deploys PriceOracle and SessionHandler on a live or fork network. Supported `network` values: `"mainnet-fork"`, `"sepolia-fork"`, `"sepolia"`.
 
@@ -969,22 +1052,24 @@ Deployment and session registration scripts. Run once per fresh environment or n
 
 **`add_default_session(chat_id)`** registers a default set of session keys. The set varies by network:
 
-**mainnet-fork** — Uniswap V2 is live on the fork, so all four sessions are registered:
+**mainnet-fork** — Uniswap V2 is live on the fork, so five sessions are registered:
 
 | Target | Selectors |
 |---|---|
 | `address(0)` (native ETH) | None — value transfers only |
 | WETH | `transfer`, `balanceOf`, `approve`, `transferFrom`, `allowance`, `deposit`, `withdraw` |
-| LINK | `transfer`, `balanceOf`, `approve`, `transferFrom`, `allowance` |
+| USDC | `transfer`, `balanceOf`, `approve`, `transferFrom`, `allowance` |
 | Uniswap V2 Router | all 6 swap functions + `addLiquidity`, `addLiquidityETH`, `removeLiquidity`, `removeLiquidityETH` |
+| Reputation Registry | `giveFeedback` |
 
-**sepolia / sepolia-fork** — No Uniswap V2 on Sepolia, so only three sessions are registered:
+**sepolia / sepolia-fork** — No Uniswap V2 on Sepolia, so four sessions are registered:
 
 | Target | Selectors |
 |---|---|
 | `address(0)` (native ETH) | None — value transfers only |
 | WETH | `transfer`, `balanceOf`, `approve`, `transferFrom`, `allowance`, `deposit`, `withdraw` |
 | LINK | `transfer`, `balanceOf`, `approve`, `transferFrom`, `allowance` |
+| Reputation Registry | `giveFeedback` |
 
 Each session gets a 50-day validity window and a $50,000 per-session spending limit. For mainnet-fork, `approve()` is also called for WETH and LINK to grant the Uniswap router an unlimited allowance from the SessionHandler.
 
@@ -1071,6 +1156,16 @@ All write tools accept `session_key_ciphertext: str` — the opaque Vault cipher
 | `cancel_recurring_transfer(chat_id, transfer_id)` | Removes the job and deletes the DB record |
 
 `recurring_transfer_job` is the async PTB callback that executes each scheduled transfer. If the session key has expired it sends the user a warning, removes the job, and deletes the DB record.
+
+**ERC-8004 tools:**
+
+| Tool | Description |
+|---|---|
+| `get_agent_identity(chat_id)` | Looks up the agent's ERC-8004 on-chain identity — returns `token_id` and `card_uri` if registered |
+| `get_agent_reputation(chat_id)` | Returns the agent's `average_score` (0–100) and `feedback_count` from the `ReputationRegistry` |
+| `post_reputation_feedback(chat_id, session_key_ciphertext, score, tags)` | Posts a `giveFeedback` call to the `ReputationRegistry` via the `reputation_registry` session key |
+
+`post_reputation_feedback` routes through the standard `send_user_op_as_session` dispatcher and requires a dedicated `reputation_registry` session key (registered by `add_default_session` alongside the ETH, WETH, and LINK keys). The `reputation_registry` target is resolved to the canonical Sepolia or mainnet registry address based on the user's current network.
 
 ---
 
@@ -1335,7 +1430,7 @@ On Sepolia, the Alchemy bundler handles UserOp submission. `SEPOLIA_RPC_URL` mus
 
 After a successful Sepolia deployment, `deploy.py` prints the deployed `PriceOracle` and `SessionHandler` addresses. If `ETHERSCAN_API_KEY` is set, both contracts are automatically submitted for Etherscan verification via `forge verify-contract`.
 
-The default Sepolia session registers ETH, WETH, and LINK keys (Uniswap V2 operations are not supported on Sepolia since the router is not deployed there).
+The default Sepolia session registers ETH, WETH, LINK, and Reputation Registry keys (Uniswap V2 operations are not supported on Sepolia since the router is not deployed there).
 
 > **Uniswap V2 tools are unavailable on Sepolia and Sepolia fork.** Uniswap V2 has no official deployment on Sepolia, so `deploy_session_handler()` sets the router address to `address(0)` and `add_default_session()` does not register a `uniswapv2_router` session key. Any agent tool that performs a swap, adds liquidity, or removes liquidity (`swap_*`, `add_liquidity*`, `remove_liquidity*`, `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance`) will fail on these networks — either because the session key does not exist or because there is no router to call.
 
@@ -1345,6 +1440,8 @@ The default Sepolia session registers ETH, WETH, and LINK keys (Uniswap V2 opera
 |---|---|
 | `SessionHandler` | `0x202DCf56889F9b11F68f636e7567Ac14B9B1D249` |
 | `PriceOracle` | `0x6C1A1Da2518C456a097A082fc9f48d76f23F0aaC` |
+| `IdentityRegistry` (canonical ERC-8004) | `0x8004A818BFB912233c491871b3d84c89A494BD9e` |
+| `ReputationRegistry` (canonical ERC-8004) | `0x8004B663056A597Dffe9eCcC1965A193B7388713` |
 
 ---
 
@@ -1378,15 +1475,20 @@ session-key-infra/
 │   ├── SessionHandler.sol
 │   ├── PriceOracle.sol
 │   ├── Constants.sol
+│   ├── AgentIdentityRegistry.sol    ← ERC-8004 identity registry scaffold (Anvil)
+│   ├── ReputationRegistry.sol       ← ERC-8004 reputation registry scaffold (Anvil)
 │   ├── interfaces/
 │   │   ├── IWETH.sol
-│   │   └── IERC20Extended.sol
+│   │   ├── IERC20Extended.sol
+│   │   ├── IIdentityRegistry.sol    ← ERC-8004 IIdentityRegistry interface
+│   │   └── IReputationRegistry.sol  ← ERC-8004 IReputationRegistry interface
 │   └── mocks/
 │       ├── ERC20Mock.sol
 │       ├── MockV3Aggregator.sol
 │       └── MockWeth.sol
 ├── script/
 │   ├── DeploySessionHandler.s.sol
+│   ├── DeployAgentRegistry.s.sol    ← Deploys local AgentIdentityRegistry (Anvil)
 │   ├── HelperConfig.s.sol
 │   ├── SendPackedUserOp.s.sol
 │   └── FundSessionHandler.s.sol
@@ -1409,10 +1511,12 @@ session-key-infra/
 │   ├── live_network.py
 │   ├── vault_signer.py
 │   ├── deploy.py
+│   ├── register_agent.py            ← One-time ERC-8004 identity registration script
 │   ├── tools.py
 │   ├── smart_wallet_agent.py
 │   ├── telebot.py
-│   ├── wallet.db              ← SQLite database (not committed)
+│   ├── agent_card.json              ← ERC-8004/v1 agent card
+│   ├── wallet.db                    ← SQLite database (not committed)
 │   ├── artifacts/
 │   │   ├── SessionHandler.json
 │   │   ├── EntryPoint.json
@@ -1422,27 +1526,30 @@ session-key-infra/
 │   │   ├── IUniswapV2Factory.json
 │   │   ├── IUniswapV2Pair.json
 │   │   ├── ERC20Mock.json
-│   │   └── MockV3Aggregator.json
+│   │   ├── MockV3Aggregator.json
+│   │   ├── IdentityRegistry.json    ← Canonical ERC-8004 IdentityRegistry ABI
+│   │   └── ReputationRegistry.json  ← Canonical ERC-8004 ReputationRegistry ABI
 │   └── migrate/
 │       ├── Chains.json
 │       ├── RPC.json
 │       ├── ERC20_Selectors.json
 │       ├── UniswapV2_Selectors.json
+│       ├── Registry_Selectors.json  ← ERC-8004 ReputationRegistry selectors
 │       ├── Mainnet_Tokens.json
 │       ├── Mainnet_Pricefeeds.json
 │       ├── Sepolia_Tokens.json
 │       └── Sepolia_Pricefeeds.json
-├── lib/                       ← Foundry dependencies (git submodules)
+├── lib/                             ← Foundry dependencies (git submodules)
 │   ├── account-abstraction/
 │   ├── openzeppelin-contracts/
 │   ├── chainlink-brownie-contracts/
 │   ├── forge-std/
 │   ├── v2-core/
 │   └── v2-periphery/
-├── setup_vault.sh             ← Vault configuration automation script
+├── setup_vault.sh                   ← Vault configuration automation script
 ├── Makefile
 ├── foundry.toml
-└── .env                       ← Not committed — create locally
+└── .env                             ← Not committed — create locally
 ```
 
 ---
@@ -1454,10 +1561,11 @@ session-key-infra/
 | Library | Purpose |
 |---|---|
 | `eth-infinitism/account-abstraction` | ERC-4337 `IAccount`, `EntryPoint`, `PackedUserOperation` |
-| `OpenZeppelin Contracts` | `ECDSA`, `Ownable`, `ReentrancyGuard`, `Pausable`, `IERC20Metadata` |
+| `OpenZeppelin Contracts` | `ECDSA`, `Ownable`, `ReentrancyGuard`, `Pausable`, `IERC20Metadata`, `ERC721`, `ERC721URIStorage` |
 | `chainlink-brownie-contracts` | `AggregatorV3Interface` for Chainlink price feeds |
 | `Uniswap v2-core / v2-periphery` | `IUniswapV2Router01/02`, `IUniswapV2Factory`, `IUniswapV2Pair` interfaces |
 | `forge-std` | Foundry testing and scripting utilities |
+| ERC-8004 canonical registries (external) | `IIdentityRegistry`, `IReputationRegistry` — canonical UUPS-upgradeable deployments on Sepolia and mainnet; local scaffolds (`AgentIdentityRegistry`, `ReputationRegistry`) used on Anvil |
 
 **Python**
 

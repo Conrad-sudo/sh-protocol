@@ -9,16 +9,22 @@ from constants import (
     HEARTBEAT_1H,
     HEARTBEAT_23H,
     HEARTBEAT_24H,
+    IDENTITY_REGISTRY_MAINNET ,  
+    IDENTITY_REGISTRY_SEPOLIA  ,
+    REPUTATION_REGISTRY_MAINNET ,
+    REPUTATION_REGISTRY_SEPOLIA ,
+    
 
 )
 
 from network_config import load_network_config_by_name, load_network_config
 from db import (
     get_json,
-
+    get_reputation_registry_selectors,
     save_wallet_address,
     save_anvil_token_address,
     save_entry_point_address,
+    save_agent_registry_addresses,
     save_session,
     save_user_network,
     get_pricefeed_address,
@@ -422,17 +428,29 @@ def deploy_session_handler_anvil(chat_id: int):
         )
     )
 
-    # 8. Persist addresses to DB
+    # 8. Deploy ERC-8004 registries
+    nonce = w3.eth.get_transaction_count(deployer.address)
+    identity_abi, identity_bc = _load("./out/AgentIdentityRegistry.sol/AgentIdentityRegistry.json")
+    reputation_abi, reputation_bc = _load("./out/ReputationRegistry.sol/ReputationRegistry.json")
 
+    identity_registry = _deploy(deployer, w3, chain_id, nonce, identity_abi, identity_bc)
+    nonce += 1
+    reputation_registry = _deploy(deployer, w3, chain_id, nonce, reputation_abi, reputation_bc, identity_registry.address)
+    nonce += 1
+
+    # 9. Persist addresses to DB
     save_wallet_address(chat_id, session_handler.address)
     save_entry_point_address(chain_id, entry_point.address)
+    save_agent_registry_addresses(chain_id, identity_registry.address, reputation_registry.address)
     for sym_lower, contract in tokens.items():
         save_anvil_token_address(sym_lower, contract.address)
     invalidate_cache(chat_id)
 
-    print(f"EntryPoint:     {entry_point.address}")
-    print(f"PriceOracle:    {oracle.address}")
-    print(f"SessionHandler: {session_handler.address}")
+    print(f"EntryPoint:          {entry_point.address}")
+    print(f"PriceOracle:         {oracle.address}")
+    print(f"SessionHandler:      {session_handler.address}")
+    print(f"IdentityRegistry:    {identity_registry.address}")
+    print(f"ReputationRegistry:  {reputation_registry.address}")
     print("Deployment complete — Database updated!.")
 
     return session_handler, oracle, entry_point
@@ -501,6 +519,13 @@ def deploy_session_handler(chat_id: int, network: str):
     # 2. SessionHandler
     entry_point = get_entry_point_address(chain_id)
     router = UNISWAP_V2_ROUTER if is_mainnet_fork else ETH_SENTINEL
+    if "mainnet" in network:
+        reputation_registry = w3.to_checksum_address(REPUTATION_REGISTRY_MAINNET)
+        identity_registry = w3.to_checksum_address(IDENTITY_REGISTRY_MAINNET)
+    if "sepolia" in network:
+        reputation_registry = w3.to_checksum_address(REPUTATION_REGISTRY_SEPOLIA)
+        identity_registry = w3.to_checksum_address(IDENTITY_REGISTRY_SEPOLIA)
+        
     session_handler = _deploy(
         deployer,
         w3,
@@ -511,6 +536,7 @@ def deploy_session_handler(chat_id: int, network: str):
         entry_point,
         oracle.address,
         router,
+        reputation_registry
     )
     nonce += 1
 
@@ -525,10 +551,13 @@ def deploy_session_handler(chat_id: int, network: str):
 
     prefund(deployer, session_handler, w3, network, chain_id)
     save_wallet_address(chat_id, session_handler.address)
+    save_agent_registry_addresses(chain_id, identity_registry, reputation_registry)
     invalidate_cache(chat_id)
 
     print(f"PriceOracle:    {oracle.address}")
     print(f"SessionHandler: {session_handler.address}")
+    print(f"IdentityRegistry: {identity_registry}")
+    print(f"ReputationRegistry: {reputation_registry}")
     print("Deployment complete — Database updated.")
 
     return session_handler, oracle
@@ -581,6 +610,9 @@ def add_session(
     selector_map.update(
         {row["name"]: row["selector"] for row in get_uniswapv2_selectors()}
     )
+    selector_map.update(
+        {row["name"]: row["selector"] for row in get_reputation_registry_selectors()}
+    )
     for target, funcs, session_end, limit in zip(
         targets, functions, session_ends, limits
     ):
@@ -593,6 +625,12 @@ def add_session(
 
         elif chain_name == "anvil":
             target_address = load_ierc20(chat_id=chat_id, token=target).address
+
+        elif target == "reputation_registry":
+            if "mainnet" in chain_name:
+                target_address = w3.to_checksum_address(REPUTATION_REGISTRY_MAINNET)
+            if "sepolia" in chain_name:
+                target_address = w3.to_checksum_address(REPUTATION_REGISTRY_SEPOLIA)
 
         else:
             target_address = get_token_address(chain_id, target)
@@ -707,32 +745,35 @@ def add_default_session(chat_id: int):
         "removeLiquidity",
         "removeLiquidityETH",
     ]
+    reputation_registry_functions = ["giveFeedback"]
 
     if chain_name == "mainnet-fork":
         add_session(
             chat_id=chat_id,
-            targets=["eth", "weth", "usdc", "uniswapv2_router"],
+            targets=["eth", "weth", "usdc", "uniswapv2_router","reputation_registry"],
             functions=[
                 [],  # empty selector array for native ETH sessions (address(0) target) since there are no function calls, just value transfers
                 weth_functions,
                 erc20_functions,
                 uniswapV2_functions,
+                reputation_registry_functions
             ],
-            session_ends=[50, 50, 50, 50],
-            limits=[50000, 50000, 50000, 50000],
+            session_ends=[50, 50, 50, 50, 50],
+            limits=[50000, 50000, 50000, 50000, 0],
         )
     if "sepolia" in chain_name: 
         add_session(
             chat_id=chat_id,
-            targets=["eth", "weth", "link"],
+            targets=["eth", "weth", "link","reputation_registry"],
             functions=[
                 [],  # empty selector array for native ETH sessions (address(0) target) since there are no function calls, just value transfers
                 weth_functions,
                 erc20_functions,
+                reputation_registry_functions
                 
             ],
-            session_ends=[50, 50, 50],
-            limits=[50000, 50000, 50000],
+            session_ends=[50, 50, 50, 50],
+            limits=[50000, 50000, 50000, 0],
         )
 
 
@@ -768,5 +809,5 @@ def deploy(chat_id: int, network: str):
 
 if __name__ == "__main__":
     chat_id = int(os.getenv("TELEGRAM_CHAT_ID"))
-    deploy(chat_id=chat_id, network="mainnet-fork")
+    deploy(chat_id=chat_id, network="sepolia-fork")
     add_default_session(chat_id=chat_id)

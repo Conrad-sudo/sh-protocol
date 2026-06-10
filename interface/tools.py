@@ -13,7 +13,7 @@ from db import (
     save_recurring_transfer as _save_recurring_transfer,
     delete_recurring_transfer as _delete_recurring_transfer,
     delete_session,
-    
+    get_agent_id,
 )
 from network_config import load_network_config
 from anvil import (
@@ -69,6 +69,8 @@ from contracts import (
     load_calldata,
     load_iuniswap_router,
     load_iuniswap_pair,
+    load_identity_registry,
+    load_reputation_registry,
 )
 from network_config import load_network_config
 from langchain.tools import tool
@@ -318,6 +320,8 @@ def get_session_keys(chat_id: int, token: str) -> tuple[str, str]:
         target_address = UNISWAP_V2_ROUTER
     elif token == "eth":
         target_address = ETH_SENTINEL
+    elif token == "reputation_registry":
+        target_address = load_reputation_registry(chat_id).address
     else:
         target_address = load_ierc20(chat_id=chat_id, token=token).address
 
@@ -2165,6 +2169,114 @@ def _make_cancel_tool(job_queue):
     return cancel_recurring_transfer
 
 
+"""
+ /*//////////////////////////////////////////////////////////////
+                       ERC-8004 TOOLS
+//////////////////////////////////////////////////////////////*/
+"""
+
+
+
+@tool
+def get_agent_identity(chat_id: int) -> dict:
+    """
+    Looks up this agent's ERC-8004 on-chain identity.
+
+    Returns the token ID and agent card URI if registered, or indicates that the
+    agent is not registered. Call this when the user asks about the agent's identity
+    or wants to verify on-chain registration.
+
+    Args:
+        chat_id: The Telegram chat ID of the user.
+
+    Returns:
+        A dict with 'registered' (bool), and if True: 'token_id' (int) and 'card_uri' (str).
+    """
+    print("Running get_agent_identity")
+    _, chain_id, _ = load_network_config(chat_id)
+    agent_id = get_agent_id(chain_id)
+    identity_registry = load_identity_registry(chat_id)
+    try:
+        identity_registry.functions.ownerOf(agent_id).call()
+        card_uri = identity_registry.functions.tokenURI(agent_id).call()
+        return {"registered": True, "token_id": agent_id, "card_uri": card_uri}
+    except Exception:
+        return {"registered": False}
+
+
+@tool
+def get_agent_reputation(chat_id: int) -> dict:
+    """
+    Returns the on-chain reputation score and feedback count for this agent.
+
+    Call this when the user wants to check how the agent is rated.
+
+    Args:
+        chat_id: The Telegram chat ID of the user.
+
+    Returns:
+        A dict with 'token_id' (int), 'average_score' (float, 0–100), and 'feedback_count' (int).
+    """
+    print("Running get_agent_reputation")
+    _, chain_id, _ = load_network_config(chat_id)
+    agent_id = get_agent_id(chain_id)
+    reputation_registry = load_reputation_registry(chat_id)
+
+    count, summary_value, summary_value_decimals = reputation_registry.functions.getSummary(
+        agent_id, [], "", ""
+    ).call()
+    average_score = round(summary_value / (10 ** summary_value_decimals) / count, 2) if count > 0 else 0
+    return {
+        "token_id": agent_id,
+        "average_score": average_score,
+        "feedback_count": count,
+    }
+
+
+@tool
+def post_reputation_feedback(
+    chat_id: int, session_key_ciphertext: str, score: int, tags: str
+) -> dict:
+    """
+    Posts on-chain feedback for this agent in the ERC-8004 Reputation Registry.
+
+    Call this when the user wants to rate the agent after an interaction. The score must
+    be between 0 and 100. Tags are comma-separated descriptors (e.g. "reliable,fast").
+    Always retrieve the session key by calling get_session_keys("reputation_registry")
+    before calling this tool.
+
+    Args:
+        chat_id: The Telegram chat ID of the user.
+        session_key_ciphertext: Vault ciphertext for the reputation_registry session key.
+                                Obtain by calling get_session_keys("reputation_registry").
+        score: Rating from 0 (worst) to 100 (best).
+        tags: Comma-separated tags describing the interaction (e.g. "reliable,fast").
+
+    Returns:
+        A dict with 'tx_hash' (str) and 'status' (int, 1 = success).
+    """
+    print("Running post_reputation_feedback")
+    _, chain_id, _ = load_network_config(chat_id)
+    agent_id = get_agent_id(chain_id)
+    reputation_registry = load_reputation_registry(chat_id)
+
+    # score 0-100 → int128 value with valueDecimals=0; tag goes into tag1, tag2 empty
+    data = load_calldata(
+        instance=reputation_registry,
+        fn_name="giveFeedback",
+        args=[agent_id, score, 0, tags, "", "", "", b"\x00" * 32],
+    )
+    tx_hash, receipt = send_user_op_as_session(
+        chat_id=chat_id,
+        key_ciphertext=session_key_ciphertext,
+        target=reputation_registry.address,
+        value=int(0),
+        data=data,
+    )
+    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    return {"tx_hash": tx_hash.hex(), "status": receipt["status"]}
+
+
 def get_tools(job_queue=None):
     tools_list = [
         # Database tools
@@ -2211,6 +2323,10 @@ def get_tools(job_queue=None):
         transfer_erc20,
         approve_erc20,
         transferFrom_erc20,
+        # ERC-8004 tools
+        get_agent_identity,
+        get_agent_reputation,
+        post_reputation_feedback,
     ]
 
 

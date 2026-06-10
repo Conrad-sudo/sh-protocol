@@ -93,3 +93,6 @@ bot:
 
 agent:
 	.venv/bin/python3 interface/smart_wallet_agent.py
+
+register:
+	.venv/bin/python3 interface/register_agent.py

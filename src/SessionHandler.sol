@@ -19,6 +19,7 @@ import {PriceOracle} from "./PriceOracle.sol";
 import {IUniswapV2Router01} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router01.sol";
 import {IUniswapV2Router02} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
+import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
 
 /**
  * @title SessionHandler
@@ -76,6 +77,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     address private immutable PRICE_ORACLE;
     /// @dev Uniswap V2 Router address; used to route calldata parsing for swap and liquidity functions.
     address private immutable UNISWAP_ROUTER;
+    /// @dev Reputation Registry address; used to interact with the reputation system.
+    address private immutable REPUTATION_REGISTRY;
 
     /// @dev Maps each registered session key address to its Session configuration.
     mapping(address => Session) sessions;
@@ -147,11 +150,13 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
      * @param entryPoint           The canonical ERC-4337 EntryPoint. Only this address may call validateUserOp.
      * @param priceOracleAddress   The deployed PriceOracle used for USD spending limit enforcement.
      * @param uniswapRouterAddress The Uniswap V2 Router address used for swap and liquidity calldata parsing.
+     * @param reputationRegistryAddress The deployed Reputation Registry address.
      */
-    constructor(address entryPoint, address priceOracleAddress, address uniswapRouterAddress) Ownable(msg.sender) {
+    constructor(address entryPoint, address priceOracleAddress, address uniswapRouterAddress, address reputationRegistryAddress) Ownable(msg.sender) {
         ENTRY_POINT = entryPoint;
         PRICE_ORACLE = priceOracleAddress;
         UNISWAP_ROUTER = uniswapRouterAddress;
+        REPUTATION_REGISTRY = reputationRegistryAddress;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -263,7 +268,7 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
         uint256 spendingLimit
     ) external onlyOwner {
         //check to see weather the selector actually exists on the target contract
-        if (spendingLimit == 0) revert SessionHandler_SpendingLimitCannotBeZero();
+        if (spendingLimit == 0 && target != REPUTATION_REGISTRY) revert SessionHandler_SpendingLimitCannotBeZero();
         if (sessionKey == address(0)) revert SessionHandler_InvalidSessionKey();
         // address(0) is the sentinel for a native ETH-send session; it must have no selectors
         if (target == address(0) && selectors.length != 0) revert SessionHandler_InvalidTarget();
@@ -426,9 +431,19 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
             return _packValidationData(false, selectedSession.validFrom, selectedSession.validUntil);
         }
 
+
+
         if (selectedSession.target != dest) {
             return _packValidationData(true, selectedSession.validFrom, selectedSession.validUntil);
         }
+
+        if (dest == REPUTATION_REGISTRY ) {
+            // For calls to the Reputation Registry, we ignore the selector and allow any function
+            // so that session keys can perform all reputation-related actions (e.g. giving feedback,
+            // reading summaries, etc.) without needing separate sessions for each function.
+             return _packValidationData(false, selectedSession.validFrom, selectedSession.validUntil);
+            
+        } 
 
         if (data.length >= 4) {
             assembly {

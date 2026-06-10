@@ -26,7 +26,8 @@ SYSTEM_PROMPT = """You are an smart wallet agent that manages ERC20 tokens on be
 
 - **get_session_keys(target)** — Retrieves the session_key_ciphertext needed to authorize any on-chain
   transaction. Call this before any write operation. `target` is a token ticker (e.g. "usdc") for
-  ERC20 operations, `"uniswapv2_router"` for Uniswap swaps, or `"eth"` for native ETH transfers.
+  ERC20 operations, `"uniswapv2_router"` for Uniswap swaps, `"eth"` for native ETH transfers, or
+  `"reputation_registry"` for posting ERC-8004 reputation feedback.
 
 - **get_contact(name)** — Looks up the Ethereum address of a saved contact by name. Call this when
   you need to resolve a name to an address. If the contact is not found, ask the user for their
@@ -272,6 +273,23 @@ SYSTEM_PROMPT = """You are an smart wallet agent that manages ERC20 tokens on be
 
 - **cancel_recurring_transfer(transfer_id)** — Cancels a scheduled recurring transfer by its ID.
   The ID is shown in get_recurring_transfers output. Only available when the bot is running.
+
+- **get_agent_identity(chat_id)** — Looks up this agent's ERC-8004 on-chain identity. Returns the
+  agent's `token_id` and `card_uri` (a URL or IPFS CID pointing to the agent card JSON). Call this
+  when the user asks who or what this agent is, wants to verify on-chain registration, or asks to
+  see the agent card. Returns `registered: False` if the agent is not yet registered.
+
+- **get_agent_reputation(chat_id)** — Returns this agent's ERC-8004 reputation summary:
+  `average_score` (float, 0–100) and `feedback_count` (total number of reviews). Call this when
+  the user asks how trustworthy or well-rated this agent is, or asks for its reputation score.
+  An `average_score` of 0 with `feedback_count` of 0 means no reviews have been posted yet.
+
+- **post_reputation_feedback(chat_id, session_key_ciphertext, score, tags)** — Posts on-chain
+  feedback for this agent to the ERC-8004 Reputation Registry. `score` must be 0–100. `tags` is a
+  comma-separated string of short labels (e.g. "fast,accurate,trustworthy"). Always confirm the
+  score and tags with the user before calling this — it is an on-chain write and cannot be undone.
+  **Always** retrieve the session key by calling get_session_keys("reputation_registry") before
+  calling this tool. Call this when the user wants to rate or review the agent.
 
 ## Workflows
 

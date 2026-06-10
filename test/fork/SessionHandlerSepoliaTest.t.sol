@@ -10,6 +10,8 @@ import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {DeploySessionHandler} from "../../script/DeploySessionHandler.s.sol";
 import {PriceOracle} from "../../src/PriceOracle.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {IReputationRegistry} from "../../src/interfaces/IReputationRegistry.sol";
+import{IIdentityRegistry} from "../../src/interfaces/IIdentityRegistry.sol";
 
 contract SessionHandlerSepoliaTest is Test {
     PriceOracle oracle;
@@ -21,6 +23,7 @@ contract SessionHandlerSepoliaTest is Test {
     address kani = makeAddr("kani");
     address bundler = makeAddr("bundler");
     uint256 constant BUDGET = 5000e18;
+    uint256 agentId; 
 
     modifier ethSessionAdded() {
         address sessionKey = user;
@@ -59,6 +62,24 @@ contract SessionHandlerSepoliaTest is Test {
         _;
     }
 
+    modifier registrySessionAdded() {
+        address sessionKey = user;
+        address target = config.reputationRegistry;
+        bytes4[] memory sel= new bytes4[](1);
+        sel[0]= IReputationRegistry.giveFeedback.selector;
+        uint48 validFrom = uint48(block.timestamp);
+        uint48 validUntil = uint48(block.timestamp + 1 days);
+        uint256 spendingLimit = 0;
+
+        vm.prank(sessionHandler.owner());
+        sessionHandler.addSessionKey(sessionKey, target, sel, validFrom, validUntil, spendingLimit);
+        _;
+    
+    }
+
+
+
+
     function setUp() external {
         DeploySessionHandler deployer = new DeploySessionHandler();
         (sessionHandler, config, oracle) = deployer.run();
@@ -66,6 +87,10 @@ contract SessionHandlerSepoliaTest is Test {
         sendPackedUserOp = new SendPackedUserOp();
         vm.deal(address(sessionHandler), 10 ether);
         deal(config.link, address(sessionHandler), 10000e18);
+
+        //register the agent in the reputation registry so we can test feedback submission via session key
+        vm.prank(sessionHandler.owner());
+        agentId=IIdentityRegistry(config.identityRegistry).register("https://example.com/session-handler-agent");
     }
 
     /**
@@ -123,4 +148,56 @@ contract SessionHandlerSepoliaTest is Test {
 
         assertEq(IERC20(config.link).balanceOf(user), amountToTransfer);
     }
+
+
+
+
+        /**
+        * @notice Session keys with access to the Reputation Registry can successfully submit feedback
+        * @dev Adds a session key with permission to call giveFeedback on the Reputation Registry.
+        *      Constructs a UserOp that calls giveFeedback via the session key, and submits it through the EntryPoint.
+        *      Verifies the feedback is recorded in the Reputation Registry by reading it back.
+        */
+    function testGiveFeedbackWithSession() public registrySessionAdded {
+        uint256 value = 0;
+        PackedUserOperation[] memory PackedUserOp = new PackedUserOperation[](1);
+        bytes memory data = abi.encodeWithSelector(IReputationRegistry.giveFeedback.selector,
+            agentId,
+            5, // value
+            0, // valueDecimals
+            "goodService", // tag1
+            "tag2",
+            "endpoint",         
+            "feedbackURI",
+            bytes32("feedbackHash")
+        );
+        bytes memory callData = abi.encodeWithSelector(SessionHandler.execute.selector, config.reputationRegistry, value, data);
+        (PackedUserOperation memory userOp,,) =
+        sendPackedUserOp.generateSignedUserOp(address(sessionHandler), config, callData, user, privateKey);
+        PackedUserOp[0] = userOp;
+
+
+        vm.warp(block.timestamp + 10 minutes);
+        vm.prank(bundler, bundler);
+        IEntryPoint(config.entryPoint).handleOps(PackedUserOp, payable(user));
+
+        (
+            address[] memory clients,
+            uint64[] memory feedbackIndexes,
+            int128[] memory values,
+            uint8[] memory valueDecimals,
+            string[] memory tag1s,
+            string[] memory tag2s,
+            bool[] memory revokedStatuses
+        ) = IReputationRegistry(config.reputationRegistry).readAllFeedback(agentId, new address[](0), "goodService", "tag2", false);
+
+        assertEq(clients.length, 1);
+        assertEq(clients[0], address(sessionHandler));
+        assertEq(values[0], 5);
+       assertEq(valueDecimals[0], 0);
+        assertEq(keccak256(bytes(tag1s[0])), keccak256(bytes("goodService")));
+        assertEq(keccak256(bytes(tag2s[0])), keccak256(bytes("tag2")));
+       assertFalse(revokedStatuses[0]);        
+}
+
 }

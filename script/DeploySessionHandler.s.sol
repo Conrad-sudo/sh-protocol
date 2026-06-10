@@ -114,7 +114,7 @@ contract DeploySessionHandler is Script {
         heartbeats[20] = config.usdtHeartbeat;
 
         PriceOracle oracle = new PriceOracle(tokens, priceFeeds, heartbeats);
-        SessionHandler sessionHandler = new SessionHandler(config.entryPoint, address(oracle), config.uniswapRouter);
+        SessionHandler sessionHandler = new SessionHandler(config.entryPoint, address(oracle), config.uniswapRouter,config.reputationRegistry);
 
         if (block.chainid == 31337) {
             MockWeth(payable(config.weth)).mint(address(sessionHandler), 1000e18);

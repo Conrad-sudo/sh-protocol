@@ -5,8 +5,10 @@ from db import (
     get_wallet_address,
     get_token_address,
     get_entry_point_address,
+    get_identity_registry_address,
+    get_reputation_registry_address,
 )
-from constants import UNISWAP_V2_ROUTER, UNISWAP_V2_FACTORY, ETH_SENTINEL
+from constants import UNISWAP_V2_ROUTER, UNISWAP_V2_FACTORY, ETH_SENTINEL, CHAIN_ID_ANVIL
 
 _session_handler_cache: dict[int, Contract] = {}
 _entry_point_cache: dict[int, Contract] = {}
@@ -14,6 +16,8 @@ _erc20_cache: dict[tuple[int, str], Contract] = {}
 _router_cache: dict[int, Contract] = {}
 _factory_cache: dict[int, Contract] = {}
 _pair_cache: dict[str, Contract] = {}
+_identity_registry_cache: dict[int, Contract] = {}
+_reputation_registry_cache: dict[int, Contract] = {}
 
 
 def load_session_handler(chat_id: int) -> Contract:
@@ -121,6 +125,34 @@ def load_iuniswap_factory(chat_id: int) -> Contract:
         address = UNISWAP_V2_FACTORY
         _factory_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
     return _factory_cache[chat_id]
+
+
+def load_identity_registry(chat_id: int) -> Contract:
+    """Loads the ERC-8004 Identity Registry bound to the correct address for this chain.
+    Anvil uses the locally compiled ABI; Sepolia/Mainnet use the canonical artifact."""
+    if chat_id not in _identity_registry_cache:
+        w3, chain_id, _ = load_network_config(chat_id)
+        if chain_id == CHAIN_ID_ANVIL:
+            abi = get_json("./out/AgentIdentityRegistry.sol/AgentIdentityRegistry.json")["abi"]
+        else:
+            abi = get_json("./interface/artifacts/IdentityRegistry.json")
+        address = get_identity_registry_address(chain_id)
+        _identity_registry_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
+    return _identity_registry_cache[chat_id]
+
+
+def load_reputation_registry(chat_id: int) -> Contract:
+    """Loads the ERC-8004 Reputation Registry bound to the correct address for this chain.
+    Anvil uses the locally compiled ABI; Sepolia/Mainnet use the canonical artifact."""
+    if chat_id not in _reputation_registry_cache:
+        w3, chain_id, _ = load_network_config(chat_id)
+        if chain_id == CHAIN_ID_ANVIL:
+            abi = get_json("./out/ReputationRegistry.sol/ReputationRegistry.json")["abi"]
+        else:
+            abi = get_json("./interface/artifacts/ReputationRegistry.json")
+        address = get_reputation_registry_address(chain_id)
+        _reputation_registry_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
+    return _reputation_registry_cache[chat_id]
 
 
 def load_iuniswap_pair(chat_id: int, token_a: str, token_b: str) -> Contract:

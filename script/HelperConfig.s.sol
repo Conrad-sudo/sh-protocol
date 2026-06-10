@@ -6,6 +6,8 @@ import {EntryPoint} from "@account-abstraction/contracts/core/EntryPoint.sol";
 import {ERC20Mock} from "../src/mocks/ERC20Mock.sol";
 import {MockWeth} from "../src/mocks/MockWeth.sol";
 import {MockV3Aggregator} from "../src/mocks/MockV3Aggregator.sol";
+import {AgentIdentityRegistry} from "../src/AgentIdentityRegistry.sol";
+import {ReputationRegistry} from "../src/ReputationRegistry.sol";
 import "../src/Constants.sol";
 
 /**
@@ -130,6 +132,8 @@ contract HelperConfig is Script {
         address entryPoint;
         address account;
         address uniswapRouter;
+        address identityRegistry;
+        address reputationRegistry;
         // Stablecoins
         address usdc;
         address dai;
@@ -369,6 +373,8 @@ contract HelperConfig is Script {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
             account: SEPOLIA_ACCOUNT,
+            identityRegistry: SEPOLIA_IDENTITY_REGISTRY,
+            reputationRegistry: SEPOLIA_REPUTATION_REGISTRY,
             // Stablecoins
             usdc: SEPOLIA_USDC,
             weth: SEPOLIA_WETH,
@@ -463,6 +469,8 @@ contract HelperConfig is Script {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
             account: ANVIL_BURNER_WALLET,
+            identityRegistry: MNT_IDENTITY_REGISTRY,
+            reputationRegistry: MNT_REPUTATION_REGISTRY,
             //swap for the deployer account on mainnet and ensure it's funded before broadcasting
             uniswapRouter: UNISWAP_V2_ROUTER_02,
             // Stablecoins
@@ -624,11 +632,16 @@ contract HelperConfig is Script {
             MockV3Aggregator kncUsdPriceFeed = new MockV3Aggregator(DECIMALS, KNC_USD_PRICE);
             MockV3Aggregator rdntUsdPriceFeed = new MockV3Aggregator(DECIMALS, RDNT_USD_PRICE);
 
+            AgentIdentityRegistry identityRegistry = new AgentIdentityRegistry();
+            ReputationRegistry reputationRegistry = new ReputationRegistry();
+
             vm.stopBroadcast();
 
             s_localNetworkConfig = NetworkConfig({
                 entryPoint: address(entryPoint),
                 account: ANVIL_BURNER_WALLET,
+                identityRegistry: address(identityRegistry),
+                reputationRegistry: address(reputationRegistry),
                 uniswapRouter: address(0), // Uniswap not deployed on Anvil by default
                 // Stablecoins
                 usdc: address(usdc),

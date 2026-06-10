@@ -4,7 +4,10 @@ import sqlite3
 import threading
 from web3 import Web3
 from datetime import datetime, timezone
-from constants import CHAIN_ID_ANVIL, CHAIN_ID_MAINNET, WEI_PER_ETH, CHAIN_ID_SEPOLIA,ENTRYPOINT_V07
+from constants import (
+    CHAIN_ID_ANVIL, CHAIN_ID_MAINNET, WEI_PER_ETH, CHAIN_ID_SEPOLIA, ENTRYPOINT_V07,
+
+)
 
 DB_PATH = "./interface/wallet.db"
 
@@ -64,6 +67,10 @@ def init_db():
             selector TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS uniswapv2_selectors (
+            name      TEXT PRIMARY KEY,
+            selector TEXT NOT NULL
+        );
+         CREATE TABLE IF NOT EXISTS reputation_registry_selectors (
             name      TEXT PRIMARY KEY,
             selector TEXT NOT NULL
         );
@@ -133,6 +140,20 @@ def init_db():
             PRIMARY KEY (chat_id, target)
         );
 
+        CREATE TABLE IF NOT EXISTS agent_registries (
+            chain_id            INTEGER PRIMARY KEY,
+            identity_registry   TEXT NOT NULL,
+            reputation_registry TEXT NOT NULL
+        );
+                     
+       
+
+        CREATE TABLE IF NOT EXISTS agent_ids (
+            chain_id  INTEGER PRIMARY KEY,
+            agent_id  INTEGER NOT NULL
+        );
+                     
+        
 
     """)
     db.commit()
@@ -161,6 +182,15 @@ def migrate_json_to_db():
         ).items():
             db.execute(
                 "INSERT OR REPLACE INTO uniswapv2_selectors (name, selector) VALUES (?, ?)",
+                (name, selector),
+            )
+
+    if os.path.exists("./interface/migrate/ReputationRegistry_Selectors.json"):
+        for name, selector in get_json(
+            "./interface/migrate/ReputationRegistry_Selectors.json"
+        ).items():
+            db.execute(
+                "INSERT OR REPLACE INTO reputation_registry_selectors (name, selector) VALUES (?, ?)",
                 (name, selector),
             )
 
@@ -347,6 +377,91 @@ def get_entry_point_address(chain_id: int) -> str:
         raise ValueError("No EntryPoint address found in database")
 
     return Web3.to_checksum_address(row["address"])
+
+
+# ── ERC-8004 Agent ID ────────────────────────────────────────────────────
+
+
+
+def save_agent_id(chain_id: int, agent_id: int):
+    """Persists the agent's ERC-8004 tokenId (agentId) for a given chain."""
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO agent_ids (chain_id, agent_id) VALUES (?, ?)",
+        (chain_id, agent_id),
+    )
+    db.commit()
+
+
+def get_agent_id(chain_id: int) -> int:
+    """
+    Returns the agent's ERC-8004 tokenId for the given chain.
+
+    @raises ValueError  If register_agent.py has not been run for this chain yet.
+    """
+    row = (
+        get_db()
+        .execute("SELECT agent_id FROM agent_ids WHERE chain_id = ?", (chain_id,))
+        .fetchone()
+    )
+    if row is None:
+        raise ValueError(f"No agent_id found for chain_id {chain_id}. Run register_agent.py first.")
+    return int(row["agent_id"])
+
+
+def try_get_agent_id(chain_id: int) -> int | None:
+    """Returns the agent's ERC-8004 tokenId, or None if not yet saved."""
+    row = (
+        get_db()
+        .execute("SELECT agent_id FROM agent_ids WHERE chain_id = ?", (chain_id,))
+        .fetchone()
+    )
+    return int(row["agent_id"]) if row else None
+
+
+# ── ERC-8004 Agent Registries ─────────────────────────────────────────────────
+
+
+def save_agent_registry_addresses(chain_id: int, identity: str, reputation: str):
+    """Persists the Identity and Reputation registry addresses for a chain."""
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO agent_registries (chain_id, identity_registry, reputation_registry) VALUES (?, ?, ?)",
+        (chain_id, identity, reputation),
+    )
+    db.commit()
+
+
+def get_identity_registry_address(chain_id: int) -> str:
+    """
+    Returns the ERC-8004 Identity Registry address for the given chain.
+   
+    """
+    
+    row = (
+        get_db()
+        .execute("SELECT identity_registry FROM agent_registries WHERE chain_id = ?", (chain_id,))
+        .fetchone()
+    )
+    if row is None:
+        raise ValueError(f"No Identity Registry address found for chain_id {chain_id}. Run deployment first.")
+    return Web3.to_checksum_address(row["identity_registry"])
+
+
+def get_reputation_registry_address(chain_id: int) -> str:
+    """
+    Returns the ERC-8004 Reputation Registry address for the given chain.
+   
+    """
+  
+    row = (
+        get_db()
+        .execute("SELECT reputation_registry FROM agent_registries WHERE chain_id = ?", (chain_id,))
+        .fetchone()
+    )
+    if row is None:
+        raise ValueError(f"No Reputation Registry address found for chain_id {chain_id}. Run deployment first.")
+    return Web3.to_checksum_address(row["reputation_registry"])
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
@@ -557,6 +672,22 @@ def get_uniswapv2_selectors() -> list[dict]:
     rows = (
         get_db()
         .execute("SELECT name, selector FROM uniswapv2_selectors ORDER BY name ASC")
+        .fetchall()
+    )
+    return [{"name": row["name"], "selector": row["selector"]} for row in rows]
+
+
+
+def get_reputation_registry_selectors() -> list[dict]:
+    """
+    Returns all rows from the reputation_registry_selectors table.
+
+    @return  A list of dicts with 'name' and 'selector' keys
+             (e.g. [{"name": "updateReputation", "selector": "0x12345678"}, ...]).
+    """
+    rows = (
+        get_db()
+        .execute("SELECT name, selector FROM reputation_registry_selectors ORDER BY name ASC")
         .fetchall()
     )
     return [{"name": row["name"], "selector": row["selector"]} for row in rows]

@@ -26,6 +26,13 @@ address constant SEPOLIA_DAI_USD_PRICE_FEED = 0x14866185B1962B63C3Ea9E03Bc1da838
 address constant SEPOLIA_LINK_USD_PRICE_FEED = 0xc59E3633BAAC79493d908e63626716e204A45EdF;
 address constant SEPOLIA_BTC_USD_PRICE_FEED = 0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43;
 
+// ─── Sepolia Agent Registries ──────────────────────────────────────────────────────
+
+address constant SEPOLIA_REPUTATION_REGISTRY = 0x8004B663056A597Dffe9eCcC1965A193B7388713;
+address constant SEPOLIA_IDENTITY_REGISTRY = 0x8004A818BFB912233c491871b3d84c89A494BD9e;
+
+
+
 // ─── Mainnet Tokens ───────────────────────────────────────────────────────────
 address constant MNT_USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
 address constant MNT_DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
@@ -79,3 +86,8 @@ address constant MNT_BAT_USD_PRICE_FEED = 0x0d16d4528239e9ee52fa531af613AcdB23D8
 address constant MNT_IMX_USD_PRICE_FEED = 0xBAEbEFc1D023c0feCcc047Bff42E75F15Ff213E6;
 address constant MNT_KNC_USD_PRICE_FEED = 0xf8fF43E991A81e6eC886a3D281A2C6cC19aE70Fc;
 address constant MNT_RDNT_USD_PRICE_FEED = 0x393CC05baD439c9B36489384F11487d9C8410471;
+
+// ─── Mainnet Agent Registries ──────────────────────────────────────────────────────
+address constant MNT_REPUTATION_REGISTRY = 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63;
+address constant MNT_IDENTITY_REGISTRY = 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;
+

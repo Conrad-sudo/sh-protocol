@@ -1150,7 +1150,7 @@ contract TestSessionHandler is Test {
      */
     function testPackValidationDataRoundTrip(bool sigFailed, uint48 validAfter, uint48 validUntil) public {
         SessionHandlerHarness sessionHandlerHarness =
-            new SessionHandlerHarness(config.entryPoint, address(oracle), config.uniswapRouter);
+            new SessionHandlerHarness(config.entryPoint, address(oracle), config.uniswapRouter,config.reputationRegistry);
         uint256 packed = sessionHandlerHarness.packValidationData(sigFailed, validAfter, validUntil);
         assertEq(uint160(packed), sigFailed ? 1 : 0);
         assertEq(uint48(packed >> 160), validUntil);

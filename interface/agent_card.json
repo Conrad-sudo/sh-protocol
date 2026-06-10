@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "erc-8004/v1",
+  "name": "SmartWalletAgent",
+  "description": "ERC-4337 session-key smart wallet agent with Uniswap V2 and ERC20 support",
+  "version": "1.0.0",
+  "walletAddress": "<YOUR_SESSION_HANDLER_ADDRESS>",
+  "capabilities": [
+    "erc20_transfer",
+    "erc20_approve",
+    "uniswap_v2_swap",
+    "uniswap_v2_liquidity",
+    "session_key_management",
+    "eth_send",
+    "eth_wrap"
+
+  ],
+  "trustModel": "erc-4337-session-key",
+  "network": "ethereum-sepolia"
+}
