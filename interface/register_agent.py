@@ -20,7 +20,7 @@ Example:
 
 import os
 from dotenv import load_dotenv
-from db import get_db, get_json, save_agent_id, try_get_agent_id
+from db import get_json, save_agent_id, try_get_agent_id
 from network_config import load_network_config_by_name
 from constants import (
     CHAIN_ID_SEPOLIA, CHAIN_ID_MAINNET, CHAIN_ID_ANVIL,

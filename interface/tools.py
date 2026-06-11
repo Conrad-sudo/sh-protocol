@@ -2220,10 +2220,11 @@ def get_agent_reputation(chat_id: int) -> dict:
     print("Running get_agent_reputation")
     _, chain_id, _ = load_network_config(chat_id)
     agent_id = get_agent_id(chain_id)
+    client=load_session_handler(chat_id).address
     reputation_registry = load_reputation_registry(chat_id)
 
     count, summary_value, summary_value_decimals = reputation_registry.functions.getSummary(
-        agent_id, [], "", ""
+        agent_id, [client], "", ""
     ).call()
     average_score = round(summary_value / (10 ** summary_value_decimals) / count, 2) if count > 0 else 0
     return {
