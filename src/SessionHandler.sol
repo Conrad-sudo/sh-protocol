@@ -1,5 +1,9 @@
-// SPDX-License-Identifier: MIT
-
+/* SPDX-License-Identifier: BUSL-1.1
+ * Licensor: Conrad Japhet
+ * Licensed Work: SessionHandler.sol
+ * Change Date: 2029-06-12
+ * Change License: MIT
+*/
 pragma solidity ^0.8.24;
 //Account Abstraction imports
 import {IAccount} from "@account-abstraction/contracts/interfaces/IAccount.sol";
