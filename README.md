@@ -46,12 +46,7 @@ cd session-key-infra
 **Foundry dependencies:**
 
 ```bash
-forge install foundry-rs/forge-std
-forge install OpenZeppelin/openzeppelin-contracts
-forge install eth-infinitism/account-abstraction
-forge install smartcontractkit/chainlink-brownie-contracts
-forge install Uniswap/v2-core
-forge install Uniswap/v2-periphery
+forge install 
 ```
 
 **Python dependencies:**
