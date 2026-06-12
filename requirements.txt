@@ -5,3 +5,4 @@ langchain
 langchain-anthropic
 langgraph
 python-telegram-bot[job-queue]
+

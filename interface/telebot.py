@@ -9,7 +9,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from smart_wallet_agent import chat, init_agent
+from smart_wallet_agent import chat, init_agent,open_checkpointer,close_checkpointer
 from db import get_all_recurring_transfers
 from tools import recurring_transfer_job, SECONDS_PER_HOUR, get_all_sessions
 
@@ -84,6 +84,7 @@ async def post_init(application: Application) -> None:
     are available, then restores any recurring transfer jobs that were persisted in
     the database from a previous run.
     """
+    await open_checkpointer()
     job_queue = application.job_queue
     init_agent(job_queue)
 
@@ -103,9 +104,12 @@ async def post_init(application: Application) -> None:
             },
         )
 
+async def post_shutdown(application: Application) -> None:
+    await close_checkpointer()
+
 
 def main():
-    app = Application.builder().token(telegram_token).post_init(post_init).build()
+    app = Application.builder().token(telegram_token).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_chat))

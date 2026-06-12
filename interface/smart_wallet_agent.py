@@ -1,9 +1,13 @@
 from dotenv import load_dotenv
 from tools import get_tools
+import os
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
+#from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from db import DB_PATH
+import asyncio
 
 load_dotenv()
 
@@ -482,48 +486,60 @@ llm = ChatAnthropic(
     model="claude-sonnet-4-6",
     temperature=0.1,
     timeout=30,
-    max_tokens=1000,
+    max_tokens=4096,
     max_retries=2,
     verbose=True,
 )
-memory = InMemorySaver()
+_checkpointer_cm= None
+_checkpointer= None
+agent =None
 
-agent = None
 
+async def open_checkpointer():
+    global _checkpointer_cm, _checkpointer
+    _checkpointer_cm = AsyncSqliteSaver.from_conn_string(DB_PATH)
+    _checkpointer = await _checkpointer_cm.__aenter__()
+    await _checkpointer.setup()
+
+async def close_checkpointer():
+    global _checkpointer_cm, _checkpointer
+    if _checkpointer_cm:
+        await _checkpointer_cm.__aexit__(None, None, None)
+        _checkpointer_cm = None
+        _checkpointer = None
 
 def init_agent(job_queue=None):
-    """
-    Initialises (or re-initialises) the global agent with the given job_queue.
-
-    Call this once at bot startup — after the JobQueue is available — so that the
-    scheduling tools can be included in the agent's tool list. Safe to call with
-    job_queue=None for CLI use, in which case the recurring-transfer tools are omitted.
-    """
     global agent
     tools = get_tools(job_queue=job_queue)
     agent = create_agent(
-        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=memory
+        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=_checkpointer
     )
 
 
-def main():
+async def main():
+    
+    await open_checkpointer()
     init_agent()
-    config = {"configurable": {"thread_id": "cli-session"}}
-    chat_id = 7037774873
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() in ["exit", "quit"]:
-            print("Exiting...")
-            break
-        response = agent.invoke(
-            {
-                "messages": [
-                    HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
-                ]
-            },
-            config={"configurable": {"thread_id": str(chat_id)}},
-        )
-        print("Agent:", response["messages"][-1].content)
+    
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    try:
+        while True:
+            user_input = input("You: ")
+            if user_input.lower() in ["exit", "quit"]:
+                print("Exiting...")
+                
+                break
+            response = await agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
+                    ]
+                },
+                config={"configurable": {"thread_id": str(chat_id)}},
+            )
+            print("Agent:", response["messages"][-1].content)
+    finally:
+        await close_checkpointer()
 
 
 def chat(chat_id, user_input):
@@ -539,4 +555,4 @@ def chat(chat_id, user_input):
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

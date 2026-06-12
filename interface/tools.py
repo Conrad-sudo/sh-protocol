@@ -292,7 +292,8 @@ def send_eth(
         data=b"",
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
 
 
@@ -629,7 +630,8 @@ def wrap_eth(chat_id: int, session_key_ciphertext: str, amount_eth: float):
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
 
 
@@ -676,7 +678,8 @@ def transfer_erc20(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
 
 
@@ -721,7 +724,8 @@ def approve_erc20(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
 
 
@@ -781,7 +785,8 @@ def transferFrom_erc20(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
 
 
@@ -1287,7 +1292,8 @@ def swap_ETH_for_exact_tokens(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1361,7 +1367,8 @@ def swap_exact_tokens_for_tokens(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1434,7 +1441,8 @@ def swap_tokens_for_exact_tokens(
         value=int(0),
         data=data,
     )
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1511,7 +1519,8 @@ def swap_exact_tokens_for_ETH(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1589,7 +1598,8 @@ def swap_tokens_for_exact_ETH(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1665,7 +1675,8 @@ def swap_exact_ETH_for_tokens(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1751,7 +1762,8 @@ def add_liquidity(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1835,7 +1847,8 @@ def add_liquidity_eth(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
 
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
@@ -1920,7 +1933,8 @@ def remove_liquidity(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
         f"Min {token_a.upper()} returned: {amount_a_min / 10**lp['decimals_a']:.6f}, "
@@ -2004,7 +2018,8 @@ def remove_liquidity_eth(
         data=data,
     )
 
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "
         f"Min {token.upper()} returned: {amount_token_min / 10**lp['decimals_a']:.6f}, "
@@ -2274,7 +2289,8 @@ def post_reputation_feedback(
         value=int(0),
         data=data,
     )
-    assert receipt["status"] == 1, f"UserOp failed! tx: {tx_hash.hex()}"
+    if receipt["status"] != 1:
+        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
     return {"tx_hash": tx_hash.hex(), "status": receipt["status"]}
 
 
