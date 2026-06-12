@@ -523,36 +523,40 @@ async def main():
     
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     try:
-        while True:
-            user_input = input("You: ")
-            if user_input.lower() in ["exit", "quit"]:
-                print("Exiting...")
-                
-                break
-            response = await agent.ainvoke(
-                {
-                    "messages": [
-                        HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
-                    ]
-                },
-                config={"configurable": {"thread_id": str(chat_id)}},
-            )
-            print("Agent:", response["messages"][-1].content)
+      while True:
+          user_input = input("You: ")
+          if user_input.lower() in ["exit", "quit"]:
+              print("Exiting...")
+              
+              break
+          response = await agent.ainvoke(
+              {
+                  "messages": [
+                      HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
+                  ]
+              },
+              config={"configurable": {"thread_id": str(chat_id)}},
+          )
+          print("Agent:", response["messages"][-1].content)
     finally:
-        await close_checkpointer()
+      await close_checkpointer()
 
 
 def chat(chat_id, user_input):
-    response = agent.invoke(
-        {
-            "messages": [
-                HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
-            ]
-        },
-        config={"configurable": {"thread_id": str(chat_id)}},
-    )
-    return response["messages"][-1].content
-
+    
+    try:
+      response = agent.invoke(
+          {
+              "messages": [
+                  HumanMessage(content=f"[chat_id: {chat_id}] {user_input}"),
+              ]
+          },
+          config={"configurable": {"thread_id": str(chat_id)}},
+      )
+      return response["messages"][-1].content
+    except Exception as e:
+         return f"Sorry, something went wrong while processing your request {e}."
+     
 
 if __name__ == "__main__":
     asyncio.run(main())

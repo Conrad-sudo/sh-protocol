@@ -1,5 +1,6 @@
 import asyncio
 import time
+from decimal import Decimal
 
 
 from db import (
@@ -24,6 +25,10 @@ from anvil import (
 from live_network import send_live_user_op_as_session as _send_live_user_op_as_session
 
 from constants import ETH_SENTINEL, UNISWAP_V2_ROUTER, WEI_PER_ETH
+
+
+def _to_base_units(amount: float, decimals: int) -> int:
+    return int(Decimal(str(amount)) * Decimal(10) ** decimals)
 
 
 def send_user_op_as_session(chat_id, key_ciphertext, target, value, data):
@@ -282,7 +287,7 @@ def send_eth(
     """
     print("Running send_eth")
     recipient_addr = get_contact.func(chat_id, recipient)
-    value = int(amount_eth * WEI_PER_ETH)  # Convert ETH to wei
+    value = _to_base_units(amount_eth, 18)
 
     tx_hash, receipt = send_user_op_as_session(
         chat_id=chat_id,
@@ -407,7 +412,7 @@ def check_spending_within_budget(
     erc20 = load_ierc20(chat_id=chat_id, token=token)
     decimals = erc20.functions.decimals().call()
     return session_handler.functions.isSpendingWithinBudget(
-        session_key, erc20.address, int(amount * 10**decimals)
+        session_key, erc20.address, _to_base_units(amount, decimals)
     ).call()
 
 
@@ -500,14 +505,14 @@ def preflight_check(
 
         decimals = 18
         within_budget = session_handler.functions.isSpendingWithinBudget(
-            session_key, ETH_SENTINEL, int(amount * 10**decimals)
+            session_key, ETH_SENTINEL, _to_base_units(amount, decimals)
         ).call()
 
     else:
         erc20 = load_ierc20(chat_id=chat_id, token=token)
         decimals = erc20.functions.decimals().call()
         within_budget = session_handler.functions.isSpendingWithinBudget(
-            session_key, erc20.address, int(amount * 10**decimals)
+            session_key, erc20.address, _to_base_units(amount, decimals)
         ).call()
 
     usd_value = get_price.func(chat_id, token) * amount
@@ -613,7 +618,7 @@ def wrap_eth(chat_id: int, session_key_ciphertext: str, amount_eth: float):
     """
     print("Running wrap_eth")
     iweth = load_ierc20(chat_id, "weth")
-    value = int(amount_eth * WEI_PER_ETH)  # Convert ETH to wei
+    value = _to_base_units(amount_eth, 18)
 
     data = load_calldata(
         instance=iweth,
@@ -663,7 +668,7 @@ def transfer_erc20(
     erc20 = load_ierc20(chat_id=chat_id, token=token)
     recipient_addr = get_contact.func(chat_id, recipient)
     decimals = erc20.functions.decimals().call()
-    value = int(amount * 10**decimals)
+    value = _to_base_units(amount, decimals)
 
     data = load_calldata(
         instance=erc20, fn_name="transfer", args=[recipient_addr, value]
@@ -711,7 +716,7 @@ def approve_erc20(
     erc20 = load_ierc20(chat_id=chat_id, token=token)
     spender_addr = get_contact.func(chat_id, spender)
     decimals = erc20.functions.decimals().call()
-    value = int(amount * 10**decimals)
+    value = _to_base_units(amount, decimals)
 
     data = load_calldata(instance=erc20, fn_name="approve", args=[spender_addr, value])
     target = erc20.address
@@ -768,7 +773,7 @@ def transferFrom_erc20(
     else:
         recipient_addr = get_contact.func(chat_id, recipient)
     decimals = erc20.functions.decimals().call()
-    value = int(amount * 10**decimals)
+    value = _to_base_units(amount, decimals)
 
     data = load_calldata(
         instance=erc20,
@@ -835,7 +840,7 @@ def get_quote_in(
     erc20_in = load_ierc20(chat_id=chat_id, token=token_in)
     decimals_out = erc20_out.functions.decimals().call()
     decimals_in = erc20_in.functions.decimals().call()
-    amount_out_base = int(amount_out * 10**decimals_out)
+    amount_out_base = _to_base_units(amount_out, decimals_out)
     if token_in.lower() != "weth" and token_out.lower() != "weth":
         path = [
             erc20_in.address,
@@ -900,7 +905,7 @@ def get_quote_out(
     erc20_in = load_ierc20(chat_id=chat_id, token=token_in)
     decimals_out = erc20_out.functions.decimals().call()
     decimals_in = erc20_in.functions.decimals().call()
-    amount_in_base = int(amount_in * 10**decimals_in)
+    amount_in_base = _to_base_units(amount_in, decimals_in)
     if token_in.lower() != "weth" and token_out.lower() != "weth":
         path = [
             erc20_in.address,
@@ -1133,7 +1138,7 @@ def get_pool_quote(chat_id: int, token_a: str, token_b: str, amount_a: float) ->
 
     decimals_a = erc20_a.functions.decimals().call()
     decimals_b = erc20_b.functions.decimals().call()
-    amount_a_base = int(amount_a * 10**decimals_a)
+    amount_a_base = _to_base_units(amount_a, decimals_a)
 
     reserve0, reserve1, _ = pair.functions.getReserves().call()
     token0 = pair.functions.token0().call()
@@ -1197,7 +1202,7 @@ def get_lp_amounts(chat_id: int, token_a: str, token_b: str, lp_amount: float) -
     lp_decimals = pair_erc20.functions.decimals().call()
     decimals_a = erc20_a.functions.decimals().call()
     decimals_b = erc20_b.functions.decimals().call()
-    liquidity = int(lp_amount * 10**lp_decimals)
+    liquidity = _to_base_units(lp_amount, lp_decimals)
 
     reserve0, reserve1, _ = pair.functions.getReserves().call()
     total_supply = pair_erc20.functions.totalSupply().call()
@@ -2056,7 +2061,7 @@ async def recurring_transfer_job(context) -> None:
         erc20 = load_ierc20(chat_id=chat_id, token=token)
         recipient_addr = _get_contact(chat_id, recipient)
         decimals = erc20.functions.decimals().call()
-        value = int(amount * 10**decimals)
+        value = _to_base_units(amount, decimals)
         calldata = load_calldata(
             instance=erc20, fn_name="transfer", args=[recipient_addr, value]
         )
@@ -2272,6 +2277,10 @@ def post_reputation_feedback(
         A dict with 'tx_hash' (str) and 'status' (int, 1 = success).
     """
     print("Running post_reputation_feedback")
+
+    if score < 0 or score > 100:
+        raise ToolException("Score must be between 0 and 100.")
+
     _, chain_id, _ = load_network_config(chat_id)
     agent_id = get_agent_id(chain_id)
     reputation_registry = load_reputation_registry(chat_id)
