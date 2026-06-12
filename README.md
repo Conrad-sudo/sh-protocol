@@ -40,7 +40,7 @@ The system is composed of five layers: Solidity smart contracts, a Python blockc
 
 ```bash
 git clone https://github.com/Conrad-sudo/agentic-wallet-infra.git
-cd session-key-infra
+cd agentic-wallet-infra
 ```
 
 **Foundry dependencies:**
