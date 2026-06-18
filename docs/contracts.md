@@ -76,7 +76,7 @@ function setCallValueInterpreter(address newInterpreter) external onlyOwner;
 
 ## `SHTreasury.sol`
 
-`SHTreasury` is the protocol operator contract. It serves two roles: it receives ETH protocol fees from all deployed `SessionHandler` wallets, and it is the sole admin of `SHRegistry`. Deploying the registry inside the treasury constructor means `address(this)` is the canonical treasury and `SHRegistry` owner from day one — no ownership transfers required.
+`SHTreasury` is the protocol's operator and fee-sink contract, fulfilling two coupled responsibilities: it acts as the terminal receiver in a push-based settlement pipeline, accepting a per-execution ETH debit from every deployed `SessionHandler` instance via a low-level `call`, and it holds exclusive write-capability over the `SHRegistry` singleton. Self-referential construction — instantiating `SHRegistry` from within the `SHTreasury` constructor — establishes `address(this)` as the canonical owner and fee-destination atomically at deploy time, eliminating a separate ownership-transfer step and its associated trust window.
 
 **Fee flow:**
 ```
