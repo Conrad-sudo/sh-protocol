@@ -29,7 +29,7 @@
 ## Project Structure
 
 ```
-session-key-infra/
+sh-protocol/
 ├── src/
 │   ├── SHFactory.sol
 │   ├── SHTreasury.sol

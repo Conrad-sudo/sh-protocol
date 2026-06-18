@@ -72,8 +72,8 @@ SHFactory   (user-facing factory)
 ## Clone and Install
 
 ```bash
-git clone https://github.com/Conrad-sudo/session-key-infra.git
-cd session-key-infra
+git clone https://github.com/Conrad-sudo/sh-protocol.git
+cd sh-protocol
 
 # Foundry dependencies
 forge install
