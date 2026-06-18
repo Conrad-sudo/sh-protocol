@@ -1,14 +1,15 @@
 //SPDX-License-Identifier:MIT
 pragma solidity ^0.8.24;
 
-import {Script, console} from "forge-std/Script.sol";
+import {Script} from "forge-std/Script.sol";
 import {EntryPoint} from "@account-abstraction/contracts/core/EntryPoint.sol";
 import {ERC20Mock} from "../src/mocks/ERC20Mock.sol";
 import {MockWeth} from "../src/mocks/MockWeth.sol";
 import {MockV3Aggregator} from "../src/mocks/MockV3Aggregator.sol";
-import {AgentIdentityRegistry} from "../src/AgentIdentityRegistry.sol";
-import {ReputationRegistry} from "../src/ReputationRegistry.sol";
-import "../src/Constants.sol";
+import {MockIdentityRegistry} from "../src/mocks/MockIdentityRegistry.sol";
+import {MockReputationRegistry} from "../src/mocks/MockReputationRegistry.sol";
+// forge-lint: disable-next-line(unaliased-plain-import)
+import "./Constants.s.sol";
 
 /**
  * @title HelperConfig
@@ -29,7 +30,7 @@ import "../src/Constants.sol";
  *      │ Anvil (local)       │ 31337      │ Freshly deployed EntryPoint (cached)         │
  *      └─────────────────────┴────────────┴──────────────────────────────────────────────┘
  *
- *      Local Anvil config is lazily initialised and cached in s_localNetworkConfig
+ *      Local Anvil config is lazily initialised and cached in sLocalNetworkConfig
  *      to avoid redeploying EntryPoint on repeated calls within the same session.
  */
 contract HelperConfig is Script {
@@ -229,10 +230,18 @@ contract HelperConfig is Script {
     uint256 public constant LOCAL_CHAIN_ID = 31337;
 
     /// @notice Deployer account used on live networks — must be funded before broadcasting
-    address public SEPOLIA_ACCOUNT = vm.envOr("SEPOLIA_ACCOUNT", address(0));
+    address public sepoliaAccount = vm.envOr("SEPOLIA_ACCOUNT", address(0));
 
     /// @notice Default pre-funded account on a local Anvil node (account index 0)
     address public constant ANVIL_BURNER_WALLET = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
+
+    /// @dev Placeholder private key for the mainnet/fork deployer account.
+    ///      MUST NOT be ANVIL_BURNER_WALLET's key (0xac0974...) — that key is public and the
+    ///      corresponding address has been hijacked on real mainnet via an EIP-7702 delegation
+    ///      that sweeps any received ERC-721 to an attacker address, which breaks mainnet-fork
+    ///      tests that register an NFT to config.account. Replace with a real funded key before
+    ///      broadcasting an actual mainnet deployment.
+    uint256 private constant MAINNET_DEPLOYER_PK = uint256(keccak256("session-handler-mainnet-deployer"));
 
     /// @notice The number of decimals the price from the V3Aggregator will return
     uint8 public constant DECIMALS = 8;
@@ -325,7 +334,7 @@ contract HelperConfig is Script {
      * @dev Cached Anvil network config. Populated on first call to getOrCreateAnvilConfig.
      *      Both fields must be non-zero for the cache to be considered valid.
      */
-    NetworkConfig private s_localNetworkConfig;
+    NetworkConfig private sLocalNetworkConfig;
 
     /*//////////////////////////////////////////////////////////////
                            EXTERNAL FUNCTIONS
@@ -366,13 +375,13 @@ contract HelperConfig is Script {
     /**
      * @notice Returns the Ethereum Sepolia testnet configuration
      * @dev Uses the canonical EntryPoint v0.9 address and the burner wallet as deployer.
-     *      Ensure SEPOLIA_ACCOUNT is funded with Sepolia ETH before broadcasting.
+     *      Ensure sepoliaAccount is funded with Sepolia ETH before broadcasting.
      * @return config NetworkConfig for Ethereum Sepolia
      */
     function getEthSepoliaConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
-            account: SEPOLIA_ACCOUNT,
+            account: sepoliaAccount,
             identityRegistry: SEPOLIA_IDENTITY_REGISTRY,
             reputationRegistry: SEPOLIA_REPUTATION_REGISTRY,
             // Stablecoins
@@ -462,13 +471,13 @@ contract HelperConfig is Script {
      * @notice Returns the mainnet (and generic EVM chain) configuration
      * @dev Assumes the canonical EntryPoint v0.9 is deployed at ENTRYPOINT_V07.
      *      Used as the fallback for any unrecognised chain ID.
-     *      Ensure SEPOLIA_ACCOUNT is funded before broadcasting on any live network.
+     *      Ensure sepoliaAccount is funded before broadcasting on any live network.
      * @return config NetworkConfig for Ethereum mainnet and compatible chains
      */
     function getMainnetConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
-            account: ANVIL_BURNER_WALLET,
+            account: vm.addr(MAINNET_DEPLOYER_PK),
             identityRegistry: MNT_IDENTITY_REGISTRY,
             reputationRegistry: MNT_REPUTATION_REGISTRY,
             //swap for the deployer account on mainnet and ensure it's funded before broadcasting
@@ -558,7 +567,7 @@ contract HelperConfig is Script {
     /**
      * @notice Returns the local Anvil configuration, deploying a fresh EntryPoint if needed
      * @dev Lazily deploys a new EntryPoint contract on the first call and caches the result
-     *      in s_localNetworkConfig. Subsequent calls return the cached config without
+     *      in sLocalNetworkConfig. Subsequent calls return the cached config without
      *      redeploying. Cache validity is determined by both fields being non-zero.
      *
      *      The EntryPoint is deployed without vm.startBroadcast since this is an internal
@@ -567,8 +576,8 @@ contract HelperConfig is Script {
      */
     function getOrCreateAnvilConfig() internal returns (NetworkConfig memory) {
         // Return cached config if EntryPoint has already been deployed this session
-        if (s_localNetworkConfig.entryPoint != address(0) && s_localNetworkConfig.account != address(0)) {
-            return s_localNetworkConfig;
+        if (sLocalNetworkConfig.entryPoint != address(0) && sLocalNetworkConfig.account != address(0)) {
+            return sLocalNetworkConfig;
         } else {
             vm.startBroadcast();
 
@@ -632,12 +641,12 @@ contract HelperConfig is Script {
             MockV3Aggregator kncUsdPriceFeed = new MockV3Aggregator(DECIMALS, KNC_USD_PRICE);
             MockV3Aggregator rdntUsdPriceFeed = new MockV3Aggregator(DECIMALS, RDNT_USD_PRICE);
 
-            AgentIdentityRegistry identityRegistry = new AgentIdentityRegistry();
-            ReputationRegistry reputationRegistry = new ReputationRegistry();
+            MockIdentityRegistry identityRegistry = new MockIdentityRegistry();
+            MockReputationRegistry reputationRegistry = new MockReputationRegistry(address(identityRegistry));
 
             vm.stopBroadcast();
 
-            s_localNetworkConfig = NetworkConfig({
+            sLocalNetworkConfig = NetworkConfig({
                 entryPoint: address(entryPoint),
                 account: ANVIL_BURNER_WALLET,
                 identityRegistry: address(identityRegistry),
@@ -723,7 +732,7 @@ contract HelperConfig is Script {
                 kncHeartbeat: HEARTBEAT_1H,
                 rdntHeartbeat: HEARTBEAT_1H
             });
-            return s_localNetworkConfig;
+            return sLocalNetworkConfig;
         }
     }
 }

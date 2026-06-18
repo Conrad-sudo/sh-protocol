@@ -40,14 +40,14 @@
 
 ### 3.2 Uniswap Spending Limit Enforcement
 **Status: Mitigated.**  
-`_validateSession` decodes calldata via inline assembly for all six Uniswap V2 swap functions (`swapExactTokensForTokens`, `swapTokensForExactTokens`, `swapExactTokensForETH`, `swapTokensForExactETH`, `swapExactETHForTokens`, `swapETHForExactTokens`) plus `addLiquidity`, `addLiquidityETH`, `removeLiquidity`, and `removeLiquidityETH`. The extracted token amounts are priced via `PriceOracle.getUSDValue()` and charged against `spentAmount` before validation succeeds.  
+`_validateSession` decodes calldata via inline assembly for all six Uniswap V2 swap functions (`swapExactTokensForTokens`, `swapTokensForExactTokens`, `swapExactTokensForETH`, `swapTokensForExactETH`, `swapExactETHForTokens`, `swapETHForExactTokens`) plus `addLiquidity`, `addLiquidityETH`, `removeLiquidity`, and `removeLiquidityETH`. The extracted token amounts are priced via `SHOracle.getUSDValue()` and charged against `spentAmount` before validation succeeds.  
 **Residual risk:** `swapETHForExactTokens` charges the full forwarded `msg.value` against the budget, not the actual ETH consumed — the Uniswap router refunds unused ETH but the budget is decremented by the full amount. This is conservative (over-charges the session) rather than exploitable. See §3.8.
 
 ---
 
 ### 3.3 Price Oracle — Staleness
 **Threat:** A stale Chainlink feed (e.g. during network congestion) could cause USD value calculations to be incorrect — either allowing overspending or incorrectly rejecting valid operations.  
-**Mitigation in place:** `PriceOracle._stalePriceCheck()` reverts with `PriceOracle_StalePrice` if a feed has not updated within its registered per-feed heartbeat. Heartbeats mirror real Chainlink update schedules: 1 hour for ETH, WBTC, AAVE, LINK, DAI, COMP, MKR, UNI, WETH; 23 hours for USDC; 24 hours for all other feeds. Using a uniform timeout would either flag slow stablecoin feeds as stale or mask genuinely stale volatile-asset feeds.  
+**Mitigation in place:** `SHOracle._stalePriceCheck()` reverts with `SHOracle_StalePrice` if a feed has not updated within its registered per-feed heartbeat. Heartbeats mirror real Chainlink update schedules: 1 hour for ETH, WBTC, AAVE, LINK, DAI, COMP, MKR, UNI, WETH; 23 hours for USDC; 24 hours for all other feeds. Using a uniform timeout would either flag slow stablecoin feeds as stale or mask genuinely stale volatile-asset feeds.  
 **Residual risk:** Low. During extreme volatility a 1-hour window on ETH/BTC feeds may still admit a meaningfully stale price.
 
 ---
@@ -67,7 +67,7 @@
 
 ### 3.6 State Mutation in `validateUserOp`
 **Threat:** `_validateSession` writes to EIP-1153 transient storage slots inside `validateUserOp`. The EntryPoint calls `validateUserOp` during simulation — if simulation triggers state writes, the actual execution may behave differently than simulated.  
-**Status: Mitigated.** Transient storage slots (`t_pendingSessionKey`, `t_pendingSelector`) are scoped to the sender account and are zeroed automatically at transaction end. ERC-4337 v0.7 simulation rules permit transient storage writes by the account itself. Verified against a live Alchemy bundler on Ethereum Sepolia — UserOps pass simulation and execute correctly with no bundler rejection.
+**Status: Mitigated.** Transient storage slots (`tPendingSessionKey`, `tPendingSelector`) are scoped to the sender account and are zeroed automatically at transaction end. ERC-4337 v0.7 simulation rules permit transient storage writes by the account itself. Verified against a live Alchemy bundler on Ethereum Sepolia — UserOps pass simulation and execute correctly with no bundler rejection.
 
 ---
 

@@ -23,4 +23,4 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Run unit tests
-        run: forge test --match-path test/unit/TestSessionHandler.t.sol -vvv
+        run: forge test --match-path test/unit/SHProtocolTest.t.sol -vvv

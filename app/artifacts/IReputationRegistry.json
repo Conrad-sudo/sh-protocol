@@ -1,0 +1,234 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "getSummary",
+      "inputs": [
+        { "name": "agentId", "type": "uint256", "internalType": "uint256" },
+        {
+          "name": "clientAddresses",
+          "type": "address[]",
+          "internalType": "address[]"
+        },
+        { "name": "tag1", "type": "string", "internalType": "string" },
+        { "name": "tag2", "type": "string", "internalType": "string" }
+      ],
+      "outputs": [
+        { "name": "count", "type": "uint64", "internalType": "uint64" },
+        { "name": "summaryValue", "type": "int128", "internalType": "int128" },
+        {
+          "name": "summaryValueDecimals",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "giveFeedback",
+      "inputs": [
+        { "name": "agentId", "type": "uint256", "internalType": "uint256" },
+        { "name": "value", "type": "int128", "internalType": "int128" },
+        { "name": "valueDecimals", "type": "uint8", "internalType": "uint8" },
+        { "name": "tag1", "type": "string", "internalType": "string" },
+        { "name": "tag2", "type": "string", "internalType": "string" },
+        { "name": "endpoint", "type": "string", "internalType": "string" },
+        { "name": "feedbackURI", "type": "string", "internalType": "string" },
+        { "name": "feedbackHash", "type": "bytes32", "internalType": "bytes32" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "readAllFeedback",
+      "inputs": [
+        { "name": "agentId", "type": "uint256", "internalType": "uint256" },
+        {
+          "name": "clientAddresses",
+          "type": "address[]",
+          "internalType": "address[]"
+        },
+        { "name": "tag1", "type": "string", "internalType": "string" },
+        { "name": "tag2", "type": "string", "internalType": "string" },
+        { "name": "includeRevoked", "type": "bool", "internalType": "bool" }
+      ],
+      "outputs": [
+        { "name": "clients", "type": "address[]", "internalType": "address[]" },
+        {
+          "name": "feedbackIndexes",
+          "type": "uint64[]",
+          "internalType": "uint64[]"
+        },
+        { "name": "values", "type": "int128[]", "internalType": "int128[]" },
+        {
+          "name": "valueDecimals",
+          "type": "uint8[]",
+          "internalType": "uint8[]"
+        },
+        { "name": "tag1s", "type": "string[]", "internalType": "string[]" },
+        { "name": "tag2s", "type": "string[]", "internalType": "string[]" },
+        {
+          "name": "revokedStatuses",
+          "type": "bool[]",
+          "internalType": "bool[]"
+        }
+      ],
+      "stateMutability": "view"
+    }
+  ],
+  "bytecode": { "object": "0x", "sourceMap": "", "linkReferences": {} },
+  "deployedBytecode": { "object": "0x", "sourceMap": "", "linkReferences": {} },
+  "methodIdentifiers": {
+    "getSummary(uint256,address[],string,string)": "81bbba58",
+    "giveFeedback(uint256,int128,uint8,string,string,string,string,bytes32)": "3c036a7e",
+    "readAllFeedback(uint256,address[],string,string,bool)": "d9d84224"
+  },
+  "rawMetadata": "{\"compiler\":{\"version\":\"0.8.33+commit.64118f21\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"agentId\",\"type\":\"uint256\"},{\"internalType\":\"address[]\",\"name\":\"clientAddresses\",\"type\":\"address[]\"},{\"internalType\":\"string\",\"name\":\"tag1\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"tag2\",\"type\":\"string\"}],\"name\":\"getSummary\",\"outputs\":[{\"internalType\":\"uint64\",\"name\":\"count\",\"type\":\"uint64\"},{\"internalType\":\"int128\",\"name\":\"summaryValue\",\"type\":\"int128\"},{\"internalType\":\"uint8\",\"name\":\"summaryValueDecimals\",\"type\":\"uint8\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"agentId\",\"type\":\"uint256\"},{\"internalType\":\"int128\",\"name\":\"value\",\"type\":\"int128\"},{\"internalType\":\"uint8\",\"name\":\"valueDecimals\",\"type\":\"uint8\"},{\"internalType\":\"string\",\"name\":\"tag1\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"tag2\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"endpoint\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"feedbackURI\",\"type\":\"string\"},{\"internalType\":\"bytes32\",\"name\":\"feedbackHash\",\"type\":\"bytes32\"}],\"name\":\"giveFeedback\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"agentId\",\"type\":\"uint256\"},{\"internalType\":\"address[]\",\"name\":\"clientAddresses\",\"type\":\"address[]\"},{\"internalType\":\"string\",\"name\":\"tag1\",\"type\":\"string\"},{\"internalType\":\"string\",\"name\":\"tag2\",\"type\":\"string\"},{\"internalType\":\"bool\",\"name\":\"includeRevoked\",\"type\":\"bool\"}],\"name\":\"readAllFeedback\",\"outputs\":[{\"internalType\":\"address[]\",\"name\":\"clients\",\"type\":\"address[]\"},{\"internalType\":\"uint64[]\",\"name\":\"feedbackIndexes\",\"type\":\"uint64[]\"},{\"internalType\":\"int128[]\",\"name\":\"values\",\"type\":\"int128[]\"},{\"internalType\":\"uint8[]\",\"name\":\"valueDecimals\",\"type\":\"uint8[]\"},{\"internalType\":\"string[]\",\"name\":\"tag1s\",\"type\":\"string[]\"},{\"internalType\":\"string[]\",\"name\":\"tag2s\",\"type\":\"string[]\"},{\"internalType\":\"bool[]\",\"name\":\"revokedStatuses\",\"type\":\"bool[]\"}],\"stateMutability\":\"view\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"src/interfaces/IReputationRegistry.sol\":\"IReputationRegistry\"},\"evmVersion\":\"prague\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[\":@account-abstraction/contracts/=lib/account-abstraction/contracts/\",\":@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/\",\":@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/\",\":account-abstraction/=lib/account-abstraction/contracts/\",\":chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/\",\":erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/\",\":forge-std/=lib/forge-std/src/\",\":halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/\",\":openzeppelin-contracts/=lib/openzeppelin-contracts/\",\":v2-core/=lib/v2-core/contracts/\",\":v2-periphery/=lib/v2-periphery/contracts/\"],\"viaIR\":true},\"sources\":{\"src/interfaces/IReputationRegistry.sol\":{\"keccak256\":\"0xc6a345ccdb9b249aa5c69fcaf36b2518d7a9437a4a569751ebf89618cc78aee2\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://71db57719568cdbd66b26e3a019aa428047828a75bf687e4442f284be4b701cf\",\"dweb:/ipfs/QmTSfZuvpzpyzJQVfa4rd6R77vEDb2bH3r7j66JivfsMP8\"]}},\"version\":1}",
+  "metadata": {
+    "compiler": { "version": "0.8.33+commit.64118f21" },
+    "language": "Solidity",
+    "output": {
+      "abi": [
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "agentId", "type": "uint256" },
+            {
+              "internalType": "address[]",
+              "name": "clientAddresses",
+              "type": "address[]"
+            },
+            { "internalType": "string", "name": "tag1", "type": "string" },
+            { "internalType": "string", "name": "tag2", "type": "string" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getSummary",
+          "outputs": [
+            { "internalType": "uint64", "name": "count", "type": "uint64" },
+            {
+              "internalType": "int128",
+              "name": "summaryValue",
+              "type": "int128"
+            },
+            {
+              "internalType": "uint8",
+              "name": "summaryValueDecimals",
+              "type": "uint8"
+            }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "agentId", "type": "uint256" },
+            { "internalType": "int128", "name": "value", "type": "int128" },
+            {
+              "internalType": "uint8",
+              "name": "valueDecimals",
+              "type": "uint8"
+            },
+            { "internalType": "string", "name": "tag1", "type": "string" },
+            { "internalType": "string", "name": "tag2", "type": "string" },
+            { "internalType": "string", "name": "endpoint", "type": "string" },
+            {
+              "internalType": "string",
+              "name": "feedbackURI",
+              "type": "string"
+            },
+            {
+              "internalType": "bytes32",
+              "name": "feedbackHash",
+              "type": "bytes32"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "giveFeedback"
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "agentId", "type": "uint256" },
+            {
+              "internalType": "address[]",
+              "name": "clientAddresses",
+              "type": "address[]"
+            },
+            { "internalType": "string", "name": "tag1", "type": "string" },
+            { "internalType": "string", "name": "tag2", "type": "string" },
+            { "internalType": "bool", "name": "includeRevoked", "type": "bool" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "readAllFeedback",
+          "outputs": [
+            {
+              "internalType": "address[]",
+              "name": "clients",
+              "type": "address[]"
+            },
+            {
+              "internalType": "uint64[]",
+              "name": "feedbackIndexes",
+              "type": "uint64[]"
+            },
+            {
+              "internalType": "int128[]",
+              "name": "values",
+              "type": "int128[]"
+            },
+            {
+              "internalType": "uint8[]",
+              "name": "valueDecimals",
+              "type": "uint8[]"
+            },
+            { "internalType": "string[]", "name": "tag1s", "type": "string[]" },
+            { "internalType": "string[]", "name": "tag2s", "type": "string[]" },
+            {
+              "internalType": "bool[]",
+              "name": "revokedStatuses",
+              "type": "bool[]"
+            }
+          ]
+        }
+      ],
+      "devdoc": { "kind": "dev", "methods": {}, "version": 1 },
+      "userdoc": { "kind": "user", "methods": {}, "version": 1 }
+    },
+    "settings": {
+      "remappings": [
+        "@account-abstraction/contracts/=lib/account-abstraction/contracts/",
+        "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+        "account-abstraction/=lib/account-abstraction/contracts/",
+        "chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/",
+        "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-std/=lib/forge-std/src/",
+        "halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/",
+        "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+        "v2-core/=lib/v2-core/contracts/",
+        "v2-periphery/=lib/v2-periphery/contracts/"
+      ],
+      "optimizer": { "enabled": true, "runs": 200 },
+      "metadata": { "bytecodeHash": "ipfs" },
+      "compilationTarget": {
+        "src/interfaces/IReputationRegistry.sol": "IReputationRegistry"
+      },
+      "evmVersion": "prague",
+      "libraries": {},
+      "viaIR": true
+    },
+    "sources": {
+      "src/interfaces/IReputationRegistry.sol": {
+        "keccak256": "0xc6a345ccdb9b249aa5c69fcaf36b2518d7a9437a4a569751ebf89618cc78aee2",
+        "urls": [
+          "bzz-raw://71db57719568cdbd66b26e3a019aa428047828a75bf687e4442f284be4b701cf",
+          "dweb:/ipfs/QmTSfZuvpzpyzJQVfa4rd6R77vEDb2bH3r7j66JivfsMP8"
+        ],
+        "license": "MIT"
+      }
+    },
+    "version": 1
+  },
+  "id": 89
+}

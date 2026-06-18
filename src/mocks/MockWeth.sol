@@ -51,7 +51,8 @@ contract MockWeth is ERC20 {
 
     function withdraw(uint256 amount) external {
         _burn(msg.sender, amount);
-        payable(msg.sender).transfer(amount);
+        (bool success,) = payable(msg.sender).call{value: amount}("");
+        require(success, "ETH transfer failed");
         emit Withdrawal(msg.sender, amount);
     }
 

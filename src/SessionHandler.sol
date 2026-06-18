@@ -18,12 +18,11 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 //Chainlink imports
-import {PriceOracle} from "./PriceOracle.sol";
-//Uniswap imports
-import {IUniswapV2Router01} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router01.sol";
-import {IUniswapV2Router02} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
-import {IWETH} from "./interfaces/IWETH.sol";
+import {SHOracle} from "./SHOracle.sol";
 import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
+import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
+import {SHRegistry} from "./SHRegistry.sol";
+import {SHValueInterpreter} from "./SHValueInterpreter.sol";
 
 /**
  * @title SessionHandler
@@ -70,20 +69,21 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     error SessionHandler_NotEnoughBalance();
     /// @dev Thrown when a session key's USD spending limit would be exceeded by the current call.
     error SessionHandler_SpendingLimitExceeded();
+    /// @dev Thrown when the protocol fee ETH transfer to the treasury fails.
+    error SessionHandler_FeeTransferFailed();
 
     /*//////////////////////////////////////////////////////////////
 
                            STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
-    /// @dev The canonical ERC-4337 EntryPoint. Only this address may call validateUserOp.
-    address private immutable ENTRY_POINT;
-    /// @dev PriceOracle used to convert token amounts to USD for spending limit enforcement.
-    address private immutable PRICE_ORACLE;
-    /// @dev Uniswap V2 Router address; used to route calldata parsing for swap and liquidity functions.
-    address private immutable UNISWAP_ROUTER;
-    /// @dev Reputation Registry address; used to interact with the reputation system.
-    address private immutable REPUTATION_REGISTRY;
-
+    /// @dev The canonical ERC-4337 EntryPoint. Immutable — only this address may call validateUserOp.
+    address public immutable ENTRY_POINT;
+    /// @dev Reputation Registry address. Immutable — used to identify and permit reputation calls.
+    address public immutable REPUTATION_REGISTRY;
+    /// @dev Identity Registry address. Immutable — used for ERC-8004 agent identity lookups.
+    address public immutable IDENTITY_REGISTRY;
+    /// @dev SHRegistry providing uniswapRouter, priceOracle, treasury, and protocol fee at runtime.
+    SHRegistry public immutable REGISTRY;
     /// @dev Maps each registered session key address to its Session configuration.
     mapping(address => Session) sessions;
     /// @dev Maps (sessionKey, selector) to whether that selector is whitelisted for the session.
@@ -115,8 +115,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     /// @dev EIP-1153 transient variables bridging validateUserOp → execute within the same handleOps transaction.
     ///      Written by _setPendingSession on successful validation; read and consumed in execute().
     ///      Both slots are automatically zeroed at transaction end — no manual cleanup required.
-    address transient t_pendingSessionKey;
-    bytes4 transient t_pendingSelector;
+    address transient tPendingSessionKey;
+    bytes4 transient tPendingSelector;
 
     /*//////////////////////////////////////////////////////////////
                                    EVENTS
@@ -150,17 +150,19 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
                                 CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
     /**
-     * @notice Deploys the SessionHandler and sets the three immutable protocol addresses.
-     * @param entryPoint           The canonical ERC-4337 EntryPoint. Only this address may call validateUserOp.
-     * @param priceOracleAddress   The deployed PriceOracle used for USD spending limit enforcement.
-     * @param uniswapRouterAddress The Uniswap V2 Router address used for swap and liquidity calldata parsing.
-     * @param reputationRegistryAddress The deployed Reputation Registry address.
+     * @notice Deploys the SessionHandler and wires it to the protocol registry.
+     * @param owner              The address that will own this wallet and control session key management.
+     * @param entryPoint         The canonical ERC-4337 EntryPoint. Only this address may call validateUserOp.
+     * @param reputationRegistry The Reputation Registry address.
+     * @param identityRegistry   The ERC-8004 Identity Registry address.
+     * @param registry           The SHRegistry address supplying uniswapRouter, priceOracle, treasury,
+     *                           and protocol fee at runtime.
      */
-    constructor(address entryPoint, address priceOracleAddress, address uniswapRouterAddress, address reputationRegistryAddress) Ownable(msg.sender) {
+    constructor(address owner, address entryPoint, address reputationRegistry, address identityRegistry, address registry) Ownable(owner) {
         ENTRY_POINT = entryPoint;
-        PRICE_ORACLE = priceOracleAddress;
-        UNISWAP_ROUTER = uniswapRouterAddress;
-        REPUTATION_REGISTRY = reputationRegistryAddress;
+        REPUTATION_REGISTRY = reputationRegistry;
+        IDENTITY_REGISTRY = identityRegistry;
+        REGISTRY = SHRegistry(registry);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -194,29 +196,28 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
      * @param data  Encoded calldata to pass.
      */
     function execute(address dest, uint256 value, bytes calldata data) external onlyEntryPointOrOwner whenNotPaused {
-        if (msg.sender == ENTRY_POINT && t_pendingSessionKey != address(0)) {
-            address sessionKey = t_pendingSessionKey;
+        bool isSessionKeyExecution = msg.sender == ENTRY_POINT && tPendingSessionKey != address(0);
+        if (isSessionKeyExecution) {
+            address sessionKey = tPendingSessionKey;
             Session storage selectedSession = sessions[sessionKey];
-            bytes4 selector = t_pendingSelector;
+            bytes4 selector = tPendingSelector;
 
             // Oracle access is unrestricted in the execution phase (no opcode ban).
             bytes memory dataMem = data;
-            (uint256 debitValueInUSD, uint256 creditValueInUSD) = _computeUSDValue(dest, value, dataMem, selector);
+            (uint256 debitValueInUsd, uint256 creditValueInUsd) =
+                SHValueInterpreter(REGISTRY.callValueInterpreter()).computeUsdValue(dest, value, dataMem, selector);
 
-            if (
-                selector != IUniswapV2Router01.removeLiquidity.selector
-                    && selector != IUniswapV2Router01.removeLiquidityETH.selector
-            ) {
-                if (selectedSession.spentAmount + debitValueInUSD > selectedSession.spendingLimit) {
-                    revert SessionHandler_SpendingLimitExceeded();
-                }
-                selectedSession.spentAmount += debitValueInUSD;
-            } else {
+            if (creditValueInUsd > 0) {
                 /* For removeLiquidity we use the minimum amounts from the UserOp, not the actual
                    amounts received, so we credit conservatively rather than charging. */
-                creditValueInUSD >= selectedSession.spentAmount
+                creditValueInUsd >= selectedSession.spentAmount
                     ? selectedSession.spentAmount = 0
-                    : selectedSession.spentAmount -= creditValueInUSD;
+                    : selectedSession.spentAmount -= creditValueInUsd;
+            } else {
+                if (selectedSession.spentAmount + debitValueInUsd > selectedSession.spendingLimit) {
+                    revert SessionHandler_SpendingLimitExceeded();
+                }
+                selectedSession.spentAmount += debitValueInUsd;
             }
 
             if (!isSessionActive(sessionKey)) {
@@ -229,6 +230,12 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
         (bool success,) = payable(dest).call{value: value}(data);
         if (!success) {
             revert SessionHandler_ExecutionFailed();
+        }
+
+        uint256 fee = REGISTRY.protocolFee();
+        if (isSessionKeyExecution && fee > 0) {
+            (bool feeSuccess,) = payable(REGISTRY.treasury()).call{value: fee}("");
+            if (!feeSuccess) revert SessionHandler_FeeTransferFailed();
         }
     }
 
@@ -383,7 +390,7 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
 
         //the owner
         if (signer == owner()) {
-            t_pendingSessionKey = address(0);
+            tPendingSessionKey = address(0);
             return _packValidationData(false, 0, 0);
         }
         //there is an  session
@@ -435,19 +442,16 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
             return _packValidationData(false, selectedSession.validFrom, selectedSession.validUntil);
         }
 
-
-
         if (selectedSession.target != dest) {
             return _packValidationData(true, selectedSession.validFrom, selectedSession.validUntil);
         }
 
-        if (dest == REPUTATION_REGISTRY ) {
+        if (dest == REPUTATION_REGISTRY) {
             // For calls to the Reputation Registry, we ignore the selector and allow any function
             // so that session keys can perform all reputation-related actions (e.g. giving feedback,
             // reading summaries, etc.) without needing separate sessions for each function.
-             return _packValidationData(false, selectedSession.validFrom, selectedSession.validUntil);
-            
-        } 
+            return _packValidationData(false, selectedSession.validFrom, selectedSession.validUntil);
+        }
 
         if (data.length >= 4) {
             assembly {
@@ -470,114 +474,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
      *      The slots are zeroed automatically at the end of the transaction.
      */
     function _setPendingSession(address sessionKey, bytes4 sel) internal {
-        t_pendingSessionKey = sessionKey;
-        t_pendingSelector = sel;
-    }
-
-    /**
-     * @dev Computes the USD value of a session-key call from its decoded parameters.
-     *      Called from execute() where oracle access (external storage reads) is unrestricted.
-     *      Returns (debitValueInUSD, creditValueInUSD); creditValueInUSD is non-zero only for
-     *      removeLiquidity variants where budget is credited rather than charged.
-     */
-    function _computeUSDValue(address dest, uint256 value, bytes memory data, bytes4 selector)
-        internal
-        view
-        returns (uint256 debitValueInUSD, uint256 creditValueInUSD)
-    {
-        address token;
-        uint256 extractedValue;
-
-        if (selector != IWETH.deposit.selector) {
-            debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(address(0), value);
-        }
-
-        if (data.length >= 68 && dest != UNISWAP_ROUTER) {
-            if (selector == IERC20.transfer.selector) {
-                assembly {
-                    extractedValue := mload(add(data, 68))
-                }
-            }
-            if (selector == IERC20.transferFrom.selector) {
-                assembly {
-                    extractedValue := mload(add(data, 100))
-                }
-            }
-            debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(dest, extractedValue);
-        }
-
-        if (data.length >= 68 && dest == UNISWAP_ROUTER) {
-            if (selector == IUniswapV2Router01.swapTokensForExactETH.selector) {
-                assembly {
-                    extractedValue := mload(add(data, 36))
-                }
-                debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(address(0), extractedValue);
-            } else if (
-                selector == IUniswapV2Router01.swapExactTokensForTokens.selector
-                    || selector == IUniswapV2Router01.swapTokensForExactTokens.selector
-                    || selector == IUniswapV2Router01.swapExactTokensForETH.selector
-            ) {
-                address tokenIn;
-                address tokenOut;
-                assembly {
-                    extractedValue := mload(add(data, 36))
-                    let paramsBase := add(data, 36)
-                    let pathOffset := mload(add(paramsBase, 64))
-                    let pathPtr := add(paramsBase, pathOffset)
-                    let pathLen := mload(pathPtr)
-                    tokenIn := mload(add(pathPtr, 32))
-                    tokenOut := mload(add(pathPtr, add(32, mul(sub(pathLen, 1), 32))))
-                }
-                token = (selector == IUniswapV2Router01.swapExactTokensForTokens.selector
-                        || selector == IUniswapV2Router01.swapExactTokensForETH.selector)
-                    ? tokenIn
-                    : tokenOut;
-                debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(token, extractedValue);
-            } else if (selector == IUniswapV2Router01.addLiquidity.selector && data.length >= 132) {
-                address tokenA;
-                address tokenB;
-                uint256 amountADesired;
-                uint256 amountBDesired;
-                assembly {
-                    tokenA := mload(add(data, 36))
-                    tokenB := mload(add(data, 68))
-                    amountADesired := mload(add(data, 100))
-                    amountBDesired := mload(add(data, 132))
-                }
-                debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(tokenA, amountADesired);
-                debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(tokenB, amountBDesired);
-            } else if (selector == IUniswapV2Router01.addLiquidityETH.selector) {
-                uint256 amountTokenDesired;
-                assembly {
-                    token := mload(add(data, 36))
-                    amountTokenDesired := mload(add(data, 68))
-                }
-                debitValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(token, amountTokenDesired);
-            } else if (selector == IUniswapV2Router01.removeLiquidity.selector && data.length >= 164) {
-                address tokenA;
-                address tokenB;
-                uint256 amountAMin;
-                uint256 amountBMin;
-                assembly {
-                    tokenA := mload(add(data, 36))
-                    tokenB := mload(add(data, 68))
-                    amountAMin := mload(add(data, 132))
-                    amountBMin := mload(add(data, 164))
-                }
-                creditValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(tokenA, amountAMin);
-                creditValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(tokenB, amountBMin);
-            } else if (selector == IUniswapV2Router01.removeLiquidityETH.selector && data.length >= 132) {
-                uint256 amountTokenMin;
-                uint256 amountETHMin;
-                assembly {
-                    token := mload(add(data, 36))
-                    amountTokenMin := mload(add(data, 100))
-                    amountETHMin := mload(add(data, 132))
-                }
-                creditValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(token, amountTokenMin);
-                creditValueInUSD += PriceOracle(PRICE_ORACLE).getUSDValue(address(0), amountETHMin);
-            }
-        }
+        tPendingSessionKey = sessionKey;
+        tPendingSelector = sel;
     }
 
     /**
@@ -608,6 +506,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
         return sessions[sessionKey];
     }
 
+   
+
     /// @notice Returns whether a session key is currently active.
     /// @param sessionKey The session key address to check.
     /// @return True if the session is active and within its valid time window with budget remaining.
@@ -631,13 +531,56 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
         return session.active;
     }
 
-    /// @notice Returns the current USD price of a token by querying the registered PriceOracle.
+    /// @notice Returns the current USD price of a token by querying the registered SHOracle.
     /// @param token The token address to price. Use address(0) for native ETH.
     /// @return price The current price with 8 decimals (Chainlink standard).
     /// @return decimals The decimal count of the returned price (always 8 for Chainlink USD feeds).
     function getPrice(address token) public view returns (uint256 price, uint8 decimals) {
-        return PriceOracle(PRICE_ORACLE).getPrice(token);
+        return SHOracle(REGISTRY.priceOracle()).getPrice(token);
     }
+
+    function getAgentId() public view returns (uint256){
+        return REGISTRY.agentId();
+    }
+
+
+    /// @notice Returns the agent's ERC-8004 on-chain identity.
+    /// @return registered True if the agent token exists in the Identity Registry.
+    /// @return agentId    The ERC-8004 tokenId. 0 if not registered.
+    /// @return agentUri   The agent card URI. Empty string if not registered.
+    function getAgentIdentity() public view returns (bool registered, uint256 agentId, string memory agentUri) {
+        agentId = getAgentId();
+        try IIdentityRegistry(IDENTITY_REGISTRY).ownerOf(agentId) returns (address) {
+            agentUri = IIdentityRegistry(IDENTITY_REGISTRY).tokenURI(agentId);
+            registered = true;
+        } catch {
+            registered = false;
+        }
+    }
+
+    /// @notice Returns the agent's on-chain reputation from the Reputation Registry, scoped to this wallet.
+    /// @return agentId              The ERC-8004 tokenId.
+    /// @return feedbackCount        Number of feedback entries from this wallet.
+    /// @return summaryValue         Aggregated score (raw — divide by 10**summaryValueDecimals to scale).
+    /// @return summaryValueDecimals Decimal precision of summaryValue.
+    function getAgentReputation()
+        public
+        view
+        returns (uint256 agentId, uint64 feedbackCount, int128 summaryValue, uint8 summaryValueDecimals)
+    {
+        agentId = getAgentId();
+        address[] memory clients = new address[](1);
+        clients[0] = address(this);
+        (feedbackCount, summaryValue, summaryValueDecimals) =
+            IReputationRegistry(REPUTATION_REGISTRY).getSummary(agentId, clients, "", "");
+    }
+
+    /// @notice Returns the Uniswap V2 Router address from the registry.
+    function getUniswapRouter() public view returns (address) {
+        return REGISTRY.uniswapRouter();
+    }
+
+    
 
     /// @notice Checks whether a proposed spend is within the session's remaining budget.
     /// @param sessionKey The session key to check.
@@ -647,8 +590,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     function isSpendingWithinBudget(address sessionKey, address token, uint256 amount) public view returns (bool) {
         Session memory session = sessions[sessionKey];
         if (!isSessionActive(sessionKey)) return false;
-        uint256 valueInUSD = PriceOracle(PRICE_ORACLE).getUSDValue(token, amount);
-        return session.spentAmount + valueInUSD <= session.spendingLimit;
+        uint256 valueInUsd = SHOracle(REGISTRY.priceOracle()).getUsdValue(token, amount);
+        return session.spentAmount + valueInUsd <= session.spendingLimit;
     }
 
     /// @notice Returns the remaining spending budget for a session key in USD (same units as spendingLimit).

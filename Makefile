@@ -21,7 +21,7 @@ help:
 	@echo "  make install            - Install Forge dependencies"
 	@echo "  make update             - Update Forge dependencies"
 	@echo "  make anvil              - Start a local Anvil node"
-	@echo "  make deploy [ARGS=--network sepolia]  - Deploy SessionHandler"
+	@echo "  make deploy [ARGS=sepolia|sepolia-fork]  - Deploy SessionHandler"
 	@echo ""
 	@echo "Python"
 	@echo "  make db                 - Initialise the SQLite database and run migrations"
@@ -60,6 +60,15 @@ format:
 anvil:
 	anvil -m 'test test test test test test test test test test test junk' --steps-tracing
 
+unit-test:
+	forge test --match-path test/unit/SHProtocolTest.t.sol -vvvv
+
+uniswap-test:
+	forge test --match-path test/fork/SHUniswapV2Test.t.sol --fork-url $(MAINNET_RPC_URL) -vvvv
+
+sepolia-test:
+	forge test --match-path test/fork/SHSepoliaTest.t.sol --fork-url $(SEPOLIA_RPC_URL) -vvvv
+
 
 mainnet-fork:
 	anvil --fork-url $(MAINNET_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(MAINNET_RPC_URL))
@@ -69,30 +78,29 @@ sepolia-fork:
 
 NETWORK_ARGS := --rpc-url http://127.0.0.1:8545 --sender $(DEFAULT_ANVIL_ADDRESS) --private-key $(DEFAULT_ANVIL_KEY) --broadcast
 
-ifeq ($(findstring --network sepolia,$(ARGS)),--network sepolia)
-	ANVIL_NETWORK_ARGS := --rpc-url $(SEPOLIA_RPC_URL) --private-key $(PRIVATE_KEY) --broadcast --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv
+ifeq ($(findstring sepolia-fork,$(ARGS)),sepolia-fork)
+	NETWORK_ARGS := --rpc-url http://127.0.0.1:8545 --sender $(SEPOLIA_ACCOUNT) --private-key $(SEPOLIA_PRIVATE_KEY) --broadcast
+else ifeq ($(findstring sepolia,$(ARGS)),sepolia)
+	NETWORK_ARGS := --rpc-url $(SEPOLIA_RPC_URL) --private-key $(SEPOLIA_PRIVATE_KEY) --broadcast --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv
 endif
 
 deploy:
-	@forge script script/DeploySessionHandler.s.sol $(NETWORK_ARGS)
+	@forge script script/DeploySHProtocol.s.sol $(NETWORK_ARGS)
 
-fund:
-	@forge script script/FundSessionHandler.s.sol $(NETWORK_ARGS)
+
 
 # ── Python ────────────────────────────────────────────────────────────────────
 
 db:
-	.venv/bin/python3 interface/db.py
+	.venv/bin/python3 app/db.py
 
-deploy-py:
-	.venv/bin/python3 interface/deploy.py
+deploy-wallet:
+	.venv/bin/python3 app/deploy_wallet.py
 
 
 bot:
-	.venv/bin/python3 interface/telebot.py
+	.venv/bin/python3 app/telebot.py
 
 agent:
-	.venv/bin/python3 interface/smart_wallet_agent.py
+	.venv/bin/python3 app/smart_wallet_agent.py
 
-register:
-	.venv/bin/python3 interface/register_agent.py

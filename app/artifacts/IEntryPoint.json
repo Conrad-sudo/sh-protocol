@@ -1,0 +1,2046 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "addStake",
+      "inputs": [
+        {
+          "name": "unstakeDelaySec",
+          "type": "uint32",
+          "internalType": "uint32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "balanceOf",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" }
+      ],
+      "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "delegateAndRevert",
+      "inputs": [
+        { "name": "target", "type": "address", "internalType": "address" },
+        { "name": "data", "type": "bytes", "internalType": "bytes" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "depositTo",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" }
+      ],
+      "outputs": [],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "getCurrentUserOpHash",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getDepositInfo",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" }
+      ],
+      "outputs": [
+        {
+          "name": "info",
+          "type": "tuple",
+          "internalType": "struct IStakeManager.DepositInfo",
+          "components": [
+            { "name": "deposit", "type": "uint256", "internalType": "uint256" },
+            { "name": "staked", "type": "bool", "internalType": "bool" },
+            { "name": "stake", "type": "uint112", "internalType": "uint112" },
+            {
+              "name": "unstakeDelaySec",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "withdrawTime",
+              "type": "uint48",
+              "internalType": "uint48"
+            }
+          ]
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getNonce",
+      "inputs": [
+        { "name": "sender", "type": "address", "internalType": "address" },
+        { "name": "key", "type": "uint192", "internalType": "uint192" }
+      ],
+      "outputs": [
+        { "name": "nonce", "type": "uint256", "internalType": "uint256" }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getSenderAddress",
+      "inputs": [
+        { "name": "initCode", "type": "bytes", "internalType": "bytes" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "getUserOpHash",
+      "inputs": [
+        {
+          "name": "userOp",
+          "type": "tuple",
+          "internalType": "struct PackedUserOperation",
+          "components": [
+            { "name": "sender", "type": "address", "internalType": "address" },
+            { "name": "nonce", "type": "uint256", "internalType": "uint256" },
+            { "name": "initCode", "type": "bytes", "internalType": "bytes" },
+            { "name": "callData", "type": "bytes", "internalType": "bytes" },
+            {
+              "name": "accountGasLimits",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "preVerificationGas",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            { "name": "gasFees", "type": "bytes32", "internalType": "bytes32" },
+            {
+              "name": "paymasterAndData",
+              "type": "bytes",
+              "internalType": "bytes"
+            },
+            { "name": "signature", "type": "bytes", "internalType": "bytes" }
+          ]
+        }
+      ],
+      "outputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "handleAggregatedOps",
+      "inputs": [
+        {
+          "name": "opsPerAggregator",
+          "type": "tuple[]",
+          "internalType": "struct IEntryPoint.UserOpsPerAggregator[]",
+          "components": [
+            {
+              "name": "userOps",
+              "type": "tuple[]",
+              "internalType": "struct PackedUserOperation[]",
+              "components": [
+                {
+                  "name": "sender",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "nonce",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "initCode",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                },
+                {
+                  "name": "callData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                },
+                {
+                  "name": "accountGasLimits",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "preVerificationGas",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "gasFees",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "paymasterAndData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                },
+                {
+                  "name": "signature",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "aggregator",
+              "type": "address",
+              "internalType": "contract IAggregator"
+            },
+            { "name": "signature", "type": "bytes", "internalType": "bytes" }
+          ]
+        },
+        {
+          "name": "beneficiary",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "handleOps",
+      "inputs": [
+        {
+          "name": "ops",
+          "type": "tuple[]",
+          "internalType": "struct PackedUserOperation[]",
+          "components": [
+            { "name": "sender", "type": "address", "internalType": "address" },
+            { "name": "nonce", "type": "uint256", "internalType": "uint256" },
+            { "name": "initCode", "type": "bytes", "internalType": "bytes" },
+            { "name": "callData", "type": "bytes", "internalType": "bytes" },
+            {
+              "name": "accountGasLimits",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "preVerificationGas",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            { "name": "gasFees", "type": "bytes32", "internalType": "bytes32" },
+            {
+              "name": "paymasterAndData",
+              "type": "bytes",
+              "internalType": "bytes"
+            },
+            { "name": "signature", "type": "bytes", "internalType": "bytes" }
+          ]
+        },
+        {
+          "name": "beneficiary",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "incrementNonce",
+      "inputs": [
+        { "name": "key", "type": "uint192", "internalType": "uint192" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "senderCreator",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "contract ISenderCreator"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "unlockStake",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawStake",
+      "inputs": [
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawTo",
+      "inputs": [
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "internalType": "address payable"
+        },
+        {
+          "name": "withdrawAmount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "AccountDeployed",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "factory",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "paymaster",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "BeforeExecution",
+      "inputs": [],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Deposited",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "totalDeposit",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "EIP7702AccountInitialized",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "delegate",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "IgnoredInitCode",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "unusedFactory",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "PostOpRevertReason",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "revertReason",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "SignatureAggregatorChanged",
+      "inputs": [
+        {
+          "name": "aggregator",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "StakeLocked",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "totalStaked",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "unstakeDelaySec",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "StakeUnlocked",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "withdrawTime",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "StakeWithdrawn",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "UserOperationEvent",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "paymaster",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "success",
+          "type": "bool",
+          "indexed": false,
+          "internalType": "bool"
+        },
+        {
+          "name": "actualGasCost",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "actualGasUsed",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "UserOperationPrefundTooLow",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "UserOperationRevertReason",
+      "inputs": [
+        {
+          "name": "userOpHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sender",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "revertReason",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Withdrawn",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "DelegateAndRevert",
+      "inputs": [
+        { "name": "success", "type": "bool", "internalType": "bool" },
+        { "name": "ret", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "DepositWithdrawalFailed",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" },
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        { "name": "amount", "type": "uint256", "internalType": "uint256" },
+        { "name": "revertReason", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "FailedOp",
+      "inputs": [
+        { "name": "opIndex", "type": "uint256", "internalType": "uint256" },
+        { "name": "reason", "type": "string", "internalType": "string" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "FailedOpWithRevert",
+      "inputs": [
+        { "name": "opIndex", "type": "uint256", "internalType": "uint256" },
+        { "name": "reason", "type": "string", "internalType": "string" },
+        { "name": "inner", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "FailedSendToBeneficiary",
+      "inputs": [
+        { "name": "beneficiary", "type": "address", "internalType": "address" },
+        { "name": "amount", "type": "uint256", "internalType": "uint256" },
+        { "name": "revertData", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InsufficientDeposit",
+      "inputs": [
+        {
+          "name": "currentDeposit",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "withdrawAmount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    { "type": "error", "name": "InternalFunction", "inputs": [] },
+    {
+      "type": "error",
+      "name": "InvalidBeneficiary",
+      "inputs": [
+        { "name": "beneficiary", "type": "address", "internalType": "address" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidPaymaster",
+      "inputs": [
+        { "name": "paymaster", "type": "address", "internalType": "address" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidPaymasterData",
+      "inputs": [
+        {
+          "name": "paymasterAndDataLength",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidStake",
+      "inputs": [
+        { "name": "msgValue", "type": "uint256", "internalType": "uint256" },
+        { "name": "currentStake", "type": "uint256", "internalType": "uint256" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidUnstakeDelay",
+      "inputs": [
+        {
+          "name": "newUnstakeDelaySec",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "currentUnstakeDelaySec",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "NotStaked",
+      "inputs": [
+        {
+          "name": "currentStake",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "unstakeDelaySec",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        { "name": "staked", "type": "bool", "internalType": "bool" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "PostOpReverted",
+      "inputs": [
+        { "name": "returnData", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "SenderAddressResult",
+      "inputs": [
+        { "name": "sender", "type": "address", "internalType": "address" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "SignatureValidationFailed",
+      "inputs": [
+        { "name": "aggregator", "type": "address", "internalType": "address" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StakeNotUnlocked",
+      "inputs": [
+        {
+          "name": "withdrawTime",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "blockTimestamp",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StakeWithdrawalFailed",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" },
+        {
+          "name": "withdrawAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        { "name": "amount", "type": "uint256", "internalType": "uint256" },
+        { "name": "revertReason", "type": "bytes", "internalType": "bytes" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "WithdrawalNotDue",
+      "inputs": [
+        {
+          "name": "withdrawTime",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "blockTimestamp",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    }
+  ],
+  "bytecode": { "object": "0x", "sourceMap": "", "linkReferences": {} },
+  "deployedBytecode": { "object": "0x", "sourceMap": "", "linkReferences": {} },
+  "methodIdentifiers": {
+    "addStake(uint32)": "0396cb60",
+    "balanceOf(address)": "70a08231",
+    "delegateAndRevert(address,bytes)": "850aaf62",
+    "depositTo(address)": "b760faf9",
+    "getCurrentUserOpHash()": "b0a398d1",
+    "getDepositInfo(address)": "5287ce12",
+    "getNonce(address,uint192)": "35567e1a",
+    "getSenderAddress(bytes)": "9b249f69",
+    "getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))": "22cdde4c",
+    "handleAggregatedOps(((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address,bytes)[],address)": "dbed18e0",
+    "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)": "765e827f",
+    "incrementNonce(uint192)": "0bd28e3b",
+    "senderCreator()": "09ccb880",
+    "unlockStake()": "bb9fe6bf",
+    "withdrawStake(address)": "c23a5cea",
+    "withdrawTo(address,uint256)": "205c2878"
+  },
+  "rawMetadata": "{\"compiler\":{\"version\":\"0.8.33+commit.64118f21\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"bool\",\"name\":\"success\",\"type\":\"bool\"},{\"internalType\":\"bytes\",\"name\":\"ret\",\"type\":\"bytes\"}],\"name\":\"DelegateAndRevert\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"withdrawAddress\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"revertReason\",\"type\":\"bytes\"}],\"name\":\"DepositWithdrawalFailed\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"opIndex\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"}],\"name\":\"FailedOp\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"opIndex\",\"type\":\"uint256\"},{\"internalType\":\"string\",\"name\":\"reason\",\"type\":\"string\"},{\"internalType\":\"bytes\",\"name\":\"inner\",\"type\":\"bytes\"}],\"name\":\"FailedOpWithRevert\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"beneficiary\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"revertData\",\"type\":\"bytes\"}],\"name\":\"FailedSendToBeneficiary\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"currentDeposit\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"withdrawAmount\",\"type\":\"uint256\"}],\"name\":\"InsufficientDeposit\",\"type\":\"error\"},{\"inputs\":[],\"name\":\"InternalFunction\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"beneficiary\",\"type\":\"address\"}],\"name\":\"InvalidBeneficiary\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"paymaster\",\"type\":\"address\"}],\"name\":\"InvalidPaymaster\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"paymasterAndDataLength\",\"type\":\"uint256\"}],\"name\":\"InvalidPaymasterData\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"msgValue\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"currentStake\",\"type\":\"uint256\"}],\"name\":\"InvalidStake\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"newUnstakeDelaySec\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"currentUnstakeDelaySec\",\"type\":\"uint256\"}],\"name\":\"InvalidUnstakeDelay\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"currentStake\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"unstakeDelaySec\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"staked\",\"type\":\"bool\"}],\"name\":\"NotStaked\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"bytes\",\"name\":\"returnData\",\"type\":\"bytes\"}],\"name\":\"PostOpReverted\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"}],\"name\":\"SenderAddressResult\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"aggregator\",\"type\":\"address\"}],\"name\":\"SignatureValidationFailed\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"withdrawTime\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"blockTimestamp\",\"type\":\"uint256\"}],\"name\":\"StakeNotUnlocked\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"withdrawAddress\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"revertReason\",\"type\":\"bytes\"}],\"name\":\"StakeWithdrawalFailed\",\"type\":\"error\"},{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"withdrawTime\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"blockTimestamp\",\"type\":\"uint256\"}],\"name\":\"WithdrawalNotDue\",\"type\":\"error\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"factory\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"paymaster\",\"type\":\"address\"}],\"name\":\"AccountDeployed\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[],\"name\":\"BeforeExecution\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"totalDeposit\",\"type\":\"uint256\"}],\"name\":\"Deposited\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"delegate\",\"type\":\"address\"}],\"name\":\"EIP7702AccountInitialized\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"unusedFactory\",\"type\":\"address\"}],\"name\":\"IgnoredInitCode\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"bytes\",\"name\":\"revertReason\",\"type\":\"bytes\"}],\"name\":\"PostOpRevertReason\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"aggregator\",\"type\":\"address\"}],\"name\":\"SignatureAggregatorChanged\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"totalStaked\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"unstakeDelaySec\",\"type\":\"uint256\"}],\"name\":\"StakeLocked\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"withdrawTime\",\"type\":\"uint256\"}],\"name\":\"StakeUnlocked\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"withdrawAddress\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"StakeWithdrawn\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"paymaster\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"bool\",\"name\":\"success\",\"type\":\"bool\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"actualGasCost\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"actualGasUsed\",\"type\":\"uint256\"}],\"name\":\"UserOperationEvent\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"}],\"name\":\"UserOperationPrefundTooLow\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"bytes32\",\"name\":\"userOpHash\",\"type\":\"bytes32\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"indexed\":false,\"internalType\":\"bytes\",\"name\":\"revertReason\",\"type\":\"bytes\"}],\"name\":\"UserOperationRevertReason\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"address\",\"name\":\"withdrawAddress\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"Withdrawn\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"uint32\",\"name\":\"unstakeDelaySec\",\"type\":\"uint32\"}],\"name\":\"addStake\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"target\",\"type\":\"address\"},{\"internalType\":\"bytes\",\"name\":\"data\",\"type\":\"bytes\"}],\"name\":\"delegateAndRevert\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"depositTo\",\"outputs\":[],\"stateMutability\":\"payable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"getCurrentUserOpHash\",\"outputs\":[{\"internalType\":\"bytes32\",\"name\":\"\",\"type\":\"bytes32\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"getDepositInfo\",\"outputs\":[{\"components\":[{\"internalType\":\"uint256\",\"name\":\"deposit\",\"type\":\"uint256\"},{\"internalType\":\"bool\",\"name\":\"staked\",\"type\":\"bool\"},{\"internalType\":\"uint112\",\"name\":\"stake\",\"type\":\"uint112\"},{\"internalType\":\"uint32\",\"name\":\"unstakeDelaySec\",\"type\":\"uint32\"},{\"internalType\":\"uint48\",\"name\":\"withdrawTime\",\"type\":\"uint48\"}],\"internalType\":\"struct IStakeManager.DepositInfo\",\"name\":\"info\",\"type\":\"tuple\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"uint192\",\"name\":\"key\",\"type\":\"uint192\"}],\"name\":\"getNonce\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes\",\"name\":\"initCode\",\"type\":\"bytes\"}],\"name\":\"getSenderAddress\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"initCode\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"callData\",\"type\":\"bytes\"},{\"internalType\":\"bytes32\",\"name\":\"accountGasLimits\",\"type\":\"bytes32\"},{\"internalType\":\"uint256\",\"name\":\"preVerificationGas\",\"type\":\"uint256\"},{\"internalType\":\"bytes32\",\"name\":\"gasFees\",\"type\":\"bytes32\"},{\"internalType\":\"bytes\",\"name\":\"paymasterAndData\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"internalType\":\"struct PackedUserOperation\",\"name\":\"userOp\",\"type\":\"tuple\"}],\"name\":\"getUserOpHash\",\"outputs\":[{\"internalType\":\"bytes32\",\"name\":\"\",\"type\":\"bytes32\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"initCode\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"callData\",\"type\":\"bytes\"},{\"internalType\":\"bytes32\",\"name\":\"accountGasLimits\",\"type\":\"bytes32\"},{\"internalType\":\"uint256\",\"name\":\"preVerificationGas\",\"type\":\"uint256\"},{\"internalType\":\"bytes32\",\"name\":\"gasFees\",\"type\":\"bytes32\"},{\"internalType\":\"bytes\",\"name\":\"paymasterAndData\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"internalType\":\"struct PackedUserOperation[]\",\"name\":\"userOps\",\"type\":\"tuple[]\"},{\"internalType\":\"contract IAggregator\",\"name\":\"aggregator\",\"type\":\"address\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"internalType\":\"struct IEntryPoint.UserOpsPerAggregator[]\",\"name\":\"opsPerAggregator\",\"type\":\"tuple[]\"},{\"internalType\":\"address payable\",\"name\":\"beneficiary\",\"type\":\"address\"}],\"name\":\"handleAggregatedOps\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"components\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"nonce\",\"type\":\"uint256\"},{\"internalType\":\"bytes\",\"name\":\"initCode\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"callData\",\"type\":\"bytes\"},{\"internalType\":\"bytes32\",\"name\":\"accountGasLimits\",\"type\":\"bytes32\"},{\"internalType\":\"uint256\",\"name\":\"preVerificationGas\",\"type\":\"uint256\"},{\"internalType\":\"bytes32\",\"name\":\"gasFees\",\"type\":\"bytes32\"},{\"internalType\":\"bytes\",\"name\":\"paymasterAndData\",\"type\":\"bytes\"},{\"internalType\":\"bytes\",\"name\":\"signature\",\"type\":\"bytes\"}],\"internalType\":\"struct PackedUserOperation[]\",\"name\":\"ops\",\"type\":\"tuple[]\"},{\"internalType\":\"address payable\",\"name\":\"beneficiary\",\"type\":\"address\"}],\"name\":\"handleOps\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"uint192\",\"name\":\"key\",\"type\":\"uint192\"}],\"name\":\"incrementNonce\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"senderCreator\",\"outputs\":[{\"internalType\":\"contract ISenderCreator\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"unlockStake\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address payable\",\"name\":\"withdrawAddress\",\"type\":\"address\"}],\"name\":\"withdrawStake\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address payable\",\"name\":\"withdrawAddress\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"withdrawAmount\",\"type\":\"uint256\"}],\"name\":\"withdrawTo\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}],\"devdoc\":{\"errors\":{\"FailedOp(uint256,string)\":[{\"params\":{\"opIndex\":\"- Index into the array of ops to the failed one.                  When using 'simulateValidation', this value is always zero.\",\"reason\":\"- Revert reason. The string starts with a unique code \\\"AAmn\\\",                  where \\\"m\\\" is \\\"1\\\" for factory, \\\"2\\\" for account, \\\"3\\\" for paymaster, and \\\"9\\\" for other issues,                  so a failure can be attributed to the correct entity.\"}}],\"FailedOpWithRevert(uint256,string,bytes)\":[{\"details\":\"note that inner is truncated to 2048 bytes\",\"params\":{\"inner\":\"- Revert data caught from the inner revert reason of an entity contract.\",\"opIndex\":\"- Index of the failed UserOperation in the array of ops. In simulateValidation, this value is always zero.\",\"reason\":\"- Revert reason. See the 'FailedOp(uint256,string)' error above.\"}}],\"SignatureValidationFailed(address)\":[{\"params\":{\"aggregator\":\"The aggregator that failed to verify the signature\"}}]},\"events\":{\"AccountDeployed(bytes32,address,address,address)\":{\"params\":{\"factory\":\"- The factory used to deploy this account (in the initCode)\",\"paymaster\":\"- The paymaster used by this UserOp\",\"sender\":\"- The account that is deployed\",\"userOpHash\":\"- The userOp that deployed this account. UserOperationEvent will follow.\"}},\"EIP7702AccountInitialized(bytes32,address,address)\":{\"params\":{\"sender\":\"- The account that was supposed to be deployed.\",\"userOpHash\":\"- The current userOp. UserOperationEvent will follow.\"}},\"IgnoredInitCode(bytes32,address,address)\":{\"params\":{\"sender\":\"- The account that was supposed to be deployed.\",\"unusedFactory\":\"- The factory contract that was not used but was specified in the 'initCode'.\",\"userOpHash\":\"- The current userOp. UserOperationEvent will follow.\"}},\"PostOpRevertReason(bytes32,address,uint256,bytes)\":{\"params\":{\"nonce\":\"- The nonce used in the request.\",\"revertReason\":\"- The return bytes from the reverted call to \\\"postOp\\\".\",\"sender\":\"- The sender of this request.\",\"userOpHash\":\"- The request unique identifier.\"}},\"SignatureAggregatorChanged(address)\":{\"params\":{\"aggregator\":\"- The aggregator used for the following UserOperationEvents.\"}},\"UserOperationPrefundTooLow(bytes32,address,uint256)\":{\"params\":{\"nonce\":\"- The nonce used in the request.\",\"sender\":\"- The sender of this request.\",\"userOpHash\":\"- The request unique identifier.\"}},\"UserOperationRevertReason(bytes32,address,uint256,bytes)\":{\"params\":{\"nonce\":\"- The nonce used in the request.\",\"revertReason\":\"- The return bytes from the reverted \\\"callData\\\" call.\",\"sender\":\"- The sender of this request.\",\"userOpHash\":\"- The request unique identifier.\"}}},\"kind\":\"dev\",\"methods\":{\"addStake(uint32)\":{\"params\":{\"unstakeDelaySec\":\"- The new lock duration before the deposit can be withdrawn.\"}},\"balanceOf(address)\":{\"params\":{\"account\":\"- The account to query.\"},\"returns\":{\"_0\":\"- The deposit (for gas payment) of the account.\"}},\"delegateAndRevert(address,bytes)\":{\"details\":\"calling this method, the EntryPoint will make a delegatecall to the given data, and report (via revert) the result.  The method always revert, so is only useful off-chain for dry run calls, in cases where state-override to replace  actual EntryPoint code is less convenient.\",\"params\":{\"data\":\"data to pass to target in a delegatecall\",\"target\":\"a target contract to make a delegatecall from entrypoint\"}},\"depositTo(address)\":{\"params\":{\"account\":\"- The account to add to.\"}},\"getCurrentUserOpHash()\":{\"returns\":{\"_0\":\"hash - the hash of the currently running UserOperation, or 0 if none.\"}},\"getDepositInfo(address)\":{\"params\":{\"account\":\"- The account to query.\"},\"returns\":{\"info\":\"  - Full deposit information of given account.\"}},\"getNonce(address,uint192)\":{\"params\":{\"key\":\"the high 192 bit of the nonce\",\"sender\":\"the account address\"},\"returns\":{\"nonce\":\"a full nonce to pass for next UserOp with this sender.\"}},\"getSenderAddress(bytes)\":{\"params\":{\"initCode\":\"- The constructor code to be passed into the UserOperation.\"}},\"getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))\":{\"params\":{\"userOp\":\"- The user operation to generate the request ID for.\"},\"returns\":{\"_0\":\"hash the hash of this UserOperation\"}},\"handleAggregatedOps(((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address,bytes)[],address)\":{\"params\":{\"beneficiary\":\"- The address to receive the fees.\",\"opsPerAggregator\":\"- The operations to execute, grouped by aggregator (or address(0) for no-aggregator accounts).\"}},\"handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)\":{\"params\":{\"beneficiary\":\"- The address to receive the fees.\",\"ops\":\"- The operations to execute.\"}},\"incrementNonce(uint192)\":{\"params\":{\"key\":\"- the \\\"nonce key\\\" to increment the \\\"nonce sequence\\\" for.\"}},\"withdrawStake(address)\":{\"params\":{\"withdrawAddress\":\"- The address to send withdrawn value.\"}},\"withdrawTo(address,uint256)\":{\"params\":{\"withdrawAddress\":\"- The address to send withdrawn value.\",\"withdrawAmount\":\"- The amount to withdraw.\"}}},\"version\":1},\"userdoc\":{\"errors\":{\"FailedOp(uint256,string)\":[{\"notice\":\"A custom revert error of 'handleOps' and 'handleAggregatedOps', to identify the offending UserOperation. Should be caught in off-chain 'handleOps'/'handleAggregatedOps' simulation and should not happen on-chain. Useful for mitigating DoS attempts against batchers or for troubleshooting of factory/account/paymaster reverts. NOTE: If 'simulateValidation' passes successfully, there should be no reason for 'handleOps' to revert as well.\"}],\"FailedOpWithRevert(uint256,string,bytes)\":[{\"notice\":\"A custom revert error of handleOps and handleAggregatedOps, to report a revert by account or paymaster.\"}],\"SignatureValidationFailed(address)\":[{\"notice\":\"Error case when a signature aggregator fails to verify the aggregated signature it had created.\"}]},\"events\":{\"AccountDeployed(bytes32,address,address,address)\":{\"notice\":\"Account \\\"sender\\\" was deployed.\"},\"BeforeExecution()\":{\"notice\":\"An event emitted by handleOps() and handleAggregatedOps(), before starting the execution loop. Any event emitted before this event, is part of the validation.\"},\"EIP7702AccountInitialized(bytes32,address,address)\":{\"notice\":\"Account \\\"sender\\\" is an EIP-7702 account that was initialized during this UserOperation.\"},\"IgnoredInitCode(bytes32,address,address)\":{\"notice\":\"Account \\\"sender\\\" already exists and the 'initCode' was ignored.\"},\"PostOpRevertReason(bytes32,address,uint256,bytes)\":{\"notice\":\"An event emitted if the UserOperation Paymaster's \\\"postOp\\\" call reverted with non-zero length.\"},\"SignatureAggregatorChanged(address)\":{\"notice\":\"Signature aggregator used by the following UserOperationEvents within this bundle.\"},\"UserOperationPrefundTooLow(bytes32,address,uint256)\":{\"notice\":\"UserOp consumed more than prefund. The UserOperation is reverted, and no refund is made.\"},\"UserOperationRevertReason(bytes32,address,uint256,bytes)\":{\"notice\":\"An event emitted if the UserOperation \\\"callData\\\" reverted with non-zero length.\"}},\"kind\":\"user\",\"methods\":{\"addStake(uint32)\":{\"notice\":\"Add to the account's stake - amount and delay any pending unstake is first cancelled.\"},\"balanceOf(address)\":{\"notice\":\"Get account balance.\"},\"delegateAndRevert(address,bytes)\":{\"notice\":\"Helper method for dry-run testing.\"},\"depositTo(address)\":{\"notice\":\"Add to the deposit of the given account.\"},\"getCurrentUserOpHash()\":{\"notice\":\"Allows the AA-aware contracts to query the hash of the currently running UserOperation.\"},\"getDepositInfo(address)\":{\"notice\":\"Get deposit info.\"},\"getNonce(address,uint192)\":{\"notice\":\"Return the next nonce for this sender. Within a given key, the nonce values are sequenced (starting with zero, and incremented by one on each userop) But UserOp with different keys can come with arbitrary order.\"},\"getSenderAddress(bytes)\":{\"notice\":\"Get counterfactual sender address. Calculate the sender contract address that will be generated by the initCode and salt in the UserOperation. This method always revert, and returns the address in SenderAddressResult error.this method cannot be used for EIP-7702 derived contracts.\"},\"getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))\":{\"notice\":\"Generate a request Id - unique identifier for this request. The request ID is a hash over the content of the userOp (except the signature), entrypoint address, chainId and (optionally) 7702 delegate address\"},\"handleAggregatedOps(((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address,bytes)[],address)\":{\"notice\":\"Execute a batch of UserOperation with Aggregators\"},\"handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)\":{\"notice\":\"Execute a batch of UserOperations. No signature aggregator is used. If any account requires an aggregator (that is, it returned an aggregator when performing simulateValidation), then handleAggregatedOps() must be used instead.\"},\"incrementNonce(uint192)\":{\"notice\":\"Manually increment the nonce of the sender. This method is exposed just for completeness. Account does NOT need to call it, neither during validation, nor elsewhere, as the EntryPoint will update the nonce regardless. Possible use-case is call it with various keys to \\\"initialize\\\" their nonces to one, so that future UserOperations will not pay extra for the first transaction with a given key.\"},\"senderCreator()\":{\"notice\":\"Retrieves the immutable SenderCreator contract which is responsible for deployment of sender contracts.\"},\"unlockStake()\":{\"notice\":\"Attempt to unlock the stake. The value can be withdrawn (using withdrawStake) after the unstake delay.\"},\"withdrawStake(address)\":{\"notice\":\"Withdraw from the (unlocked) stake. Must first call unlockStake and wait for the unstakeDelay to pass.\"},\"withdrawTo(address,uint256)\":{\"notice\":\"Withdraw from the deposit.\"}},\"version\":1}},\"settings\":{\"compilationTarget\":{\"lib/account-abstraction/contracts/interfaces/IEntryPoint.sol\":\"IEntryPoint\"},\"evmVersion\":\"prague\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[\":@account-abstraction/contracts/=lib/account-abstraction/contracts/\",\":@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/\",\":@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/\",\":account-abstraction/=lib/account-abstraction/contracts/\",\":chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/\",\":erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/\",\":forge-std/=lib/forge-std/src/\",\":halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/\",\":openzeppelin-contracts/=lib/openzeppelin-contracts/\",\":v2-core/=lib/v2-core/contracts/\",\":v2-periphery/=lib/v2-periphery/contracts/\"],\"viaIR\":true},\"sources\":{\"lib/account-abstraction/contracts/interfaces/IAggregator.sol\":{\"keccak256\":\"0xdf580eafa015b81bde436d6a5468cc92b531ada84007cef885e923f6dfc5e8bf\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://99f0060626568619ac94d750eb4c0888d92ca5775a6bd957fef9847843835b77\",\"dweb:/ipfs/QmXJer3D9sTkEj3mmUDqpdqfGpe46Rn9G22nGrfZdP2wAT\"]},\"lib/account-abstraction/contracts/interfaces/IEntryPoint.sol\":{\"keccak256\":\"0x62f739f59c661f48b750e1d67d96f209056bbc2e4b5e48cbcd0656d162e566cd\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://ee103fb0c5103bc001171303bac9f80659c5f0efc4ebf4cfa22e1adc831c68ce\",\"dweb:/ipfs/QmbiosncMJBe3skD8KsCXE9Y3C6NdKthHq83ba3Sw6RP4U\"]},\"lib/account-abstraction/contracts/interfaces/INonceManager.sol\":{\"keccak256\":\"0x0a93a26e990e3da5762c461f5f500bec0f6e216bb42c55f07d95651bd85d5f74\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://d76343b1e306ed0ed2a5f49b578b8c30d1c6aecac260c8b71d30665021f93961\",\"dweb:/ipfs/QmPo7xaetd9koekFkNoapGUE2omFH1HhxF35PstTH6fG3J\"]},\"lib/account-abstraction/contracts/interfaces/ISenderCreator.sol\":{\"keccak256\":\"0x677f651d733162b80d1af7901e4f36469e362737a8353d1d0cc7bb94489e4ba4\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://d6905a80acd70b444ea230b5b582164cb99aaae518bf72c88f8292df31615570\",\"dweb:/ipfs/QmfTKTPwJYf9pmA3T5PE5cCG8GLLDrLaq3jQqMP3pVRL6w\"]},\"lib/account-abstraction/contracts/interfaces/IStakeManager.sol\":{\"keccak256\":\"0xcbac5ac68fb0582d743c4172cc78afc530f750ed529386327ebfa909be067111\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://95ec6059800b3c9a645c1fdc33061f7a48c2b49b9f8bce53d55fc840092dd964\",\"dweb:/ipfs/Qmb33bEcx36hdhXpVCcsUGFmk3AGEU1rto9FU7VBu5S941\"]},\"lib/account-abstraction/contracts/interfaces/PackedUserOperation.sol\":{\"keccak256\":\"0xa262abaec9b922c33e54dd8cd88d4fd1989915e16127959736af966884b4d441\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://8cb49a30d699867fd6efa3e349b5802dd1ec1a57379e70077e38fe001e19008d\",\"dweb:/ipfs/QmdsY3et68ceJAyuDScz8iWJfimXmApf6Qcp3BmqDjNSzc\"]}},\"version\":1}",
+  "metadata": {
+    "compiler": { "version": "0.8.33+commit.64118f21" },
+    "language": "Solidity",
+    "output": {
+      "abi": [
+        {
+          "inputs": [
+            { "internalType": "bool", "name": "success", "type": "bool" },
+            { "internalType": "bytes", "name": "ret", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "DelegateAndRevert"
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "account", "type": "address" },
+            {
+              "internalType": "address",
+              "name": "withdrawAddress",
+              "type": "address"
+            },
+            { "internalType": "uint256", "name": "amount", "type": "uint256" },
+            { "internalType": "bytes", "name": "revertReason", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "DepositWithdrawalFailed"
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "opIndex", "type": "uint256" },
+            { "internalType": "string", "name": "reason", "type": "string" }
+          ],
+          "type": "error",
+          "name": "FailedOp"
+        },
+        {
+          "inputs": [
+            { "internalType": "uint256", "name": "opIndex", "type": "uint256" },
+            { "internalType": "string", "name": "reason", "type": "string" },
+            { "internalType": "bytes", "name": "inner", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "FailedOpWithRevert"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "beneficiary",
+              "type": "address"
+            },
+            { "internalType": "uint256", "name": "amount", "type": "uint256" },
+            { "internalType": "bytes", "name": "revertData", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "FailedSendToBeneficiary"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "currentDeposit",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "withdrawAmount",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "InsufficientDeposit"
+        },
+        { "inputs": [], "type": "error", "name": "InternalFunction" },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "beneficiary",
+              "type": "address"
+            }
+          ],
+          "type": "error",
+          "name": "InvalidBeneficiary"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "paymaster",
+              "type": "address"
+            }
+          ],
+          "type": "error",
+          "name": "InvalidPaymaster"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "paymasterAndDataLength",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "InvalidPaymasterData"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "msgValue",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "currentStake",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "InvalidStake"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "newUnstakeDelaySec",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "currentUnstakeDelaySec",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "InvalidUnstakeDelay"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "currentStake",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "unstakeDelaySec",
+              "type": "uint256"
+            },
+            { "internalType": "bool", "name": "staked", "type": "bool" }
+          ],
+          "type": "error",
+          "name": "NotStaked"
+        },
+        {
+          "inputs": [
+            { "internalType": "bytes", "name": "returnData", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "PostOpReverted"
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "sender", "type": "address" }
+          ],
+          "type": "error",
+          "name": "SenderAddressResult"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "aggregator",
+              "type": "address"
+            }
+          ],
+          "type": "error",
+          "name": "SignatureValidationFailed"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "withdrawTime",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "blockTimestamp",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "StakeNotUnlocked"
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "account", "type": "address" },
+            {
+              "internalType": "address",
+              "name": "withdrawAddress",
+              "type": "address"
+            },
+            { "internalType": "uint256", "name": "amount", "type": "uint256" },
+            { "internalType": "bytes", "name": "revertReason", "type": "bytes" }
+          ],
+          "type": "error",
+          "name": "StakeWithdrawalFailed"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "withdrawTime",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "blockTimestamp",
+              "type": "uint256"
+            }
+          ],
+          "type": "error",
+          "name": "WithdrawalNotDue"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "factory",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "internalType": "address",
+              "name": "paymaster",
+              "type": "address",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "AccountDeployed",
+          "anonymous": false
+        },
+        {
+          "inputs": [],
+          "type": "event",
+          "name": "BeforeExecution",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "account",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "totalDeposit",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "Deposited",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "delegate",
+              "type": "address",
+              "indexed": true
+            }
+          ],
+          "type": "event",
+          "name": "EIP7702AccountInitialized",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "unusedFactory",
+              "type": "address",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "IgnoredInitCode",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "internalType": "bytes",
+              "name": "revertReason",
+              "type": "bytes",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "PostOpRevertReason",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "aggregator",
+              "type": "address",
+              "indexed": true
+            }
+          ],
+          "type": "event",
+          "name": "SignatureAggregatorChanged",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "account",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "totalStaked",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "internalType": "uint256",
+              "name": "unstakeDelaySec",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "StakeLocked",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "account",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "withdrawTime",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "StakeUnlocked",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "account",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "withdrawAddress",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "internalType": "uint256",
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "StakeWithdrawn",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "paymaster",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "internalType": "bool",
+              "name": "success",
+              "type": "bool",
+              "indexed": false
+            },
+            {
+              "internalType": "uint256",
+              "name": "actualGasCost",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "internalType": "uint256",
+              "name": "actualGasUsed",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "UserOperationEvent",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "UserOperationPrefundTooLow",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bytes32",
+              "name": "userOpHash",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "uint256",
+              "name": "nonce",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "internalType": "bytes",
+              "name": "revertReason",
+              "type": "bytes",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "UserOperationRevertReason",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "account",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "internalType": "address",
+              "name": "withdrawAddress",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "internalType": "uint256",
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ],
+          "type": "event",
+          "name": "Withdrawn",
+          "anonymous": false
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint32",
+              "name": "unstakeDelaySec",
+              "type": "uint32"
+            }
+          ],
+          "stateMutability": "payable",
+          "type": "function",
+          "name": "addStake"
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "account", "type": "address" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "balanceOf",
+          "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "target", "type": "address" },
+            { "internalType": "bytes", "name": "data", "type": "bytes" }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "delegateAndRevert"
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "account", "type": "address" }
+          ],
+          "stateMutability": "payable",
+          "type": "function",
+          "name": "depositTo"
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getCurrentUserOpHash",
+          "outputs": [
+            { "internalType": "bytes32", "name": "", "type": "bytes32" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "account", "type": "address" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getDepositInfo",
+          "outputs": [
+            {
+              "internalType": "struct IStakeManager.DepositInfo",
+              "name": "info",
+              "type": "tuple",
+              "components": [
+                {
+                  "internalType": "uint256",
+                  "name": "deposit",
+                  "type": "uint256"
+                },
+                { "internalType": "bool", "name": "staked", "type": "bool" },
+                {
+                  "internalType": "uint112",
+                  "name": "stake",
+                  "type": "uint112"
+                },
+                {
+                  "internalType": "uint32",
+                  "name": "unstakeDelaySec",
+                  "type": "uint32"
+                },
+                {
+                  "internalType": "uint48",
+                  "name": "withdrawTime",
+                  "type": "uint48"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "address", "name": "sender", "type": "address" },
+            { "internalType": "uint192", "name": "key", "type": "uint192" }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getNonce",
+          "outputs": [
+            { "internalType": "uint256", "name": "nonce", "type": "uint256" }
+          ]
+        },
+        {
+          "inputs": [
+            { "internalType": "bytes", "name": "initCode", "type": "bytes" }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "getSenderAddress"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "struct PackedUserOperation",
+              "name": "userOp",
+              "type": "tuple",
+              "components": [
+                {
+                  "internalType": "address",
+                  "name": "sender",
+                  "type": "address"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "nonce",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "initCode",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "callData",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes32",
+                  "name": "accountGasLimits",
+                  "type": "bytes32"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "preVerificationGas",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "bytes32",
+                  "name": "gasFees",
+                  "type": "bytes32"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "paymasterAndData",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "signature",
+                  "type": "bytes"
+                }
+              ]
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "getUserOpHash",
+          "outputs": [
+            { "internalType": "bytes32", "name": "", "type": "bytes32" }
+          ]
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "struct IEntryPoint.UserOpsPerAggregator[]",
+              "name": "opsPerAggregator",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "internalType": "struct PackedUserOperation[]",
+                  "name": "userOps",
+                  "type": "tuple[]",
+                  "components": [
+                    {
+                      "internalType": "address",
+                      "name": "sender",
+                      "type": "address"
+                    },
+                    {
+                      "internalType": "uint256",
+                      "name": "nonce",
+                      "type": "uint256"
+                    },
+                    {
+                      "internalType": "bytes",
+                      "name": "initCode",
+                      "type": "bytes"
+                    },
+                    {
+                      "internalType": "bytes",
+                      "name": "callData",
+                      "type": "bytes"
+                    },
+                    {
+                      "internalType": "bytes32",
+                      "name": "accountGasLimits",
+                      "type": "bytes32"
+                    },
+                    {
+                      "internalType": "uint256",
+                      "name": "preVerificationGas",
+                      "type": "uint256"
+                    },
+                    {
+                      "internalType": "bytes32",
+                      "name": "gasFees",
+                      "type": "bytes32"
+                    },
+                    {
+                      "internalType": "bytes",
+                      "name": "paymasterAndData",
+                      "type": "bytes"
+                    },
+                    {
+                      "internalType": "bytes",
+                      "name": "signature",
+                      "type": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "internalType": "contract IAggregator",
+                  "name": "aggregator",
+                  "type": "address"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "signature",
+                  "type": "bytes"
+                }
+              ]
+            },
+            {
+              "internalType": "address payable",
+              "name": "beneficiary",
+              "type": "address"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "handleAggregatedOps"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "struct PackedUserOperation[]",
+              "name": "ops",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "internalType": "address",
+                  "name": "sender",
+                  "type": "address"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "nonce",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "initCode",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "callData",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes32",
+                  "name": "accountGasLimits",
+                  "type": "bytes32"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "preVerificationGas",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "bytes32",
+                  "name": "gasFees",
+                  "type": "bytes32"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "paymasterAndData",
+                  "type": "bytes"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "signature",
+                  "type": "bytes"
+                }
+              ]
+            },
+            {
+              "internalType": "address payable",
+              "name": "beneficiary",
+              "type": "address"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "handleOps"
+        },
+        {
+          "inputs": [
+            { "internalType": "uint192", "name": "key", "type": "uint192" }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "incrementNonce"
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "senderCreator",
+          "outputs": [
+            {
+              "internalType": "contract ISenderCreator",
+              "name": "",
+              "type": "address"
+            }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "unlockStake"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address payable",
+              "name": "withdrawAddress",
+              "type": "address"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "withdrawStake"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address payable",
+              "name": "withdrawAddress",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "withdrawAmount",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "withdrawTo"
+        }
+      ],
+      "devdoc": {
+        "kind": "dev",
+        "methods": {
+          "addStake(uint32)": {
+            "params": {
+              "unstakeDelaySec": "- The new lock duration before the deposit can be withdrawn."
+            }
+          },
+          "balanceOf(address)": {
+            "params": { "account": "- The account to query." },
+            "returns": {
+              "_0": "- The deposit (for gas payment) of the account."
+            }
+          },
+          "delegateAndRevert(address,bytes)": {
+            "details": "calling this method, the EntryPoint will make a delegatecall to the given data, and report (via revert) the result.  The method always revert, so is only useful off-chain for dry run calls, in cases where state-override to replace  actual EntryPoint code is less convenient.",
+            "params": {
+              "data": "data to pass to target in a delegatecall",
+              "target": "a target contract to make a delegatecall from entrypoint"
+            }
+          },
+          "depositTo(address)": {
+            "params": { "account": "- The account to add to." }
+          },
+          "getCurrentUserOpHash()": {
+            "returns": {
+              "_0": "hash - the hash of the currently running UserOperation, or 0 if none."
+            }
+          },
+          "getDepositInfo(address)": {
+            "params": { "account": "- The account to query." },
+            "returns": {
+              "info": "  - Full deposit information of given account."
+            }
+          },
+          "getNonce(address,uint192)": {
+            "params": {
+              "key": "the high 192 bit of the nonce",
+              "sender": "the account address"
+            },
+            "returns": {
+              "nonce": "a full nonce to pass for next UserOp with this sender."
+            }
+          },
+          "getSenderAddress(bytes)": {
+            "params": {
+              "initCode": "- The constructor code to be passed into the UserOperation."
+            }
+          },
+          "getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))": {
+            "params": {
+              "userOp": "- The user operation to generate the request ID for."
+            },
+            "returns": { "_0": "hash the hash of this UserOperation" }
+          },
+          "handleAggregatedOps(((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address,bytes)[],address)": {
+            "params": {
+              "beneficiary": "- The address to receive the fees.",
+              "opsPerAggregator": "- The operations to execute, grouped by aggregator (or address(0) for no-aggregator accounts)."
+            }
+          },
+          "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)": {
+            "params": {
+              "beneficiary": "- The address to receive the fees.",
+              "ops": "- The operations to execute."
+            }
+          },
+          "incrementNonce(uint192)": {
+            "params": {
+              "key": "- the \"nonce key\" to increment the \"nonce sequence\" for."
+            }
+          },
+          "withdrawStake(address)": {
+            "params": {
+              "withdrawAddress": "- The address to send withdrawn value."
+            }
+          },
+          "withdrawTo(address,uint256)": {
+            "params": {
+              "withdrawAddress": "- The address to send withdrawn value.",
+              "withdrawAmount": "- The amount to withdraw."
+            }
+          }
+        },
+        "version": 1
+      },
+      "userdoc": {
+        "kind": "user",
+        "methods": {
+          "addStake(uint32)": {
+            "notice": "Add to the account's stake - amount and delay any pending unstake is first cancelled."
+          },
+          "balanceOf(address)": { "notice": "Get account balance." },
+          "delegateAndRevert(address,bytes)": {
+            "notice": "Helper method for dry-run testing."
+          },
+          "depositTo(address)": {
+            "notice": "Add to the deposit of the given account."
+          },
+          "getCurrentUserOpHash()": {
+            "notice": "Allows the AA-aware contracts to query the hash of the currently running UserOperation."
+          },
+          "getDepositInfo(address)": { "notice": "Get deposit info." },
+          "getNonce(address,uint192)": {
+            "notice": "Return the next nonce for this sender. Within a given key, the nonce values are sequenced (starting with zero, and incremented by one on each userop) But UserOp with different keys can come with arbitrary order."
+          },
+          "getSenderAddress(bytes)": {
+            "notice": "Get counterfactual sender address. Calculate the sender contract address that will be generated by the initCode and salt in the UserOperation. This method always revert, and returns the address in SenderAddressResult error.this method cannot be used for EIP-7702 derived contracts."
+          },
+          "getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))": {
+            "notice": "Generate a request Id - unique identifier for this request. The request ID is a hash over the content of the userOp (except the signature), entrypoint address, chainId and (optionally) 7702 delegate address"
+          },
+          "handleAggregatedOps(((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address,bytes)[],address)": {
+            "notice": "Execute a batch of UserOperation with Aggregators"
+          },
+          "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)": {
+            "notice": "Execute a batch of UserOperations. No signature aggregator is used. If any account requires an aggregator (that is, it returned an aggregator when performing simulateValidation), then handleAggregatedOps() must be used instead."
+          },
+          "incrementNonce(uint192)": {
+            "notice": "Manually increment the nonce of the sender. This method is exposed just for completeness. Account does NOT need to call it, neither during validation, nor elsewhere, as the EntryPoint will update the nonce regardless. Possible use-case is call it with various keys to \"initialize\" their nonces to one, so that future UserOperations will not pay extra for the first transaction with a given key."
+          },
+          "senderCreator()": {
+            "notice": "Retrieves the immutable SenderCreator contract which is responsible for deployment of sender contracts."
+          },
+          "unlockStake()": {
+            "notice": "Attempt to unlock the stake. The value can be withdrawn (using withdrawStake) after the unstake delay."
+          },
+          "withdrawStake(address)": {
+            "notice": "Withdraw from the (unlocked) stake. Must first call unlockStake and wait for the unstakeDelay to pass."
+          },
+          "withdrawTo(address,uint256)": {
+            "notice": "Withdraw from the deposit."
+          }
+        },
+        "version": 1
+      }
+    },
+    "settings": {
+      "remappings": [
+        "@account-abstraction/contracts/=lib/account-abstraction/contracts/",
+        "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+        "account-abstraction/=lib/account-abstraction/contracts/",
+        "chainlink-brownie-contracts/=lib/chainlink-brownie-contracts/",
+        "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-std/=lib/forge-std/src/",
+        "halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/",
+        "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+        "v2-core/=lib/v2-core/contracts/",
+        "v2-periphery/=lib/v2-periphery/contracts/"
+      ],
+      "optimizer": { "enabled": true, "runs": 200 },
+      "metadata": { "bytecodeHash": "ipfs" },
+      "compilationTarget": {
+        "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol": "IEntryPoint"
+      },
+      "evmVersion": "prague",
+      "libraries": {},
+      "viaIR": true
+    },
+    "sources": {
+      "lib/account-abstraction/contracts/interfaces/IAggregator.sol": {
+        "keccak256": "0xdf580eafa015b81bde436d6a5468cc92b531ada84007cef885e923f6dfc5e8bf",
+        "urls": [
+          "bzz-raw://99f0060626568619ac94d750eb4c0888d92ca5775a6bd957fef9847843835b77",
+          "dweb:/ipfs/QmXJer3D9sTkEj3mmUDqpdqfGpe46Rn9G22nGrfZdP2wAT"
+        ],
+        "license": "MIT"
+      },
+      "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol": {
+        "keccak256": "0x62f739f59c661f48b750e1d67d96f209056bbc2e4b5e48cbcd0656d162e566cd",
+        "urls": [
+          "bzz-raw://ee103fb0c5103bc001171303bac9f80659c5f0efc4ebf4cfa22e1adc831c68ce",
+          "dweb:/ipfs/QmbiosncMJBe3skD8KsCXE9Y3C6NdKthHq83ba3Sw6RP4U"
+        ],
+        "license": "MIT"
+      },
+      "lib/account-abstraction/contracts/interfaces/INonceManager.sol": {
+        "keccak256": "0x0a93a26e990e3da5762c461f5f500bec0f6e216bb42c55f07d95651bd85d5f74",
+        "urls": [
+          "bzz-raw://d76343b1e306ed0ed2a5f49b578b8c30d1c6aecac260c8b71d30665021f93961",
+          "dweb:/ipfs/QmPo7xaetd9koekFkNoapGUE2omFH1HhxF35PstTH6fG3J"
+        ],
+        "license": "MIT"
+      },
+      "lib/account-abstraction/contracts/interfaces/ISenderCreator.sol": {
+        "keccak256": "0x677f651d733162b80d1af7901e4f36469e362737a8353d1d0cc7bb94489e4ba4",
+        "urls": [
+          "bzz-raw://d6905a80acd70b444ea230b5b582164cb99aaae518bf72c88f8292df31615570",
+          "dweb:/ipfs/QmfTKTPwJYf9pmA3T5PE5cCG8GLLDrLaq3jQqMP3pVRL6w"
+        ],
+        "license": "MIT"
+      },
+      "lib/account-abstraction/contracts/interfaces/IStakeManager.sol": {
+        "keccak256": "0xcbac5ac68fb0582d743c4172cc78afc530f750ed529386327ebfa909be067111",
+        "urls": [
+          "bzz-raw://95ec6059800b3c9a645c1fdc33061f7a48c2b49b9f8bce53d55fc840092dd964",
+          "dweb:/ipfs/Qmb33bEcx36hdhXpVCcsUGFmk3AGEU1rto9FU7VBu5S941"
+        ],
+        "license": "MIT"
+      },
+      "lib/account-abstraction/contracts/interfaces/PackedUserOperation.sol": {
+        "keccak256": "0xa262abaec9b922c33e54dd8cd88d4fd1989915e16127959736af966884b4d441",
+        "urls": [
+          "bzz-raw://8cb49a30d699867fd6efa3e349b5802dd1ec1a57379e70077e38fe001e19008d",
+          "dweb:/ipfs/QmdsY3et68ceJAyuDScz8iWJfimXmApf6Qcp3BmqDjNSzc"
+        ],
+        "license": "MIT"
+      }
+    },
+    "version": 1
+  },
+  "id": 10
+}
