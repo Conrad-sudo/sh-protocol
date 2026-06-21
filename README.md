@@ -1,6 +1,6 @@
 # SessionHandler Protocol 🤖⛓️
 
-A full DeFi protocol built on ERC-4337 account abstraction. Users deploy smart wallets via `SHFactory` and delegate control to scoped, time-limited, spending-capped session keys — allowing an AI agent to sign transactions on their behalf through natural language without ever exposing the owner's private key.
+A capability-based delegation system built on ERC-4337 account abstraction. Each user instantiates a smart-contract account via `SHFactory` and grants scoped, time-bounded, rate-limited signing authority to ephemeral session keys — enabling an autonomous agent to construct and authorize transactions on the owner's behalf from natural-language instructions, without gaining custody of the owner's root private key. Session keys can be scoped to ERC20 primitives (transfer, approve) and DeFi primitives such as Uniswap V2 swaps and liquidity provisioning, with spend caps enforced in USD terms via on-chain price oracles.
 
 The protocol is composed of five layers: Solidity smart contracts, a Python blockchain interface, HashiCorp Vault (key custody), a LangChain AI agent, and a Telegram bot front end. It also integrates the **ERC-8004** canonical on-chain agent identity and reputation registries.
 

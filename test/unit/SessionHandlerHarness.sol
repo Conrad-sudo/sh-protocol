@@ -11,9 +11,14 @@ import {SessionHandler} from "../../src/SessionHandler.sol";
  *      for all other tests.
  */
 contract SessionHandlerHarness is SessionHandler {
-    constructor(address owner, address entryPoint, address reputationRegistry, address identityRegistry, address feeRegistry)
-        SessionHandler(owner, entryPoint, reputationRegistry, identityRegistry, feeRegistry)
-    {}
+    constructor(
+        address owner,
+        address entryPoint,
+        address reputationRegistry,
+        address identityRegistry,
+        address feeRegistry,
+        uint256 walletId
+    ) SessionHandler(owner, entryPoint, reputationRegistry, identityRegistry, feeRegistry, walletId) {}
 
     /**
      * @notice Exposes _packValidationData for round-trip testing.

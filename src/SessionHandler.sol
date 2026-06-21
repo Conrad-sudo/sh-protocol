@@ -71,6 +71,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     error SessionHandler_SpendingLimitExceeded();
     /// @dev Thrown when the protocol fee ETH transfer to the treasury fails.
     error SessionHandler_FeeTransferFailed();
+    /// @dev Thrown when address(0) is passed as the withdrawal recipient.
+    error SessionHandler_InvalidRecipient();
 
     /*//////////////////////////////////////////////////////////////
 
@@ -84,6 +86,8 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     address public immutable IDENTITY_REGISTRY;
     /// @dev SHRegistry providing uniswapRouter, priceOracle, treasury, and protocol fee at runtime.
     SHRegistry public immutable REGISTRY;
+    /// @dev Sequential ID assigned by SHFactory at deployment. Unique per wallet, unlike the shared ERC-8004 agentId.
+    uint256 public immutable WALLET_ID;
     /// @dev Maps each registered session key address to its Session configuration.
     mapping(address => Session) sessions;
     /// @dev Maps (sessionKey, selector) to whether that selector is whitelisted for the session.
@@ -157,12 +161,21 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
      * @param identityRegistry   The ERC-8004 Identity Registry address.
      * @param registry           The SHRegistry address supplying uniswapRouter, priceOracle, treasury,
      *                           and protocol fee at runtime.
+     * @param walletId           Sequential wallet ID assigned by SHFactory.
      */
-    constructor(address owner, address entryPoint, address reputationRegistry, address identityRegistry, address registry) Ownable(owner) {
+    constructor(
+        address owner,
+        address entryPoint,
+        address reputationRegistry,
+        address identityRegistry,
+        address registry,
+        uint256 walletId
+    ) Ownable(owner) {
         ENTRY_POINT = entryPoint;
         REPUTATION_REGISTRY = reputationRegistry;
         IDENTITY_REGISTRY = identityRegistry;
         REGISTRY = SHRegistry(registry);
+        WALLET_ID = walletId;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -325,19 +338,24 @@ contract SessionHandler is IAccount, Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Withdraws ERC20 tokens or native ETH from the wallet to the owner. Only callable by the owner.
+     * @notice Withdraws ERC20 tokens or native ETH from the wallet to a recipient chosen by the owner.
+     *         Only callable by the owner.
      * @dev Pass address(0) as `token` to withdraw native ETH. Reverts with SessionHandler_NotEnoughBalance
-     *      if the wallet holds less than `amount`.
+     *      if the wallet holds less than `amount`. `to` is owner-supplied so that an owner that is itself
+     *      a multisig (e.g. a Safe) can send funds directly to their final destination in a single
+     *      approved transaction, rather than withdrawing to the multisig and then forwarding again.
      * @param token  ERC20 token address to withdraw, or address(0) for native ETH.
      * @param amount Amount to withdraw in the token's base units (e.g. 1e6 for 1 USDC at 6 decimals).
+     * @param to     Recipient address for the withdrawn funds.
      */
-    function withdraw(address token, uint256 amount) external onlyOwner {
+    function withdraw(address token, uint256 amount, address to) external onlyOwner {
+        if (to == address(0)) revert SessionHandler_InvalidRecipient();
         if (token != address(0)) {
             if (IERC20(token).balanceOf(address(this)) < amount) revert SessionHandler_NotEnoughBalance();
-            SafeERC20.safeTransfer(IERC20(token), owner(), amount);
+            SafeERC20.safeTransfer(IERC20(token), to, amount);
         } else {
             if (address(this).balance < amount) revert SessionHandler_NotEnoughBalance();
-            (bool success,) = payable(owner()).call{value: amount}("");
+            (bool success,) = payable(to).call{value: amount}("");
             if (!success) {
                 revert SessionHandler_ExecutionFailed();
             }

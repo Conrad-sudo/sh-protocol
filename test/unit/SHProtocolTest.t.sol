@@ -1163,7 +1163,7 @@ contract SHProtocolTest is Test {
      */
     function testPackValidationDataRoundTrip(bool sigFailed, uint48 validAfter, uint48 validUntil) public {
         SessionHandlerHarness sessionHandlerHarness =
-            new SessionHandlerHarness(config.account, config.entryPoint, config.reputationRegistry, config.identityRegistry, address(feeRegistry));
+            new SessionHandlerHarness(config.account, config.entryPoint, config.reputationRegistry, config.identityRegistry, address(feeRegistry), 0);
         uint256 packed = sessionHandlerHarness.packValidationData(sigFailed, validAfter, validUntil);
         // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(uint160(packed), sigFailed ? 1 : 0);

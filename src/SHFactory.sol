@@ -22,7 +22,12 @@ contract SHFactory is Ownable, Pausable {
     /// @notice The ERC-8004 Identity Registry baked into every deployed SessionHandler.
     address private immutable IDENTITY_REGISTRY;
 
-    event WalletDeployed(address indexed walletAddress, address indexed owner);
+    /// @notice Total number of wallets deployed. Doubles as the next walletId to assign.
+    uint256 public totalWallets;
+    /// @notice Maps each sequential walletId to its deployed SessionHandler address.
+    mapping(uint256 => address) public wallets;
+
+    event WalletDeployed(address indexed walletAddress, address indexed owner, uint256 indexed walletId);
 
     /**
      * @param _entryPoint         The canonical ERC-4337 EntryPoint address.
@@ -49,15 +54,19 @@ contract SHFactory is Ownable, Pausable {
     }
 
     function deployWallet() external payable whenNotPaused returns (address) {
+        uint256 walletId = totalWallets;
         SessionHandler sessionHandler =
-            new SessionHandler(msg.sender, ENTRY_POINT, REPUTATION_REGISTRY, IDENTITY_REGISTRY, REGISTRY);
+            new SessionHandler(msg.sender, ENTRY_POINT, REPUTATION_REGISTRY, IDENTITY_REGISTRY, REGISTRY, walletId);
+
+        wallets[walletId] = address(sessionHandler);
+        totalWallets = walletId + 1;
 
         (bool success,) = payable(address(sessionHandler)).call{value: msg.value}("");
         if (!success) {
             revert SHFactory_FundTransferFailed();
         }
 
-        emit WalletDeployed(address(sessionHandler), msg.sender);
+        emit WalletDeployed(address(sessionHandler), msg.sender, walletId);
         return address(sessionHandler);
     }
 }
