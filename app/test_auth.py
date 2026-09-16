@@ -594,8 +594,67 @@ def test_chains_lists_only_deployed_served_chains():
     check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == api.FORK_MODE, str(chains))
 
 
+def test_google_sign_in_and_linking():
+    """
+    The Google routes, with token verification stubbed: the real check calls Google, and what is
+    under test here is what the API does with a verified (sub, email) pair.
+    """
+    print("\n[12] Google sign-in creates, finds and links accounts by `sub`, never by email")
+    identities = {
+        "tok-new": ("sub-new", "gnew@example.com"),
+        "tok-clash": ("sub-clash", "pw@example.com"),
+        "tok-link": ("sub-link", "someone-else@example.com"),
+        "tok-noemail": ("sub-noemail", None),
+    }
+    original = auth.verify_google_id_token
+    auth.verify_google_id_token = lambda token: identities[token]
+    try:
+        c = make_client()
+
+        r = c.post("/api/auth/google", json={"id_token": "tok-new"})
+        check("a first Google sign-in creates the account", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+        first = r.json()
+        check("and sets the refresh cookie", api.REFRESH_COOKIE in r.cookies)
+        me = c.get("/api/me", headers={"Authorization": f"Bearer {first['access_token']}"}).json()
+        check("the account is Google-linked with no password",
+              me["google_linked"] is True and me["has_password"] is False and me["email"] == "gnew@example.com",
+              str(me))
+
+        again = c.post("/api/auth/google", json={"id_token": "tok-new"}).json()
+        check("signing in again reaches the same account", again["user_id"] == first["user_id"], str(again))
+
+        r = c.post("/api/auth/google", json={"id_token": "tok-noemail"})
+        check("a Google account without a verified email still gets an account", r.status_code == 200,
+              f"{r.status_code} {r.text[:120]}")
+
+        # A password account already owns this email: no silent merge.
+        pw = c.post("/api/auth/signup", json={"email": "pw@example.com", "password": "hunter2hunter2"}).json()
+        pw_headers = {"Authorization": f"Bearer {pw['access_token']}"}
+        check("a password account reports has_password",
+              c.get("/api/me", headers=pw_headers).json()["has_password"] is True)
+        r = c.post("/api/auth/google", json={"id_token": "tok-clash"})
+        check("Google with a password account's email -> 409", r.status_code == 409, str(r.status_code))
+        check("the refusal says how to link instead", "link google" in r.text.lower(), r.text[:160])
+        check("and no account was created for that sub", db.get_user_by_google_sub("sub-clash") is None)
+
+        # The safe direction: signed in with the password, then link.
+        r = c.post("/api/auth/google/link", json={"id_token": "tok-clash"}, headers=pw_headers)
+        check("a signed-in user can link Google", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+        check("the account now shows Google as linked",
+              c.get("/api/me", headers=pw_headers).json()["google_linked"] is True)
+        r = c.post("/api/auth/google", json={"id_token": "tok-clash"})
+        check("and Google now signs into that same account",
+              r.status_code == 200 and r.json()["user_id"] == pw["user_id"], f"{r.status_code} {r.text[:120]}")
+
+        check("linking needs a session", c.post("/api/auth/google/link", json={"id_token": "tok-link"}).status_code == 401)
+        r = c.post("/api/auth/google/link", json={"id_token": "tok-new"}, headers=pw_headers)
+        check("linking a Google account that belongs to someone else -> 409", r.status_code == 409, str(r.status_code))
+    finally:
+        auth.verify_google_id_token = original
+
+
 def test_rate_limit():
-    print("\n[12] credential endpoints are rate limited")
+    print("\n[13] credential endpoints are rate limited")
     c = make_client(rate_limit=True)
     codes = [
         c.post(
@@ -620,6 +679,7 @@ if __name__ == "__main__":
         test_contacts_are_web_only_and_per_account()
         test_chat_history_shows_only_the_conversation()
         test_chains_lists_only_deployed_served_chains()
+        test_google_sign_in_and_linking()
         test_rate_limit()
     finally:
         os.unlink(_tmp_db.name)

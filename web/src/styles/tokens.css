@@ -64,6 +64,16 @@
   /* Shape and structure */
   --rs-panel-border-radius: var(--mf-radius-card);
   --rs-sidenav-inverse-bg: var(--mf-navy);
+
+  /* Status tags (StatusTag): soft fill, dark text, AA in both themes. */
+  --mf-tag-success-bg: #e7f5ef;
+  --mf-tag-success-text: #066644;
+  --mf-tag-neutral-bg: #eef1f5;
+  --mf-tag-neutral-text: #3d4a5c;
+  --mf-tag-warning-bg: #fbf1e1;
+  --mf-tag-warning-text: #7a4f0e;
+  --mf-tag-danger-bg: #fbeaea;
+  --mf-tag-danger-text: #a52b2b;
 }
 
 .rs-theme-dark {
@@ -119,4 +129,34 @@
   /* RSuite's dark default (primary-600) is 3.3:1 against the white item text. */
   --rs-sidenav-inverse-selected-bg: var(--rs-primary-700);
   --rs-sidenav-inverse-hover-bg: var(--rs-primary-800);
+
+  /*
+   * Messages. RSuite's dark default is a solid fill with white text — loud on a calm dark page, and
+   * white on its blue is under AA. A tint of the state colour with ordinary text reads better.
+   */
+  --rs-message-info-bg: rgb(127 176 230 / 12%);
+  --rs-message-info-border: rgb(127 176 230 / 35%);
+  --rs-message-info-text: var(--rs-text-primary);
+  --rs-message-info-icon: #7fb0e6;
+  --rs-message-success-bg: rgb(43 183 126 / 12%);
+  --rs-message-success-border: rgb(43 183 126 / 35%);
+  --rs-message-success-text: var(--rs-text-primary);
+  --rs-message-success-icon: #2bb77e;
+  --rs-message-warning-bg: rgb(224 163 64 / 12%);
+  --rs-message-warning-border: rgb(224 163 64 / 35%);
+  --rs-message-warning-text: var(--rs-text-primary);
+  --rs-message-warning-icon: #e0a340;
+  --rs-message-error-bg: rgb(229 99 95 / 12%);
+  --rs-message-error-border: rgb(229 99 95 / 35%);
+  --rs-message-error-text: var(--rs-text-primary);
+  --rs-message-error-icon: #e5635f;
+
+  --mf-tag-success-bg: rgb(43 183 126 / 16%);
+  --mf-tag-success-text: #6fd4a8;
+  --mf-tag-neutral-bg: rgb(147 163 184 / 16%);
+  --mf-tag-neutral-text: #c3cedb;
+  --mf-tag-warning-bg: rgb(224 163 64 / 16%);
+  --mf-tag-warning-text: #e9bd72;
+  --mf-tag-danger-bg: rgb(229 99 95 / 16%);
+  --mf-tag-danger-text: #f09896;
 }

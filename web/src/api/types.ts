@@ -13,6 +13,8 @@ export interface Me {
   user_id: number
   email: string | null
   owner_addr: string | null
+  /** False for an account created through Google. */
+  has_password: boolean
   google_linked: boolean
   telegram_linked: boolean
   wallet_chains: number[]

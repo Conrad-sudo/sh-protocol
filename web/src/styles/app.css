@@ -345,3 +345,131 @@
   gap: 12px;
   margin-top: 32px;
 }
+
+/* ── Utilities ──────────────────────────────────────────────────────────── */
+
+.mf-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.mf-address {
+  font-size: 0.95em;
+}
+
+/* "or" rule between the password form and the Google button */
+
+.mf-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  color: var(--rs-text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mf-or::before,
+.mf-or::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-google-button {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+}
+
+/* ── Settings ───────────────────────────────────────────────────────────── */
+
+.mf-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 12px 0;
+}
+
+.mf-settings-row + .mf-settings-row {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-settings-row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mf-settings-row-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mf-settings-row-action .mf-google-button {
+  width: 260px;
+  max-width: 100%;
+}
+
+.mf-settings-note {
+  margin-top: 12px;
+}
+
+/* Status tags */
+
+.mf-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.mf-tag[data-tone='success'] {
+  background: var(--mf-tag-success-bg);
+  color: var(--mf-tag-success-text);
+}
+
+.mf-tag[data-tone='neutral'] {
+  background: var(--mf-tag-neutral-bg);
+  color: var(--mf-tag-neutral-text);
+}
+
+.mf-tag[data-tone='warning'] {
+  background: var(--mf-tag-warning-bg);
+  color: var(--mf-tag-warning-text);
+}
+
+.mf-tag[data-tone='danger'] {
+  background: var(--mf-tag-danger-bg);
+  color: var(--mf-tag-danger-text);
+}
+
+/* Tabular figures only where numbers line up: Inter's `tnum` also widens the hyphen. */
+.mf-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * RSuite paints messages on a hard-coded white base (`.rs-message { background: #fff }`) and lays
+ * the state tint over it. Our dark tints are translucent, so dark mode needs a dark base.
+ */
+.rs-theme-dark .rs-message {
+  background: var(--rs-bg-card);
+}

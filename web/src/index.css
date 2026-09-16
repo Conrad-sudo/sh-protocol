@@ -13,7 +13,6 @@ body {
   min-height: 100dvh;
   color: var(--rs-text-primary);
   font-family: var(--rs-font-family-base);
-  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
 

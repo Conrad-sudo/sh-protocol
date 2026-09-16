@@ -25,6 +25,7 @@ export const ME = {
   user_id: 7,
   email: 'sam@example.com',
   owner_addr: null,
+  has_password: true,
   google_linked: false,
   telegram_linked: false,
   wallet_chains: [],

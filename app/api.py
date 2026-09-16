@@ -564,13 +564,17 @@ def me(user_id: int = Depends(get_current_user)):
     """
     Returns the signed-in account, without anything secret.
 
-    @return  The account's id, email, bound EOA, whether Telegram is linked, and its wallets.
+    @return  The account's id, email, bound EOA, which sign-in methods it has, whether Telegram is
+             linked, and its wallets.
     """
     user = get_user_by_id(user_id)
     return {
         "user_id": user["id"],
         "email": user["email"],
         "owner_addr": user["owner_addr"],
+        # A Google-created account has no password; the settings page says so rather than implying
+        # an email login that would always fail.
+        "has_password": user["password_hash"] is not None,
         "google_linked": user["google_sub"] is not None,
         "telegram_linked": user["telegram_chat_id"] is not None,
         "wallet_chains": get_wallet_chains(user_id),

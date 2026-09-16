@@ -3,6 +3,7 @@ import { createBrowserRouter } from 'react-router'
 import { RouterProvider } from 'react-router/dom'
 import { queryClient } from './api/queryClient'
 import { AuthProvider } from './auth/AuthProvider'
+import { GoogleProvider } from './auth/GoogleProvider'
 import { routes } from './routes'
 
 const router = createBrowserRouter(routes)
@@ -10,9 +11,11 @@ const router = createBrowserRouter(routes)
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <RouterProvider router={router} />
-      </AuthProvider>
+      <GoogleProvider>
+        <AuthProvider>
+          <RouterProvider router={router} />
+        </AuthProvider>
+      </GoogleProvider>
     </QueryClientProvider>
   )
 }

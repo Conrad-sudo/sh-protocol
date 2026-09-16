@@ -34,6 +34,11 @@ the API, so the page and the API share an origin.
 Set `VITE_API_URL` only if the API is served from a different origin (e.g. `https://api.mitfah.com`);
 by default requests go to the same origin.
 
+**Google sign-in** uses the same `GOOGLE_CLIENT_ID` as the API: `vite.config.ts` reads it from the
+repo's `.env` (only that one value — the rest of that file never reaches the bundle).
+`VITE_GOOGLE_CLIENT_ID` in `web/.env.local` overrides it. With neither set, Google buttons are
+hidden. Setup steps are in [docs/setup.md](../docs/setup.md).
+
 ## Where things live
 
 - `src/api/client.ts` — every API call goes through `apiFetch`. The access token is kept in memory
@@ -47,7 +52,10 @@ by default requests go to the same origin.
 - `src/routes.tsx` — the route tree.
 
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
-  written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block.
+  written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. For status labels
+  use `StatusTag`, not RSuite's coloured `Tag` (its white-on-colour text fails contrast). Use the
+  `.mf-num` class for numbers that should line up (tabular figures are off by default, because
+  Inter's version also widens hyphens).
 - `src/theme/` — light/dark handling. `index.html` repeats the same rule in a small script so dark
   mode applies before the first paint.
 - `public/brand/`, `public/favicon.svg`, `public/icon-*.png` — logo assets derived from

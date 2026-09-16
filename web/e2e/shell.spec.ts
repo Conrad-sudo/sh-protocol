@@ -9,13 +9,14 @@ const TOKEN = { access_token: 'e2e-token', token_type: 'bearer', expires_in: 900
 const ME = {
   user_id: 7,
   email: 'sam@example.com',
-  owner_addr: null,
+  owner_addr: null as string | null,
+  has_password: true,
   google_linked: false,
   telegram_linked: false,
   wallet_chains: [],
 }
 
-async function mockApi(page: Page, { signedIn }: { signedIn: boolean }) {
+async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; me?: typeof ME }) {
   let session = signedIn
   // A predicate, not the glob '**/api/**': in dev, Vite serves source files such as
   // /src/api/client.ts, and the glob would answer those with mock JSON too.
@@ -32,7 +33,7 @@ async function mockApi(page: Page, { signedIn }: { signedIn: boolean }) {
         session = false
         return route.fulfill({ json: { status: 'signed out' } })
       case '/api/me':
-        return route.fulfill({ json: ME })
+        return route.fulfill({ json: me })
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
@@ -114,6 +115,20 @@ test('the app shell fits the screen', async ({ page }, testInfo) => {
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'settings')
+})
+
+test('settings shows sign-in methods and the wallet owner', async ({ page }, testInfo) => {
+  const owner = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+  await mockApi(page, { signedIn: true, me: { ...ME, owner_addr: owner } })
+  await page.goto('/settings')
+
+  await expect(page.getByText('Sign-in methods')).toBeVisible()
+  await expect(page.getByTitle(owner)).toContainText('0xf39F…2266')
+  await expect(page.getByRole('button', { name: 'Copy address' })).toBeVisible()
+  // No client ID in test runs, so Google is offered nowhere.
+  await expect(page.getByText('Not available yet')).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'settings-owner')
 })
 
 test('signing out lands on the sign-in page', async ({ page }) => {

@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
-import { Button, Form, Message, PasswordInput, PasswordStrengthMeter, Schema, Text } from 'rsuite'
+import { Button, Form, Loader, Message, PasswordInput, PasswordStrengthMeter, Schema, Text } from 'rsuite'
 import { signup, type Credentials } from '../api/auth'
 import { ApiError } from '../api/client'
+import { googleEnabled } from '../auth/google'
 import { useAuth } from '../auth/useAuth'
+import { GoogleButton } from '../components/GoogleButton'
+import { OrDivider } from '../components/OrDivider'
+import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import { passwordStrength, STRENGTH_LABELS } from '../lib/passwordStrength'
 
 const { StringType } = Schema.Types
@@ -23,6 +27,7 @@ export function SignupPage() {
   const [params] = useSearchParams()
   const [value, setValue] = useState<Credentials>({ email: params.get('email') ?? '', password: '' })
   const submit = useMutation({ mutationFn: signup, onSuccess: signIn })
+  const google = useGoogleSignIn()
 
   const next = params.get('next')
   const loginLink = (email?: string) => {
@@ -56,6 +61,12 @@ export function SignupPage() {
           )}
         </Message>
       )}
+      {google.error && (
+        <Message type="error" showIcon style={{ marginTop: 20 }}>
+          {google.error.message}{' '}
+          {google.error.emailTaken && <Link to={loginLink()}>Sign in with your password</Link>}
+        </Message>
+      )}
 
       <Form
         fluid
@@ -63,7 +74,10 @@ export function SignupPage() {
         model={model}
         formValue={value}
         onChange={formValue => setValue(formValue as Credentials)}
-        onSubmit={formValue => submit.mutate(formValue as Credentials)}
+        onSubmit={formValue => {
+          google.reset()
+          submit.mutate(formValue as Credentials)
+        }}
       >
         <Form.Group controlId="email">
           <Form.Label>Email</Form.Label>
@@ -80,6 +94,24 @@ export function SignupPage() {
           Create account
         </Button>
       </Form>
+
+      {googleEnabled && (
+        <>
+          <OrDivider />
+          {google.pending ? (
+            <Loader center={false} content="Creating your account with Google…" />
+          ) : (
+            <GoogleButton
+              text="signup_with"
+              onCredential={token => {
+                submit.reset()
+                google.onCredential(token)
+              }}
+              onFailure={google.onFailure}
+            />
+          )}
+        </>
+      )}
 
       <Text className="mf-auth-alt">
         Already have an account? <Link to={loginLink()}>Sign in</Link>

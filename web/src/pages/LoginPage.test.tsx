@@ -41,6 +41,14 @@ describe('LoginPage', () => {
     expect(await screen.findByText('Incorrect email or password.')).toBeInTheDocument()
   })
 
+  it('offers no Google button when no client ID is configured', async () => {
+    stubApi(() => json(200, TOKEN))
+    renderRoutes(routes, '/login')
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(screen.queryByRole('separator', { name: 'or' })).toBeNull()
+    expect(document.querySelector('.mf-google-button')).toBeNull()
+  })
+
   it('explains rate limiting', async () => {
     stubApi(() => json(429, { error: 'Rate limit exceeded' }))
     renderRoutes(routes, '/login')

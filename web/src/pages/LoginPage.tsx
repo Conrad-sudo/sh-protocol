@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
-import { Button, Form, Message, PasswordInput, Schema, Text } from 'rsuite'
+import { Button, Form, Loader, Message, PasswordInput, Schema, Text } from 'rsuite'
 import { login, type Credentials } from '../api/auth'
 import { ApiError } from '../api/client'
+import { googleEnabled } from '../auth/google'
 import { useAuth } from '../auth/useAuth'
+import { GoogleButton } from '../components/GoogleButton'
+import { OrDivider } from '../components/OrDivider'
+import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 
 const { StringType } = Schema.Types
 
@@ -20,14 +24,15 @@ function errorMessage(error: unknown) {
 }
 
 /**
- * Email + password sign-in. On success the session starts, and RedirectIfSignedIn (around this
- * page) sends the user on to `?next=` or the dashboard.
+ * Email + password or Google sign-in. On success the session starts, and RedirectIfSignedIn (around
+ * this page) sends the user on to `?next=` or the dashboard.
  */
 export function LoginPage() {
   const { signIn } = useAuth()
   const [params] = useSearchParams()
   const [value, setValue] = useState<Credentials>({ email: params.get('email') ?? '', password: '' })
   const submit = useMutation({ mutationFn: login, onSuccess: signIn })
+  const google = useGoogleSignIn()
 
   const next = params.get('next')
   const signupLink = next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'
@@ -43,6 +48,11 @@ export function LoginPage() {
           {errorMessage(submit.error)}
         </Message>
       )}
+      {google.error && (
+        <Message type="error" showIcon style={{ marginTop: 20 }}>
+          {google.error.message}
+        </Message>
+      )}
 
       <Form
         fluid
@@ -50,7 +60,10 @@ export function LoginPage() {
         model={model}
         formValue={value}
         onChange={formValue => setValue(formValue as Credentials)}
-        onSubmit={formValue => submit.mutate(formValue as Credentials)}
+        onSubmit={formValue => {
+          google.reset()
+          submit.mutate(formValue as Credentials)
+        }}
       >
         <Form.Group controlId="email">
           <Form.Label>Email</Form.Label>
@@ -64,6 +77,24 @@ export function LoginPage() {
           Sign in
         </Button>
       </Form>
+
+      {googleEnabled && (
+        <>
+          <OrDivider />
+          {google.pending ? (
+            <Loader center={false} content="Signing in with Google…" />
+          ) : (
+            <GoogleButton
+              text="signin_with"
+              onCredential={token => {
+                submit.reset()
+                google.onCredential(token)
+              }}
+              onFailure={google.onFailure}
+            />
+          )}
+        </>
+      )}
 
       <Text className="mf-auth-alt">
         New to Mitfah? <Link to={signupLink}>Create an account</Link>

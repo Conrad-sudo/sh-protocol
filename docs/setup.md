@@ -16,6 +16,12 @@ Before running any setup, make sure you have completed the one-time steps:
 
 4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). `GOOGLE_CLIENT_ID` is needed only for Google sign-in, `TELEGRAM_BOT_USERNAME` only to mint Telegram deep links, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a wallet-binding message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from binding a victim's address.
    >
+   > **Google sign-in (optional).** Until `GOOGLE_CLIENT_ID` is set, the web app hides every Google button. To turn it on:
+   > 1. In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials), create an **OAuth client ID** of type **Web application**.
+   > 2. Under **Authorized JavaScript origins**, add `http://localhost:3000` and `http://localhost` (dev), and later `https://mitfah.com`. No redirect URI is needed — the button uses a popup.
+   > 3. Put the client ID in `.env` as `GOOGLE_CLIENT_ID=…`. The API uses it to check each token's audience, and `web/vite.config.ts` reads the same value for the button, so restart both `make api` and `npm run dev`.
+   > 4. Publishing the OAuth consent screen needs a homepage, privacy policy and terms URLs on your domain (the web app's legal pages arrive in a later phase). While the app is in *Testing* mode, only the test users you list can sign in.
+   >
    > **The LLM provider is optional too.** The agent defaults to Anthropic's Claude (`ANTHROPIC_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
 
 ---
