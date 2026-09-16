@@ -129,7 +129,9 @@ def signup_and_bind(c: TestClient, acct, email: str) -> dict:
     headers = {"Authorization": f"Bearer {body['access_token']}"}
 
     nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    message = f"session-key-infra wants you to sign in with your Ethereum account.\nNonce: {nonce}"
+    message = api.auth.build_siwe_message(
+        next(iter(api.auth.SIWE_DOMAINS)), acct.address, nonce, CHAIN_ID
+    )
     signature = Account.sign_message(encode_defunct(text=message), acct.key).signature.hex()
     r = c.post(
         "/api/auth/siwe/verify",

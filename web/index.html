@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Mitfah</title>
+    <meta name="description" content="An AI assistant for your crypto wallet that can only spend what you allow." />
+    <meta name="theme-color" content="#F6F8FB" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#07111F" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+  </head>
+  <body>
+    <script>
+      // Dark before first paint. RSuite's CustomProvider sets this class too, but only after React
+      // mounts. Mirrors src/theme/themeStore.ts — same key, same rule.
+      try {
+        var choice = localStorage.getItem('mitfah-theme')
+        var dark = choice === 'dark' ||
+          (choice !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        if (dark) document.body.classList.add('rs-theme-dark')
+      } catch (e) {}
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

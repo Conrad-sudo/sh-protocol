@@ -1,0 +1,119 @@
+/*
+ * Mitfah design tokens, layered over RSuite 6's.
+ *
+ * Must load AFTER rsuite.min.css: RSuite declares light variables on :root and dark ones on
+ * .rs-theme-dark (a class CustomProvider puts on <body>), and these use the same selectors so the
+ * later declaration wins.
+ *
+ * Colours are sampled from Key-logo.png: navy ring, green circuit. RSuite's primary scale runs light
+ * (50) to dark (900) in both themes; primary buttons use 500 in light and 700 in dark.
+ */
+
+:root {
+  /* Brand */
+  --mf-navy: #062a4e;
+  --mf-green: #0a8a5a;
+  --mf-warning: #9a6412;
+  --mf-danger: #c93a3a;
+  --mf-muted: #5b6b80;
+  --mf-font-heading: 'Manrope Variable', 'Inter Variable', system-ui, sans-serif;
+  --mf-radius-card: 12px;
+
+  /* RSuite primary scale: green */
+  --rs-primary-50: #e7f5ef;
+  --rs-primary-100: #c4e7d8;
+  --rs-primary-200: #9dd8bf;
+  --rs-primary-300: #6fc6a2;
+  --rs-primary-400: #3faf82;
+  --rs-primary-500: #0a8a5a;
+  --rs-primary-600: #087a50;
+  --rs-primary-700: #066644;
+  --rs-primary-800: #055236;
+  --rs-primary-900: #033826;
+
+  /* 500 with white text is 4.4:1, just under AA; 600 is 5.4:1. */
+  --rs-btn-primary-bg: var(--rs-primary-600);
+  --rs-btn-primary-hover-bg: var(--rs-primary-700);
+  --rs-btn-primary-active-bg: var(--rs-primary-800);
+
+  /* Surfaces and text */
+  --rs-body: #f6f8fb;
+  --rs-bg-card: #ffffff;
+  --rs-border-primary: #e3e8ef;
+  --rs-text-primary: #0e1726;
+  --rs-text-heading: #0e1726;
+  --rs-text-secondary: var(--mf-muted);
+  --rs-text-link: #1b4677;
+  --rs-text-link-hover: var(--mf-navy);
+
+  /* States */
+  --rs-state-success: var(--mf-green);
+  --rs-state-warning: var(--mf-warning);
+  --rs-state-error: var(--mf-danger);
+
+  /* Red buttons (color="red") fill with red-500. RSuite's #F44336 is 3.7:1 against white text. */
+  --rs-red-500: #c93a3a;
+  --rs-red-600: #b83232;
+  --rs-red-700: #a52b2b;
+  --rs-red-800: #8a2323;
+
+  /* Type */
+  --rs-font-family-base: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --rs-font-family-monospace: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Shape and structure */
+  --rs-panel-border-radius: var(--mf-radius-card);
+  --rs-sidenav-inverse-bg: var(--mf-navy);
+}
+
+.rs-theme-dark {
+  color-scheme: dark;
+
+  --mf-navy: #1b4677;
+  --mf-green: #2bb77e;
+  --mf-warning: #e0a340;
+  --mf-danger: #e5635f;
+  --mf-muted: #93a3b8;
+
+  --rs-primary-50: #e6f7f0;
+  --rs-primary-100: #bfebd9;
+  --rs-primary-200: #95ddbf;
+  --rs-primary-300: #69cfa5;
+  --rs-primary-400: #45c290;
+  --rs-primary-500: #2bb77e;
+  --rs-primary-600: #22a06d;
+  --rs-primary-700: #1a8659;
+  --rs-primary-800: #136b47;
+  --rs-primary-900: #0b4a31;
+
+  /* 700 with white text is 4.6:1. */
+  --rs-btn-primary-bg: var(--rs-primary-700);
+  --rs-btn-primary-hover-bg: var(--rs-primary-600);
+  --rs-btn-primary-active-bg: var(--rs-primary-800);
+
+  --rs-body: #07111f;
+  --rs-bg-card: #0e1b2c;
+  --rs-border-primary: #1c2b40;
+  --rs-text-primary: #e6edf5;
+  --rs-text-heading: #e6edf5;
+  --rs-text-secondary: var(--mf-muted);
+  --rs-text-link: #7fb0e6;
+  --rs-text-link-hover: #a9cbf0;
+
+  /*
+   * Re-declared here, not inherited from :root: a var() is resolved where it is declared, so the
+   * :root copies carry the LIGHT --mf-* values, and RSuite's own .rs-theme-dark block would win on
+   * <body> anyway. Any token written as var(--mf-…) needs a line in this block.
+   */
+  --rs-state-success: var(--mf-green);
+  --rs-state-warning: var(--mf-warning);
+  --rs-state-error: var(--mf-danger);
+
+  /* 5.7:1 against white text. --mf-danger stays the lighter red, for text on the dark page. */
+  --rs-red-500: #b83a36;
+  --rs-red-600: #a8332f;
+  --rs-red-700: #962c29;
+  --rs-red-800: #7a2421;
+
+  --rs-sidenav-inverse-bg: #0a1a2e;
+}

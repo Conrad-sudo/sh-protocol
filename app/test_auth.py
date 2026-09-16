@@ -18,6 +18,7 @@ _tmp_db.close()
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-0123456789abcdef")
 os.environ["COOKIE_SECURE"] = "0"          # the test client speaks http
 os.environ["TELEGRAM_BOT_USERNAME"] = "test_wallet_bot"
+os.environ["SIWE_DOMAIN"] = "localhost:3000"   # explicit, so a SIWE_DOMAIN in .env cannot move it
 
 import db                                   # noqa: E402
 db.DB_PATH = _tmp_db.name
@@ -25,6 +26,7 @@ db.init_db()
 
 from fastapi.testclient import TestClient   # noqa: E402
 from eth_account import Account             # noqa: E402
+from eth_account.messages import encode_defunct  # noqa: E402
 
 import api                                  # noqa: E402
 import auth                                 # noqa: E402
@@ -192,46 +194,98 @@ def test_identity_comes_from_token_not_body():
     check("the refusal names the SIWE step", "siwe" in r.text.lower(), r.text[:160])
 
 
-def test_siwe_binding_and_deployer_check():
-    print("\n[5] SIWE binds an address, and only that address may deploy")
-    c = make_client()
-    signed_in = c.post("/api/auth/signup", json={"email": "d@example.com", "password": "hunter2hunter2"}).json()
-    headers = {"Authorization": f"Bearer {signed_in['access_token']}"}
-
-    acct = Account.create()
-    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    message = f"session-key-infra wants you to sign in with your Ethereum account.\nNonce: {nonce}"
-    signature = Account.sign_message(
-        __import__("eth_account").messages.encode_defunct(text=message), acct.key
-    ).signature.hex()
-
-    r = c.post(
+def siwe_verify(c: TestClient, headers: dict, acct, message: str, nonce: str):
+    """Signs `message` with `acct` and posts it to the SIWE verify endpoint."""
+    signature = Account.sign_message(encode_defunct(text=message), acct.key).signature.hex()
+    return c.post(
         "/api/auth/siwe/verify",
         headers=headers,
         json={"message": message, "signature": signature, "nonce": nonce},
     )
+
+
+def new_signed_in(c: TestClient, email: str) -> dict:
+    """Signs up a fresh account and returns its auth headers."""
+    body = c.post("/api/auth/signup", json={"email": email, "password": "hunter2hunter2"}).json()
+    return {"Authorization": f"Bearer {body['access_token']}"}
+
+
+def test_siwe_binding_and_deployer_check():
+    print("\n[5] SIWE binds an address, and only that address may deploy")
+    c = make_client()
+    headers = new_signed_in(c, "d@example.com")
+
+    acct = Account.create()
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    check("the nonce is alphanumeric, as EIP-4361 requires", nonce.isalnum() and len(nonce) >= 8, nonce)
+    message = auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111)
+
+    r = siwe_verify(c, headers, acct, message, nonce)
     check("a valid signature binds the address", r.status_code == 200, r.text[:160])
     check("the recovered address is right", r.json()["owner_addr"] == acct.address, r.text[:160])
 
     # The nonce is single-use.
-    r = c.post(
-        "/api/auth/siwe/verify",
-        headers=headers,
-        json={"message": message, "signature": signature, "nonce": nonce},
-    )
+    r = siwe_verify(c, headers, acct, message, nonce)
     check("replaying the same nonce is refused", r.status_code == 400, str(r.status_code))
 
-    # A signature over a message that does not carry the issued nonce.
+    # A signature over text that is not a SIWE message at all.
     fresh = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    other = Account.sign_message(
-        __import__("eth_account").messages.encode_defunct(text="unrelated message"), acct.key
-    ).signature.hex()
-    r = c.post(
-        "/api/auth/siwe/verify",
-        headers=headers,
-        json={"message": "unrelated message", "signature": other, "nonce": fresh},
+    r = siwe_verify(c, headers, acct, f"unrelated message {fresh}", fresh)
+    check("a non-SIWE message is refused, even carrying the nonce", r.status_code == 400, str(r.status_code))
+
+    # A well-formed message whose Nonce field is a different, also-issued nonce.
+    other_nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    r = siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, other_nonce, 1), fresh)
+    check("a message carrying a different nonce is refused", r.status_code == 400, str(r.status_code))
+
+    # The phishing case the domain check exists for: another site fetched a nonce from us and had the
+    # victim sign a message naming ITSELF (so the victim's wallet showed no mismatch warning).
+    victim = Account.create()
+    attacker = new_signed_in(c, "attacker@example.com")
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    phished = auth.build_siwe_message("evil.example", victim.address, nonce, 1)
+    r = siwe_verify(c, attacker, victim, phished, nonce)
+    check("a message written for another site is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("the refusal names the other site", "evil.example" in r.text, r.text[:160])
+    r = c.get("/api/me", headers=attacker)
+    check("and the victim's address was not bound", r.json()["owner_addr"] is None, r.text[:160])
+
+    # A message that names one address but is signed by another describes someone else.
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    r = siwe_verify(
+        c, new_signed_in(c, "mismatch@example.com"), acct,
+        auth.build_siwe_message("localhost:3000", victim.address, nonce, 1), nonce,
     )
-    check("a message not carrying the nonce is refused", r.status_code == 400, str(r.status_code))
+    check("a signer different from the named address is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+
+    # Expired.
+    from datetime import datetime, timedelta, timezone
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    stale = auth.build_siwe_message(
+        "localhost:3000", victim.address, nonce, 1,
+        expiration_time=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    r = siwe_verify(c, new_signed_in(c, "expired@example.com"), victim, stale, nonce)
+    check("an expired message is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+
+    # The layouts viem's createSiweMessage actually produces must all be accepted: with a statement,
+    # with a scheme on the domain, and with a live expiry. Each on a fresh account and address,
+    # since an address binds to one account only.
+    for label, build in [
+        ("a message with a statement",
+         lambda a, n: auth.build_siwe_message("localhost:3000", a, n, 1, statement="Link this wallet to Mitfah.")),
+        ("a message with an https:// scheme",
+         lambda a, n: auth.build_siwe_message("localhost:3000", a, n, 1).replace(
+             "localhost:3000 wants", "https://localhost:3000 wants", 1)),
+        ("a message with a future expiry",
+         lambda a, n: auth.build_siwe_message(
+             "localhost:3000", a, n, 1, expiration_time=datetime.now(timezone.utc) + timedelta(minutes=5))),
+    ]:
+        signer = Account.create()
+        nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+        r = siwe_verify(c, new_signed_in(c, f"{signer.address[2:10].lower()}@example.com"),
+                        signer, build(signer.address, nonce), nonce)
+        check(f"{label} is accepted", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
 
     # Deploying from an address this account did NOT prove it holds.
     r = c.post(
@@ -429,8 +483,106 @@ def test_contacts_are_web_only_and_per_account():
           c.delete("/api/contacts/sandy", headers=a_headers).status_code == 404)
 
 
+def test_chat_history_shows_only_the_conversation():
+    """
+    GET /api/chat/history returns what was SAID, never the tool traffic around it.
+
+    Tool messages and tool-call arguments carry the session-key ciphertext, so the stub thread below
+    plants a marker in every place a ciphertext can sit and asserts it never reaches the response.
+    The real agent is not needed (or wanted: it would call Anthropic) -- only its checkpointed state.
+    """
+    print("\n[10] chat history returns what was said, never tool traffic")
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    import smart_wallet_agent
+
+    secret = "CIPHERTEXT-must-never-leave-0xdeadbeef"
+    thread = [
+        HumanMessage(content="send 5 usdc to sandy"),
+        # A tool-only turn: no text, arguments carrying the secret.
+        AIMessage(content="", tool_calls=[{"name": "get_session_keys", "args": {"x": secret}, "id": "t1"}]),
+        ToolMessage(content=secret, tool_call_id="t1"),
+        # The announcement-before-a-transaction turn: text AND a tool_use block, as Anthropic returns it.
+        AIMessage(
+            content=[
+                {"type": "text", "text": "Sending transaction, hold tight."},
+                {"type": "tool_use", "id": "t2", "name": "transfer_erc20", "input": {"ciphertext": secret}},
+            ],
+            tool_calls=[{"name": "transfer_erc20", "args": {"ciphertext": secret}, "id": "t2"}],
+        ),
+        ToolMessage(content=f"ok {secret}", tool_call_id="t2"),
+        AIMessage(content="Done: sent 5 USDC to sandy."),
+    ]
+    threads_read = []
+
+    class StubAgent:
+        def get_state(self, config):
+            threads_read.append(config["configurable"]["thread_id"])
+            return SimpleNamespace(values={"messages": thread})
+
+    original = smart_wallet_agent.agent
+    smart_wallet_agent.agent = StubAgent()
+    try:
+        c = make_client()
+        body = c.post("/api/auth/signup", json={"email": "chat@example.com", "password": "hunter2hunter2"}).json()
+        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        url = "/api/chat/history?chain_id=11155111"
+
+        check("history needs a token", c.get(url).status_code == 401)
+
+        r = c.get(url, headers=headers)
+        check("history is readable when signed in", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+        got = r.json()["messages"]
+        check("only the conversation comes back, oldest first", got == [
+            {"role": "user", "text": "send 5 usdc to sandy"},
+            {"role": "assistant", "text": "Sending transaction, hold tight."},
+            {"role": "assistant", "text": "Done: sent 5 USDC to sandy."},
+        ], str(got))
+        check("the ciphertext never appears", secret not in r.text)
+        check("the thread read is the caller's own",
+              threads_read[-1] == f"{body['user_id']}:11155111", str(threads_read))
+
+        r = c.get(url + "&limit=1", headers=headers)
+        check("limit keeps the most recent", r.json()["messages"] == [
+            {"role": "assistant", "text": "Done: sent 5 USDC to sandy."}
+        ], r.text[:160])
+        check("a limit over 200 -> 422", c.get(url + "&limit=201", headers=headers).status_code == 422)
+        check("an unsupported chain -> 400",
+              c.get("/api/chat/history?chain_id=999999", headers=headers).status_code == 400)
+    finally:
+        smart_wallet_agent.agent = original
+
+
+def test_chains_lists_only_deployed_served_chains():
+    print("\n[11] /api/chains lists chains that are served AND deployed")
+    conn = db.get_db()
+    conn.execute("DELETE FROM factory")
+    conn.executemany(
+        "INSERT INTO factory (chain_id, address) VALUES (?, ?)",
+        [(11155111, ADDR), (56, ADDR), (999999, ADDR)],   # 999999: deployed, but not served
+    )
+    conn.commit()
+
+    c = make_client()
+    r = c.get("/api/chains")
+    check("the chain list is public", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    chains = r.json()["chains"]
+    ids = [x["chain_id"] for x in chains]
+    check("served chains with a factory are listed, in order", ids == [56, 11155111], str(ids))
+    check("a factory on a chain this server does not serve is left out", 999999 not in ids)
+    check("a served chain with no factory is left out", 1 not in ids)
+
+    by_id = {x["chain_id"]: x for x in chains}
+    check("each carries its name and native ticker",
+          by_id[11155111]["name"] == "sepolia" and by_id[11155111]["native_ticker"] == "ETH"
+          and by_id[56]["native_ticker"] == "BNB", str(chains))
+    check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == api.FORK_MODE, str(chains))
+
+
 def test_rate_limit():
-    print("\n[10] credential endpoints are rate limited")
+    print("\n[12] credential endpoints are rate limited")
     c = make_client(rate_limit=True)
     codes = [
         c.post(
@@ -453,6 +605,8 @@ if __name__ == "__main__":
         test_owner_actions_are_guarded()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
+        test_chat_history_shows_only_the_conversation()
+        test_chains_lists_only_deployed_served_chains()
         test_rate_limit()
     finally:
         os.unlink(_tmp_db.name)

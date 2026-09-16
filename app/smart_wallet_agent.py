@@ -5,7 +5,7 @@ import os
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from db import DB_PATH
@@ -367,7 +367,53 @@ def chat(user_id: int, chain_id: int, user_input: str) -> str:
       return response["messages"][-1].content
     except Exception as e:
          return f"Sorry, something went wrong while processing your request {e}."
-     
+
+
+def _message_text(content) -> str:
+    """The plain text of a message, dropping tool_use and other non-text blocks."""
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def get_history(user_id: int, chain_id: int, limit: int) -> list[dict]:
+    """
+    The visible conversation for a user on a chain, oldest first: what they typed and what the
+    assistant said back.
+
+    Filtered, not dumped. Tool messages and tool-call arguments carry the session-key ciphertext and
+    raw calldata, so only human text and the text of assistant messages leave this function. An
+    assistant message that only called a tool has no text and is skipped; one that announced a
+    transaction before calling a tool keeps its announcement.
+
+    The thread is shared with Telegram, so this includes messages sent there.
+
+    Sync on purpose, like chat(): the checkpointer is async, and its sync reads work only from a
+    thread other than the event loop's -- FastAPI's threadpool, for a plain `def` handler.
+
+    @param user_id   The application user ID, from the caller's token.
+    @param chain_id  The chain whose conversation to read.
+    @param limit     The most recent messages to return.
+    @return          [{"role": "user" | "assistant", "text": str}, ...].
+    """
+    state = agent.get_state({"configurable": {"thread_id": thread_id(user_id, chain_id)}})
+    visible = []
+    for message in state.values.get("messages", []):
+        if isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, AIMessage):
+            role = "assistant"
+        else:
+            continue
+        text = _message_text(message.content).strip()
+        if text:
+            visible.append({"role": role, "text": text})
+    return visible[-limit:]
+
 
 if __name__ == "__main__":
     asyncio.run(main())

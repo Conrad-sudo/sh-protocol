@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<style>
+.ring{fill:none;stroke:#062A4E;stroke-width:6}
+.circuit{fill:none;stroke:#0A8A5A;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.dots{fill:#0A8A5A}
+@media (prefers-color-scheme: dark){.ring{stroke:#7FB0E6}.circuit{stroke:#2BB77E}.dots{fill:#2BB77E}}
+</style>
+<circle class="ring" cx="32" cy="32" r="26"/>
+<g class="circuit"><polyline points="32,32 38.5,25.5 38.5,21.5 44,16"/><polyline points="32,32 27.5,38 18.5,49.5"/><polyline points="14,32.5 24,32.5 24,38"/><polyline points="24,38 39.5,38"/><polyline points="37,38 39.5,34.5 50,34.5"/><polyline points="25.5,42.5 32,42.5 32,50"/><polyline points="36.5,38 43,47"/></g>
+<g class="dots"><circle cx="14" cy="32.5" r="3.2"/><circle cx="50" cy="34.5" r="3.2"/><circle cx="32" cy="50" r="3.2"/><circle cx="32" cy="32" r="4.2"/></g>
+</svg>

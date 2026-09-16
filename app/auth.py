@@ -14,8 +14,10 @@ user's browser, not here.
 
 import hashlib
 import os
+import re
 import secrets
 import time
+from datetime import datetime, timezone
 
 import jwt
 from argon2 import PasswordHasher
@@ -244,39 +246,156 @@ def revoke_refresh(token: str):
 # ── SIWE (EIP-4361) wallet binding ────────────────────────────────────────────
 
 
+# The site(s) a SIWE message must name as its `domain`. This check is what makes SIWE worth having.
+# The nonce endpoint is open, so a phishing page can fetch a nonce and get a victim to sign it; the
+# victim's wallet shows the domain written in the message (MetaMask warns when it does not match the
+# page asking), so that page has to write ITS OWN domain -- and this set refuses it. Without the
+# check, the victim's address would be bound to the attacker's account, and since owner_addr is
+# UNIQUE the victim could never bind it to their own.
+#
+# Comma-separated, for an apex plus www. Defaults to the local dev server, so a production deploy
+# that forgets to set it fails closed: every bind is refused rather than every domain accepted.
+SIWE_DOMAINS = {
+    d.strip().lower() for d in os.getenv("SIWE_DOMAIN", "localhost:3000").split(",") if d.strip()
+}
+
+# EIP-4361's layout, exactly as viem's createSiweMessage writes it: optional scheme, a one-line
+# optional statement, then the fields in the order the spec fixes. Anchored at both ends so nothing
+# can ride along outside it.
+_SIWE_MESSAGE = re.compile(
+    r"\A(?:[a-zA-Z][a-zA-Z0-9+.-]*://)?(?P<domain>[^\s/]+)"
+    r" wants you to sign in with your Ethereum account:\n"
+    r"(?P<address>0x[0-9a-fA-F]{40})\n"
+    r"\n"
+    r"(?:[^\n]+\n)?"
+    r"\n"
+    r"URI: [^\n]+\n"
+    r"Version: 1\n"
+    r"Chain ID: [0-9]+\n"
+    r"Nonce: (?P<nonce>[a-zA-Z0-9]{8,})\n"
+    r"Issued At: [^\n]+"
+    r"(?:\nExpiration Time: (?P<expiration_time>[^\n]+))?"
+    r"(?:\nNot Before: (?P<not_before>[^\n]+))?"
+    r"(?:\nRequest ID: [^\n]*)?"
+    r"(?:\nResources:(?:\n- [^\n]+)+)?"
+    r"\Z"
+)
+
+
 def issue_siwe_nonce() -> str:
     """
     Issues a nonce to embed in a SIWE message.
 
+    Hex, because EIP-4361 requires an alphanumeric nonce and client libraries enforce it --
+    token_urlsafe's `-` and `_` would be rejected before the user ever saw the message.
+
     @return  The nonce, to be included in the message the user signs.
     """
-    nonce = secrets.token_urlsafe(16)
+    nonce = secrets.token_hex(16)
     save_siwe_nonce(nonce)
     return nonce
 
 
+def build_siwe_message(
+    domain: str,
+    address: str,
+    nonce: str,
+    chain_id: int,
+    statement: str | None = None,
+    expiration_time: datetime | None = None,
+) -> str:
+    """
+    Writes a SIWE message in the layout verify_siwe accepts.
+
+    The web app builds its message with viem's createSiweMessage; this produces the same text, for
+    the tests and any client that is not a browser.
+
+    @param domain           The site the message is for; must be in SIWE_DOMAINS to verify.
+    @param address          The address that will sign it.
+    @param nonce            From issue_siwe_nonce.
+    @param chain_id         The chain the signing wallet is on.
+    @param statement        Optional one-line text shown to the user.
+    @param expiration_time  Optional timezone-aware expiry.
+    @return                 The message to sign.
+    """
+    def iso(t: datetime) -> str:
+        return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    message = (
+        f"{domain} wants you to sign in with your Ethereum account:\n{address}\n\n"
+        + (f"{statement}\n" if statement else "")
+        + f"\nURI: http://{domain}\nVersion: 1\nChain ID: {chain_id}\nNonce: {nonce}\n"
+        + f"Issued At: {iso(datetime.now(timezone.utc))}"
+    )
+    if expiration_time:
+        message += f"\nExpiration Time: {iso(expiration_time)}"
+    return message
+
+
+def _siwe_time(value: str) -> datetime:
+    """Parses a SIWE timestamp, refusing one with no timezone (its meaning would be a guess)."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unreadable time in the message: {value}")
+    return parsed
+
+
 def verify_siwe(message: str, signature: str, nonce: str) -> str:
     """
-    Recovers and returns the address that signed a SIWE message.
+    Checks a SIWE message and returns the address that signed it.
 
-    The nonce is burned on the way through, so a captured (message, signature) pair cannot be
-    replayed to bind the same address again. The nonce is also required to appear IN the message:
-    without that check a signature over any other text could be presented alongside a fresh nonce.
+    In order, each check before anything that costs state:
+    - the text must be an EIP-4361 message, so every field below is read from a fixed place;
+    - its domain must be this site (see SIWE_DOMAINS for why this is the check that matters);
+    - its Nonce field must equal the issued nonce -- exactly, not merely appear somewhere;
+    - Expiration Time / Not Before, when present, must hold now;
+    - the nonce is burned, so a captured (message, signature) pair cannot be replayed;
+    - the signer must be the address the message names, or the message is describing someone else.
+
+    The chain ID is parsed but not restricted: binding an owner address is not a per-chain act, and
+    refusing a user whose wallet happens to sit on another network would add friction, not safety.
 
     @param message    The exact message the user signed.
     @param signature  The hex signature returned by their wallet.
     @param nonce      The nonce this message was supposed to carry.
     @return           The checksummed address that produced the signature.
-    @raises HTTPException 400 if the nonce is stale/unknown/absent, or the signature is unreadable.
+    @raises HTTPException 400 if any check fails.
     """
-    if nonce not in message:
+    parsed = _SIWE_MESSAGE.match(message)
+    if parsed is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "That is not a Sign-In With Ethereum (EIP-4361) message"
+        )
+    if parsed["domain"].lower() not in SIWE_DOMAINS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"This message was written for {parsed['domain']}, not for this site",
+        )
+    if parsed["nonce"] != nonce:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The signed message does not carry this nonce")
+
+    now = datetime.now(timezone.utc)
+    if parsed["expiration_time"] and _siwe_time(parsed["expiration_time"]) <= now:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in message has expired")
+    if parsed["not_before"] and _siwe_time(parsed["not_before"]) > now:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in message is not valid yet")
+
     if not consume_siwe_nonce(nonce, SIWE_NONCE_TTL_SECS):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown or expired nonce")
     try:
-        return Account.recover_message(encode_defunct(text=message), signature=signature)
+        signer = Account.recover_message(encode_defunct(text=message), signature=signature)
     except Exception:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not verify that signature")
+
+    if signer.lower() != parsed["address"].lower():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The message names a different address from the one that signed it",
+        )
+    return signer
 
 
 # ── Google sign-in ────────────────────────────────────────────────────────────

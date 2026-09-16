@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -73,6 +73,7 @@ from auth import get_current_user
 from smart_wallet_agent import (
     chat,
     close_checkpointer,
+    get_history,
     init_agent,
     open_checkpointer,
 )
@@ -715,6 +716,31 @@ def post_chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
     return {"reply": chat(user_id, req.chain_id, req.message)}
 
 
+@app.get("/api/chat/history")
+def chat_history(
+    chain_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    user_id: int = Depends(get_current_user),
+):
+    """
+    Returns the recent conversation for one chain, so the web chat is not blank after a reload.
+
+    Only what was said is returned -- the user's messages and the assistant's text. Tool traffic
+    stays inside: those messages carry the session-key ciphertext. See smart_wallet_agent.get_history.
+    The thread is shared with Telegram, so messages sent there appear too.
+
+    A plain `def` for the same reason as post_chat: the checkpointer's sync read must not run on the
+    event loop.
+
+    @param chain_id  The chain whose conversation to read.
+    @param limit     How many of the most recent messages to return (1-200).
+    @return          {"chain_id", "messages": [{"role": "user" | "assistant", "text"}, ...]}, oldest first.
+    """
+    if chain_id not in CHAIN_NAME_BY_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
+    return {"chain_id": chain_id, "messages": get_history(user_id, chain_id, limit)}
+
+
 def _require_own_deployer(user_id: int, deployer: str):
     """
     Refuses a deploy unless the deploying EOA is the one this account proved it holds via SIWE.
@@ -746,6 +772,40 @@ def _require_own_deployer(user_id: int, deployer: str):
             f"This account is linked to {owner_addr}, not {deployer}. Switch accounts in your "
             "wallet, or link the new address first.",
         )
+
+
+@app.get("/api/chains")
+def list_chains():
+    """
+    Lists the chains a user can deploy a wallet on with this server.
+
+    A chain qualifies when this deployment serves it (CHAIN_NAME_BY_ID) AND the protocol is deployed
+    there (a `factory` row). The front end builds its network picker from this rather than from a
+    list of its own that would drift from the server's.
+
+    Public and RPC-free, like /api/tokens: it reads two local tables and says nothing that is not
+    already public on chain.
+
+    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork"}, ...]}, by chain ID.
+             `fork` is true when this server points that chain at a local fork (APP_FORK_MODE).
+    """
+    chains = []
+    for chain_id, name in sorted(CHAIN_NAME_BY_ID.items()):
+        try:
+            get_factory_address(chain_id)
+        except ValueError:
+            continue
+        try:
+            native_ticker = get_native_asset_ticker(chain_id)
+        except ValueError:
+            native_ticker = None
+        chains.append({
+            "chain_id": chain_id,
+            "name": name,
+            "native_ticker": native_ticker,
+            "fork": FORK_MODE and chain_id in FORKABLE_CHAIN_IDS,
+        })
+    return {"chains": chains}
 
 
 @app.get("/api/tokens")

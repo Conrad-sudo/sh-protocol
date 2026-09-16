@@ -37,6 +37,7 @@ JWT_SECRET=                                     # REQUIRED for the API; long ran
 GOOGLE_CLIENT_ID=                               # optional — only for Google sign-in
 CORS_ORIGINS=http://localhost:3000              # comma-separated; the refresh cookie needs credentialed CORS
 COOKIE_SECURE=1                                 # set 0 for local http development
+SIWE_DOMAIN=localhost:3000                      # the site SIWE messages must name; mitfah.com in production (comma-separated)
 
 # HashiCorp Vault — populated automatically by `make vault`
 VAULT_ADDR=http://127.0.0.1:8200
