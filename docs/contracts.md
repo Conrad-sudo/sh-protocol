@@ -30,19 +30,20 @@ src/
 script/
 ├── DeploySHProtocol.s.sol     ← Deployment entry point (SHTreasury → SHOracle → agent → SHRegistry → setRegistry → module → setSpendingLimitModule → SHFactory → setFactory)
 ├── Constants.s.sol            ← Chain IDs, canonical addresses, per-network token/Chainlink-feed addresses, Anvil mock prices
-├── HelperConfig.s.sol         ← Chain-specific configuration resolver (Mainnet, Sepolia, BSC, Anvil)
+├── HelperConfig.s.sol         ← Chain-specific configuration resolver (Mainnet, Sepolia, BSC, Arbitrum, Anvil)
 └── SendPackedUserOp.s.sol     ← ERC-7579 UserOp construction and signing helper (single + batch)
 
 test/
 ├── unit/
 │   ├── SHProtocolTest.t.sol            ← Core unit suite: deploy, module lifecycle, metering, approvals, trusted spenders (61 tests)
-│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (14 tests)
+│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (37 tests)
 │   └── SpendingLimitModuleHarness.sol ← Test harness exposing the module's internal calldata/approval helpers
 ├── fork/
 │   ├── SHForkTestBase.sol              ← Shared abstract fork suite (10 tests) parameterized per network
 │   ├── SHUniswapV2Test.t.sol           ← Mainnet-fork instance (WETH→DAI)
 │   ├── SHSepoliaUniswapV2Test.t.sol    ← Sepolia-fork instance (WETH→USDC)
-│   └── SHPancakeswapV2Test.t.sol       ← BSC-fork instance (USDT→WBNB→LINK)
+│   ├── SHPancakeswapV2Test.t.sol       ← BSC-fork instance (USDT→WBNB→LINK)
+│   └── SHArbitrumUniswapV2Test.t.sol   ← Arbitrum-fork instance (WETH→USDC) + L2 sequencer-gate tests
 └── invariant/
     ├── InvariantSH.t.sol  ← Stateful invariant tests (8 invariants)
     └── SHHandler.sol      ← Action handler for fuzzing, with a ghost metering model
@@ -178,9 +179,18 @@ uint256 public totalFeesCollected;
 
 ## `SHFactory.sol`
 
-`SHFactory` is the user-facing entry point for deploying new `SessionHandler` wallets. It deploys a single `SessionHandler` implementation in its constructor, then `deployWallet(...)` creates each user's wallet as an **EIP-1167 minimal-proxy clone** and calls `initialize()` on it — which installs the configured `SpendingLimitModule` as a **hook** and seeds the wallet's spending-cap configuration. ETH sent with the call is forwarded to the new wallet as the initial gas prefund.
+`SHFactory` is the user-facing entry point for deploying new `SessionHandler` wallets. It deploys a single `SessionHandler` implementation in its constructor, then `deployWallet(...)` creates each user's wallet as an **EIP-1167 minimal-proxy clone** and calls `initialize()` on it — which installs the configured `SpendingLimitModule` as a **hook**, seeds the wallet's spending-cap configuration, and applies the two owner-only grants (session key, trusted spenders) that used to need a follow-up transaction each. ETH sent with the call is forwarded to the new wallet as the initial gas prefund.
 
-`deployWallet` takes the per-wallet spending-cap config so each wallet is born with a cap, a window, and its watched-token set:
+**One transaction is enough.** `deployWallet` takes the per-wallet spending-cap config *and* `sessionKey` + `trustedSpenders`, so a wallet is fully usable the moment it is deployed. Previously onboarding was three owner-signed transactions (`deployWallet`, then `addSession`, then `addTrustedSpender`); those two functions remain for later re-grants but are no longer part of the deploy path. They cannot be batched through `execute` — see the two guards described under `SessionHandler` — which is why seeding them in `initialize` is the only way to get to one signature.
+
+**Wallets are deployed with CREATE2.** The salt is `keccak256(abi.encode(msg.sender, deployCount[msg.sender]))`, so `predictWalletAddress(owner)` returns the address that owner's *next* deploy will produce, before it exists. Binding the owner into the salt is what makes that prediction safe to publish: no other caller can reach the same salt, so a predicted address cannot be squatted.
+
+The nonce is a **per-owner** counter held by the factory, not a caller-supplied value and not a global one. A global counter (`totalWallets`, say) would make a predicted address depend on how many wallets *everyone else* had deployed, so any other user's deploy landing first would move it — which would defeat the point, since the address is what the wallet's session key is derived against. Two consequences worth knowing:
+
+- A prediction is only valid for **one factory instance** — the deployer is baked into a CREATE2 address, so redeploying `SHFactory` invalidates every previously shown address.
+- Calling `deployWallet` again simply consumes the next nonce and yields another wallet — one EOA may own several. A salt can never repeat, so there is no collision case and no "already deployed" error. **Enforcing one-wallet-per-user is the caller's job**: read `deployCount(owner)` and refuse when it is non-zero, which is a free view rather than a reverted transaction the user pays for. That check means "does this USER have a wallet" only when the user is `msg.sender` — i.e. when they sign their own deploy. A caller deploying on users' behalf from one shared EOA (as `app/deploy_wallet.py` does) sees a counter covering all its users and must track per-user ownership itself.
+
+Knowing the address up front is also what lets an off-chain caller derive the wallet's **session key** before deploying it — the key's Vault entry is stored under the wallet address, so without CREATE2 it could not be minted until after the deploy that needs it as an argument.
 
 The factory stores **no** protocol addresses of its own. EntryPoint, both ERC-8004 registries, and the `SpendingLimitModule` are read off the registry at `deployWallet` time, so correcting any of them is a single registry call rather than a factory redeploy. `SHFactory` itself owns only the clone implementation and the wallet index.
 
@@ -193,9 +203,26 @@ constructor(
 /// Deploys a new SessionHandler owned by msg.sender; forwards msg.value as ETH prefund.
 /// dailyLimitUsd (18 decimals, >= 0), windowDuration (seconds, > 0), and watchedTokens (each
 /// must already be priced by the oracle) seed the hook's onInstall config.
+/// sessionKey is authorized on the new wallet (address(0) = owner-only wallet); every entry in
+/// trustedSpenders is granted the unpriced-approval exemption (may be empty). Both are applied
+/// inside initialize(), so no follow-up owner transaction is needed.
+/// Salted with (msg.sender, deployCount[msg.sender]), which is consumed here — so calling twice
+/// yields two distinct wallets rather than reverting.
 /// Reverts with SHFactory_SpendingLimitModuleNotSet if the registry has no module set yet.
-function deployWallet(int256 dailyLimitUsd, uint256 windowDuration, address[] calldata watchedTokens)
-    external payable whenNotPaused returns (address);
+function deployWallet(
+    int256 dailyLimitUsd,
+    uint256 windowDuration,
+    address[] calldata watchedTokens,
+    address sessionKey,
+    address[] calldata trustedSpenders
+) external payable whenNotPaused returns (address);
+
+/// The address `owner`'s NEXT deployWallet call will produce, before it is deployed.
+function predictWalletAddress(address owner) external view returns (address);
+
+/// How many wallets `owner` has deployed. Doubles as their next salt nonce, and as a
+/// "does this user already have a wallet?" check a front end can read before asking for a signature.
+mapping(address owner => uint256) public deployCount;
 
 function pause() external onlyOwner;      // via SHTreasury.pauseFactory
 function unpause() external onlyOwner;    // via SHTreasury.unpauseFactory
@@ -222,10 +249,18 @@ The module calls it directly (there is no interpreter layer). `getPrice` returns
 
 **Staleness protection:** each registered feed has its **own** heartbeat, set once at construction — volatile assets (ETH, LINK, BTC) update roughly hourly, stablecoins every 23–24 hours. `getPrice` reverts with `PriceOracle_StalePrice` if `block.timestamp - updatedAt > heartbeat` for that feed, and with `PriceOracle_InvalidPrice` on a non-positive answer. (The error names retain the `PriceOracle_` prefix from the contract's earlier name.)
 
-```solidity
-constructor(address[] memory tokens, address[] memory priceFeeds, uint256[] memory heartbeats);
+**L2 sequencer gate:** on an L2 the heartbeat check alone is not enough — Chainlink publishes updates *through* the sequencer, so an outage freezes every feed at an answer whose `updatedAt` still looks recent. `_requireSequencerUp()` runs at the top of `_stalePriceCheck` (so it covers `getPrice`, `getNativeFee`, and every module valuation) and reverts with `PriceOracle_SequencerDown` while the uptime feed reads down or reports an uninitialised round, and `PriceOracle_SequencerGracePeriod` until the sequencer has been back for longer than `SEQUENCER_GRACE_PERIOD` (1 hour). `SEQUENCER_UPTIME_FEED` is **immutable**, comes from `HelperConfig.sequencerUptimeFeed`, and is `address(0)` on chains with no sequencer — which skips the check entirely. The constructor probes a non-zero feed once and rejects anything that cannot answer or that answers with something other than the 0/1 status flag (`PriceOracle_InvalidSequencerFeed`), catching a price feed passed in by mistake. `isPriced` is a plain storage read and stays answerable through an outage. Blast radius and rationale: [THREAT_MODEL.md](../THREAT_MODEL.md) §3.14.
 
-/// True if `token` has a registered feed (safe to watch/approve/price).
+```solidity
+constructor(
+    address owner,
+    address sequencerUptimeFeed,   // address(0) on a chain with no sequencer
+    address[] memory tokens,
+    address[] memory priceFeeds,
+    uint256[] memory heartbeats
+);
+
+/// True if `token` has a registered feed (safe to watch/approve/price). Never gated by the sequencer.
 function isPriced(address token) external view returns (bool);
 
 /// USD value of `amount` of `token`, 18 decimals, signed (int256 for arithmetic parity with the module).
@@ -249,24 +284,31 @@ The `SessionHandler` is an **ERC-7579 smart account** (extends OpenZeppelin's `A
 
 Session-key management and cap configuration are plain `onlyOwner`. Note that the module also refuses `execute`-routed calls to its own setters for *every* caller, owner included — see `SpendingLimitModule` below.
 
-**Session keys are a bare allowlist.** `addSession(key)` / `removeSession(key)` — no per-key target/selector scope, no expiry. A session key can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of target addresses via `sessionTargetAllowlist` (off by default). Nothing is trusted at deploy: the owner grants a router with `addTrustedSpender` before `removeLiquidity`'s LP-token approval will pass.
+**Session keys are a bare allowlist.** `addSession(key)` / `removeSession(key)` — no per-key target/selector scope, no expiry. A session key can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of target addresses via `sessionTargetAllowlist` (off by default). A key and a trusted router are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
+
+**Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and `removeLiquidity`'s LP-token approval then fails until the owner grants a router. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
 ```solidity
 /// Called once by SHFactory on each freshly cloned wallet (replaces the constructor).
 /// Installs the module as a HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens),
-/// The trusted-spender list starts EMPTY; the owner grants a router with addTrustedSpender.
-function initialize(
-    address owner,
-    address entryPointAddress,
-    address reputationRegistry,
-    address identityRegistry,
-    address registry,
-    uint256 walletId,
-    address spendingLimitModule,
-    int256 dailyLimitUsd,
-    uint256 windowDuration,
-    address[] calldata watchedTokens
-) external;
+/// authorizes cfg.sessionKey if non-zero, and grants each cfg.trustedSpenders entry.
+/// A struct rather than a flat parameter list purely for stack depth.
+struct InitConfig {
+    address owner;
+    address entryPoint;
+    address reputationRegistry;
+    address identityRegistry;
+    address registry;
+    uint256 walletId;
+    address spendingLimitModule;
+    int256 dailyLimitUsd;
+    uint256 windowDuration;
+    address[] watchedTokens;
+    address sessionKey;        // address(0) = owner-only wallet (not an error, unlike addSession)
+    address[] trustedSpenders; // may be empty; granted AFTER the hook is installed
+}
+
+function initialize(InitConfig calldata cfg) external;
 
 // Execution + module admin (owner escape hatch)
 function execute(bytes32 mode, bytes calldata executionCalldata) public payable override whenNotPaused onlyEntryPointOrSelfOrOwner;
@@ -356,7 +398,7 @@ struct Config {
 
 Because spending *is* the drop in watched-portfolio USD, the module needs no per-venue swap decoder: a value-neutral swap nets ~0, and a bad-rate or sandwiched swap registers its lost value automatically. Both `execute` and `executeFromExecutor` calldata are decoded for approvals; delegatecalls are not decoded (no reliable selector), but the net-value cap still applies to them.
 
-**Trusted-spender exemption (unpriced approvals).** An `approve` on a token the oracle can't price normally reverts (`TokenNotPriced`) — *unless* the spender is on the account's `trustedSpenders` list. This is the escape hatch that lets a Uniswap V2 **LP token** (which has no Chainlink feed) be approved to the router for `removeLiquidity`. The no-standing-approval and no-unlimited-approval rules still apply in full to trusted spenders — the exemption only skips the price check. The list starts empty — the owner trusts a router explicitly (the bot does this in `deploy_wallet.trust_router`).
+**Trusted-spender exemption (unpriced approvals).** An `approve` on a token the oracle can't price normally reverts (`TokenNotPriced`) — *unless* the spender is on the account's `trustedSpenders` list. This is the escape hatch that lets a Uniswap V2 **LP token** (which has no Chainlink feed) be approved to the router for `removeLiquidity`. The no-standing-approval and no-unlimited-approval rules still apply in full to trusted spenders — the exemption only skips the price check. The list starts empty unless the deployer seeds one: `SHFactory.deployWallet`'s `trustedSpenders` argument grants them inside `initialize` (this is how the bot grants the router now, from `constants.get_router`). `addTrustedSpender` remains for granting one later.
 
 **Self-guard on the module's admin surface.** `preCheck` reverts `AdminExecution` if any sub-call of the execution targets the module itself with one of its own selectors (the six config setters, `onInstall`, `onUninstall`). It runs *first*, before approvals are collected, so a refused transaction pays almost nothing. It is defence-in-depth that holds even on a host account with no guard of its own — and it deliberately blocks the **owner's** `execute` path too, because by the time `preCheck` runs `msg.sender` is the account whether an owner or a session key drove it, leaving no way to tell them apart. Nothing legitimate is lost: the owner reaches the six setters through `SessionHandler`'s `onlyOwner` passthroughs (a direct call, so no hook runs), and `onInstall`/`onUninstall` through `installModule`/`uninstallModule`, whose outer calldata is not an `execute` selector and so never reaches the check.
 
@@ -429,16 +471,19 @@ Session-key calls to the Reputation Registry (`giveFeedback`) work without any s
 
 ## `HelperConfig.s.sol`
 
-`HelperConfig` resolves chain-specific deployment parameters at runtime. Its `NetworkConfig` struct carries ~22 tokens and their Chainlink USD price feeds + heartbeats, plus the router and ERC-8004 registry addresses.
+`HelperConfig` resolves chain-specific deployment parameters at runtime. Its `NetworkConfig` struct carries ~22 tokens and their Chainlink USD price feeds + heartbeats, plus the L2 sequencer uptime feed and the ERC-8004 registry addresses. (The router is **not** protocol config — which venue a wallet trades on is a wallet-level choice; the fork suite reads it straight from `Constants.s.sol`, as an owner would.)
 
-| Network | Chain ID | EntryPoint | Router |
-|---|---|---|---|
-| Ethereum Mainnet | 1 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 |
-| Ethereum Sepolia | 11155111 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 |
-| BSC | 56 | `ENTRYPOINT_V07` (canonical) | PancakeSwap V2 |
-| Anvil (local) | 31337 | Freshly deployed, cached per session | none (`address(0)`) |
+| Network | Chain ID | EntryPoint | Router (from Constants) | Sequencer uptime feed |
+|---|---|---|---|---|
+| Ethereum Mainnet | 1 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | none (`address(0)`) |
+| Ethereum Sepolia | 11155111 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | none (`address(0)`) |
+| BSC | 56 | `ENTRYPOINT_V07` (canonical) | PancakeSwap V2 | none (`address(0)`) |
+| Arbitrum One | 42161 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | `ARB_SEQUENCER_UPTIME_FEED` |
+| Anvil (local) | 31337 | Freshly deployed, cached per session | none (`address(0)`) | none (`address(0)`) |
 
-`getConfigByChainId` falls back to `getMainnetConfig()` for any unrecognised chain ID. For Anvil, `HelperConfig` deploys a fresh `EntryPoint`, `MockV3Aggregator` feeds seeded with approximate real-world prices, and the ERC-8004 mocks (all inside `vm.startBroadcast`, so the mock token addresses land on-chain and are recoverable from the broadcast file). Sepolia uses a wide 72h heartbeat across the board (its Chainlink nodes update far less often than mainnet's — an accepted testnet characteristic). `MAINNET_DEPLOYER_PK` is a placeholder — replace it before a real mainnet deployment.
+`getConfigByChainId` **reverts with `HelperConfig__InvalidChainId`** on an unrecognised chain ID, rather than silently handing back mainnet's token and feed addresses — which would be wrong for that chain. For Anvil, `HelperConfig` deploys a fresh `EntryPoint`, `MockV3Aggregator` feeds seeded with approximate real-world prices, and the ERC-8004 mocks (all inside `vm.startBroadcast`, so the mock token addresses land on-chain and are recoverable from the broadcast file). Sepolia uses a wide 72h heartbeat across the board (its Chainlink nodes update far less often than mainnet's — an accepted testnet characteristic). The mainnet/BSC/Arbitrum deployer resolves from `MAINNET_DEPLOYER_ADDRESS`, falling back to a deterministic placeholder for fork tests — export the real one before a live deployment.
+
+**Arbitrum coverage.** 16 of the ~22 tokens carry both an official Arbitrum deployment and a Chainlink USD feed. The rest are zeroed **in pairs** — token *and* feed together — because `DeploySHProtocol` pairs the arrays positionally and `SHOracle` reads a zero token as the native-ETH sentinel, so a zero token beside a live feed would silently repoint native pricing at it. ENS, SAND, IMX and KNC have no Arbitrum feed; BNB, AVAX and wTAO have feeds but no credible token deployment on the chain.
 
 ---
 
@@ -450,7 +495,7 @@ Orchestrates deployment of all shared infrastructure. Individual `SessionHandler
 
 1. Instantiate `HelperConfig`; build parallel `(tokens, priceFeeds, heartbeats)` arrays.
 2. Deploy `SHTreasury()` — the admin root, deployed **first** so its address can own everything below.
-3. Deploy `SHOracle(address(treasury), tokens, priceFeeds, heartbeats)` — born owned by the treasury.
+3. Deploy `SHOracle(address(treasury), config.sequencerUptimeFeed, tokens, priceFeeds, heartbeats)` — born owned by the treasury.
 4. Call `IIdentityRegistry.register(AGENT_URI)` to mint the agent NFT and obtain `agentId`.
 5. Deploy `SHRegistry(address(treasury), initialFee, address(treasury), address(oracle), agentId)` — owned by the treasury and paying fees to it.
 6. Call `treasury.setRegistry(address(registry))` — write-once, fixing the pairing.
@@ -502,7 +547,7 @@ Totals: **60** unit + **13** guard + **8** invariant (local), and **33** fork (1
 
 **`test/unit/SHProtocolTest.t.sol` (61 tests)** — deploy/factory config, module lifecycle (install/uninstall/reinstall, `isModuleType` hook-only), config setters (limit/window/watched-token cap, non-owner reverts), session-key allowlist, **net-value metering** (transfer pricing, inflow-offset within a tx, no-banked-credit across txs, window roll, per-token staleness isolation), **approvals** (unlimited rejected, standing reverts, consumed-in-same-tx passes, partial reverts, approve-then-zero), **trusted spenders** (Option C: unpriced approval allowed when trusted / reverts when untrusted, unlimited still rejected, standing still reverts, remove reinstates the price gate, uninstall clears), plus the harness calldata/approval-classifier tests. Uses a `MockSpender` to consume allowances mid-batch.
 
-**`test/unit/SessionGuardTest.t.sol` (14 tests)** — drives real `EntryPoint.handleOps` end-to-end. Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
+**`test/unit/SessionGuardTest.t.sol` (37 tests)** — drives real `EntryPoint.handleOps` end-to-end. A wallet deployed with `deployWallet`'s `sessionKey` argument is driven by that key with no `addSession` call anywhere (`test_deployWallet_seededSessionKeyExecutesImmediately`). Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
 
 > **Gotcha:** the vendored account-abstraction is EntryPoint **v0.9**, whose `nonReentrant` requires `tx.origin == msg.sender` — tests must submit `handleOps` with a two-arg `vm.prank(bundler, bundler)` (EOA bundler) or it reverts `Reentrancy()`.
 
@@ -531,6 +576,7 @@ forge test --match-contract InvariantSH
 make mainnet-uniswap-test    # Uniswap V2, mainnet fork
 make sepolia-uniswap-test    # Uniswap V2, Sepolia fork  (make sepolia-test is an alias)
 make pancakeswap-test        # PancakeSwap V2, BSC fork
+make arbitrum-uniswap-test   # Uniswap V2, Arbitrum One fork (+ the live sequencer gate)
 
 # Deploy shared protocol infrastructure
 forge script script/DeploySHProtocol.s.sol \

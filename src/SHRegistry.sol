@@ -81,8 +81,7 @@ contract SHRegistry is Ownable {
     ///      for this long — wallet owners can {SessionHandler-pause} in the meantime.
     uint256 public constant ORACLE_TIMELOCK = 2 days;
 
-    /// @notice Oracle awaiting commit, or address(0) when no proposal is outstanding.
-    address public pendingPriceOracle;
+    
     /// @notice Timestamp from which {pendingPriceOracle} may be committed. Meaningless when there is
     ///         no pending proposal.
     uint256 public pendingPriceOracleEta;
@@ -96,17 +95,8 @@ contract SHRegistry is Ownable {
     ///      they were initialized with, since SessionHandler copies it into its own storage.
     address public spendingLimitModule;
 
-    /// @notice The canonical ERC-4337 EntryPoint that deployed wallets validate UserOps against.
-    /// @dev Immutable, like the two ERC-8004 registries below: SessionHandler.initialize copies this
-    ///      into the wallet's own storage at deploy time, so a later change here could never reach an
-    ///      existing wallet anyway. Making that permanence explicit is more honest than a setter that
-    ///      silently applies only to future wallets.
-    address public immutable ENTRY_POINT;
-
-    /// @notice Reputation Registry baked into every SessionHandler deployed from this registry.
-    address public immutable REPUTATION_REGISTRY;
-    /// @notice ERC-8004 Identity Registry baked into every SessionHandler deployed from this registry.
-    address public immutable IDENTITY_REGISTRY;
+    /// @notice Oracle awaiting commit, or address(0) when no proposal is outstanding.
+    address public pendingPriceOracle;
 
     /// @notice Address that receives protocol fees collected by SessionHandler wallets.
     address public treasury;
@@ -119,6 +109,19 @@ contract SHRegistry is Ownable {
     ///      because the factory takes this registry's address in its own constructor.
     address public factory;
 
+    /// @notice The canonical ERC-4337 EntryPoint that deployed wallets validate UserOps against.
+    /// @dev Immutable, like the two ERC-8004 registries below: SessionHandler.initialize copies this
+    ///      into the wallet's own storage at deploy time, so a later change here could never reach an
+    ///      existing wallet anyway. Making that permanence explicit is more honest than a setter that
+    ///      silently applies only to future wallets.
+    address public immutable ENTRY_POINT;
+
+    /// @notice Reputation Registry baked into every SessionHandler deployed from this registry.
+    address public immutable REPUTATION_REGISTRY;
+    /// @notice ERC-8004 Identity Registry baked into every SessionHandler deployed from this registry.
+    address public immutable IDENTITY_REGISTRY;
+
+    
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/

@@ -7,6 +7,7 @@ pragma solidity ^0.8.24;
 uint256 constant MAINNET_CHAIN_ID = 1;
 uint256 constant SEPOLIA_CHAIN_ID = 11155111;
 uint256 constant BSC_CHAIN_ID = 56;
+uint256 constant ARB_CHAIN_ID=42161;
 uint256 constant LOCAL_CHAIN_ID = 31337;
 
 /*//////////////////////////////////////////////////////////////
@@ -42,6 +43,16 @@ address constant SPO_UNISWAP_V2_FACTORY = 0xF62c03E08ada871A0bEb309762E260a7a6a8
 // ─── PancakeSwap ──────────────────────────────────────────────────────────────
 address constant PANCAKE_V2_ROUTER_02 = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
 address constant PANCAKE_V2_FACTORY = 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73;
+
+// ─── Arbitrum Uniswap ──────────────────────────────────────────────────────────────────
+address constant ARB_UNISWAP_V2_ROUTER=0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24;
+address constant ARB_UNISWAP_V2_FACTORY=0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9;
+
+
+// ─── Base Uniswap ──────────────────────────────────────────────────────────────────
+address constant BASE_UNISWAP_V2_ROUTER=0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24;
+address constant BASE_UNISWAP_V2_FACTORY=0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
+
 
 /*//////////////////////////////////////////////////////////////
                       ETHEREUM MAINNET
@@ -153,6 +164,64 @@ address constant BSC_YFI_USD_PRICE_FEED = 0xD7eAa5Bf3013A96e3d515c055Dbd98DbdC8c
 address constant BSC_AVAX_USD_PRICE_FEED = 0x5974855ce31EE8E1fff2e76591CbF83D7110F151;
 address constant BSC_KNC_USD_PRICE_FEED = 0xF2f8273F6b9Fc22C90891DC802cAf60eeF805cDF;
 address constant BSC_CAKE_USD_PRICE_FEED = 0xB6064eD41d4f67e353768aA239cA86f4F73665a1; // heartbeat: 1 min
+
+
+
+/*//////////////////////////////////////////////////////////////
+                            ARBITRUM
+//////////////////////////////////////////////////////////////*/
+
+// Arbitrum One (chain id 42161). Every address below was read back on-chain: tokens answered
+// symbol()/name()/decimals() as expected and each feed answered description() with the pair named
+// in its constant. Tokens with no Chainlink USD feed on Arbitrum (ENS, SAND, IMX, KNC) and feeds
+// with no credible token deployment (BNB, AVAX, TAO) are deliberately absent — see getArbConfig.
+
+// ─── Arbitrum Tokens ──────────────────────────────────────────────────────────
+address constant ARB_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831; // native Circle USDC, not USDC.e
+address constant ARB_DAI = 0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1;
+address constant ARB_USDT = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9; // Tether's Arbitrum USDT, rebranded USD₮0
+address constant ARB_WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+address constant ARB_AAVE = 0xba5DdD1f9d7F570dc94a51479a000E3BCE967196;
+address constant ARB_LINK = 0xf97f4df75117a78c1A5a0DBb814Af92458539FB4;
+address constant ARB_ONEINCH = 0x6314C31A7a1652cE482cffe247E9CB7c3f4BB9aF;
+address constant ARB_APE = 0x7f9FBf9bDd3F4105C478b996B648FE6e828a1e98; // ApeCoin's own Arbitrum deployment
+address constant ARB_ARB = 0x912CE59144191C1204E64559FE8253a0e49E6548;
+address constant ARB_WBTC = 0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f;
+address constant ARB_COMP = 0x354A6dA3fcde098F8389cad84b0182725c6C91dE;
+address constant ARB_CRV = 0x11cDb42B0EB46D95f990BeDD4695A6e3fA034978;
+address constant ARB_SUSHI = 0xd4d42F0b6DEF4CE0383636770eF773390d85c61A;
+address constant ARB_UNI = 0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0;
+address constant ARB_YFI = 0x82e3A8F066a6989666b031d916c43672085b1582;
+address constant ARB_CAKE = 0x1b896893dfc86bb67Cf57767298b9073D2c1bA2c; // PancakeSwap's own Arbitrum deployment
+
+// ─── Arbitrum Price Feeds (Chainlink) ─────────────────────────────────────────
+// Canonical Data Feed proxies only — the -svr (Smart Value Recapture) and -cre-backup variants
+// Chainlink also publishes on Arbitrum are intentionally not used here.
+address constant ARB_ETH_USD_PRICE_FEED = 0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612;
+address constant ARB_USDC_USD_PRICE_FEED = 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3;
+address constant ARB_DAI_USD_PRICE_FEED = 0xc5C8E77B397E531B8EC06BFb0048328B30E9eCfB;
+address constant ARB_USDT_USD_PRICE_FEED = 0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7;
+address constant ARB_AAVE_USD_PRICE_FEED = 0xaD1d5344AaDE45F43E596773Bcc4c423EAbdD034;
+address constant ARB_LINK_USD_PRICE_FEED = 0x86E53CF1B870786351Da77A57575e79CB55812CB;
+address constant ARB_ONEINCH_USD_PRICE_FEED = 0x4bC735Ef24bf286983024CAd5D03f0738865Aaef;
+address constant ARB_APE_USD_PRICE_FEED = 0x221912ce795669f628c51c69b7d0873eDA9C03bB;
+address constant ARB_ARB_USD_PRICE_FEED = 0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6;
+address constant ARB_BTC_USD_PRICE_FEED = 0x6ce185860a4963106506C203335A2910413708e9; // used for WBTC
+address constant ARB_COMP_USD_PRICE_FEED = 0xe7C53FFd03Eb6ceF7d208bC4C13446c76d1E5884;
+address constant ARB_CRV_USD_PRICE_FEED = 0xaebDA2c976cfd1eE1977Eac079B4382acb849325;
+address constant ARB_SUSHI_USD_PRICE_FEED = 0xb2A8BA74cbca38508BA1632761b56C897060147C;
+address constant ARB_UNI_USD_PRICE_FEED = 0x9C917083fDb403ab5ADbEC26Ee294f6EcAda2720;
+address constant ARB_YFI_USD_PRICE_FEED = 0x745Ab5b69E01E2BE1104Ca84937Bb71f96f5fB21;
+address constant ARB_CAKE_USD_PRICE_FEED = 0x256654437f1ADA8057684b18d742eFD14034C400;
+
+// ─── Arbitrum L2 Sequencer Uptime Feed ────────────────────────────────────────
+// Reports 0 while the sequencer is up and 1 while it is down, with `startedAt` marking when that
+// status began. SHOracle refuses to price anything while it reads down, or within
+// SHOracle.SEQUENCER_GRACE_PERIOD of it coming back — price feeds are published through the
+// sequencer, so an outage freezes them all without making any of them look stale.
+address constant ARB_SEQUENCER_UPTIME_FEED = 0xFdB631F5EE196F0ed6FAa767959853A9F217697D;
+
+
 
 /*//////////////////////////////////////////////////////////////
                   ANVIL FIXED PRICES

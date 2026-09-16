@@ -5,6 +5,7 @@ from web3.logs import DISCARD
 from network_config import load_network_config
 from constants import CHAIN_ID_ANVIL
 from userop import create_signed_user_op, prepare_execute_call, prepare_execute_batch_call
+from tx_sender import send_and_confirm
 
 load_dotenv()
 
@@ -19,8 +20,54 @@ GAS_BUFFER_MULTIPLIER = 1.2  # 20% headroom added to estimated gas
 PRE_VERIFICATION_GAS = 50_000
 
 
+def resolve_bundler(w3, chain_id: int):
+    """
+    Returns the account that signs outer handleOps transactions on this chain.
+
+    Plain Anvil has no real chain state to inherit, so its own burner key is safe there. Every
+    other self-bundled network — the four forks and live Sepolia — uses SEPOLIA_PRIVATE_KEY,
+    which is also their deployer key (see deploy_wallet.LIVE_PRIVATE_KEY_ENV), keeping deployer,
+    protocol owner and bundler as one address.
+
+    Whichever it is, it must stay a plain EOA: the EntryPoint pays the beneficiary with a bare
+    ETH send, which reverts AA91 against an address carrying code. That is what rules out the
+    well-known Anvil keys off plain Anvil — they are EIP-7702-delegated on real mainnet/Sepolia/BSC,
+    and a fork inherits that code.
+
+    On every network but plain Anvil this is also the deployer key, so `make fund`'s single
+    anvil_setBalance on a fork covers both roles at once.
+
+    @param w3        Web3 connection for the target network.
+    @param chain_id  EIP-155 chain ID of that network.
+    @return          A web3.py LocalAccount for the bundler key.
+    """
+    key = os.getenv("ANVIL_BUNDLER") if chain_id == CHAIN_ID_ANVIL else os.getenv("SEPOLIA_PRIVATE_KEY")
+    return w3.eth.account.from_key(key)
+
+
+def _fees(w3) -> tuple[int, int]:
+    """
+    Returns (max_fee_per_gas, max_priority_fee_per_gas) for both the UserOp and the outer tx.
+
+    A UserOp's fees are fixed at signing, so a thin cushion strands it the moment the base fee
+    climbs past the cap. The 2x base-fee headroom survives a spike of up to ~2x and is the
+    figure SessionHandler's {maxOpGasCost} was sized against ("clears a ~600k-gas swap at 2x a
+    spiking base fee"), so a legitimate op stays inside the account's own ceiling.
+
+    @param w3  Web3 connection for the target network.
+    @return    (max_fee_per_gas, max_priority_fee_per_gas), both in wei.
+    """
+    base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
+    try:
+        tip = w3.eth.max_priority_fee
+    except Exception:
+        # Some nodes don't implement eth_maxPriorityFeePerGas; a 2 gwei tip is a safe default.
+        tip = w3.to_wei(2, "gwei")
+    return 2 * base_fee + tip, tip
+
+
 def create_unsigned_user_op(
-    chat_id: int,
+    user_id: int,
     session_handler: Contract,
     key_ciphertext: str,
     entry_point: Contract,
@@ -35,7 +82,7 @@ def create_unsigned_user_op(
     via eth_estimateGas, then constructs the final op with a 20% gas buffer and the
     live gas price from the node.
 
-    @param chat_id        The Telegram chat ID of the user.
+    @param user_id        The application user ID.
     @param session_handler Bound SessionHandler contract (the UserOp sender).
     @param key_ciphertext  Vault Transit ciphertext for the session key ('vault:v1:...').
     @param entry_point     Bound EntryPoint contract.
@@ -46,12 +93,13 @@ def create_unsigned_user_op(
                            EntryPoint's final _compensate() step does a plain ETH send to it,
                            which reverts (AA91) against any address with code that lacks a
                            payable receive/fallback (e.g. an EIP-7702-delegated EOA).
-    @return                A tuple of (unsigned PackedUserOperation, outer_gas, gas_price) where
+    @return                A tuple of (unsigned PackedUserOperation, outer_gas, fees) where
                            outer_gas is 2x the estimated inner gas so the EntryPoint AA95 check
-                           passes, and gas_price is the snapshot used to build gas_fees — must be
-                           reused on the outer tx so the EntryPoint prefund check is consistent.
+                           passes, and fees is the EIP-1559 fee dict for the outer transaction,
+                           built from the same snapshot as the op's own gas_fees so the bundler
+                           is reimbursed for what it pays.
     """
-    w3, _, _ = load_network_config(chat_id)
+    w3, _, _ = load_network_config(user_id)
 
     # Use modest placeholder limits for the dummy op so the EntryPoint's prefund
     # calculation (verificationGasLimit + callGasLimit + preVerificationGas) * gasPrice
@@ -69,7 +117,7 @@ def create_unsigned_user_op(
     )
 
     signed_dummy_op = create_signed_user_op(
-        chat_id=chat_id,
+        user_id=user_id,
         user_op=dummy_op,
         entry_point=entry_point,
         key_ciphertext=key_ciphertext,
@@ -89,13 +137,47 @@ def create_unsigned_user_op(
     # verificationGasLimit + callGasLimit so the EntryPoint's AA95 check passes.
     # inner_gas: per-component limit packed into the UserOp. Set to estimated so each
     # component has enough headroom; outer_gas = 2x covers the sum.
-    gas_price = w3.eth.gas_price
+    max_fee_per_gas, max_priority_fee_per_gas = _fees(w3)
     inner_gas = int(estimated * GAS_BUFFER_MULTIPLIER)
     outer_gas = inner_gas * 2
     pre_verification_gas = PRE_VERIFICATION_GAS
 
+    # SessionHandler._validateUserOp prices the op at
+    #   (verificationGasLimit + callGasLimit + preVerificationGas) * maxFeePerGas
+    # and reverts above the account's own maxOpGasCost. That revert happens during validation, so
+    # the EntryPoint reimburses nothing and this bundler eats the whole handleOps transaction —
+    # worth one eth_call to avoid. Clamping the cap keeps the op inside the ceiling instead.
+    #
+    # The ceiling is reached sooner than it looks: both halves of accountGasLimits are set to
+    # inner_gas below, so the account prices roughly twice the gas an op really uses.
+    op_gas = 2 * inner_gas + pre_verification_gas
+    affordable_max_fee = session_handler.functions.maxOpGasCost().call() // op_gas
+    if max_fee_per_gas > affordable_max_fee:
+        base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
+        if affordable_max_fee <= base_fee:
+            raise RuntimeError(
+                f"base fee ({base_fee / 1e9:.1f} gwei) exceeds what this wallet will pay for one "
+                f"UserOp ({affordable_max_fee / 1e9:.1f} gwei over {op_gas:,} gas, capped by its "
+                f"maxOpGasCost). Submitting would revert in validation at the bundler's expense — "
+                f"retry when the base fee falls, or raise maxOpGasCost on the wallet."
+            )
+        # Trim the spike cushion, not the tip: the tip is what actually buys inclusion, and the
+        # EntryPoint reimburses at min(maxFee, tip + basefee) either way.
+        max_fee_per_gas = affordable_max_fee
+        max_priority_fee_per_gas = min(max_priority_fee_per_gas, max_fee_per_gas)
+
     account_gas_limits = (inner_gas << 128 | inner_gas).to_bytes(32, "big")
-    gas_fees = (gas_price << 128 | gas_price).to_bytes(32, "big")
+    # Packing per ERC-4337 v0.7: gasFees = maxPriorityFeePerGas (HIGH 128) | maxFeePerGas (LOW
+    # 128) — see UserOperationLib.unpack{MaxPriorityFeePerGas,MaxFeePerGas} and the matching read
+    # in SessionHandler._validateUserOp. The order only became load-bearing once the two stopped
+    # being equal, so it must not be flipped.
+    #
+    # They are a real cap-and-tip pair rather than one repeated value. The EntryPoint reimburses
+    # this bundler at min(maxFee, maxPriority + basefee) = tip + basefee, which is what the outer
+    # transaction below actually costs at the same block: the bundler is made whole and no more.
+    # Setting both halves to the cap, as the bundler-RPC path is forced to, would instead repay
+    # 2 * basefee + tip and charge the user a whole extra base fee per op.
+    gas_fees = (max_priority_fee_per_gas << 128 | max_fee_per_gas).to_bytes(32, "big")
 
     return (
         (
@@ -110,12 +192,15 @@ def create_unsigned_user_op(
             b"",
         ),
         outer_gas,
-        gas_price,
+        {
+            "maxFeePerGas": max_fee_per_gas,
+            "maxPriorityFeePerGas": max_priority_fee_per_gas,
+        },
     )
 
 
 def send_user_op_as_session(
-    chat_id: int, key_ciphertext: str, target: str, value: int, data: bytes
+    user_id: int, key_ciphertext: str, target: str, value: int, data: bytes
 ):
     """
     Orchestrates the full ERC-4337 UserOperation flow for a session key holder.
@@ -127,7 +212,7 @@ def send_user_op_as_session(
     and submits it to the EntryPoint via handleOps(). The bundler key from the environment
     signs and sends the outer transaction.
 
-    @param chat_id        The Telegram chat ID of the user.
+    @param user_id        The application user ID.
     @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
     @param target         The contract address SessionHandler will call (e.g. USDC).
     @param value          The ETH value in wei to forward with the inner call.
@@ -135,13 +220,13 @@ def send_user_op_as_session(
     @return               A tuple of (tx_hash, receipt).
     """
     session_handler, entry_point, calldata, nonce = prepare_execute_call(
-        chat_id, target, value, data
+        user_id, target, value, data
     )
-    return _submit_user_op(chat_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
+    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
 
 
 def send_batch_user_op_as_session(
-    chat_id: int, key_ciphertext: str, executions: list[tuple[str, int, bytes]]
+    user_id: int, key_ciphertext: str, executions: list[tuple[str, int, bytes]]
 ):
     """
     Batch variant of send_user_op_as_session: submits several sub-calls as ONE atomic
@@ -149,19 +234,19 @@ def send_batch_user_op_as_session(
     SpendingLimitModule reverts the whole transaction if an approval survives it, so
     [approve, spend(, approve 0)] must land together.
 
-    @param chat_id        The Telegram chat ID of the user.
+    @param user_id        The application user ID.
     @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
     @param executions     List of (target_address, value_wei, calldata_bytes) triples, in order.
     @return               A tuple of (tx_hash, receipt).
     """
     session_handler, entry_point, calldata, nonce = prepare_execute_batch_call(
-        chat_id, executions
+        user_id, executions
     )
-    return _submit_user_op(chat_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
+    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
 
 
 def _submit_user_op(
-    chat_id: int,
+    user_id: int,
     key_ciphertext: str,
     session_handler,
     entry_point,
@@ -173,17 +258,12 @@ def _submit_user_op(
     and submits it to the EntryPoint via handleOps() signed by the local bundler key. Everything
     after calldata construction is identical for single-call and batch ops.
     """
-    # FORK_DEPLOYER_PK is shared across every fork network (mainnet-fork/sepolia-fork/bsc-fork/
-    # celo-fork) — deploy_wallet.py's prefund() funds this same key, so it always has gas here.
-    w3, chain_id, _ = load_network_config(chat_id)
-    if chain_id == CHAIN_ID_ANVIL:
-        bundler = w3.eth.account.from_key(os.getenv("ANVIL_BUNDLER"))
-    else:
-        bundler = w3.eth.account.from_key(os.getenv("FORK_DEPLOYER_PK"))
+    w3, chain_id, chain_name = load_network_config(user_id)
+    bundler = resolve_bundler(w3, chain_id)
 
     print("\n[1/3] Creating transaction  ...")
-    user_op, gas_limit, gas_price = create_unsigned_user_op(
-        chat_id=chat_id,
+    user_op, gas_limit, fees = create_unsigned_user_op(
+        user_id=user_id,
         session_handler=session_handler,
         key_ciphertext=key_ciphertext,
         entry_point=entry_point,
@@ -193,7 +273,7 @@ def _submit_user_op(
     )
     print("[2/3] Signing transaction   ...")
     user_op_signed = create_signed_user_op(
-        chat_id=chat_id,
+        user_id=user_id,
         user_op=user_op,
         entry_point=entry_point,
         key_ciphertext=key_ciphertext,
@@ -205,15 +285,21 @@ def _submit_user_op(
     ).build_transaction(
         {
             "from": bundler.address,
-            "nonce": w3.eth.get_transaction_count(bundler.address),
+            # Placeholder only: send_tx overwrites this with a nonce allocated under its lock.
+            # Supplying one at all just stops build_transaction from making its own (racy)
+            # eth_getTransactionCount call while assembling the dict.
+            "nonce": 0,
             "chainId": chain_id,
             "gas": gas_limit,
-            "gasPrice": gas_price,
+            **fees,
         }
     )
-    signed_tx = w3.eth.account.sign_transaction(tx, bundler.key)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    # One bundler EOA signs for every user, so the nonce is allocated under a lock rather than
+    # read here — telebot.py serves concurrent users on separate threads. send_and_confirm also
+    # bounds the wait and replaces the transaction at a higher fee if the base fee outruns it,
+    # instead of parking a user's request on an unbounded wait_for_transaction_receipt.
+    receipt = send_and_confirm(w3, chain_name, bundler, tx)
+    tx_hash = receipt["transactionHash"]
 
     if receipt["status"] == 0:
         try:
@@ -223,7 +309,7 @@ def _submit_user_op(
                     "to": entry_point.address,
                     "data": tx["data"],
                     "gas": tx["gas"],
-                    "gasPrice": gas_price,
+                    **fees,
                 },
                 block_identifier=receipt["blockNumber"] - 1,
             )

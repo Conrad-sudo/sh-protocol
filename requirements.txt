@@ -27,3 +27,18 @@ requests==2.32.5
 # Config + Telegram front end
 python-dotenv==1.2.1
 python-telegram-bot[job-queue]==22.6
+
+# Web API + auth. Argon2 comes from argon2-cffi directly rather than passlib[argon2]:
+# passlib's last release was 2020 and it warns against modern bcrypt, while all this needs
+# is PasswordHasher().hash()/.verify(). SIWE signature recovery reuses eth-account above,
+# so no separate siwe package. Run uvicorn with --workers 1 -- tx_sender hands out bundler
+# nonces under a process-wide lock, so a second worker means a second nonce counter.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic[email]==2.12.5
+PyJWT==2.13.0
+argon2-cffi==25.1.0
+google-auth==2.58.0
+slowapi==0.1.10
+# Required by fastapi.testclient, which app/test_auth.py drives the API through.
+httpx==0.28.1

@@ -10,20 +10,20 @@ from db import get_rpc_url, get_chain_id_from_name, get_user_network
 _web3_cache: dict[str, dict] = {}
 
 
-def load_network_config(chat_id: int) -> tuple[Web3, int, str]:
+def load_network_config(user_id: int) -> tuple[Web3, int, str]:
     """
     Initializes and returns a Web3 instance connected to the RPC URL for the
     specified chain, along with the chain ID. Both values are looked up from
     the chains and rpcs tables in wallet.db.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     @return            A tuple of (Web3 instance, chain_id, chain_name).
     """
 
     
-    chain_name = get_user_network(chat_id)
+    chain_name = get_user_network(user_id)
     if chain_name is None:
-        raise ValueError(f"No network configured for user {chat_id}. Deploy first.")
+        raise ValueError(f"No network configured for user {user_id}. Deploy first.")
     
     if chain_name not in _web3_cache:
 

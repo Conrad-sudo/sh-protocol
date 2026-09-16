@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/PackedUserOperation.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
-import {MODULE_TYPE_HOOK, Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {MODULE_TYPE_HOOK, MODULE_TYPE_EXECUTOR, Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {ERC7579Utils} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
 import {PackedUserOperation as OZPackedUserOperation} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
@@ -16,6 +16,7 @@ import {SHTreasury} from "../../src/SHTreasury.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
 import {SHRegistry} from "../../src/SHRegistry.sol";
 import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
+import {MockExecutorModule} from "../../src/mocks/MockExecutorModule.sol";
 import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
@@ -76,7 +77,8 @@ contract SessionGuardTest is Test {
         watched[0] = address(usdc);
         watched[1] = address(dai);
         vm.prank(owner);
-        wallet = SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched)));
+        wallet =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
 
         sendPackedUserOp = new SendPackedUserOp();
 
@@ -86,6 +88,43 @@ contract SessionGuardTest is Test {
 
         vm.prank(owner);
         wallet.addSession(sessionKey);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       DEPLOY-TIME SESSION-KEY SEEDING
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice The whole point of seeding the key in {SHFactory-deployWallet}: ONE owner-signed
+     *         transaction produces a wallet a session key can immediately drive. Note there is no
+     *         `addSession` call anywhere in this test -- setUp's wallet is untouched and this one is
+     *         deployed fresh with the key already authorized.
+     */
+    function test_deployWallet_seededSessionKeyExecutesImmediately() public {
+        address[] memory watched = new address[](1);
+        watched[0] = address(usdc);
+
+        vm.prank(kani);
+        SessionHandler w =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, new address[](0))));
+
+        assertTrue(w.allowedSession(sessionKey), "key should be authorized by deployWallet alone");
+
+        vm.deal(address(w), 10 ether);
+        usdc.mint(address(w), 1_000e6);
+
+        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
+            address(w),
+            config,
+            address(usdc),
+            0,
+            abi.encodeCall(ERC20Mock.transfer, (attacker, 100e6)),
+            sessionKey,
+            sessionKeyPk
+        );
+        _handleOps(userOp);
+
+        assertEq(usdc.balanceOf(attacker), 100e6, "seeded session key could not spend");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -512,6 +551,20 @@ contract SessionGuardTest is Test {
         assertEq(wallet.maxOpGasCost(), 1 ether);
     }
 
+    /// @notice MaxOpGasCostUpdated must report the PREVIOUS ceiling as oldMax, not the new one.
+    /// @dev Regression test: the emit ran after the assignment, so both arguments carried the new
+    ///      value and the old ceiling was unrecoverable by anything indexing the event.
+    function test_setMaxOpGasCost_emitsPreviousValueAsOldMax() public {
+        vm.prank(owner);
+        wallet.setMaxOpGasCost(1 ether);
+
+        vm.expectEmit(true, true, true, true, address(wallet));
+        emit SessionHandler.MaxOpGasCostUpdated(1 ether, 2 ether);
+
+        vm.prank(owner);
+        wallet.setMaxOpGasCost(2 ether);
+    }
+
     /*//////////////////////////////////////////////////////////////
                   PROTOCOL FEE (USD-denominated, native-paid)
     //////////////////////////////////////////////////////////////*/
@@ -762,5 +815,203 @@ contract SessionGuardTest is Test {
         vm.prank(owner);
         vm.expectRevert(SessionHandler.SessionHandler_InvalidAllowedTarget.selector);
         wallet.addAllowedTarget(address(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              EXECUTOR MODULES (executeFromExecutor) -- the guard
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @dev Until 2026-09-14 `executeFromExecutor` ran NO guard: it charged the fee and executed.
+     *      Nothing in the repo drove that path, which is how the gap survived. An installed executor
+     *      could therefore reach everything a session key is blocked from -- most consequentially
+     *      `ENTRY_POINT.withdrawTo`, which moves the account's 4337 deposit without touching
+     *      `account.balance`, so the hook metered a $0 spend.
+     *
+     *      It was never a session-key hole (installing a module is `onlyOwner`, and none is installed
+     *      at deploy), but it contradicted the guarantee THREAT_MODEL 3.5 makes for "every non-owner
+     *      path". These tests hold that guarantee to its word.
+     */
+    function _installExecutor() internal returns (MockExecutorModule executor) {
+        executor = new MockExecutorModule();
+        vm.prank(owner);
+        wallet.installModule(MODULE_TYPE_EXECUTOR, address(executor), "");
+        assertTrue(wallet.isModuleInstalled(MODULE_TYPE_EXECUTOR, address(executor), ""), "executor not installed");
+    }
+
+    /// @notice THE finding. An executor must not be able to drain the account's EntryPoint deposit --
+    ///         the one outflow the spending cap structurally cannot see.
+    function test_executor_cannotDrainEntryPointDeposit() public {
+        MockExecutorModule executor = _installExecutor();
+        IEntryPoint(config.entryPoint).depositTo{value: 1 ether}(address(wallet));
+        uint256 depositBefore = IEntryPoint(config.entryPoint).balanceOf(address(wallet));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, config.entryPoint)
+        );
+        executor.callExecute(
+            address(wallet),
+            bytes32(0),
+            _encodeSingle(
+                config.entryPoint, 0, abi.encodeWithSignature("withdrawTo(address,uint256)", attacker, 1 ether)
+            )
+        );
+
+        // The state assertion is the one that matters -- a revert could come from anywhere.
+        assertEq(IEntryPoint(config.entryPoint).balanceOf(address(wallet)), depositBefore, "deposit moved");
+        assertEq(attacker.balance, 0, "attacker received the deposit");
+    }
+
+    /// @notice An executor cannot reach the account's own admin surface to mint itself a session key.
+    function test_executor_cannotReachAccountAdminSurface() public {
+        MockExecutorModule executor = _installExecutor();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(wallet))
+        );
+        executor.callExecute(
+            address(wallet), bytes32(0), _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker)))
+        );
+
+        assertFalse(wallet.allowedSession(attacker), "attacker gained a session key");
+    }
+
+    /// @notice An executor cannot reach the module's cap setters, which key by msg.sender.
+    function test_executor_cannotReachSpendingLimitModule() public {
+        MockExecutorModule executor = _installExecutor();
+        int256 limitBefore = wallet.getConfig().dailyLimitUsd;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(module))
+        );
+        executor.callExecute(
+            address(wallet),
+            bytes32(0),
+            _encodeSingle(address(module), 0, abi.encodeCall(SpendingLimitModule.setDailyLimit, (int256(1_000_000e18))))
+        );
+
+        assertEq(wallet.getConfig().dailyLimitUsd, limitBefore, "cap was raised");
+    }
+
+    /// @notice An executor cannot delegatecall, which would run arbitrary code as the account and
+    ///         reach the admin surface whatever target was encoded.
+    function test_executor_cannotDelegatecall() public {
+        MockExecutorModule executor = _installExecutor();
+        bytes memory executionCalldata =
+            abi.encodePacked(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        bytes32 delegatecallMode = bytes32(uint256(0xff) << 248);
+
+        vm.expectRevert(SessionHandler.SessionHandler_SessionDelegateCallForbidden.selector);
+        executor.callExecute(address(wallet), delegatecallMode, executionCalldata);
+    }
+
+    /// @notice The decision taken with this fix: executors are bound by `sessionTargetAllowlist` too,
+    ///         not only session keys. An owner who narrowed the wallet to a fixed set of venues meant
+    ///         to constrain automated spending, and an executor IS automated spending.
+    function test_executor_isBoundByTheTargetAllowlist() public {
+        MockExecutorModule executor = _installExecutor();
+        vm.startPrank(owner);
+        wallet.addAllowedTarget(address(dai));
+        wallet.toggleAllowList(true);
+        vm.stopPrank();
+
+        // dai is allowed; usdc is not.
+        executor.callExecute(
+            address(wallet), bytes32(0), _encodeSingle(address(dai), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e18)))
+        );
+        assertEq(dai.balanceOf(kani), 1e18, "allowed target was blocked");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(usdc))
+        );
+        executor.callExecute(
+            address(wallet), bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)))
+        );
+    }
+
+    /// @notice The capability still works. Without this, the guard could over-block every executor
+    ///         call and every test above would still pass.
+    function test_executor_legitTransferSucceedsIsMeteredAndPaysTheFee() public {
+        MockExecutorModule executor = _installExecutor();
+        uint256 amount = 1000e6;
+        int256 expectedUsd = oracle.getPrice(address(usdc), amount);
+        uint256 expectedFee = registry.getFee();
+        uint256 treasuryBefore = address(treasury).balance;
+
+        executor.callExecute(
+            address(wallet), bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)))
+        );
+
+        assertEq(usdc.balanceOf(kani), amount, "executor transfer did not execute");
+        assertEq(wallet.getConfig().spentInWindow, expectedUsd, "executor outflow not metered");
+        assertEq(address(treasury).balance, treasuryBefore + expectedFee, "executor path paid no fee");
+    }
+
+    /// @notice A module that is NOT installed cannot use the path at all -- `onlyModule` is the outer
+    ///         gate, and the guard added above is the inner one.
+    function test_executor_uninstalledModuleCannotExecute() public {
+        MockExecutorModule rogue = new MockExecutorModule();
+
+        vm.expectRevert();
+        rogue.callExecute(
+            address(wallet), bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)))
+        );
+
+        assertEq(usdc.balanceOf(kani), 0, "uninstalled module moved funds");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       EXECTYPE IS NOT A WAY AROUND
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice The guard fires on a restricted target even in EXECTYPE_TRY mode.
+     * @dev Worth pinning explicitly, because the mode word's SECOND byte is the ExecType and nothing
+     *      here inspects it. With EXECTYPE_TRY (0x01) `ERC7579Utils._call` emits `ERC7579TryExecuteFail`
+     *      instead of bubbling, so a sub-call that fails leaves the transaction SUCCESSFUL. That makes
+     *      it a natural place to suspect a bypass -- and a natural way to write a test that passes for
+     *      the wrong reason.
+     *
+     *      It is not a bypass: {_guardSessionExecution} runs BEFORE {_execute}, so it reverts on the
+     *      target regardless of how failures inside `_execute` would have been handled. The ExecType
+     *      only ever governs what happens once execution has already been allowed to start.
+     *
+     *      RULE FOR THIS FILE: for any path where a failure might be swallowed -- try-mode, or an
+     *      inner revert absorbed by `handleOps` -- assert the STATE never changed. Never rely on
+     *      `vm.expectRevert` alone.
+     */
+    function test_guard_firesEvenInTryMode() public {
+        bytes32 tryMode = bytes32(uint256(0x01) << 240); // CALLTYPE_SINGLE, EXECTYPE_TRY
+
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, config.entryPoint)
+        );
+        wallet.execute(
+            tryMode,
+            _encodeSingle(
+                config.entryPoint, 0, abi.encodeWithSignature("withdrawTo(address,uint256)", attacker, 1 ether)
+            )
+        );
+
+        assertEq(attacker.balance, 0, "attacker received value");
+    }
+
+    /// @notice The same for an executor: try-mode does not slip past the newly-added guard either.
+    function test_executor_guardFiresEvenInTryMode() public {
+        MockExecutorModule executor = _installExecutor();
+        bytes32 tryMode = bytes32(uint256(0x01) << 240);
+        int256 limitBefore = wallet.getConfig().dailyLimitUsd;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(module))
+        );
+        executor.callExecute(
+            address(wallet),
+            tryMode,
+            _encodeSingle(address(module), 0, abi.encodeCall(SpendingLimitModule.setDailyLimit, (int256(1_000_000e18))))
+        );
+
+        assertEq(wallet.getConfig().dailyLimitUsd, limitBefore, "cap was raised in try mode");
     }
 }

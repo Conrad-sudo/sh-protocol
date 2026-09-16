@@ -12,11 +12,15 @@ from abi import ientry_point
 # duplicate could only ever drift away from what the toolkits actually encode.
 from langchain_erc20 import ERC20_ABI
 
-_session_handler_cache: dict[int, Contract] = {}
-_entry_point_cache: dict[int, Contract] = {}
-_erc20_cache: dict[tuple[int, str], Contract] = {}
-_sh_factory_cache: dict[int, Contract] = {}
-_spending_limit_module_cache: dict[int, Contract] = {}
+# All keyed by (user_id, chain_id), never user_id alone: every address these hold is chain-specific,
+# and a user runs a wallet on several chains at once. Keyed by user_id only, switching a user's
+# network would hand back the previous chain's wallet, EntryPoint and module against the new
+# chain's RPC -- reads would return garbage and writes would target a contract that isn't there.
+_session_handler_cache: dict[tuple[int, int], Contract] = {}
+_entry_point_cache: dict[tuple[int, int], Contract] = {}
+_erc20_cache: dict[tuple[int, int, str], Contract] = {}
+_sh_factory_cache: dict[tuple[int, int], Contract] = {}
+_spending_limit_module_cache: dict[tuple[int, int], Contract] = {}
 
 # ERC-7579 single-call, default-execution-type mode (CALLTYPE_SINGLE = 0x00 in the top byte).
 ERC7579_SINGLE_CALL_MODE = b"\x00" * 32
@@ -27,38 +31,49 @@ ERC7579_SINGLE_CALL_MODE = b"\x00" * 32
 ERC7579_BATCH_CALL_MODE = b"\x01" + b"\x00" * 31
 
 
-def invalidate_cache(chat_id: int) -> None:
-    """Drop all cached contract instances for chat_id after a redeploy."""
+def invalidate_cache(user_id: int) -> None:
+    """
+    Drop all cached contract instances for user_id, on EVERY chain, after a redeploy or a network
+    switch.
+
+    Deliberately not chain-scoped: clearing one chain would be enough for a redeploy, but a network
+    switch has to drop the chain the user is leaving, and the caller does not always know which that
+    was. Rebuilding is a couple of cheap DB reads, so clear the lot.
+    """
     # Imported here, not at module scope: toolkits.py imports load_session_handler from this
     # module, so a top-level import would be circular.
     from toolkits import invalidate_toolkits
 
-    invalidate_toolkits(chat_id)
-    _session_handler_cache.pop(chat_id, None)
-    _entry_point_cache.pop(chat_id, None)
-    _sh_factory_cache.pop(chat_id, None)
-    _spending_limit_module_cache.pop(chat_id, None)
-    for key in [k for k in _erc20_cache if k[0] == chat_id]:
-        del _erc20_cache[key]
+    invalidate_toolkits(user_id)
+    for cache in (
+        _session_handler_cache,
+        _entry_point_cache,
+        _sh_factory_cache,
+        _spending_limit_module_cache,
+        _erc20_cache,
+    ):
+        for key in [k for k in cache if k[0] == user_id]:
+            del cache[key]
 
 
-def load_session_handler(chat_id: int) -> Contract:
+def load_session_handler(user_id: int) -> Contract:
     """
     Loads the SessionHandler contract ABI and binds it to the address stored in the DB
-    for the given chat ID.
+    for the given user.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     @return         A web3.py Contract instance pointing to the deployed SessionHandler.
     """
-    if chat_id not in _session_handler_cache:
-        w3, _, _ = load_network_config(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _session_handler_cache:
         abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
-        address = get_wallet_address(chat_id)
-        _session_handler_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
-    return _session_handler_cache[chat_id]
+        address = get_wallet_address(user_id, chain_id)
+        _session_handler_cache[key] = w3.eth.contract(address=address, abi=abi)
+    return _session_handler_cache[key]
 
 
-def load_spending_limit_module(chat_id: int) -> Contract:
+def load_spending_limit_module(user_id: int) -> Contract:
     """
     Loads the SpendingLimitModule contract ABI, bound to the address the wallet reports
     via its public SH_MODULE getter.
@@ -69,31 +84,33 @@ def load_spending_limit_module(chat_id: int) -> Contract:
     (allowedSession/addSession), and SessionAdded/SessionRemoved are emitted there. This loader
     is used mainly to read the module's cap config/events.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     @return         A web3.py Contract instance pointing to the installed SpendingLimitModule.
     """
-    if chat_id not in _spending_limit_module_cache:
-        w3, _, _ = load_network_config(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _spending_limit_module_cache:
         abi = get_json("./out/SpendingLimitModule.sol/SpendingLimitModule.json")["abi"]
-        address = load_session_handler(chat_id).functions.SH_MODULE().call()
-        _spending_limit_module_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
-    return _spending_limit_module_cache[chat_id]
+        address = load_session_handler(user_id).functions.SH_MODULE().call()
+        _spending_limit_module_cache[key] = w3.eth.contract(address=address, abi=abi)
+    return _spending_limit_module_cache[key]
 
 
-def load_entry_point(chat_id: int) -> Contract:
+def load_entry_point(user_id: int) -> Contract:
     """
     Loads the EntryPoint contract ABI and binds it to the address stored in the DB.
 
     @return  A web3.py Contract instance pointing to the deployed EntryPoint.
     """
-    if chat_id not in _entry_point_cache:
-        w3, _, _ = load_network_config(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _entry_point_cache:
         abi = ientry_point
         # entryPoint() (lowercase, a function) — SessionHandler inherits this from OZ's
         # Account.sol.
-        address = load_session_handler(chat_id).functions.ENTRY_POINT().call()
-        _entry_point_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
-    return _entry_point_cache[chat_id]
+        address = load_session_handler(user_id).functions.ENTRY_POINT().call()
+        _entry_point_cache[key] = w3.eth.contract(address=address, abi=abi)
+    return _entry_point_cache[key]
 
 
 def pack_execution_calldata(target: str, value: int, data: bytes) -> bytes:
@@ -144,7 +161,7 @@ def encode_batch_execution_calldata(executions: list[tuple[str, int, bytes]]) ->
     return encode(["(address,uint256,bytes)[]"], [executions])
 
 
-def load_ierc20(chat_id: int, token: str) -> Contract:
+def load_ierc20(user_id: int, token: str) -> Contract:
     """
     Loads an IERC20 Contract instance for the given ticker symbol.
 
@@ -156,28 +173,29 @@ def load_ierc20(chat_id: int, token: str) -> Contract:
     @param token  The token ticker symbol to look up (e.g. "usdc", "dai").
     @return       A web3.py Contract instance for the matching token.
     """
-    key = (chat_id, token)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id, token)
     if key not in _erc20_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
         address = get_token_address(chain_id, token)
         _erc20_cache[key] = w3.eth.contract(address=address, abi=ERC20_ABI)
     return _erc20_cache[key]
 
 
-def load_factory(chat_id: int) -> Contract:
+def load_factory(user_id: int) -> Contract:
     """
     Loads the SHFactory contract ABI and binds it to the address stored in the DB
     for the chain the user is connected to.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     @return         A web3.py Contract instance pointing to the deployed SHFactory.
     """
-    if chat_id not in _sh_factory_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _sh_factory_cache:
         abi = get_json("./out/SHFactory.sol/SHFactory.json")["abi"]
         address = get_factory_address(chain_id)
-        _sh_factory_cache[chat_id] = w3.eth.contract(address=address, abi=abi)
-    return _sh_factory_cache[chat_id]
+        _sh_factory_cache[key] = w3.eth.contract(address=address, abi=abi)
+    return _sh_factory_cache[key]
 
 
 def load_calldata(instance: Contract, fn_name: str, args: list) -> bytes:

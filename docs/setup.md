@@ -4,15 +4,17 @@ Before running any setup, make sure you have completed the one-time steps:
 
 1. **Clone and install** — see the root [README](../README.md#clone-and-install).
 2. **Environment variables** — create `.env` as described in [Vault & Security](vault-security.md#environment-variables).
-3. **Telegram `chat_id`** — send a message to [@userinfobot](https://t.me/userinfobot). It replies with your numeric `chat_id`. Set it in `.env`:
+3. **Which account to run as** — identity is an application account (`users.id`), not a Telegram chat id. For the local harnesses (`make deploy-wallet`, `make agent`) set:
 
    ```env
-   TELEGRAM_CHAT_ID=your_numeric_chat_id_here
+   APP_USER_ID=1
    ```
 
-   `TELEGRAM_CHAT_ID` is read by `deploy_wallet.py` (to know which user to deploy a wallet for) and by `telebot.py` / `smart_wallet_agent.py` (to know who's chatting). In CLI mode it doubles as the agent's `thread_id` and DB key — it doesn't need to be a real Telegram ID, any integer works, as long as it's the same one used at deployment time.
+   `deploy_wallet.resolve_harness_user` reads it, and `smart_wallet_agent.main` uses the same resolution. If `APP_USER_ID` is unset it falls back to translating `TELEGRAM_CHAT_ID` through the `users` table — which is what keeps a pre-2026-09-10 setup working, since the migration created an account for your old chat id and recorded it as `users.telegram_chat_id`. A raw chat id is never used as a key any more, so an unlinked one is an error rather than a silent new account.
 
-   > **Telegram is optional.** Only the Telegram bot (`make bot`) needs a `TELEGRAM_TOKEN` (from [@BotFather](https://t.me/BotFather)) and a real Telegram account. If you plan to use the interactive CLI (`make agent`) instead, skip the bot token entirely — you still set `TELEGRAM_CHAT_ID`, but it's just an arbitrary integer key here, not a Telegram identity.
+   > **Telegram is optional.** Only the Telegram bot (`make bot`) needs a `TELEGRAM_TOKEN` (from [@BotFather](https://t.me/BotFather)), `TELEGRAM_BOT_USERNAME`, and a real Telegram account. The bot serves **only chats that have been linked** to an account through the web app's deep link (`POST /api/integrations/telegram/link`); an unlinked chat is refused. For the interactive CLI (`make agent`), skip all of it and just set `APP_USER_ID`.
+
+4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). `GOOGLE_CLIENT_ID` is needed only for Google sign-in, `TELEGRAM_BOT_USERNAME` only to mint Telegram deep links, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development.
    >
    > **The LLM provider is optional too.** The agent defaults to Anthropic's Claude (`ANTHROPIC_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
 
@@ -29,22 +31,28 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
 
    > **Watch for stale addresses.** Every re-run of `forge script script/DeploySHProtocol.s.sol --broadcast` on the same chain overwrites that chain's `run-latest.json` with a fresh set of addresses (new nonces → different addresses for every contract, including `SHFactory`). If you deploy again without re-running `make db`, the DB keeps pointing at the old (now-wrong) addresses — this can fail in a confusing way, since the old address might still have *some* contract's bytecode at it (e.g. a previous deployment's `SpendingLimitModule`), producing an empty-revert rather than an obvious "no code" error.
 
-5. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens)` to create a per-user `SessionHandler` (with `SpendingLimitModule` installed as a spending-cap hook and seeded with a $50k/24h cap over the network's default watched tokens), funds it with 10 ETH (and the bundler, on forks), and registers the wallet's single session key via `addSession`.
+5. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens, sessionKey, trustedSpenders)` to create a per-user `SessionHandler` in **one transaction**: `SpendingLimitModule` is installed as a spending-cap hook seeded with a $50k/24h cap over the network's default watched tokens, the wallet's single session key is authorized, and the chain's V2 router is granted as a trusted spender. It is funded with ETH by the same call (`deployWallet` is `payable`).
+
+   > **One transaction, not three.** `addSession` and `addTrustedSpender` used to be separate owner-signed follow-ups. They are now seeded inside `initialize`, so `deploy_wallet.py`'s `add_default_session()` / `trust_router()` are recovery helpers only and are no longer called by `__main__`. Because the wallet is deployed with CREATE2, its address is known before the transaction is sent, which is what lets the session key (whose Vault entry is keyed by wallet address) be minted up front and passed in.
+
+   > **Re-running gives you a NEW wallet, not the same one.** The CREATE2 salt is derived from `(deployer, factory.deployCount[deployer])` and the factory consumes that counter on every deploy, so each `make deploy-wallet` lands on a fresh address with no salt bookkeeping on the Python side. It does **not** migrate anything: `session_handlers` is overwritten for that `chat_id`, and the previous wallet keeps its prefund, tokens and LP positions with nothing pointing at it. The script warns when it is about to do this — withdraw first if the old wallet holds anything you want.
 
    > **`ARGS` here must exactly match** the network you started in step 1 and deployed to in step 2 (`"anvil"`, `"mainnet-fork"`, `"sepolia-fork"`, `"sepolia"`, `"bsc-fork"`, or `"bsc"`) — `deploy_wallet.py`'s `deploy()` dispatcher passes it straight through to `network`. If it doesn't match, the script will look up the wrong factory address (or none at all) and fail. Omitting `ARGS` defaults to `"anvil"`, matching `make deploy`'s own no-`ARGS` default.
 
 6. **Start talking to it** — `make bot` (Telegram) or `make agent` (interactive CLI).
 
-> **Shortcut — `make setup ARGS="<network>"`.** Runs steps 2, 4, 5, and 6 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Steps 1 (start the network) and 3 (Vault) are *not* part of this chain — start the network first (skip this for live deployments), and make sure Vault is already running and configured (it persists across redeploys, so you don't need to re-run `make vault` every time). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 5 above.
+> **Shortcut — `make setup-agent ARGS="<network>"`.** Runs steps 2, 4, 5, and 6 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Steps 1 (start the network) and 3 (Vault) are *not* part of this chain — start the network first (skip this for live deployments), and make sure Vault is already running and configured (it persists across redeploys, so you don't need to re-run `make vault` every time). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 5 above.
 >
 > **The full local setup in two commands** (once Vault is configured):
 >
 > ```bash
 > make <network>-fork    # or `make anvil` for plain local Anvil — see step 1 above
-> make setup ARGS="<network>"
+> make setup-agent ARGS="<network>"
 > ```
 >
-> e.g. `make sepolia-fork` followed by `make setup ARGS="sepolia-fork"`. For a live deployment (no local node to start), just run `make setup ARGS="sepolia"` (or `"bsc"`) on its own.
+> e.g. `make sepolia-fork` followed by `make setup-agent ARGS="sepolia-fork"`. For a live deployment (no local node to start), just run `make setup-agent ARGS="sepolia"` (or `"bsc"`) on its own.
+>
+> **Two siblings run the identical chain and differ only in what they leave you in:** `make setup-bot ARGS="<network>"` ends in the Telegram bot instead of the CLI agent, and `make setup-test ARGS="<network>"` stops after `deploy-wallet` with no front end, for running tests against a freshly deployed stack.
 
 > **Celo is not yet supported end-to-end.** The Python app layer has scaffolding for it (token list, chain ID, network routing), but `HelperConfig.s.sol` has no Celo chain ID branch, so step 2 (`make deploy ARGS="celo-fork"` or similar) cannot succeed on Celo until that's added on the Solidity side. Note also that `wrap_eth` is meaningless on Celo — CELO is natively an ERC-20 with no wrapping step. See [docs/app.md](app.md) for what's already wired up.
 
@@ -99,7 +107,7 @@ Must be re-run (along with steps 1, 2, and 4) whenever Anvil is restarted — ch
 >
 > ```bash
 > make anvil
-> make setup
+> make setup-agent
 > ```
 >
 > Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below (not the Telegram bot in step 6). No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
@@ -180,7 +188,7 @@ make agent    # Interactive CLI
 >
 > ```bash
 > make mainnet-fork
-> make setup ARGS="mainnet-fork"
+> make setup-agent ARGS="mainnet-fork"
 > ```
 >
 > Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
@@ -243,7 +251,7 @@ make agent
 >
 > ```bash
 > make sepolia-fork
-> make setup ARGS="sepolia-fork"
+> make setup-agent ARGS="sepolia-fork"
 > ```
 >
 > Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
@@ -306,7 +314,7 @@ make agent
 >
 > ```bash
 > make bsc-fork
-> make setup ARGS="bsc-fork"
+> make setup-agent ARGS="bsc-fork"
 > ```
 >
 > Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
@@ -366,7 +374,7 @@ make agent
 > **Shortcut — full setup in one command** (once Vault, step 2, is configured):
 >
 > ```bash
-> make setup ARGS="sepolia"
+> make setup-agent ARGS="sepolia"
 > ```
 >
 > Since there's no local node to start for a live deployment, this alone covers steps 1, 3, and 4 above, finishing with `make agent` (not `make bot`) from step 5. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live Sepolia** — make sure that's what you intend before running it.
@@ -421,7 +429,7 @@ make db
 make deploy-wallet ARGS="bsc"
 ```
 
-On live BSC, `live_network.py` submits UserOps through the Alchemy bundler — no local bundler key is used for that path (`FORK_DEPLOYER_PK` is only used for the `bsc-fork` local-`handleOps` flow in `anvil.py`).
+On live BSC, `live_network.py` submits UserOps through a bundler RPC — no local bundler key is used for that path. `bsc-fork` self-bundles instead, signing `handleOps` in `anvil.py` with `SEPOLIA_PRIVATE_KEY` (see `anvil.resolve_bundler`). Note that no bundler-capable RPC is currently configured for live BSC, so that path is untested.
 
 **Step 5 — Start:**
 
@@ -433,7 +441,7 @@ make agent
 > **Shortcut — full setup in one command** (once Vault, step 2, is configured):
 >
 > ```bash
-> make setup ARGS="bsc"
+> make setup-agent ARGS="bsc"
 > ```
 >
 > Since there's no local node to start for a live deployment, this alone covers steps 1, 3, and 4 above, finishing with `make agent` (not `make bot`) from step 5. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live BSC** — make sure that's what you intend before running it. Also note the `make deploy` gap flagged in step 1 above: confirm `NETWORK_ARGS` actually resolves to a funded BSC broadcast before relying on this shortcut for a live BSC deploy.

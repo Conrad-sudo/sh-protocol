@@ -10,6 +10,7 @@ CHAIN_ID_MAINNET = 1
 CHAIN_ID_SEPOLIA = 11155111
 CHAIN_ID_BSC = 56
 CHAIN_ID_CELO = 42220
+CHAIN_ID_ARBITRUM = 42161
 WEI_PER_ETH = 10**18
 # The address(0) sentinel the wallet, SHOracle and both toolkits all use for "native asset".
 # Taken from langchain-erc20 so there is exactly one definition in play: it is what the ERC20
@@ -45,14 +46,16 @@ def get_router(chain_id: int) -> str:
 
 # The ticker of the chain's actual wrapped-native-asset contract — the one *ETH*-suffixed
 # router functions and deposit()/withdraw() calls operate against. WETH on Ethereum/Sepolia/
-# Anvil, WBNB on BSC. On Celo, CELO is natively an ERC-20 and Ubeswap has no WETH() function,
-# so "celo" here refers to the CELO ERC-20 used in token-to-token swaps (not a wrap/unwrap).
+# Anvil, and on Arbitrum, whose native gas asset is also ETH. WBNB on BSC. On Celo, CELO is
+# natively an ERC-20 and Ubeswap has no WETH() function, so "celo" here refers to the CELO
+# ERC-20 used in token-to-token swaps (not a wrap/unwrap).
 NATIVE_WRAPPED_TICKER = {
     CHAIN_ID_MAINNET: "weth",
     CHAIN_ID_SEPOLIA: "weth",
     CHAIN_ID_ANVIL: "weth",
     CHAIN_ID_BSC: "wbnb",
     CHAIN_ID_CELO: "celo",
+    CHAIN_ID_ARBITRUM: "weth",
 }
 
 
@@ -79,6 +82,7 @@ NATIVE_ASSET_TICKER = {
     CHAIN_ID_ANVIL: "ETH",
     CHAIN_ID_BSC: "BNB",
     CHAIN_ID_CELO: "CELO",
+    CHAIN_ID_ARBITRUM: "ETH",
 }
 
 

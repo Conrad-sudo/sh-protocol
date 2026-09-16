@@ -10,6 +10,7 @@
 | `make mainnet-uniswap-test` | Run Uniswap V2 fork tests against `MAINNET_RPC_URL` |
 | `make sepolia-uniswap-test` | Run Uniswap V2 fork tests against `SEPOLIA_RPC_URL` (`test/fork/SHSepoliaUniswapV2Test.t.sol`) |
 | `make pancakeswap-test` | Run PancakeSwap V2 fork tests against `BSC_RPC_URL` |
+| `make arbitrum-uniswap-test` | Run Uniswap V2 fork tests against `ARB_RPC_URL` (`test/fork/SHArbitrumUniswapV2Test.t.sol`) |
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make snapshot` | Generate gas snapshot |
 | `make clean` | Remove build artifacts |
@@ -20,16 +21,19 @@
 | `make sepolia-fork` | Start a Sepolia fork at the latest block |
 | `make bsc-fork` | Start a BSC fork at the latest block |
 | `make celo-fork` | Start a Celo fork at the latest block (no Solidity deployment path yet — see [docs/app.md](app.md)) |
-| `make fund ARGS=<network>` | Set a large ETH/BNB/CELO balance on the deployer address via `anvil_setBalance`. Funds `SEPOLIA_ACCOUNT` when `ARGS` contains `sepolia`, `FORK_DEPLOYER_ADDRESS` otherwise (mainnet/bsc/celo and their `-fork` variants) — except bare `ARGS="sepolia"`/`"bsc"` (live networks), where it safely no-ops instead of failing, since there's no local Anvil node to fund |
+| `make arb-fork` | Start an Arbitrum One fork at the latest block (the app calls this network `arbitrum-fork`) |
+| `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. A prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — that address is deployer, protocol owner and bundler on a fork, and starts at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
 | `make vault` | Configure Vault and refresh `.env` credentials |
 | `make db` | Initialise SQLite database and run migrations |
 | `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) and register its single session key |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
 | `make bot` | Start the Telegram bot — **optional**; the only target that needs `TELEGRAM_TOKEN` and `python-telegram-bot` |
-| `make setup ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
+| `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
+| `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bot |
+| `make setup-test ARGS=<network>` | Same chain with no front end: `deploy` → `fund` → `db` → `deploy-wallet`, for running tests against a freshly deployed stack |
 
-> **`make ubeswap-test` is currently broken.** It points at `test/fork/SHUbeswapV2Test.t.sol`, which doesn't exist yet (Celo has no Solidity deployment path — see above).
+> **There is no Celo fork-test target.** `make ubeswap-test` does not exist in the Makefile, and neither does the `test/fork/SHUbeswapV2Test.t.sol` it used to point at — Celo has no Solidity deployment path (see above), so both were removed rather than left failing. Adding Celo means adding the `HelperConfig`/`Constants` branch, the test file, and the target together.
 
 ---
 
@@ -80,7 +84,7 @@ sh-protocol/
 │   ├── seed_data.py
 │   ├── network_config.py
 │   ├── contracts.py
-│   ├── toolkits.py                  ← per-chat_id langchain-erc20 / langchain-uniswap-v2 toolkits
+│   ├── toolkits.py                  ← per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits
 │   ├── userop.py                    ← shared UserOp construction/signing (both backends)
 │   ├── anvil.py
 │   ├── live_network.py

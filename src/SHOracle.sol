@@ -24,6 +24,14 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  *      feed can never be fresher than its own heartbeat regardless. This differs from a pull
  *      oracle like Pyth, where "how recent" is genuinely caller-choosable since anyone can pay
  *      to submit a fresh update at any time.
+ *
+ *      On an L2 the heartbeat alone is not enough. Chainlink's nodes publish updates THROUGH the
+ *      sequencer, so while the sequencer is down every feed keeps serving its last pre-outage
+ *      answer — and that answer can still be well inside its heartbeat when the queued
+ *      transactions land on recovery. {SEQUENCER_UPTIME_FEED} closes that gap: valuations revert
+ *      while the sequencer is down and for {SEQUENCER_GRACE_PERIOD} after it returns, giving the
+ *      feeds time to publish post-outage prices. It is address(0) on chains with no sequencer
+ *      (Ethereum mainnet, BSC, local Anvil), where the check is skipped outright.
  */
 contract SHOracle is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -58,12 +66,53 @@ contract SHOracle is Ownable {
     ///      oracle. Repoint it with {setFeed} instead, which overwrites in place.
     error PriceOracle_CannotRemoveNativeFeed();
 
+    /// @dev Reverts when this chain's L2 sequencer uptime feed reports the sequencer as DOWN, or
+    ///      reports a round that was never initialised (startedAt == 0) and so carries no status.
+    ///      Every price feed on the chain is published through the sequencer, so none of them can
+    ///      be trusted while it is offline — however recent their `updatedAt` still looks.
+    error PriceOracle_SequencerDown();
+
+    /// @dev Reverts while the sequencer has been back up for {SEQUENCER_GRACE_PERIOD} or less.
+    ///      The feeds are reachable again at that point but may not have published since the
+    ///      outage, so their answers can still predate it while passing the heartbeat check.
+    error PriceOracle_SequencerGracePeriod();
+
+    /// @dev Reverts at construction when the supplied sequencer uptime feed answers with anything
+    ///      other than the 0/1 status flag one reports — the signature of a wrong-network address
+    ///      or of a PRICE feed passed in by mistake, either of which would otherwise brick every
+    ///      valuation the moment the oracle went live.
+    error PriceOracle_InvalidSequencerFeed();
+
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Sentinel value for native ETH (used instead of an actual token address)
     address private constant ETH_TOKEN_ADDRESS = address(0);
+
+    /// @notice This chain's Chainlink L2 Sequencer Uptime Feed, or address(0) on a chain that has
+    ///         no sequencer (Ethereum mainnet, BSC, local Anvil), which skips the check entirely.
+    /// @dev Immutable rather than an owner setter, for three reasons. It is a per-chain constant,
+    ///      not something that legitimately changes. It sits on the hot path of every metered
+    ///      transaction, and an immutable is read from bytecode instead of costing an SLOAD. And a
+    ///      setter would be one more immediate-effect admin lever over cap integrity, which
+    ///      THREAT_MODEL §3.8 already names as the protocol's top residual risk. If Chainlink ever
+    ///      retires this aggregator, the fix is the route that already exists for a bad oracle:
+    ///      {SHRegistry-proposePriceOracle} a replacement, seeded via {SHTreasury-setFeed} while it
+    ///      sits in the timelock.
+    address public immutable SEQUENCER_UPTIME_FEED;
+
+    /// @notice How long the sequencer must have been continuously up before prices are trusted
+    ///         again, matching Chainlink's reference implementation for L2 feed consumers.
+    /// @dev Sized to outlast the shortest feed heartbeats on the supported L2s (Arbitrum's
+    ///      ETH/USD, BTC/USD and LINK/USD all publish every 1755s), so by the time this window
+    ///      closes the feeds a valuation depends on have had the chance to publish post-outage.
+    uint256 public constant SEQUENCER_GRACE_PERIOD = 1 hours;
+
+    /// @notice The two answers an L2 Sequencer Uptime Feed reports: 0 while the sequencer is up,
+    ///         1 while it is down. A status flag, not a price — anything else is not such a feed.
+    int256 private constant SEQUENCER_UP = 0;
+    int256 private constant SEQUENCER_DOWN = 1;
 
     /// @notice Everything getPrice needs for one token, packed into a single 32-byte storage slot.
     /// @dev address(20) + uint8(1) + uint48(6) = 27 bytes, so a getPrice reads ONE slot instead of
@@ -123,6 +172,10 @@ contract SHOracle is Ownable {
      *      current network (e.g., Sepolia). Use address(0) as the token address to register
      *      native ETH.
      *
+     * @param sequencerUptimeFeed This chain's Chainlink L2 Sequencer Uptime Feed. Pass address(0)
+     *                    on a chain with no sequencer, which disables the check. Any non-zero value
+     *                    is probed once here so a wrong address fails at deploy rather than
+     *                    bricking every valuation later.
      * @param tokens      Ordered list of token addresses to support. Use address(0) for ETH.
      * @param priceFeeds  Ordered list of Chainlink USD price feed addresses, one per token.
      *                    Pass address(0) for tokens that have no feed on this network.
@@ -130,11 +183,26 @@ contract SHOracle is Ownable {
      *                    Matches the Chainlink-published heartbeat for each feed (e.g. 3600 for ETH/USD, 82800 for USDC/USD).
      *                    The value at index i is ignored when priceFeeds[i] is address(0).
      */
-    constructor(address owner, address[] memory tokens, address[] memory priceFeeds, uint256[] memory heartbeats)
-        Ownable(owner)
-    {
+    constructor(
+        address owner,
+        address sequencerUptimeFeed,
+        address[] memory tokens,
+        address[] memory priceFeeds,
+        uint256[] memory heartbeats
+    ) Ownable(owner) {
         if (tokens.length != priceFeeds.length || priceFeeds.length != heartbeats.length) {
             revert PriceOracle_ArrayLengthMismatch();
+        }
+        SEQUENCER_UPTIME_FEED = sequencerUptimeFeed;
+        // A mistyped or wrong-network uptime feed would otherwise pass construction and then revert
+        // every single valuation, protocol-wide, with no way to correct it short of the two-day
+        // oracle swap. One probe here turns that into a failed deploy: an address with no code (or
+        // the wrong ABI) fails the decode, and a PRICE feed passed in by mistake fails the 0/1
+        // status check. The status itself is deliberately NOT asserted — a deploy that happens to
+        // land during an outage, or inside the grace window, must still succeed.
+        if (sequencerUptimeFeed != address(0)) {
+            (, int256 status,,,) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+            if (status != SEQUENCER_UP && status != SEQUENCER_DOWN) revert PriceOracle_InvalidSequencerFeed();
         }
         for (uint256 i = 0; i < tokens.length; i++) {
             if (priceFeeds[i] != address(0)) {
@@ -223,6 +291,10 @@ contract SHOracle is Ownable {
      * stale price would incorrectly value ETH and may allow overspending beyond session limits.
      */
     function _stalePriceCheck(address priceFeed, uint256 heartbeat) internal view returns (int256) {
+        // Before trusting any feed's timestamp, confirm the chain that publishes it was actually
+        // live. On an L2 an outage freezes every feed without making any of them look stale.
+        _requireSequencerUp();
+
         (, int256 price,, uint256 updatedAt,) = AggregatorV3Interface(priceFeed).latestRoundData();
 
         if (block.timestamp - updatedAt > heartbeat) {
@@ -234,6 +306,38 @@ contract SHOracle is Ownable {
 
         // forge-lint: disable-next-line(unsafe-typecast)
         return price;
+    }
+
+    /**
+     * @dev Refuses to price anything while this chain's sequencer is down, or has only just come
+     *      back. No-ops on a chain with no uptime feed configured.
+     *
+     *      The hole this closes: Chainlink's nodes submit price updates as L2 transactions, so a
+     *      sequencer outage freezes every feed at its last pre-outage answer. That answer's
+     *      `updatedAt` keeps looking recent — a feed with a 24h heartbeat sails through
+     *      {_stalePriceCheck} on a two-hour-old price — so the heartbeat check alone would happily
+     *      value a transaction at a price the market has since left behind. Transactions queue
+     *      during an outage and land the moment it clears, which is exactly when that matters.
+     *
+     *      Both branches fail CLOSED, consistent with the rest of the oracle: a valuation that
+     *      cannot be trusted blocks the transaction rather than being guessed at. During the window
+     *      that halts every session-key execution and any owner execution that moves native or a
+     *      watched token; owner executions touching only unwatched tokens, and
+     *      {SessionHandler-pause}, stay available.
+     */
+    function _requireSequencerUp() internal view {
+        address uptimeFeed = SEQUENCER_UPTIME_FEED;
+        if (uptimeFeed == address(0)) return; // chain has no sequencer — nothing to gate on
+
+        (, int256 answer, uint256 startedAt,,) = AggregatorV3Interface(uptimeFeed).latestRoundData();
+
+        // A zero startedAt is an uninitialised round, which reports no status at all — treated as
+        // down, since "we cannot tell" must not read as "up".
+        if (answer != SEQUENCER_UP || startedAt == 0) revert PriceOracle_SequencerDown();
+
+        // startedAt stamps when the CURRENT status began, so on an up round this subtraction is
+        // exactly how long the sequencer has been back.
+        if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert PriceOracle_SequencerGracePeriod();
     }
 
     /*//////////////////////////////////////////////////////////////

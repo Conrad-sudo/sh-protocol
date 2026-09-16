@@ -53,6 +53,7 @@ CHAINS = {
     "optimism": 10,
     "optimism-goerli": 420,  # retired with Goerli
     "arbitrum": 42161,
+    "arbitrum-fork": 42161,
     "arbitrum-goerli": 421613,  # retired with Goerli
     "avalanche": 43114,
     "fuji": 43113,
@@ -89,6 +90,7 @@ RPCS = {
     "optimism": "https://mainnet.optimism.io",
     "optimism-goerli": "https://goerli.optimism.io",
     "arbitrum": "https://arb1.arbitrum.io/rpc",
+    "arbitrum-fork": "http://127.0.0.1:8545",  # `make arb-fork`
     "arbitrum-goerli": "https://goerli-rollup.arbitrum.io/rpc",
     "avalanche": "https://api.avax.network/ext/bc/C/rpc",
     "fuji": "https://api.avax-test.network/ext/bc/C/rpc",
@@ -170,6 +172,32 @@ BSC_TOKENS = {
     "cake": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
 }
 
+# Every address below is the one in script/Constants.s.sol's ARB_* block, so the app and the
+# on-chain oracle config cannot disagree about what "usdc on Arbitrum" means. Each was re-verified
+# against Arbitrum One: symbol()/decimals() answered as expected and each is EIP-55 checksummed.
+#
+# The set is exactly the Arbitrum tokens SHOracle prices (see HelperConfig.getArbConfig) — an
+# unpriced token is unusable to the spending-limit hook, so listing one here would only offer the
+# user a watched-token choice that makes deployWallet revert with TokenNotPriced.
+ARBITRUM_TOKENS = {
+    "weth": _wrapped_native(42161),
+    "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # native Circle USDC, not USDC.e
+    "dai": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
+    "usdt": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",  # answers symbol() "USD₮0" since Tether's rebrand
+    "aave": "0xba5DdD1f9d7F570dc94a51479a000E3BCE967196",
+    "link": "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4",
+    "oneinch": "0x6314C31A7a1652cE482cffe247E9CB7c3f4BB9aF",
+    "ape": "0x7f9FBf9bDd3F4105C478b996B648FE6e828a1e98",  # ApeCoin's own Arbitrum deployment
+    "arb": "0x912CE59144191C1204E64559FE8253a0e49E6548",
+    "wbtc": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+    "comp": "0x354A6dA3fcde098F8389cad84b0182725c6C91dE",
+    "crv": "0x11cDb42B0EB46D95f990BeDD4695A6e3fA034978",
+    "sushi": "0xd4d42F0b6DEF4CE0383636770eF773390d85c61A",
+    "uni": "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0",
+    "yfi": "0x82e3A8F066a6989666b031d916c43672085b1582",
+    "cake": "0x1b896893dfc86bb67Cf57767298b9073D2c1bA2c",  # PancakeSwap's own Arbitrum deployment
+}
+
 CELO_TOKENS = {
     "celo": "0x471EcE3750Da237f93B8E339c536989b8978a438",
     "usdc": "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
@@ -190,4 +218,5 @@ SEEDS = [
     ("sepolia_tokens", "ticker", "address", SEPOLIA_TOKENS, True),
     ("bsc_tokens", "ticker", "address", BSC_TOKENS, True),
     ("celo_tokens", "ticker", "address", CELO_TOKENS, True),
+    ("arbitrum_tokens", "ticker", "address", ARBITRUM_TOKENS, True),
 ]

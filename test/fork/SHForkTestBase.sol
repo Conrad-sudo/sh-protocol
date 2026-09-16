@@ -102,22 +102,29 @@ abstract contract SHForkTestBase is Test {
         address[] memory watched = new address[](2);
         watched[0] = address(_tokenIn());
         watched[1] = address(_tokenOut());
+
+        // Deploy exactly as app/deploy_wallet.py does in production: the session key and the chain's
+        // REAL V2 router are seeded through deployWallet, not granted by follow-up owner calls.
+        //
+        // This is deliberately the one suite that covers the seeded path against a live router. The
+        // unit tests only ever seed a makeAddr() spender against an ERC20Mock, and if setUp here
+        // re-granted the router with addTrustedSpender afterwards (as it used to), a regression in
+        // deploy-time seeding would be masked on every fork — the second grant would quietly repair
+        // it and removeLiquidity's unpriced LP-token approval would pass either way.
+        //
+        // The router is still not protocol configuration: it is passed in by the caller, exactly as
+        // constants.get_router(chain_id) is passed in by the app.
+        address[] memory trustedSpenders = new address[](1);
+        trustedSpenders[0] = address(router);
+
         vm.prank(owner);
-        wallet = SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched)));
+        wallet =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, trustedSpenders)));
 
         sendPackedUserOp = new SendPackedUserOp();
 
         vm.deal(address(wallet), 10 ether);
         deal(address(_tokenIn()), address(wallet), _swapAmount() * 20);
-
-        vm.prank(owner);
-        wallet.addSession(sessionKey);
-
-        // The router is no longer protocol configuration, so nothing is trusted at deploy — the
-        // owner grants it explicitly. Required for the unpriced LP-token approval in removeLiquidity;
-        // the no-standing-approval rule still forces every such approval to zero in its own tx.
-        vm.prank(owner);
-        wallet.addTrustedSpender(address(router));
 
         _freshenFeeds();
     }
@@ -129,6 +136,7 @@ abstract contract SHForkTestBase is Test {
         if (block.chainid == MAINNET_CHAIN_ID) return MNT_UNISWAP_V2_ROUTER_02;
         if (block.chainid == SEPOLIA_CHAIN_ID) return SPO_UNISWAP_V2_ROUTER_02;
         if (block.chainid == BSC_CHAIN_ID) return PANCAKE_V2_ROUTER_02;
+        if (block.chainid == ARB_CHAIN_ID) return ARB_UNISWAP_V2_ROUTER;
         revert("no router constant for this chain");
     }
 

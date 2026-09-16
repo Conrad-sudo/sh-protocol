@@ -165,36 +165,93 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /*//////////////////////////////////////////////////////////////
                                 Initialization
     //////////////////////////////////////////////////////////////*/
-    function initialize(
-        address owner,
-        address entryPointAddress,
-        address reputationRegistry,
-        address identityRegistry,
-        address registry,
-        uint256 walletId,
-        address spendingLimitModule,
-        int256 dailyLimitUsd,
-        uint256 windowDuration,
-        address[] calldata watchedTokens
-    ) external initializer {
-        __Ownable_init(owner);
-        ENTRY_POINT = entryPointAddress;
-        REPUTATION_REGISTRY = reputationRegistry;
-        IDENTITY_REGISTRY = identityRegistry;
-        REGISTRY = SHRegistry(registry);
-        WALLET_ID = walletId;
-        SH_MODULE = SpendingLimitModule(spendingLimitModule);
+
+    /**
+     * @notice Everything {initialize} needs, bundled so the wallet is fully usable after ONE
+     *         transaction: protocol wiring, the spending-cap config, and the two owner-only grants
+     *         that used to require a follow-up transaction each ({addSession}, {addTrustedSpender}).
+     * @dev A struct rather than a flat parameter list purely for stack depth — twelve value
+     *      parameters overflow the stack in the initializer body. Order mirrors the assignments.
+     * @param owner               Account owner. SHFactory passes its own msg.sender, so the user
+     *                            who signs the deploy owns the wallet.
+     * @param entryPoint          This deployment's ERC-4337 EntryPoint (v0.7).
+     * @param reputationRegistry  ERC-8004 reputation registry.
+     * @param identityRegistry    ERC-8004 identity registry.
+     * @param registry            SHRegistry this wallet reads protocol config from.
+     * @param walletId            Sequential id assigned by the factory. Bookkeeping only.
+     * @param spendingLimitModule SpendingLimitModule to install as MODULE_TYPE_HOOK.
+     * @param dailyLimitUsd       Max USD (18 decimals) spendable per window. Must be >= 0.
+     * @param windowDuration      Spending-window length in seconds. Must be > 0.
+     * @param watchedTokens       Tokens to meter. Each must already be priced by the oracle.
+     * @param sessionKey          Session key to authorize, or address(0) for an owner-only wallet.
+     * @param trustedSpenders     Spenders trusted for unpriced-token approvals (typically the DEX
+     *                            router). May be empty.
+     */
+    struct InitConfig {
+        address owner;
+        address entryPoint;
+        address reputationRegistry;
+        address identityRegistry;
+        address registry;
+        uint256 walletId;
+        address spendingLimitModule;
+        int256 dailyLimitUsd;
+        uint256 windowDuration;
+        address[] watchedTokens;
+        address sessionKey;
+        address[] trustedSpenders;
+    }
+
+    /**
+     * @notice Initializes a freshly cloned wallet. Callable once, by the factory that cloned it.
+     * @dev The two grants at the end are what make a deployed wallet immediately usable. Both are
+     *      normally `onlyOwner` and are applied here directly, which is safe for the same reason the
+     *      owner's own passthroughs are: this runs inside `initializer`, before any key exists that
+     *      could reach it, and the values come from the caller who is about to become the owner.
+     * @param cfg See {InitConfig}.
+     */
+    function initialize(InitConfig calldata cfg) external initializer {
+        __Ownable_init(cfg.owner);
+        ENTRY_POINT = cfg.entryPoint;
+        REPUTATION_REGISTRY = cfg.reputationRegistry;
+        IDENTITY_REGISTRY = cfg.identityRegistry;
+        REGISTRY = SHRegistry(cfg.registry);
+        WALLET_ID = cfg.walletId;
+        SH_MODULE = SpendingLimitModule(cfg.spendingLimitModule);
         maxOpGasCost = DEFAULT_MAX_OP_GAS_COST;
 
         // Install the spending-limit hook. Its onInstall
         // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens) tuple, so the config
         // must be non-empty and valid: windowDuration > 0, dailyLimitUsd >= 0, and every watched
         // token already priced by the oracle.
-        _installModule(MODULE_TYPE_HOOK, spendingLimitModule, abi.encode(dailyLimitUsd, windowDuration, watchedTokens));
+        _installModule(
+            MODULE_TYPE_HOOK,
+            cfg.spendingLimitModule,
+            abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens)
+        );
 
-        // No spender is trusted at deploy: which venue a wallet trades on is the owner's choice, not
-        // protocol config. Unpriced-token approvals (e.g. an LP token) are refused until the owner
-        // grants a spender with {addTrustedSpender}.
+        // Authorize the wallet's session key, if one was supplied. Equivalent to {addSession} but
+        // reachable at deploy time, so a wallet needs no second owner transaction to become usable.
+        // address(0) is not an error here (unlike in {addSession}): it means an owner-only wallet.
+        if (cfg.sessionKey != address(0)) {
+            allowedSession[cfg.sessionKey] = true;
+            emit SessionAdded(cfg.sessionKey);
+        }
+
+        // Which venue a wallet trades on remains the OWNER'S choice, not protocol config -- this list
+        // comes from the deploying caller, not from the registry. (The old deploy-time auto-trust of
+        // SHRegistry.router() was removed deliberately and is NOT being reinstated here.) An empty
+        // array keeps the previous behaviour exactly: nothing trusted, so unpriced-token approvals
+        // (e.g. an LP token in removeLiquidity) are refused until the owner grants a spender.
+        //
+        // MUST come after _installModule: SpendingLimitModule.addTrustedSpender is `onlyInstalled`.
+        // These are DIRECT calls to the module (msg.sender == this account), not wrapped in
+        // execute(), so no hook runs and the module's admin-selector guard never fires -- the same
+        // path {addTrustedSpender}'s owner passthrough uses. The module validates each entry
+        // (rejects address(0), caps at MAX_TRUSTED_SPENDERS, ignores duplicates).
+        for (uint256 i = 0; i < cfg.trustedSpenders.length; i++) {
+            SH_MODULE.addTrustedSpender(cfg.trustedSpenders[i]);
+        }
     }
 
     function entryPoint() public view override returns (IEntryPoint) {
@@ -316,7 +373,9 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Trusts a spender so it may be approved even for unpriced tokens (e.g. the DEX router,
     ///         for removeLiquidity's LP-token approval). Forwards to SH_MODULE.addTrustedSpender.
     /// @dev Owner-only: a trusted spender can pull an unpriced token within a single transaction.
-    ///      The list starts EMPTY at deploy, so a router must be granted here explicitly.
+    ///      The list holds whatever {InitConfig-trustedSpenders} seeded at deploy, which is EMPTY
+    ///      unless the deploying caller passed one -- it is never protocol config. Use this to grant
+    ///      a spender afterwards, or on a wallet deployed with an empty list.
     function addTrustedSpender(address spender) external onlyOwner {
         SH_MODULE.addTrustedSpender(spender);
     }
@@ -396,8 +455,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     function setMaxOpGasCost(uint256 newMax) external onlyOwner {
         if (newMax == 0) revert SessionHandler_InvalidMaxOpGasCost();
+        // Cached before the write: emitting after assigning would report the NEW value as `oldMax`,
+        // losing the previous ceiling for anything indexing this event.
+        uint256 oldMax = maxOpGasCost;
         maxOpGasCost = newMax;
-        emit MaxOpGasCostUpdated(maxOpGasCost, newMax);
+        emit MaxOpGasCostUpdated(oldMax, newMax);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -491,17 +553,31 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     }
 
     /**
-     * @dev Blocks a non-owner (session-key or self) execution from reaching the account's own admin
-     *      surface. Session keys may act on external protocols under the USD cap, but must never be
-     *      able to reconfigure or remove the cap itself, nor reach value the cap cannot see:
+     * @dev Blocks a non-owner execution — a session key, an installed executor, or a self-call — from
+     *      reaching the account's own admin surface. Such callers may act on external protocols under
+     *      the USD cap, but must never be able to reconfigure or remove the cap itself, nor reach
+     *      value the cap cannot see:
      *        - single / batch: reverts if any sub-call targets a restricted address (see
      *          {_requireUnrestrictedTarget}) or, when enabled, one outside {sessionTargetAllowlist};
      *        - delegatecall: reverts outright, since delegated code runs in this account's context
      *          and could reach the admin surface regardless of the encoded target.
-     *      address(this) is restricted because execute(address(this), ...) self-calls installModule/
-     *      uninstallModule/addSession/withdraw/the cap setters with msg.sender == the account, which
-     *      those functions accept; SH_MODULE is restricted because its cap setters key by msg.sender;
-     *      ENTRY_POINT is restricted because the account's 4337 deposit sits outside the meter.
+     *
+     *      What each restricted entry is actually doing, stated honestly because the three are NOT
+     *      equally load-bearing:
+     *        - ENTRY_POINT — the only one closing a hole nothing else closes. `withdrawTo` moves the
+     *          account's 4337 deposit without changing `account.balance`, so the hook meters $0.
+     *        - the delegatecall ban — likewise unique: delegated code runs as this account and would
+     *          reach the admin surface whatever target was encoded.
+     *        - address(this) and SH_MODULE — defence in depth TODAY, not a lone barrier. Every account
+     *          function reachable at address(this) is now `onlyOwner` or `onlyEntryPoint`, so a
+     *          self-call arrives with msg.sender == the account and fails `_checkOwner` on its own.
+     *          (An older comment here claimed a session key could self-call installModule/
+     *          uninstallModule because "those functions accept msg.sender == the account". That was
+     *          true when they were `onlyEntryPointOrSelf`; they are `onlyOwner` now. The restriction
+     *          is still worth keeping — it holds even if that access control is ever loosened — but
+     *          do not repeat the dead justification.)
+     *          SH_MODULE similarly backstops the module's own admin guard, whose setters key by
+     *          msg.sender.
      */
     function _guardSessionExecution(Mode mode, bytes calldata executionCalldata) internal view {
         (CallType callType,,,) = ERC7579Utils.decodeMode(mode);
@@ -572,6 +648,28 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         super._payPrefund(missingAccountFunds);
     }
 
+    /**
+     * @notice Executes on behalf of the account at the request of an installed executor module.
+     * @dev Runs {_guardSessionExecution}, exactly as {execute} does for a session key. An executor is
+     *      automated spending authority the owner delegated, so it is held to the same boundary:
+     *      no reaching the account's own admin surface, no `SH_MODULE`, no `ENTRY_POINT`, no
+     *      `delegatecall`, and bound by {sessionTargetAllowlist} when the owner has enabled it.
+     *
+     *      This guard was MISSING until 2026-09-14, and the gap was real: an executor could call
+     *      `ENTRY_POINT.withdrawTo` and drain the account's 4337 deposit, which never touches
+     *      `account.balance` and so metered as a $0 spend against the USD cap. Installing an executor
+     *      is `onlyOwner` and none is installed at deploy, so it was a trust-the-executor assumption
+     *      rather than a session-key hole — but it contradicted the guarantee THREAT_MODEL §3.5 makes
+     *      for "every non-owner path", and an owner installing a capability executor (swaps, payroll,
+     *      intents) had no reason to expect a weaker boundary than a session key gets.
+     *
+     *      No owner branch, unlike {execute}: an executor module is never the owner, which is also why
+     *      {_extractFee} is unconditional here. Guard runs BEFORE the fee so a rejected call is never
+     *      charged.
+     * @param mode              ERC-7579 execution mode (single / batch / delegatecall).
+     * @param executionCalldata The encoded execution, shaped by the mode's CallType.
+     * @return returnData       Per-sub-call return data from {_execute}.
+     */
     function executeFromExecutor(bytes32 mode, bytes calldata executionCalldata)
         public
         payable
@@ -580,9 +678,12 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         whenNotPaused
         returns (bytes[] memory returnData)
     {
+        Mode execMode = Mode.wrap(mode);
+        _guardSessionExecution(execMode, executionCalldata);
+
         _extractFee();
 
-        return _execute(Mode.wrap(mode), executionCalldata);
+        return _execute(execMode, executionCalldata);
     }
 
     /*//////////////////////////////////////////////////////////////

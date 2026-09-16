@@ -27,6 +27,8 @@ import "./Constants.s.sol";
  *      │ Ethereum Sepolia    │ 11155111   │ ENTRYPOINT_V07 (canonical)                   │
  *      │ zkSync Sepolia      │ 300        │ address(0) — native AA, no EntryPoint needed │
  *      │ Mainnet + others    │ any        │ ENTRYPOINT_V07 (canonical)                   │
+ *      │ BSC                 │ 56         │ ENTRYPOINT_V07 (canonical)                   │
+ *      │ Arbitrum One        │ 42161      │ ENTRYPOINT_V07 (canonical)                   │
  *      │ Anvil (local)       │ 31337      │ Freshly deployed EntryPoint (cached)         │
  *      └─────────────────────┴────────────┴──────────────────────────────────────────────┘
  *
@@ -93,6 +95,9 @@ contract HelperConfig is Script {
      * @param wavax              Wrapped AVAX (WAVAX) ERC-20 token address. address(0) on Sepolia.
      * @param wavaxUsdPriceFeed  Chainlink AVAX/USD price feed address. address(0) on Sepolia.
      * @param wavaxHeartbeat     Chainlink AVAX/USD feed heartbeat in seconds (mainnet: 86400)
+     * @param sequencerUptimeFeed Chainlink L2 Sequencer Uptime Feed for this chain, consumed by
+     *                   {SHOracle}. address(0) on every chain that has no sequencer (Ethereum
+     *                   mainnet, Sepolia, BSC, Anvil), which disables the check there.
      * @param imx                Immutable X (IMX) ERC-20 token address. address(0) on Sepolia.
      * @param imxUsdPriceFeed    Chainlink IMX/USD price feed address. address(0) on Sepolia.
      * @param imxHeartbeat       Chainlink IMX/USD feed heartbeat in seconds (mainnet: 86400)
@@ -127,6 +132,8 @@ contract HelperConfig is Script {
         address account;
         address identityRegistry;
         address reputationRegistry;
+        // Chainlink L2 Sequencer Uptime Feed — address(0) on chains with no sequencer
+        address sequencerUptimeFeed;
         // Stablecoins
         address usdc;
         address dai;
@@ -206,28 +213,24 @@ contract HelperConfig is Script {
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Deployer account used on live networks — must be funded before broadcasting
+    /// @notice Deployer/owner account for every network other than local Anvil — Sepolia, mainnet,
+    ///         BSC and Arbitrum alike, matching the key the Makefile passes as --private-key. It
+    ///         becomes the Ownable owner of SHTreasury, so it must be funded before broadcasting.
+    /// @dev One address across all of them on purpose: the app self-bundles with this same key (see
+    ///      deploy_wallet.LIVE_PRIVATE_KEY_ENV and anvil.py), so deployer, protocol owner and
+    ///      bundler stay in sync. Acceptable on testnets and forks; a real mainnet deployment must
+    ///      split the bundler off, since it is an always-online hot key while this one is the admin
+    ///      root. Falls back to address(0) when SEPOLIA_ACCOUNT is unset, which fails loudly at
+    ///      broadcast rather than silently deploying to a burned owner.
     address public sepoliaAccount = vm.envOr("SEPOLIA_ACCOUNT", address(0));
 
     /// @notice Default pre-funded account on a local Anvil node (account index 0)
+    /// @dev Usable only on a bare Anvil node, never on a fork of a real chain. On real
+    ///      mainnet/Sepolia/BSC this address carries an EIP-7702 delegation that sweeps any ERC-721
+    ///      it receives to an attacker — a fork inherits that code, which breaks fork tests that
+    ///      register an NFT to config.account, and makes it unusable as a handleOps beneficiary
+    ///      (the EntryPoint's plain ETH send reverts AA91 against an address with code).
     address public constant ANVIL_BURNER_WALLET = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
-
-    /// @dev Deterministic placeholder used ONLY to derive a stable deployer address for local
-    ///      mainnet/BSC fork tests. Its key comes from a public string, so the key itself is public —
-    ///      it is never a signing key for a real deploy. It also must not be ANVIL_BURNER_WALLET's key
-    ///      (0xac0974...): that address is hijacked on real mainnet via an EIP-7702 delegation that
-    ///      sweeps any received ERC-721 to an attacker, which breaks mainnet-fork tests that register
-    ///      an NFT to config.account. Real mainnet/BSC deploys resolve the deployer from
-    ///      MAINNET_DEPLOYER_ADDRESS instead — see _mainnetDeployer.
-    uint256 private constant PLACEHOLDER_DEPLOYER_PK = uint256(keccak256("session-handler-mainnet-deployer"));
-
-    /// @notice Resolves the mainnet/BSC deployer/owner address. A real deploy must export
-    ///         MAINNET_DEPLOYER_ADDRESS (the funded operator address, matching the key passed via
-    ///         --account/--private-key); fork tests fall back to a deterministic placeholder address
-    ///         with no real funds at stake, so a public placeholder key can never move real value.
-    function _mainnetDeployer() internal view returns (address) {
-        return vm.envOr("MAINNET_DEPLOYER_ADDRESS", vm.addr(PLACEHOLDER_DEPLOYER_PK));
-    }
 
     /**
      * @dev Cached Anvil network config. Populated on first call to getOrCreateAnvilConfig.
@@ -270,6 +273,8 @@ contract HelperConfig is Script {
             return getMainnetConfig();
         } else if (chainId == BSC_CHAIN_ID) {
             return getBscConfig();
+        } else if (chainId == ARB_CHAIN_ID) {
+            return getArbConfig();
         } else {
             revert HelperConfig__InvalidChainId();
         }
@@ -277,7 +282,7 @@ contract HelperConfig is Script {
 
     /**
      * @notice Returns the Ethereum Sepolia testnet configuration
-     * @dev Uses the canonical EntryPoint v0.9 address and the burner wallet as deployer.
+     * @dev Uses the canonical EntryPoint v0.9 address and sepoliaAccount as deployer.
      *      Ensure sepoliaAccount is funded with Sepolia ETH before broadcasting.
      * @return config NetworkConfig for Ethereum Sepolia
      */
@@ -287,6 +292,7 @@ contract HelperConfig is Script {
             account: sepoliaAccount,
             identityRegistry: TESTNET_IDENTITY_REGISTRY,
             reputationRegistry: TESTNET_REPUTATION_REGISTRY,
+            sequencerUptimeFeed: address(0), // L1 testnet — no sequencer
             // Stablecoins
             usdc: SPO_USDC,
             weth: SPO_WETH,
@@ -377,10 +383,10 @@ contract HelperConfig is Script {
     function getMainnetConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
-            account: _mainnetDeployer(),
+            account: sepoliaAccount,
             identityRegistry: MNT_IDENTITY_REGISTRY,
             reputationRegistry: MNT_REPUTATION_REGISTRY,
-            //swap for the deployer account on mainnet and ensure it's funded before broadcasting
+            sequencerUptimeFeed: address(0), // L1 — no sequencer
             // Stablecoins
             usdc: MNT_USDC,
             dai: MNT_DAI,
@@ -466,9 +472,10 @@ contract HelperConfig is Script {
     function getBscConfig() internal view returns (NetworkConfig memory) {
         return NetworkConfig({
             entryPoint: ENTRYPOINT_V07,
-            account: _mainnetDeployer(),
+            account: sepoliaAccount,
             identityRegistry: MNT_IDENTITY_REGISTRY,
             reputationRegistry: MNT_REPUTATION_REGISTRY,
+            sequencerUptimeFeed: address(0), // BSC is its own L1 — no sequencer
             // Stablecoins
             usdc: BSC_USDC,
             dai: BSC_DAI,
@@ -542,6 +549,109 @@ contract HelperConfig is Script {
             imxHeartbeat: HEARTBEAT_24H,
             kncHeartbeat: HEARTBEAT_24H,
             cakeHeartbeat: HEARTBEAT_1H // BSC CAKE/USD feed heartbeat is 1 min; 1h gives a safety buffer
+        });
+    }
+
+    /**
+     * @notice Returns the Arbitrum One mainnet configuration
+     * @dev Arbitrum's native gas token is ETH, so `ethUsdPriceFeed` prices the native asset here
+     *      exactly as it does on Ethereum mainnet — there is no separate native feed to resolve.
+     *
+     *      Two independent reasons put a zero in this config, and both zero the token AND its feed
+     *      together. DeploySHProtocol pairs each token slot with its feed slot positionally, and
+     *      SHOracle treats a zero token as the native-ETH sentinel — so a zero token left next to a
+     *      live feed would silently repoint native ETH at that feed. Keeping the pairs symmetric is
+     *      what makes the omissions safe:
+     *        - No Chainlink USD feed on Arbitrum: ENS, SAND, IMX, KNC (KNC and IMX are deployed on
+     *          Arbitrum, but an unpriced token is unusable to the spending-limit hook).
+     *        - No credible token deployment on Arbitrum: BNB, AVAX, wTAO. Feeds for all three exist,
+     *          but no deployment appears on Arbitrum's canonical bridge list or CoinGecko's Arbitrum
+     *          list, and the closest on-chain matches carry dust supply (~3.8 BNB), so there is
+     *          nothing safe to point the feed at.
+     * @return config NetworkConfig for Arbitrum One
+     */
+    function getArbConfig() internal view returns (NetworkConfig memory) {
+        return NetworkConfig({
+            entryPoint: ENTRYPOINT_V07,
+            account: sepoliaAccount,
+            identityRegistry: MNT_IDENTITY_REGISTRY,
+            reputationRegistry: MNT_REPUTATION_REGISTRY,
+            sequencerUptimeFeed: ARB_SEQUENCER_UPTIME_FEED,
+            // Stablecoins
+            usdc: ARB_USDC,
+            dai: ARB_DAI,
+            usdt: ARB_USDT,
+            // ERC-20 tokens
+            weth: ARB_WETH,
+            aave: ARB_AAVE,
+            link: ARB_LINK,
+            oneinch: ARB_ONEINCH,
+            ape: ARB_APE,
+            arb: ARB_ARB,
+            wbnb: address(0), // No credible BNB deployment on Arbitrum
+            wbtc: ARB_WBTC,
+            comp: ARB_COMP,
+            crv: ARB_CRV,
+            ens: address(0), // No ENS/USD feed on Arbitrum
+            sand: address(0), // No SAND/USD feed on Arbitrum
+            sushi: ARB_SUSHI,
+            wtao: address(0), // No credible wTAO deployment on Arbitrum
+            uni: ARB_UNI,
+            yfi: ARB_YFI,
+            wavax: address(0), // No credible WAVAX deployment on Arbitrum
+            imx: address(0), // Deployed on Arbitrum, but no IMX/USD feed
+            knc: address(0), // Deployed on Arbitrum, but no KNC/USD feed
+            cake: ARB_CAKE,
+            // Chainlink price feeds
+            ethUsdPriceFeed: ARB_ETH_USD_PRICE_FEED,
+            usdcUsdPriceFeed: ARB_USDC_USD_PRICE_FEED,
+            daiUsdPriceFeed: ARB_DAI_USD_PRICE_FEED,
+            usdtUsdPriceFeed: ARB_USDT_USD_PRICE_FEED,
+            aaveUsdPriceFeed: ARB_AAVE_USD_PRICE_FEED,
+            linkUsdPriceFeed: ARB_LINK_USD_PRICE_FEED,
+            oneinchUsdPriceFeed: ARB_ONEINCH_USD_PRICE_FEED,
+            apeUsdPriceFeed: ARB_APE_USD_PRICE_FEED,
+            arbUsdPriceFeed: ARB_ARB_USD_PRICE_FEED,
+            bnbUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wbnb token
+            btcUsdPriceFeed: ARB_BTC_USD_PRICE_FEED,
+            compUsdPriceFeed: ARB_COMP_USD_PRICE_FEED,
+            crvUsdPriceFeed: ARB_CRV_USD_PRICE_FEED,
+            ensUsdPriceFeed: address(0),
+            sandUsdPriceFeed: address(0),
+            sushiUsdPriceFeed: ARB_SUSHI_USD_PRICE_FEED,
+            wtaoUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wtao token
+            uniUsdPriceFeed: ARB_UNI_USD_PRICE_FEED,
+            yfiUsdPriceFeed: ARB_YFI_USD_PRICE_FEED,
+            wavaxUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wavax token
+            imxUsdPriceFeed: address(0),
+            kncUsdPriceFeed: address(0),
+            cakeUsdPriceFeed: ARB_CAKE_USD_PRICE_FEED,
+            // Heartbeats — each rounded UP to the nearest bucket from the feed's published heartbeat
+            // in Chainlink's Arbitrum reference data. ETH/BTC/LINK publish 1755s, USDC/USDT/CAKE
+            // publish 255s, and COMP/CRV publish 3600s, so all seven sit inside HEARTBEAT_1H.
+            ethHeartbeat: HEARTBEAT_1H,
+            usdcHeartbeat: HEARTBEAT_1H,
+            daiHeartbeat: HEARTBEAT_24H,
+            usdtHeartbeat: HEARTBEAT_1H,
+            aaveHeartbeat: HEARTBEAT_24H,
+            linkHeartbeat: HEARTBEAT_1H,
+            oneinchHeartbeat: HEARTBEAT_24H,
+            apeHeartbeat: HEARTBEAT_24H,
+            arbHeartbeat: HEARTBEAT_24H,
+            bnbHeartbeat: HEARTBEAT_24H,
+            btcHeartbeat: HEARTBEAT_1H,
+            compHeartbeat: HEARTBEAT_1H,
+            crvHeartbeat: HEARTBEAT_1H,
+            ensHeartbeat: HEARTBEAT_24H,
+            sandHeartbeat: HEARTBEAT_24H,
+            sushiHeartbeat: HEARTBEAT_24H,
+            wtaoHeartbeat: HEARTBEAT_24H,
+            uniHeartbeat: HEARTBEAT_24H,
+            yfiHeartbeat: HEARTBEAT_24H,
+            wavaxHeartbeat: HEARTBEAT_24H,
+            imxHeartbeat: HEARTBEAT_24H,
+            kncHeartbeat: HEARTBEAT_24H,
+            cakeHeartbeat: HEARTBEAT_1H
         });
     }
 
@@ -628,6 +738,10 @@ contract HelperConfig is Script {
                 account: ANVIL_BURNER_WALLET,
                 identityRegistry: address(identityRegistry),
                 reputationRegistry: address(reputationRegistry),
+                // Left unset so the ~140 local unit tests keep exercising the no-sequencer path.
+                // The sequencer branches are covered by tests that build their own oracle against
+                // a MockV3Aggregator uptime feed, and end-to-end by the Arbitrum fork suite.
+                sequencerUptimeFeed: address(0),
                 // Stablecoins
                 usdc: address(usdc),
                 dai: address(dai),

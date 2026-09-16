@@ -50,6 +50,17 @@ contract SHAdminTest is Test {
     ///      what a live wallet prices native at.
     int256 constant NEW_ETH_USD_PRICE = 4000e8;
 
+    /// @dev The two answers an L2 Sequencer Uptime Feed reports. Not prices — a status flag.
+    int256 constant SEQ_UP = 0;
+    int256 constant SEQ_DOWN = 1;
+
+    /// @dev Timestamps for the sequencer tests. Foundry starts block.timestamp at 1, so dating an
+    ///      uptime round in the past needs room to subtract into: the tests warp to SEQ_NOW and
+    ///      place the sequencer's recovery at SEQ_UP_SINCE, i.e. up for 9 days — comfortably past
+    ///      SHOracle.SEQUENCER_GRACE_PERIOD, so only the branch under test can revert.
+    uint256 constant SEQ_NOW = 10 days;
+    uint256 constant SEQ_UP_SINCE = 1 days;
+
     function setUp() public {
         DeploySHProtocol deployer = new DeploySHProtocol();
         (factory, treasury, config, oracle) = deployer.run();
@@ -59,7 +70,8 @@ contract SHAdminTest is Test {
         address[] memory watched = new address[](1);
         watched[0] = config.usdc;
         vm.prank(owner);
-        wallet = SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched)));
+        wallet =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -272,7 +284,7 @@ contract SHAdminTest is Test {
         tokens[0] = config.usdc;
         feeds[0] = config.usdcUsdPriceFeed;
         beats[0] = config.usdcHeartbeat;
-        SHOracle noNative = new SHOracle(address(treasury), tokens, feeds, beats);
+        SHOracle noNative = new SHOracle(address(treasury), address(0), tokens, feeds, beats);
 
         assertFalse(noNative.isPriced(address(0)));
         vm.prank(owner);
@@ -542,7 +554,7 @@ contract SHAdminTest is Test {
         tokens[0] = config.usdc;
         feeds[0] = config.usdcUsdPriceFeed;
         beats[0] = config.usdcHeartbeat;
-        SHOracle noNative = new SHOracle(address(treasury), tokens, feeds, beats);
+        SHOracle noNative = new SHOracle(address(treasury), address(0), tokens, feeds, beats);
         uint256 minFee = registry.MIN_PROTOCOL_FEE(); // read before expectRevert, or it latches here
 
         vm.expectRevert(SHRegistry.SHRegistry_InvalidPriceOracle.selector);
@@ -643,12 +655,210 @@ contract SHAdminTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                    L2 SEQUENCER UPTIME (SHOracle)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The happy path: a sequencer up for longer than the grace period prices exactly as
+    ///         an L1 would, so the check is invisible in normal operation.
+    function test_sequencerUp_pricesNormally() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_UP, SEQ_UP_SINCE)));
+
+        assertEq(gated.getPrice(address(0), 1 ether), int256(ETH_USD_PRICE) * 1e10);
+    }
+
+    /// @notice While the sequencer is DOWN every feed on the chain is frozen at its pre-outage
+    ///         answer, so nothing may be priced — however fresh those answers still look to the
+    ///         per-feed heartbeat check. This is the gap the heartbeat alone cannot see.
+    function test_sequencerDown_blocksValuation() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_DOWN, SEQ_UP_SINCE)));
+
+        vm.expectRevert(SHOracle.PriceOracle_SequencerDown.selector);
+        gated.getPrice(address(0), 1 ether);
+    }
+
+    /// @notice A round with startedAt == 0 was never initialised and reports no status at all.
+    ///         "Cannot tell" must not read as "up".
+    function test_sequencerUninitialisedRound_readsAsDown() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_UP, 0)));
+
+        vm.expectRevert(SHOracle.PriceOracle_SequencerDown.selector);
+        gated.getPrice(address(0), 1 ether);
+    }
+
+    /// @notice The grace period at its exact boundary: blocked the instant the sequencer returns,
+    ///         still blocked ON the boundary (the check is <=), clear one second later. This window
+    ///         is what gives the feeds time to publish a post-outage price before anything is
+    ///         valued against them.
+    function test_sequencerJustRecovered_blockedUntilGraceElapses() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_UP, block.timestamp)));
+        uint256 grace = gated.SEQUENCER_GRACE_PERIOD();
+
+        vm.expectRevert(SHOracle.PriceOracle_SequencerGracePeriod.selector);
+        gated.getPrice(address(0), 1 ether);
+
+        vm.warp(SEQ_NOW + grace);
+        vm.expectRevert(SHOracle.PriceOracle_SequencerGracePeriod.selector);
+        gated.getPrice(address(0), 1 ether);
+
+        vm.warp(SEQ_NOW + grace + 1);
+        assertEq(gated.getPrice(address(0), 1 ether), int256(ETH_USD_PRICE) * 1e10, "grace period never cleared");
+    }
+
+    /// @notice The fee path is gated too — SHRegistry.getFee converts through getNativeFee — so an
+    ///         outage stops fee collection rather than striking the fee at a frozen price.
+    function test_getNativeFee_blockedWhileSequencerIsDown() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_DOWN, SEQ_UP_SINCE)));
+
+        vm.expectRevert(SHOracle.PriceOracle_SequencerDown.selector);
+        gated.getNativeFee(0.02e18);
+    }
+
+    /// @notice isPriced is a plain storage read and must stay answerable through an outage:
+    ///         proposePriceOracle's native-pricing check calls it, and a candidate oracle should
+    ///         not be unproposable just because the sequencer happens to be down.
+    function test_isPriced_unaffectedBySequencerOutage() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_DOWN, SEQ_UP_SINCE)));
+
+        assertTrue(gated.isPriced(address(0)), "isPriced should not depend on the sequencer");
+    }
+
+    /// @notice On a chain with no sequencer the check is skipped outright — which is what keeps the
+    ///         mainnet, BSC and Anvil configurations on their existing behaviour.
+    function test_noUptimeFeed_skipsTheCheckEntirely() public view {
+        assertEq(oracle.SEQUENCER_UPTIME_FEED(), address(0), "anvil config should configure no sequencer");
+        assertEq(oracle.getPrice(address(0), 1 ether), int256(ETH_USD_PRICE) * 1e10);
+    }
+
+    /// @notice A mistyped or wrong-network uptime feed would otherwise pass construction and then
+    ///         revert every valuation protocol-wide, fixable only through the two-day oracle swap.
+    ///         The constructor probes it once so that becomes a failed deploy instead.
+    function test_constructor_revertsOnUptimeFeedWithNoCode() public {
+        // Everything expectRevert must NOT latch onto is built first: it applies to the next call
+        // or CREATE, and the feed mock plus makeAddr would otherwise get there before the oracle.
+        address notAFeed = makeAddr("notAnUptimeFeed");
+        (address[] memory tokens, address[] memory feeds, uint256[] memory beats) = _nativeOnlyFeedArrays();
+
+        vm.expectRevert();
+        new SHOracle(address(treasury), notAFeed, tokens, feeds, beats);
+    }
+
+    /// @notice The likelier version of the same mistake: a PRICE feed passed where the uptime feed
+    ///         belongs. Its answer is a price, not a 0/1 flag, so it would read as "sequencer down"
+    ///         forever. Caught at construction.
+    function test_constructor_revertsWhenGivenAPriceFeedAsUptimeFeed() public {
+        address priceFeedByMistake = address(new MockV3Aggregator(DECIMALS, ETH_USD_PRICE));
+        (address[] memory tokens, address[] memory feeds, uint256[] memory beats) = _nativeOnlyFeedArrays();
+
+        vm.expectRevert(SHOracle.PriceOracle_InvalidSequencerFeed.selector);
+        new SHOracle(address(treasury), priceFeedByMistake, tokens, feeds, beats);
+    }
+
+    /// @notice A deploy that lands during an outage must still succeed — the status is checked at
+    ///         valuation time, not construction time. Bricking deploys on a transient chain
+    ///         condition would be its own failure mode.
+    function test_constructor_acceptsAnUptimeFeedReadingDown() public {
+        vm.warp(SEQ_NOW);
+        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_DOWN, SEQ_UP_SINCE)));
+
+        assertTrue(gated.SEQUENCER_UPTIME_FEED() != address(0), "uptime feed should be recorded");
+    }
+
+    /// @notice End-to-end blast radius on a live wallet: with a sequencer-gated oracle committed,
+    ///         an owner transfer of a WATCHED token is refused the moment the sequencer goes down,
+    ///         because postCheck has to price the balance change to meter it. Stricter than the L1
+    ///         behaviour by design — see THREAT_MODEL §3.14.
+    function test_liveWallet_haltsWhenSequencerGoesDown() public {
+        vm.warp(SEQ_NOW);
+        MockV3Aggregator uptime = _uptimeFeed(SEQ_UP, SEQ_UP_SINCE);
+        (SHOracle gated, MockV3Aggregator gatedEthFeed) = _replacementOracle(ETH_USD_PRICE, address(uptime));
+
+        vm.prank(owner);
+        treasury.proposePriceOracle(address(gated));
+
+        // Re-stamps the PRICE feeds only. Handing the uptime feed to this would reset its startedAt
+        // to now and put the sequencer back inside its grace period.
+        MockV3Aggregator[] memory feeds = new MockV3Aggregator[](2);
+        feeds[0] = gatedEthFeed;
+        feeds[1] = MockV3Aggregator(config.usdcUsdPriceFeed);
+        _warpPastTimelock(feeds);
+
+        vm.prank(owner);
+        treasury.commitPriceOracle();
+
+        // Sequencer up and long past grace: the wallet meters and transfers as normal.
+        ERC20Mock(config.usdc).mint(address(wallet), 100e6);
+        vm.prank(owner);
+        wallet.execute(
+            bytes32(0), abi.encodePacked(config.usdc, uint256(0), abi.encodeCall(ERC20Mock.transfer, (rando, 1e6)))
+        );
+        assertEq(ERC20Mock(config.usdc).balanceOf(rando), 1e6, "baseline transfer should succeed");
+
+        // Sequencer goes down. postCheck can no longer price the watched-token outflow, so the
+        // whole execution reverts rather than metering against a frozen price.
+        uptime.updateRoundData(2, SEQ_DOWN, block.timestamp, block.timestamp);
+        vm.prank(owner);
+        vm.expectRevert(SHOracle.PriceOracle_SequencerDown.selector);
+        wallet.execute(
+            bytes32(0), abi.encodePacked(config.usdc, uint256(0), abi.encodeCall(ERC20Mock.transfer, (rando, 1e6)))
+        );
+        assertEq(ERC20Mock(config.usdc).balanceOf(rando), 1e6, "revert was not atomic");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev An L2 Sequencer Uptime Feed reporting `answer` (SEQ_UP / SEQ_DOWN) with the status
+    ///      having begun at `startedAt`. Zero decimals, matching the real feed — it carries a flag,
+    ///      not a price.
+    function _uptimeFeed(int256 answer, uint256 startedAt) internal returns (MockV3Aggregator f) {
+        f = new MockV3Aggregator(0, answer);
+        f.updateRoundData(1, answer, block.timestamp, startedAt);
+    }
+
+    /// @dev A self-contained oracle gated by `uptimeFeed`, pricing native at ETH_USD_PRICE. Its
+    ///      price feed is given a deliberately wide heartbeat: the sequencer tests warp, and a
+    ///      staleness revert would mask the branch actually under test.
+    function _sequencerGatedOracle(address uptimeFeed) internal returns (SHOracle) {
+        (address[] memory tokens, address[] memory feeds, uint256[] memory beats) = _nativeOnlyFeedArrays();
+        return new SHOracle(address(treasury), uptimeFeed, tokens, feeds, beats);
+    }
+
+    /// @dev Native-only constructor arrays backed by a fresh mock feed. The heartbeat is
+    ///      deliberately wide: the sequencer tests warp, and a staleness revert would mask the
+    ///      branch actually under test. Split out from {_sequencerGatedOracle} so a test can build
+    ///      these BEFORE arming vm.expectRevert, which would otherwise latch onto the feed's CREATE.
+    function _nativeOnlyFeedArrays()
+        internal
+        returns (address[] memory tokens, address[] memory feeds, uint256[] memory beats)
+    {
+        MockV3Aggregator ethFeed = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE);
+        tokens = new address[](1);
+        feeds = new address[](1);
+        beats = new uint256[](1);
+        tokens[0] = address(0);
+        feeds[0] = address(ethFeed);
+        beats[0] = 365 days;
+    }
 
     /// @dev A replacement oracle in the shape proposePriceOracle accepts: it prices native (at
     ///      `ethPrice`) plus USDC, so a wallet watching USDC keeps working across the swap.
     function _replacementOracle(int256 ethPrice) internal returns (SHOracle, MockV3Aggregator ethFeed) {
+        return _replacementOracle(ethPrice, address(0));
+    }
+
+    /// @dev As above, but gated by `uptimeFeed` — for exercising the sequencer check against a
+    ///      wallet that is actually live on the oracle.
+    function _replacementOracle(int256 ethPrice, address uptimeFeed)
+        internal
+        returns (SHOracle, MockV3Aggregator ethFeed)
+    {
         ethFeed = new MockV3Aggregator(DECIMALS, ethPrice);
         address[] memory tokens = new address[](2);
         address[] memory feeds = new address[](2);
@@ -659,7 +869,7 @@ contract SHAdminTest is Test {
         tokens[1] = config.usdc;
         feeds[1] = config.usdcUsdPriceFeed;
         beats[1] = config.usdcHeartbeat;
-        return (new SHOracle(address(treasury), tokens, feeds, beats), ethFeed);
+        return (new SHOracle(address(treasury), uptimeFeed, tokens, feeds, beats), ethFeed);
     }
 
     /// @dev Warps past ORACLE_TIMELOCK and re-stamps the given mock feeds. MockV3Aggregator records

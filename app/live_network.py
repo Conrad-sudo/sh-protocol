@@ -126,7 +126,7 @@ def _bundler_rpc(rpc_url: str, method: str, params: list) -> dict:
 
 
 def create_unsigned_user_op(
-    chat_id: int,
+    user_id: int,
     session_handler: Contract,
     key_ciphertext: str,
     entry_point: Contract,
@@ -140,7 +140,7 @@ def create_unsigned_user_op(
     eth_estimateUserOperationGas to get accurate per-component limits, then constructs
     the final unsigned op with a 20% buffer applied to each limit and the live gas price.
 
-    @param chat_id         The Telegram chat ID of the user.
+    @param user_id         The application user ID.
     @param session_handler Bound SessionHandler contract (the UserOp sender).
     @param key_ciphertext  Vault Transit ciphertext for the session key ('vault:v1:...').
     @param entry_point     Bound EntryPoint contract.
@@ -148,7 +148,7 @@ def create_unsigned_user_op(
     @param calldata        Hex-encoded SessionHandler.execute() calldata (0x-prefixed).
     @return                An unsigned PackedUserOperation tuple (empty signature field).
     """
-    w3, _, _ = load_network_config(chat_id)
+    w3, _, _ = load_network_config(user_id)
     rpc_url = str(w3.provider.endpoint_uri)
 
     gas_price = w3.eth.gas_price
@@ -165,7 +165,7 @@ def create_unsigned_user_op(
     )
 
     signed_dummy_op = create_signed_user_op(
-        chat_id=chat_id,
+        user_id=user_id,
         user_op=dummy_op,
         entry_point=entry_point,
         key_ciphertext=key_ciphertext,
@@ -217,7 +217,7 @@ def create_unsigned_user_op(
 
 
 def send_live_user_op_as_session(
-    chat_id: int, key_ciphertext: str, target: str, value: int, data: bytes
+    user_id: int, key_ciphertext: str, target: str, value: int, data: bytes
 ):
     """
     Orchestrates the full ERC-4337 UserOperation flow for a session key holder.
@@ -230,7 +230,7 @@ def send_live_user_op_as_session(
 
     No bundler EOA is required — the Alchemy bundler handles submission and gas payment.
 
-    @param chat_id        The Telegram chat ID of the user.
+    @param user_id        The application user ID.
     @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
     @param target         The contract address SessionHandler will call (e.g. USDC).
     @param value          The ETH value in wei to forward with the inner call.
@@ -240,13 +240,13 @@ def send_live_user_op_as_session(
                           compatibility with tools.py callers.
     """
     session_handler, entry_point, calldata, nonce = prepare_execute_call(
-        chat_id, target, value, data
+        user_id, target, value, data
     )
-    return _submit_user_op(chat_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
+    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
 
 
 def send_live_batch_user_op_as_session(
-    chat_id: int, key_ciphertext: str, executions: list[tuple[str, int, bytes]]
+    user_id: int, key_ciphertext: str, executions: list[tuple[str, int, bytes]]
 ):
     """
     Batch variant of send_live_user_op_as_session: submits several sub-calls as ONE atomic
@@ -254,19 +254,19 @@ def send_live_batch_user_op_as_session(
     approval — SpendingLimitModule reverts the whole transaction if an approval survives it,
     so [approve, spend(, approve 0)] must land together.
 
-    @param chat_id        The Telegram chat ID of the user.
+    @param user_id        The application user ID.
     @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
     @param executions     List of (target_address, value_wei, calldata_bytes) triples, in order.
     @return               A tuple of (user_op_hash_bytes, receipt), same shape as the single-call flow.
     """
     session_handler, entry_point, calldata, nonce = prepare_execute_batch_call(
-        chat_id, executions
+        user_id, executions
     )
-    return _submit_user_op(chat_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
+    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
 
 
 def _submit_user_op(
-    chat_id: int,
+    user_id: int,
     key_ciphertext: str,
     session_handler,
     entry_point,
@@ -278,12 +278,12 @@ def _submit_user_op(
     with the session key, submits via eth_sendUserOperation, and polls for the receipt.
     Everything after calldata construction is identical for single-call and batch ops.
     """
-    w3, _, _ = load_network_config(chat_id)
+    w3, _, _ = load_network_config(user_id)
     rpc_url = str(w3.provider.endpoint_uri)
 
     print("\n[1/3] Creating transaction  ...")
     user_op = create_unsigned_user_op(
-        chat_id=chat_id,
+        user_id=user_id,
         session_handler=session_handler,
         key_ciphertext=key_ciphertext,
         entry_point=entry_point,
@@ -293,7 +293,7 @@ def _submit_user_op(
 
     print("[2/3] Signing transaction   ...")
     user_op_signed = create_signed_user_op(
-        chat_id=chat_id,
+        user_id=user_id,
         user_op=user_op,
         entry_point=entry_point,
         key_ciphertext=key_ciphertext,

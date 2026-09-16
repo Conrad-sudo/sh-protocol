@@ -147,9 +147,9 @@ write tools already emit. Filter these three names out of `get_tools()`.
 
 Three structural mismatches make a straight swap impossible:
 
-1. **Multi-tenancy.** Every project tool takes `chat_id`. Package tools have no such
+1. **Multi-tenancy.** Every project tool takes `user_id`. Package tools have no such
    parameter — a toolkit instance is bound to one RPC, one router, one token map. Requires a
-   per-`chat_id` toolkit cache.
+   per-`user_id` toolkit cache.
 2. **Tickers and contacts.** The project speaks `"usdc"` and `"Sandy"`.
    `langchain-erc20` accepts a `tokens=` map (case-insensitive — verified), but
    **`langchain-uniswap-v2` requires raw addresses** and rejects tickers outright. Contact-name
@@ -180,7 +180,7 @@ Both are alpha (`0.1.0` / `0.3.0`) with an explicitly unstable public API — pi
 ### Step 2 — new file `app/toolkits.py`
 
 Toolkits hit the RPC at construction (`ConnectionError` if unreachable), so build lazily and
-cache per `chat_id`, mirroring `contracts.py`:
+cache per `user_id`, mirroring `contracts.py`:
 
 ```python
 from langchain_erc20 import ERC20Toolkit
@@ -198,37 +198,37 @@ _uniswap_toolkit_cache: dict[int, dict] = {}
 _BLOCKED = {"approve", "approve_token", "revoke_approval"}
 
 
-def _token_map(chat_id: int) -> dict[str, str]:
-    _, chain_id, _ = load_network_config(chat_id)
-    return {t: get_token_address(chain_id, t) for t in get_supported_tokens(chat_id)}
+def _token_map(user_id: int) -> dict[str, str]:
+    _, chain_id, _ = load_network_config(user_id)
+    return {t: get_token_address(chain_id, t) for t in get_supported_tokens(user_id)}
 
 
-def get_erc20_tools(chat_id: int) -> dict:
-    if chat_id not in _erc20_toolkit_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
-        tokens = _token_map(chat_id)
+def get_erc20_tools(user_id: int) -> dict:
+    if user_id not in _erc20_toolkit_cache:
+        w3, chain_id, _ = load_network_config(user_id)
+        tokens = _token_map(user_id)
         tk = ERC20Toolkit(
             rpc_url=w3.provider.endpoint_uri,
             tx_mode="calls",                       # zero nonce/gas RPC; plan["calls"] only
             tokens=tokens,
             native_wrapped_address=tokens[get_native_wrapped_ticker(chain_id)],
         )
-        _erc20_toolkit_cache[chat_id] = {
+        _erc20_toolkit_cache[user_id] = {
             t.name: t for t in tk.get_tools() if t.name not in _BLOCKED
         }
-    return _erc20_toolkit_cache[chat_id]
+    return _erc20_toolkit_cache[user_id]
 
 
-def get_uniswap_tools(chat_id: int) -> dict:
-    if chat_id not in _uniswap_toolkit_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
-        tokens = _token_map(chat_id)
+def get_uniswap_tools(user_id: int) -> dict:
+    if user_id not in _uniswap_toolkit_cache:
+        w3, chain_id, _ = load_network_config(user_id)
+        tokens = _token_map(user_id)
         tk = UniswapV2Toolkit(
             rpc_url=w3.provider.endpoint_uri,
             # Read the router from the wallet, exactly as load_iuniswap_router does —
             # never from the package's chain registry, which knows nothing about Anvil
             # or Ubeswap on Celo.
-            router_address=load_session_handler(chat_id).functions.getRouter().call(),
+            router_address=load_session_handler(user_id).functions.getRouter().call(),
             factory_address=_factory_for(chain_id),   # existing constants.py switch
             native_wrapped_address=tokens[get_native_wrapped_ticker(chain_id)],
             tx_mode="calls",
@@ -236,18 +236,18 @@ def get_uniswap_tools(chat_id: int) -> dict:
             # depends on it.
             reset_residual_approvals=True,
         )
-        _uniswap_toolkit_cache[chat_id] = {
+        _uniswap_toolkit_cache[user_id] = {
             t.name: t for t in tk.get_tools() if t.name not in _BLOCKED
         }
-    return _uniswap_toolkit_cache[chat_id]
+    return _uniswap_toolkit_cache[user_id]
 
 
-def invalidate_toolkits(chat_id: int) -> None:
-    _erc20_toolkit_cache.pop(chat_id, None)
-    _uniswap_toolkit_cache.pop(chat_id, None)
+def invalidate_toolkits(user_id: int) -> None:
+    _erc20_toolkit_cache.pop(user_id, None)
+    _uniswap_toolkit_cache.pop(user_id, None)
 ```
 
-Call `invalidate_toolkits(chat_id)` from `contracts.invalidate_cache(chat_id)` so a redeploy or
+Call `invalidate_toolkits(user_id)` from `contracts.invalidate_cache(user_id)` so a redeploy or
 a network switch drops both. A token added to the DB mid-session also needs an invalidation —
 the token map is snapshotted at construction.
 
@@ -257,7 +257,7 @@ Celo `langchain-erc20.for_chain(42220)` deliberately raises.
 ### Step 3 — replace `_submit_router_call` with `_submit_plan`
 
 ```python
-def _submit_plan(chat_id, key_ciphertext, plan):
+def _submit_plan(user_id, key_ciphertext, plan):
     """Submit a package execution plan as one UserOp: single call direct, multi-call batched.
 
     Batching is mandatory whenever the plan contains an approval — SpendingLimitModule
@@ -271,12 +271,12 @@ def _submit_plan(chat_id, key_ciphertext, plan):
     if len(execs) == 1:
         target, value, data = execs[0]
         tx_hash, receipt = send_user_op_as_session(
-            chat_id=chat_id, key_ciphertext=key_ciphertext,
+            user_id=user_id, key_ciphertext=key_ciphertext,
             target=target, value=value, data=data,
         )
     else:
         tx_hash, receipt = send_batch_user_op_as_session(
-            chat_id=chat_id, key_ciphertext=key_ciphertext, executions=execs,
+            user_id=user_id, key_ciphertext=key_ciphertext, executions=execs,
         )
     if receipt["status"] != 1:
         raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
@@ -288,25 +288,25 @@ Verified: `plan["calls"]` converts to `(address, uint256, bytes)` triples that
 
 ### Step 4 — rewrite tool bodies, keep signatures and docstrings
 
-Every tool keeps its `chat_id` / `session_key_ciphertext` / ticker / contact-name signature and
+Every tool keeps its `user_id` / `session_key_ciphertext` / ticker / contact-name signature and
 its prompt-tuned docstring. Only the body changes:
 
 ```python
 @tool
 def swap_exact_tokens_for_tokens(
-    chat_id: int, session_key_ciphertext: str, token_in: str, token_out: str,
+    user_id: int, session_key_ciphertext: str, token_in: str, token_out: str,
     amount_in: float, slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
 ):
     """<unchanged docstring>"""
-    _, chain_id, _ = load_network_config(chat_id)
-    plan = get_uniswap_tools(chat_id)["swap_exact_tokens_for_tokens"].invoke({
+    _, chain_id, _ = load_network_config(user_id)
+    plan = get_uniswap_tools(user_id)["swap_exact_tokens_for_tokens"].invoke({
         "token_in": get_token_address(chain_id, token_in),
         "token_out": get_token_address(chain_id, token_out),
         "amount_in": amount_in,
-        "from_address": load_session_handler(chat_id).address,
+        "from_address": load_session_handler(user_id).address,
         "slippage_bps": slippage_bps,
     })
-    tx_hash, receipt = _submit_plan(chat_id, session_key_ciphertext, plan)
+    tx_hash, receipt = _submit_plan(user_id, session_key_ciphertext, plan)
     s = plan["summary"]
     return (
         f"Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}, "

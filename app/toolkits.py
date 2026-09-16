@@ -10,7 +10,7 @@ never sign, submit, or hold a key. Turning a plan into a UserOperation is app/to
 Two things force a wrapper layer rather than exposing the package tools to the agent directly:
 
   1. A toolkit instance is bound to ONE rpc/router/token set. The bot is multi-tenant by
-     chat_id, so toolkits are built lazily and cached per chat_id, exactly like the Contract
+     user_id, so toolkits are built lazily and cached per user_id, exactly like the Contract
      instances in contracts.py.
   2. langchain-uniswap-v2 takes raw addresses only. The agent speaks tickers and contact
      names, so app/tools.py resolves those before invoking a package tool.
@@ -31,9 +31,13 @@ from contracts import load_session_handler
 from db import get_supported_tokens, get_token_address
 from network_config import load_network_config
 
-_erc20_tools_cache: dict[int, dict[str, BaseTool]] = {}
-_uniswap_tools_cache: dict[int, dict[str, BaseTool]] = {}
-_erc8004_tools_cache: dict[int, dict[str, BaseTool]] = {}
+# Keyed (user_id, chain_id), matching contracts.py. Every toolkit below is bound to one chain's
+# RPC, router and token addresses, so a user with wallets on several chains must not be served the
+# toolkit built for the chain they just left -- it would build calldata for the wrong router and
+# the wrong token addresses against the new chain's RPC.
+_erc20_tools_cache: dict[tuple[int, int], dict[str, BaseTool]] = {}
+_uniswap_tools_cache: dict[tuple[int, int], dict[str, BaseTool]] = {}
+_erc8004_tools_cache: dict[tuple[int, int], dict[str, BaseTool]] = {}
 
 # Package tools that build valid ERC20 calldata but ALWAYS revert on this wallet, because
 # SpendingLimitModule rejects any transaction that leaves an allowance standing (and rejects
@@ -43,27 +47,28 @@ _erc8004_tools_cache: dict[int, dict[str, BaseTool]] = {}
 _BLOCKED_TOOLS = frozenset({"approve", "approve_token", "revoke_approval"})
 
 
-def _token_map(chat_id: int) -> dict[str, str]:
+def _token_map(user_id: int) -> dict[str, str]:
     """Ticker -> checksummed address for every token listed on the user's current chain.
 
     Snapshotted into the toolkit at construction, so adding a token to the DB mid-session
-    requires invalidate_toolkits(chat_id) before it resolves.
+    requires invalidate_toolkits(user_id) before it resolves.
     """
-    _, chain_id, _ = load_network_config(chat_id)
+    _, chain_id, _ = load_network_config(user_id)
     return {
         ticker: get_token_address(chain_id, ticker)
-        for ticker in get_supported_tokens(chat_id)
+        for ticker in get_supported_tokens(user_id)
     }
 
 
-def get_erc20_tools(chat_id: int) -> dict[str, BaseTool]:
+def get_erc20_tools(user_id: int) -> dict[str, BaseTool]:
     """Returns {tool_name: tool} for langchain-erc20, bound to this user's chain.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     """
-    if chat_id not in _erc20_tools_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
-        tokens = _token_map(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _erc20_tools_cache:
+        tokens = _token_map(user_id)
         toolkit = ERC20Toolkit(
             rpc_url=w3.provider.endpoint_uri,
             tx_mode="calls",
@@ -75,20 +80,21 @@ def get_erc20_tools(chat_id: int) -> dict[str, BaseTool]:
             # Matches the address(0) sentinel the wallet and SHOracle already use for native.
             native_sentinel=ETH_SENTINEL,
         )
-        _erc20_tools_cache[chat_id] = {
+        _erc20_tools_cache[key] = {
             t.name: t for t in toolkit.get_tools() if t.name not in _BLOCKED_TOOLS
         }
-    return _erc20_tools_cache[chat_id]
+    return _erc20_tools_cache[key]
 
 
-def get_uniswap_tools(chat_id: int) -> dict[str, BaseTool]:
+def get_uniswap_tools(user_id: int) -> dict[str, BaseTool]:
     """Returns {tool_name: tool} for langchain-uniswap-v2, bound to this user's router.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     """
-    if chat_id not in _uniswap_tools_cache:
-        w3, chain_id, _ = load_network_config(chat_id)
-        tokens = _token_map(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _uniswap_tools_cache:
+        tokens = _token_map(user_id)
         toolkit = UniswapV2Toolkit(
             rpc_url=w3.provider.endpoint_uri,
             # Read the router from app constants, never from the package's chain registry
@@ -108,20 +114,21 @@ def get_uniswap_tools(chat_id: int) -> dict[str, BaseTool]:
             # allowance survives the transaction.
             reset_residual_approvals=True,
         )
-        _uniswap_tools_cache[chat_id] = {
+        _uniswap_tools_cache[key] = {
             t.name: t for t in toolkit.get_tools() if t.name not in _BLOCKED_TOOLS
         }
-    return _uniswap_tools_cache[chat_id]
+    return _uniswap_tools_cache[key]
 
 
-def get_erc8004_tools(chat_id: int) -> dict[str, BaseTool]:
+def get_erc8004_tools(user_id: int) -> dict[str, BaseTool]:
     """Returns {tool_name: tool} for langchain-erc8004, bound to this user's registries.
 
-    @param chat_id  The Telegram chat ID of the user.
+    @param user_id  The application user ID.
     """
-    if chat_id not in _erc8004_tools_cache:
-        w3, _, _ = load_network_config(chat_id)
-        wallet = load_session_handler(chat_id)
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _erc8004_tools_cache:
+        wallet = load_session_handler(user_id)
         toolkit = ERC8004Toolkit(
             rpc_url=w3.provider.endpoint_uri,
             # Both addresses come off the WALLET, never from the package's chain table. The
@@ -151,15 +158,18 @@ def get_erc8004_tools(chat_id: int) -> dict[str, BaseTool]:
             # there is no set of reviewers this project has an independent reason to trust.
             client_allowlist=None,
         )
-        _erc8004_tools_cache[chat_id] = {t.name: t for t in toolkit.get_tools()}
-    return _erc8004_tools_cache[chat_id]
+        _erc8004_tools_cache[key] = {t.name: t for t in toolkit.get_tools()}
+    return _erc8004_tools_cache[key]
 
 
-def invalidate_toolkits(chat_id: int) -> None:
-    """Drop every cached toolkit for chat_id after a redeploy, network switch, or token add.
+def invalidate_toolkits(user_id: int) -> None:
+    """Drop every cached toolkit for user_id, on EVERY chain, after a redeploy, network switch or
+    token add.
 
-    Called by contracts.invalidate_cache, which is the single invalidation entry point.
+    Called by contracts.invalidate_cache, which is the single invalidation entry point, and
+    chain-agnostic for the same reason it is: a network switch has to drop the chain being left
+    and the caller does not always know which that was.
     """
-    _erc20_tools_cache.pop(chat_id, None)
-    _uniswap_tools_cache.pop(chat_id, None)
-    _erc8004_tools_cache.pop(chat_id, None)
+    for cache in (_erc20_tools_cache, _uniswap_tools_cache, _erc8004_tools_cache):
+        for cached_key in [k for k in cache if k[0] == user_id]:
+            del cache[cached_key]

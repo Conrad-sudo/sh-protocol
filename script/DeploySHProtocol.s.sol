@@ -74,6 +74,7 @@ contract DeploySHProtocol is Script {
             heartbeats[0] = config.bnbHeartbeat;
         } else if (
             block.chainid == MAINNET_CHAIN_ID || block.chainid == SEPOLIA_CHAIN_ID || block.chainid == LOCAL_CHAIN_ID
+                || block.chainid == ARB_CHAIN_ID // Arbitrum's native gas token is ETH
         ) {
             priceFeeds[0] = config.ethUsdPriceFeed;
             heartbeats[0] = config.ethHeartbeat;
@@ -147,7 +148,7 @@ contract DeploySHProtocol is Script {
         treasury = new SHTreasury();
 
         // 2. Price oracle, born owned by the treasury (feed admin runs through its passthroughs).
-        oracle = new SHOracle(address(treasury), tokens, priceFeeds, heartbeats);
+        oracle = new SHOracle(address(treasury), config.sequencerUptimeFeed, tokens, priceFeeds, heartbeats);
 
         // 3. Register the protocol's agent, whose id the registry records.
         uint256 agentId = IIdentityRegistry(config.identityRegistry).register(AGENT_URI);

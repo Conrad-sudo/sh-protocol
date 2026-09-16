@@ -87,7 +87,8 @@ contract SHProtocolTest is Test {
         watched[0] = address(usdc);
         watched[1] = address(dai);
         vm.prank(owner);
-        wallet = SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched)));
+        wallet =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
 
         harness = new SpendingLimitModuleHarness(address(feeRegistry));
         spender = new MockSpender();
@@ -157,7 +158,7 @@ contract SHProtocolTest is Test {
 
         address[] memory watched = new address[](0);
         vm.expectRevert(SHFactory.SHFactory_SpendingLimitModuleNotSet.selector);
-        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched);
+        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0));
     }
 
     function test_deployWallet_revertsOnUnpricedWatchedToken() public {
@@ -168,20 +169,33 @@ contract SHProtocolTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced))
         );
-        factory.deployWallet(DAILY_LIMIT, WINDOW, watched);
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0));
     }
 
     function test_deployWallet_revertsOnZeroWindow() public {
         address[] memory watched = new address[](0);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidWindowDuration.selector);
-        factory.deployWallet(DAILY_LIMIT, 0, watched);
+        factory.deployWallet(DAILY_LIMIT, 0, watched, address(0), new address[](0));
     }
 
     function test_initialize_cannotRerun() public {
         address[] memory watched = new address[](0);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         wallet.initialize(
-            rando, config.entryPoint, address(1), address(2), address(3), 9, address(module), 1, 1, watched
+            SessionHandler.InitConfig({
+                owner: rando,
+                entryPoint: config.entryPoint,
+                reputationRegistry: address(1),
+                identityRegistry: address(2),
+                registry: address(3),
+                walletId: 9,
+                spendingLimitModule: address(module),
+                dailyLimitUsd: 1,
+                windowDuration: 1,
+                watchedTokens: watched,
+                sessionKey: address(0),
+                trustedSpenders: new address[](0)
+            })
         );
     }
 
@@ -189,8 +203,148 @@ contract SHProtocolTest is Test {
         address[] memory watched = new address[](0);
         vm.deal(kani, 1 ether);
         vm.prank(kani);
-        address funded = factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched);
+        address funded =
+            factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0));
         assertEq(funded.balance, 1 ether);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+        DEPLOY-TIME SEEDING (session key + trusted spenders, CREATE2)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Deploys a wallet as `as_`, seeding whatever the test needs. Empty watched list keeps
+    ///      these focused on the seeding, not on metering. The CREATE2 salt comes from the factory's
+    ///      per-owner deployCount, so repeated calls with the same `as_` yield distinct wallets.
+    function _deploySeeded(address as_, address sessionKey, address[] memory spenders)
+        internal
+        returns (SessionHandler)
+    {
+        vm.prank(as_);
+        return
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), sessionKey, spenders)));
+    }
+
+    function test_deployWallet_seedsSessionKey() public {
+        address seeded = makeAddr("seededKey");
+        // The address is known before the deploy, so the event can be expected against it.
+        address predicted = factory.predictWalletAddress(kani);
+
+        vm.expectEmit(true, false, false, false, predicted);
+        emit SessionHandler.SessionAdded(seeded);
+        SessionHandler w = _deploySeeded(kani, seeded, new address[](0));
+
+        assertEq(address(w), predicted, "deployed at a different address than predicted");
+        assertTrue(w.allowedSession(seeded), "session key not authorized at deploy");
+        assertEq(w.owner(), kani, "deployer should own the wallet");
+    }
+
+    function test_deployWallet_zeroSessionKey_authorizesNone() public {
+        SessionHandler w = _deploySeeded(kani, address(0), new address[](0));
+        // address(0) means "owner-only wallet", NOT an error (unlike addSession).
+        assertFalse(w.allowedSession(address(0)));
+    }
+
+    function test_deployWallet_seedsTrustedSpenders() public {
+        address[] memory spenders = new address[](2);
+        spenders[0] = makeAddr("routerA");
+        spenders[1] = makeAddr("routerB");
+
+        SessionHandler w = _deploySeeded(kani, address(0), spenders);
+
+        assertTrue(w.isTrustedSpender(spenders[0]));
+        assertTrue(w.isTrustedSpender(spenders[1]));
+        assertEq(w.getConfig().trustedSpenders.length, 2);
+    }
+
+    function test_deployWallet_seedsTrustedSpender_zeroReverts() public {
+        address[] memory spenders = new address[](1);
+        spenders[0] = address(0);
+        // The module's own validation propagates out through initialize().
+        vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidTrustedSpender.selector);
+        _deploySeeded(kani, address(0), spenders);
+    }
+
+    /// @dev The point of seeding a spender: an unpriced token (e.g. an LP token) may be approved to
+    ///      it. Without the grant the same batch reverts TokenNotPriced -- asserted both ways here.
+    function test_deployWallet_seededTrustedSpenderAllowsUnpricedApproval() public {
+        ERC20Mock unpriced = new ERC20Mock("Unpriced", "UNP", 18);
+        address venue = makeAddr("venue");
+
+        address[] memory spenders = new address[](1);
+        spenders[0] = venue;
+        SessionHandler trusted = _deploySeeded(kani, address(0), spenders);
+        SessionHandler untrusted = _deploySeeded(kani, address(0), new address[](0));
+
+        // approve then zero in one batch, so the no-standing-approval rule is satisfied either way.
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(unpriced), 0, abi.encodeCall(ERC20Mock.approve, (venue, 1e18)));
+        execs[1] = Execution(address(unpriced), 0, abi.encodeCall(ERC20Mock.approve, (venue, 0)));
+        bytes32 batchMode = bytes32(uint256(0x01) << 248);
+
+        vm.prank(kani);
+        trusted.execute(batchMode, ERC7579Utils.encodeBatch(execs));
+
+        vm.prank(kani);
+        vm.expectRevert(
+            abi.encodeWithSelector(SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced))
+        );
+        untrusted.execute(batchMode, ERC7579Utils.encodeBatch(execs));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                 CREATE2 ADDRESSING / PER-OWNER deployCount
+    //////////////////////////////////////////////////////////////*/
+
+    function test_predictWalletAddress_matchesDeployed() public {
+        address predicted = factory.predictWalletAddress(kani);
+        assertEq(predicted.code.length, 0, "nothing should exist at the predicted address yet");
+
+        SessionHandler w = _deploySeeded(kani, address(0), new address[](0));
+        assertEq(address(w), predicted);
+    }
+
+    /// @dev The prediction advances as the owner's own deployCount is consumed.
+    function test_predictWalletAddress_advancesAfterDeploy() public {
+        assertEq(factory.deployCount(kani), 0);
+        address first = factory.predictWalletAddress(kani);
+
+        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
+        assertEq(address(a), first);
+        assertEq(factory.deployCount(kani), 1);
+
+        address second = factory.predictWalletAddress(kani);
+        assertTrue(second != first, "prediction must advance once the counter is consumed");
+        SessionHandler b = _deploySeeded(kani, address(0), new address[](0));
+        assertEq(address(b), second);
+        assertEq(factory.deployCount(kani), 2);
+    }
+
+    /// @dev No salt to collide: a repeat deploy consumes the next nonce and yields a new wallet. One
+    ///      owner may hold several; refusing a second is the CALLER's policy, enforced by reading
+    ///      deployCount before asking for a signature, not the factory's.
+    function test_deployWallet_secondDeploySameOwner_getsFreshWallet() public {
+        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler b = _deploySeeded(kani, address(0), new address[](0));
+        assertTrue(address(a) != address(b));
+        assertEq(a.owner(), kani);
+        assertEq(b.owner(), kani);
+    }
+
+    /// @dev The owner is in the salt and the counter is per-owner, so no other caller can squat a
+    ///      predicted address OR move it by deploying first.
+    function test_predictWalletAddress_unaffectedByOtherOwners() public {
+        address predictedKani = factory.predictWalletAddress(kani);
+        address predictedRando = factory.predictWalletAddress(rando);
+        assertTrue(predictedKani != predictedRando, "salt must bind the owner");
+
+        // rando deploys first — kani's prediction must not move.
+        SessionHandler b = _deploySeeded(rando, address(0), new address[](0));
+        assertEq(address(b), predictedRando);
+        assertEq(factory.predictWalletAddress(kani), predictedKani, "another owner's deploy moved kani's address");
+        assertEq(factory.deployCount(kani), 0, "another owner's deploy advanced kani's counter");
+
+        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
+        assertEq(address(a), predictedKani);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -335,7 +489,7 @@ contract SHProtocolTest is Test {
         tokens[n] = address(0);
         feeds[n] = address(sharedFeed);
         beats[n] = 1 days;
-        SHOracle bigOracle = new SHOracle(address(this), tokens, feeds, beats);
+        SHOracle bigOracle = new SHOracle(address(this), address(0), tokens, feeds, beats);
         // The module reads its oracle from a registry, so the fixture needs its own registry
         // pointing at bigOracle (owner/fee/agentId are irrelevant to the watched-list cap).
         SHRegistry bigRegistry = new SHRegistry(

@@ -50,7 +50,8 @@ contract InvariantSH is StdInvariant, Test {
         watched[0] = address(usdc);
         watched[1] = address(dai);
         vm.prank(config.account);
-        wallet = SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched)));
+        wallet =
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
 
         vm.deal(address(wallet), 100 ether);
         usdc.mint(address(wallet), 1_000_000e6);
