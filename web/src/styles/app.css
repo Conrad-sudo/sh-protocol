@@ -1,0 +1,347 @@
+/* Layout and shared-component styles. Colours come from tokens.css. */
+
+/* ── Brand ──────────────────────────────────────────────────────────────── */
+
+.mf-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.mf-logo img {
+  display: block;
+}
+
+.mf-logo-word {
+  font-family: var(--mf-font-heading);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mf-navy);
+}
+
+.mf-logo[data-tone='dark'] .mf-logo-word {
+  color: #ffffff;
+}
+
+/* ── Shared ─────────────────────────────────────────────────────────────── */
+
+.mf-fullpage {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+}
+
+.mf-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 24px;
+  margin-bottom: 24px;
+}
+
+.mf-page-title {
+  margin: 0 0 4px;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.mf-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mf-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 24px;
+  text-align: center;
+  border: 1px dashed var(--rs-border-primary);
+  border-radius: var(--mf-radius-card);
+  background: var(--rs-bg-card);
+}
+
+.mf-empty-icon {
+  font-size: 32px;
+  color: var(--mf-green);
+}
+
+.mf-empty-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.mf-empty-action {
+  margin-top: 8px;
+}
+
+.mf-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 16px;
+}
+
+/* ── App shell ──────────────────────────────────────────────────────────── */
+
+.mf-shell {
+  display: flex;
+  min-height: 100dvh;
+}
+
+.mf-shell-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mf-content {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: 24px 32px 48px;
+}
+
+/* Sidebar (desktop expanded, tablet rail) */
+
+.mf-sidebar {
+  position: sticky;
+  top: 0;
+  flex: none;
+  width: 240px;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--rs-sidenav-inverse-bg);
+  transition: width 0.2s ease;
+}
+
+.mf-sidebar[data-expanded='false'] {
+  width: 64px;
+}
+
+.mf-sidebar .rs-sidenav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100% !important;
+  background: transparent;
+}
+
+.mf-sidebar .rs-sidenav-body {
+  flex: 1;
+}
+
+.mf-sidebar-header {
+  display: flex;
+  align-items: center;
+  height: 64px;
+  padding-inline: 18px;
+}
+
+.mf-sidebar[data-expanded='false'] .mf-sidebar-header {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.mf-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid rgb(255 255 255 / 12%);
+}
+
+.mf-sidebar-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(255 255 255 / 72%);
+}
+
+.mf-sidebar-footer .rs-btn {
+  color: rgb(255 255 255 / 85%);
+}
+
+.mf-sidebar-footer .rs-btn:hover {
+  color: #ffffff;
+  background: rgb(255 255 255 / 10%);
+}
+
+/* Top bar */
+
+.mf-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 32px;
+  background: color-mix(in srgb, var(--rs-body) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rs-border-primary);
+}
+
+.mf-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Mobile: top bar + bottom tabs */
+
+.mf-shell[data-mode='mobile'] .mf-topbar {
+  padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
+}
+
+.mf-shell[data-mode='mobile'] .mf-content {
+  padding: 16px 16px calc(80px + env(safe-area-inset-bottom));
+}
+
+.mf-shell[data-mode='tablet'] .mf-content,
+.mf-shell[data-mode='tablet'] .mf-topbar {
+  padding-inline: 24px;
+}
+
+.mf-tabbar {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--rs-bg-card);
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-tab {
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--rs-text-secondary);
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mf-tab svg {
+  font-size: 20px;
+}
+
+.mf-tab:hover,
+.mf-tab:focus-visible {
+  color: var(--rs-text-primary);
+  text-decoration: none;
+}
+
+.mf-tab[aria-current='page'] {
+  color: var(--rs-primary-600);
+}
+
+/* ── Auth pages ─────────────────────────────────────────────────────────── */
+
+.mf-auth {
+  box-sizing: border-box;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+}
+
+.mf-auth-card {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 420px;
+  padding: 32px;
+  background: var(--rs-bg-card);
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgb(6 42 78 / 8%);
+}
+
+.mf-auth-logo {
+  display: inline-flex;
+  margin-bottom: 24px;
+}
+
+.mf-auth-title {
+  margin: 0 0 4px;
+  font-size: 24px;
+}
+
+.mf-auth-form {
+  margin-top: 24px;
+}
+
+.mf-auth-alt {
+  margin-top: 20px;
+  text-align: center;
+}
+
+@media (max-width: 479px) {
+  .mf-auth {
+    align-items: flex-start;
+  }
+
+  .mf-auth-card {
+    padding: 24px 20px;
+    border: 0;
+    box-shadow: none;
+    background: transparent;
+  }
+}
+
+/* ── Public pages ───────────────────────────────────────────────────────── */
+
+.mf-public-header {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: 16px;
+}
+
+.mf-public-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.mf-hero {
+  box-sizing: border-box;
+  max-width: 760px;
+  margin-inline: auto;
+  padding: 72px 16px;
+  text-align: center;
+}
+
+.mf-hero h1 {
+  margin: 0 0 16px;
+  font-size: clamp(32px, 6vw, 52px);
+  line-height: 1.1;
+}
+
+.mf-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 32px;
+}

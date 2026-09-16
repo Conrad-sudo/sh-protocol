@@ -124,11 +124,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Name of the refresh-token cookie, and the path it is scoped to. Scoping it to the refresh
-# endpoint means it is not attached to every other API call, so it cannot leak through logs or
-# a mistake in an unrelated handler.
+# Name of the refresh-token cookie, and the path it is scoped to. Scoping it to the auth routes
+# means it is not attached to every other API call, so it cannot leak through logs or a mistake in
+# an unrelated handler.
+#
+# /api/auth, not /api/auth/refresh: logout has to RECEIVE the cookie to revoke it. With the
+# narrower path the browser never sent it to /api/auth/logout, so signing out only deleted the
+# browser's copy and left the token redeemable for its full 30 days.
 REFRESH_COOKIE = "refresh_token"
-REFRESH_COOKIE_PATH = "/api/auth/refresh"
+REFRESH_COOKIE_PATH = "/api/auth"
+# Where the cookie lived before the fix above. Cleared whenever the cookie is replaced or removed,
+# so a browser that still holds one does not carry two.
+LEGACY_REFRESH_COOKIE_PATH = "/api/auth/refresh"
 # Secure cookies require HTTPS, which local development does not have. Defaults to on.
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "1").lower() in ("1", "true", "yes")
 
@@ -352,11 +359,12 @@ def _set_refresh_cookie(response: Response, token: str):
     httpOnly keeps it out of reach of JavaScript, so an XSS bug on the site cannot read the
     long-lived credential -- it would reach at most the in-memory access token, which expires in
     minutes. SameSite=Lax plus the narrow path is the CSRF defence: the cookie is only ever sent
-    to the refresh endpoint, and not on cross-site POSTs.
+    to the auth routes, and not on cross-site POSTs.
 
     @param response  The response to attach the cookie to.
     @param token     The refresh token.
     """
+    response.delete_cookie(REFRESH_COOKIE, path=LEGACY_REFRESH_COOKIE_PATH)
     response.set_cookie(
         REFRESH_COOKIE,
         token,
@@ -459,6 +467,7 @@ def logout(response: Response, refresh_token: str | None = Cookie(default=None, 
     if refresh_token:
         auth.revoke_refresh(refresh_token)
     response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
+    response.delete_cookie(REFRESH_COOKIE, path=LEGACY_REFRESH_COOKIE_PATH)
     return {"status": "signed out"}
 
 

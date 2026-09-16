@@ -116,4 +116,7 @@
   --rs-red-800: #7a2421;
 
   --rs-sidenav-inverse-bg: #0a1a2e;
+  /* RSuite's dark default (primary-600) is 3.3:1 against the white item text. */
+  --rs-sidenav-inverse-selected-bg: var(--rs-primary-700);
+  --rs-sidenav-inverse-hover-bg: var(--rs-primary-800);
 }

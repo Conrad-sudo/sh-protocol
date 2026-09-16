@@ -20,6 +20,8 @@ export default defineConfig({
     },
   },
   test: {
+    // e2e/ holds Playwright specs, which Vitest must not try to run.
+    include: ['src/**/*.test.{ts,tsx}'],
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
   },

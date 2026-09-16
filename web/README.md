@@ -27,10 +27,24 @@ the API, so the page and the API share an origin.
 | `npm run build` | Type-check and build to `dist/` |
 | `npm run preview` | Serve the built `dist/` |
 | `npm test` | Unit tests (Vitest) |
+| `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
 | `npm run lint` | Oxlint |
 | `npm run typecheck` | TypeScript only |
 
+Set `VITE_API_URL` only if the API is served from a different origin (e.g. `https://api.mitfah.com`);
+by default requests go to the same origin.
+
 ## Where things live
+
+- `src/api/client.ts` — every API call goes through `apiFetch`. The access token is kept in memory
+  only; on a 401 the client refreshes once and retries. **Refreshes are single-flight and
+  cross-tab locked**: the server treats a refresh token used twice as stolen and signs the account
+  out everywhere.
+- `src/auth/` — `AuthProvider` (restores the session on load, syncs sign-out across tabs),
+  `RequireAuth` / `RedirectIfSignedIn`, and `safeNext` (the open-redirect guard for `?next=`).
+- `src/layouts/` — `AppShell` picks sidebar (≥ 1024px), icon rail (≥ 768px) or bottom tabs;
+  `nav.ts` is the one list of sections.
+- `src/routes.tsx` — the route tree.
 
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
   written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block.

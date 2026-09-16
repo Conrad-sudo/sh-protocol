@@ -165,6 +165,19 @@ def test_refresh_reuse_revokes_everything():
     r2 = c.post("/api/auth/refresh")
     check("every session for that account is revoked", r2.status_code == 401, str(r2.status_code))
 
+    # Signing out must revoke the token on the server, not just delete the browser's copy. The
+    # client's cookie jar applies path matching like a browser does, so this also proves the cookie
+    # actually reaches /api/auth/logout -- with the old /api/auth/refresh path it never did.
+    c = make_client()
+    c.post("/api/auth/signup", json={"email": "c2@example.com", "password": "hunter2hunter2"})
+    before_logout = c.cookies[api.REFRESH_COOKIE]
+    r = c.post("/api/auth/logout")
+    check("logout answers 200", r.status_code == 200, str(r.status_code))
+    c.cookies.clear()
+    c.cookies.set(api.REFRESH_COOKIE, before_logout, path=api.REFRESH_COOKIE_PATH)
+    r = c.post("/api/auth/refresh")
+    check("a token presented after logout is refused", r.status_code == 401, f"{r.status_code} {r.text[:80]}")
+
 
 def test_identity_comes_from_token_not_body():
     print("\n[4] a request acts on the account its TOKEN names")
