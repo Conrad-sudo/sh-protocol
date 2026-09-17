@@ -1,6 +1,6 @@
 # SessionHandler Protocol 🤖⛓️
 
-**An on-chain operating system for AI agents that use DeFi.**
+**Agentic wallet infrastructure for DeFi.**
 
 SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
 
@@ -21,9 +21,9 @@ The reference application is a **web app** in `web/`: sign in, deploy a wallet w
 
 ---
 
-## The protocol as an operating system
+## How the protocol is built
 
-The project is organised the way an operating system is: a small trusted core that enforces the rules, shared system services, drivers for the outside world, a runtime for the agent, and the applications people actually use.
+The protocol is built in layers: a small on-chain core that enforces the rules, shared contracts that configure it, integrations with DeFi and identity protocols, a runtime for the agent, and the applications people actually use.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -35,21 +35,21 @@ The project is organised the way an operating system is: a small trusted core th
 │  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)     │
 │                     the account is injected — the model can't choose it     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  DRIVERS            ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004         │
+│  INTEGRATIONS       ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004         │
 │                     Chainlink pricing · UserOp builder and bundler          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  KERNEL (on-chain)  SessionHandler account  +  SpendingLimitModule hook     │
+│  CORE (on-chain)    SessionHandler account  +  SpendingLimitModule hook     │
 │                     every agent transaction is checked here                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  SYSTEM SERVICES    SHTreasury · SHRegistry · SHOracle · SHFactory          │
+│  SHARED CONTRACTS   SHTreasury · SHRegistry · SHOracle · SHFactory          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  HARDWARE           Ethereum · Arbitrum · BNB Chain · Sepolia · Anvil       │
+│  CHAINS             Ethereum · Arbitrum · BNB Chain · Sepolia · Anvil       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Kernel — the smart account and its enforcement hook
+### Core — the smart account and its spending-limit hook
 
 **`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or an approved session key. Session keys can move value but can never touch the account's own settings, so an agent can't loosen its own rules.
 
@@ -57,9 +57,9 @@ Every transaction the account executes is wrapped by **`SpendingLimitModule`**, 
 
 This hook is what turns "an AI holds a key to my money" into "an AI can spend at most $X per day from my money". Everything above it in the stack can fail — a confused model, a bad prompt, a compromised server — and the most that can leave the wallet is still bounded here. It is a standalone module, so any ERC-7579 account can install it.
 
-Owners also get the controls you'd expect from a kernel: pause the wallet, switch the agent off, change the limit and window, choose which tokens count, trust spenders, cap network fees, and withdraw.
+Owners also keep full control of the wallet: pause the wallet, switch the agent off, change the limit and window, choose which tokens count, trust spenders, cap network fees, and withdraw.
 
-### System services — shared infrastructure, one set per chain
+### Shared contracts — one set per chain
 
 | Contract | Role |
 |---|---|
@@ -89,7 +89,7 @@ SHTreasury  (operator — admin root, fee sink)
    │
    ▼  app (web / Telegram / CLI) → API → agent runtime
    │     agent checks remaining budget, gets a quote, runs a preflight
-   ▼  drivers build [approve, swap, approve 0] as one batch
+   ▼  integrations build [approve, swap, approve 0] as one batch
    ▼  Vault decrypts the session key just long enough to sign the UserOp
    ▼  ERC-4337 EntryPoint → SessionHandler.validateUserOp
    ▼  SpendingLimitModule.preCheck  → snapshot the wallet's USD value
@@ -186,7 +186,7 @@ cd web && npm test && npm run e2e
 | Document | Contents |
 |---|---|
 | [docs/contracts.md](docs/contracts.md) | Every contract, the spending-limit design, the fee, the test suite |
-| [docs/app.md](docs/app.md) | Agent runtime, drivers, bundler, API and Telegram bot |
+| [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bot |
 | [web/README.md](web/README.md) | The web app |
 | [docs/vault-security.md](docs/vault-security.md) | Environment variables, Vault setup, session-key security |
 | [docs/setup.md](docs/setup.md) | Local, fork and live deployments |
