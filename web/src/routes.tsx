@@ -4,6 +4,7 @@ import { RequireAuth } from './auth/RequireAuth'
 import { AppShell } from './layouts/AppShell'
 import { AuthLayout } from './layouts/AuthLayout'
 import { PublicLayout } from './layouts/PublicLayout'
+import { AssistantPage } from './pages/AssistantPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { ControlsPage } from './pages/ControlsPage'
 import { DashboardPage } from './pages/DashboardPage'
@@ -11,7 +12,6 @@ import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { OnboardingPage } from './pages/onboarding/OnboardingPage'
-import { PlaceholderPage } from './pages/PlaceholderPage'
 import { RouteError } from './pages/RouteError'
 import { SettingsPage } from './pages/SettingsPage'
 import { SignupPage } from './pages/SignupPage'
@@ -44,15 +44,7 @@ export const routes: RouteObject[] = [
         ),
         children: [
           { path: 'dashboard', element: <DashboardPage /> },
-          {
-            path: 'assistant',
-            element: (
-              <PlaceholderPage
-                title="Assistant"
-                summary="Chat with your wallet assistant here once your wallet is set up."
-              />
-            ),
-          },
+          { path: 'assistant', element: <AssistantPage /> },
           { path: 'contacts', element: <ContactsPage /> },
           { path: 'controls', element: <ControlsPage /> },
           { path: 'settings', element: <SettingsPage /> },

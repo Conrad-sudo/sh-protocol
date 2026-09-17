@@ -410,7 +410,7 @@ def init_agent():
     agent = create_agent(model=llm, tools=get_tools(), system_prompt=SYSTEM_PROMPT, checkpointer=_checkpointer, middleware=[...])
 ```
 
-`AsyncSqliteSaver` persists message history keyed by `thread_id` (the `user_id`), so each user has an isolated, restart-surviving conversation.
+`AsyncSqliteSaver` persists message history keyed by `thread_id(user_id, chain_id)` (e.g. `"1:42161"`), so each user has an isolated, restart-surviving conversation per chain, shared by Telegram and the web app.
 
 ### System prompt
 
@@ -422,7 +422,7 @@ The `SYSTEM_PROMPT` teaches the agent the new model up front:
 - **Removing liquidity is free** against the cap (it returns value — a net inflow).
 - One **`preflight_check(token, amount)`** before any spend; **never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` only); resolve the wrapped-native ticker per chain; never invent addresses; always confirm before an on-chain write; never expose the ciphertext.
 
-The `user_id` is embedded in each `HumanMessage` as a `[user_id: <n>]` prefix (Anthropic's API disallows multiple non-consecutive system messages). `chat(user_id, user_input)` is the synchronous entry point.
+The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
 
 ---
 

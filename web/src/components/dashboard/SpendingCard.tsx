@@ -2,24 +2,15 @@ import { Panel, ProgressCircle, Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
+import { summarizeSpending } from '../../lib/spending'
 
 const RING = 128
 const endsAtFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
 
-/**
- * How much the assistant may still spend. The period is fixed from its start and only restarts on
- * the first spend after it ends, so once it has ended the whole limit is available again even
- * though the stored "spent" figure has not been reset yet.
- */
+/** How much the assistant may still spend, and when the period resets (see summarizeSpending). */
 export function SpendingCard({ spending }: { spending: WalletState['spending'] }) {
   const now = useNow(30_000)
-  const limit = spending.daily_limit_usd
-  const periodSecs = Math.round(spending.window_hours * 3_600)
-  const endsAt = (spending.window_start + periodSecs) * 1_000
-  const ended = now >= endsAt
-  const left = ended ? limit : Math.min(Math.max(spending.remaining_usd, 0), limit)
-  const spent = limit - left
-  const percentLeft = limit > 0 ? Math.round((left / limit) * 100) : 0
+  const { limit, left, spent, percentLeft, periodSecs, endsAt, ended } = summarizeSpending(spending, now)
 
   let status: string
   if (limit === 0) status = "The limit is $0, so the assistant can't spend anything."

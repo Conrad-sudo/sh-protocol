@@ -160,3 +160,9 @@ export interface Contact {
   /** Checksummed. */
   address: string
 }
+
+/** One line of the conversation, from GET /api/chat/history. Tool traffic is never included. */
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+}

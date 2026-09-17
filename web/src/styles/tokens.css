@@ -80,6 +80,9 @@
   --mf-tag-warning-text: #7a4f0e;
   --mf-tag-danger-bg: #fbeaea;
   --mf-tag-danger-text: #a52b2b;
+
+  /* The user's own chat messages. */
+  --mf-bubble-user: #e7f5ef;
 }
 
 .rs-theme-dark {
@@ -171,4 +174,6 @@
   --mf-tag-warning-text: #e9bd72;
   --mf-tag-danger-bg: rgb(229 99 95 / 16%);
   --mf-tag-danger-text: #f09896;
+
+  --mf-bubble-user: rgb(43 183 126 / 16%);
 }

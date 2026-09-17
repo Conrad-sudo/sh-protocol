@@ -1091,3 +1091,354 @@
 .mf-address-compare dd {
   margin: 0;
 }
+
+/* ── Assistant ──────────────────────────────────────────────────────────── */
+
+.mf-chat-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.mf-chat-layout[data-wide] {
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.mf-chat {
+  min-width: 0;
+}
+
+.mf-chat-notice {
+  margin-bottom: 16px;
+}
+
+.mf-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mf-msg {
+  box-sizing: border-box;
+  max-width: min(85%, 44rem);
+  min-width: 0;
+  padding: 10px 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.mf-msg[data-role='user'] {
+  align-self: flex-end;
+  border-radius: 16px 16px 4px 16px;
+  background: var(--mf-bubble-user);
+}
+
+.mf-msg[data-role='assistant'] {
+  align-self: flex-start;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 16px 16px 16px 4px;
+  background: var(--rs-bg-card);
+}
+
+.mf-msg-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Assistant replies (Markdown) */
+
+.mf-md > :first-child {
+  margin-top: 0;
+}
+
+.mf-md > :last-child {
+  margin-bottom: 0;
+}
+
+.mf-md :is(p, ul, ol, pre, blockquote) {
+  margin: 0 0 0.6em;
+}
+
+.mf-md :is(ul, ol) {
+  padding-left: 1.3em;
+}
+
+.mf-md :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0.8em 0 0.4em;
+  font-size: 1.05em;
+}
+
+.mf-md blockquote {
+  padding-left: 0.8em;
+  border-left: 3px solid var(--rs-border-primary);
+  color: var(--rs-text-secondary);
+}
+
+.mf-md code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  font-family: var(--rs-font-family-monospace);
+  font-size: 0.88em;
+  background: var(--rs-bg-well);
+}
+
+.mf-md pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--rs-bg-well);
+}
+
+.mf-md pre code {
+  padding: 0;
+  background: none;
+}
+
+.mf-md-table {
+  overflow-x: auto;
+  margin: 0 0 0.6em;
+}
+
+.mf-md table {
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.mf-md :is(th, td) {
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--rs-border-primary);
+  text-align: left;
+  overflow-wrap: normal;
+}
+
+/* Waiting, failures, and the empty conversation */
+
+.mf-chat-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 16px 16px 16px 4px;
+  background: var(--rs-bg-card);
+}
+
+.mf-typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: mf-typing 1.2s infinite ease-in-out;
+}
+
+.mf-typing i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.mf-typing i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes mf-typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: none;
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-typing i {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+.mf-chat-failure {
+  margin-top: 12px;
+}
+
+.mf-chat-failure-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mf-chat-noreply {
+  margin: 8px 0 0;
+  font-size: 14px;
+  text-align: right;
+}
+
+.mf-chat-start {
+  margin-bottom: 16px;
+  padding: 24px;
+  border: 1px dashed var(--rs-border-primary);
+  border-radius: var(--mf-radius-card);
+  background: var(--rs-bg-card);
+}
+
+.mf-chat-start-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.mf-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-prompts .rs-btn {
+  min-height: 44px;
+  height: auto;
+  white-space: normal;
+  text-align: left;
+}
+
+/* The composer stays at the bottom of the screen while the conversation scrolls. */
+
+.mf-composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 0 16px;
+  background: var(--rs-body);
+}
+
+/* Fades the messages out as they scroll under the composer. */
+.mf-composer::before {
+  content: '';
+  position: absolute;
+  inset: -16px 0 100%;
+  background: linear-gradient(transparent, var(--rs-body));
+  pointer-events: none;
+}
+
+.mf-composer .rs-textarea {
+  min-height: 44px;
+  padding-block: 10px;
+  line-height: 1.5;
+}
+
+.mf-composer-send.rs-btn {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.mf-composer-count {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-composer-count[data-over] {
+  color: var(--mf-danger);
+}
+
+/* Phones: the composer sits on the tab bar, and takes its place while the keyboard is up. */
+.mf-shell[data-mode='mobile']:has(.mf-composer) .mf-content {
+  padding-bottom: calc(56px + env(safe-area-inset-bottom));
+}
+
+.mf-shell[data-mode='mobile']:has(.mf-composer textarea:focus) .mf-content {
+  padding-bottom: 0;
+}
+
+.mf-shell[data-mode='mobile'] .mf-composer {
+  bottom: calc(56px + env(safe-area-inset-bottom));
+  padding-bottom: 8px;
+}
+
+/* Only for the composer: its Send button keeps focus, so the tab bar can't come back under a tap. */
+.mf-shell[data-mode='mobile']:has(.mf-composer textarea:focus) .mf-tabbar {
+  display: none;
+}
+
+.mf-shell[data-mode='mobile']:has(.mf-composer textarea:focus) .mf-composer {
+  bottom: 0;
+}
+
+/* What the assistant can spend, and whom it can pay */
+
+.mf-chat-aside {
+  position: sticky;
+  top: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mf-budget-left {
+  margin: 0 0 8px;
+}
+
+.mf-budget-left strong {
+  font-family: var(--mf-font-heading);
+  font-size: 26px;
+}
+
+.mf-budget-unlimited {
+  color: var(--mf-danger);
+}
+
+.mf-budget-reset {
+  display: block;
+  margin-top: 4px;
+}
+
+.mf-budget-contacts {
+  margin: 0 0 4px;
+  padding-left: 1.1em;
+  overflow-wrap: anywhere;
+}
+
+.mf-budget-manage.rs-btn {
+  margin-top: 8px;
+  padding-inline: 0;
+}
+
+.mf-budget-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 10px;
+  background: var(--rs-bg-card);
+  font-size: 14px;
+}
+
+.mf-budget-strip a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+}

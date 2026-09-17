@@ -729,7 +729,10 @@ def post_chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
 
     @param req  The chain and the user's message.
     @return     {"reply": str}
+    @raises HTTPException 400 for a chain this server does not serve, as chat_history does.
     """
+    if req.chain_id not in CHAIN_NAME_BY_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {req.chain_id}")
     return {"reply": chat(user_id, req.chain_id, req.message)}
 
 

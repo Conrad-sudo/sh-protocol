@@ -10,6 +10,7 @@ from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from db import DB_PATH
 import asyncio
+import logging
 
 load_dotenv()
 
@@ -356,7 +357,9 @@ def chat(user_id: int, chain_id: int, user_input: str) -> str:
                        anything the user typed.
     @param chain_id    The chain this conversation is about; scopes the history.
     @param user_input  The user's message, passed through unmodified.
-    @return            The agent's reply, or an apology if the turn raised.
+    @return            The agent's reply as plain text, or an apology if the turn raised. The
+                       apology never carries the exception: its text can hold RPC URLs (with API
+                       keys) or raw calldata, so it goes to the log instead.
     """
     try:
       response = agent.invoke(
@@ -364,9 +367,11 @@ def chat(user_id: int, chain_id: int, user_input: str) -> str:
           config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
           context=AgentContext(user_id=user_id),
       )
-      return response["messages"][-1].content
-    except Exception as e:
-         return f"Sorry, something went wrong while processing your request {e}."
+      # The model can answer in content blocks rather than a string; callers want the text.
+      return _message_text(response["messages"][-1].content).strip()
+    except Exception:
+         logging.getLogger(__name__).exception("Agent turn failed (user %s, chain %s)", user_id, chain_id)
+         return "Sorry, something went wrong while handling that. Please try again."
 
 
 def _message_text(content) -> str:

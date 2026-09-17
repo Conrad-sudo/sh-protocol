@@ -580,6 +580,63 @@ def test_chat_history_shows_only_the_conversation():
         smart_wallet_agent.agent = original
 
 
+def test_chat_turn_returns_text_and_hides_failures():
+    """
+    POST /api/chat answers the reply as plain text, refuses a chain the server does not serve, and
+    never repeats an exception to the user: its text can carry an RPC URL with an API key in it.
+    """
+    print("\n[10b] a chat turn returns text, and a failed turn hides its error")
+    from langchain_core.messages import AIMessage
+
+    import smart_wallet_agent
+
+    secret = "https://rpc.example/v2/API-KEY-must-never-leave"
+    turns = []
+
+    class StubAgent:
+        fail = False
+
+        def invoke(self, state, config, context):
+            turns.append((state["messages"][0].content, config["configurable"]["thread_id"], context.user_id))
+            if self.fail:
+                raise RuntimeError(f"HTTPError for url: {secret}")
+            # Anthropic content blocks, not a string.
+            return {"messages": [AIMessage(content=[
+                {"type": "text", "text": "You have "},
+                {"type": "text", "text": "1.5 ETH."},
+            ])]}
+
+    stub = StubAgent()
+    original = smart_wallet_agent.agent
+    smart_wallet_agent.agent = stub
+    try:
+        c = make_client()
+        body = c.post("/api/auth/signup", json={"email": "turn@example.com", "password": "hunter2hunter2"}).json()
+        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        ask = {"chain_id": 11155111, "message": "what's my balance?"}
+
+        check("chat needs a token", c.post("/api/chat", json=ask).status_code == 401)
+        r = c.post("/api/chat", json=ask, headers=headers)
+        check("a reply in content blocks comes back as one string",
+              r.status_code == 200 and r.json() == {"reply": "You have 1.5 ETH."}, f"{r.status_code} {r.text[:160]}")
+        check("the turn ran on the caller's own thread, message untouched",
+              turns[-1] == ("what's my balance?", f"{body['user_id']}:11155111", body["user_id"]), str(turns))
+
+        runs = len(turns)
+        r = c.post("/api/chat", json={**ask, "chain_id": 999999}, headers=headers)
+        check("an unsupported chain -> 400, and the agent never runs",
+              r.status_code == 400 and len(turns) == runs, f"{r.status_code} {len(turns)}")
+        check("an empty message -> 422",
+              c.post("/api/chat", json={**ask, "message": ""}, headers=headers).status_code == 422)
+
+        stub.fail = True
+        r = c.post("/api/chat", json=ask, headers=headers)
+        check("a failed turn still answers with an apology", r.status_code == 200 and "Sorry" in r.json()["reply"], r.text[:160])
+        check("the apology does not leak the exception", "API-KEY" not in r.text and "HTTPError" not in r.text, r.text[:160])
+    finally:
+        smart_wallet_agent.agent = original
+
+
 def test_chains_lists_only_deployed_served_chains():
     print("\n[11] /api/chains lists chains that are served AND deployed")
     conn = db.get_db()
@@ -690,6 +747,7 @@ if __name__ == "__main__":
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
         test_chat_history_shows_only_the_conversation()
+        test_chat_turn_returns_text_and_hides_failures()
         test_chains_lists_only_deployed_served_chains()
         test_google_sign_in_and_linking()
         test_rate_limit()

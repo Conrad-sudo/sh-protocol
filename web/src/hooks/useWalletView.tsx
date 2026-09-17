@@ -42,7 +42,8 @@ export function useWalletView(): { wallet: WalletState; fallback: null } | { wal
       ),
     }
   }
-  if (query.isError) {
+  // A failed background refresh keeps showing the wallet it already has.
+  if (query.isError && !query.data) {
     return {
       wallet: null,
       fallback: (
