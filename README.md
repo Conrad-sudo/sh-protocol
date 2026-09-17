@@ -2,7 +2,7 @@
 
 **Agentic wallet infrastructure.**
 
-SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
+SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them across DeFi — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
 
 It is built from the standards the ecosystem is converging on:
 
@@ -23,7 +23,7 @@ The reference application is a **web app** in `web/`: sign in, deploy a wallet w
 
 ## How the protocol is built
 
-The protocol is built in layers: a small on-chain core that enforces the rules, shared contracts that configure it, integrations with token, exchange and identity protocols, a runtime for the agent, and the applications people actually use.
+The protocol is built in layers: a small on-chain core that enforces the rules, shared contracts that configure it, integrations with DeFi, token and identity protocols, a runtime for the agent, and the applications people actually use.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -103,7 +103,7 @@ SHTreasury  (operator — admin root, fee sink)
 The agent has 60+ tools across four areas:
 
 - **Payments** — native and ERC-20 transfers to contacts the owner has saved on the web (the contact list is the destination allowlist; the agent can read it, never edit it)
-- **Trading and liquidity** — quotes, all six V2 swap types, add/remove liquidity, wrapping, with sufficiency and preflight checks before any write
+- **DeFi trading and liquidity** — quotes, all six V2 swap types, add/remove liquidity, wrapping, with sufficiency and preflight checks before any write
 - **Budget awareness** — remaining limit, whether a planned spend fits, live USD prices
 - **Identity and reputation (ERC-8004)** — look up agents, read and give feedback, resolve registration files; the protocol's own agent is registered on-chain and user wallets act as its reviewers
 
