@@ -674,6 +674,10 @@ def create_contact(req: ContactRequest, user_id: int = Depends(get_current_user)
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "'me' is reserved — it always refers to your own wallet",
         )
+    # A browser rewrites /api/contacts/. and /api/contacts/.. (even spelled %2E) before sending
+    # the request, so a contact under either name could never be deleted from the web app.
+    if name in (".", ".."):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "a name can't be just dots")
     try:
         address = Web3.to_checksum_address(req.address)
     except (ValueError, TypeError):

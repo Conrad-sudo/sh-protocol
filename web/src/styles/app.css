@@ -976,3 +976,118 @@
   gap: 8px;
   min-height: 32px;
 }
+
+/* ── Contacts ───────────────────────────────────────────────────────────── */
+
+.mf-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.mf-section-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+/* Focused only by script, after the row that had focus is removed. */
+.mf-section-head h2:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* A bordered list on wider screens; a stack of cards on phones. */
+.mf-contact-list {
+  margin: 0;
+  padding: 0 16px;
+  list-style: none;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: var(--mf-radius-card);
+  background: var(--rs-bg-card);
+}
+
+.mf-contact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+  grid-template-areas: 'name address remove';
+  align-items: center;
+  gap: 4px 16px;
+  padding: 10px 0;
+}
+
+.mf-contact + .mf-contact {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-contact-name {
+  grid-area: name;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mf-contact-address {
+  grid-area: address;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mf-contact-remove.rs-btn {
+  grid-area: remove;
+}
+
+@media (max-width: 479px) {
+  .mf-contact-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .mf-contact {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name remove'
+      'address address';
+    padding: 12px 16px;
+    border: 1px solid var(--rs-border-primary);
+    border-radius: var(--mf-radius-card);
+    background: var(--rs-bg-card);
+  }
+}
+
+/* The whole address, in groups of four, for checking before it is saved. */
+.mf-full-address-groups {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0 0.45em;
+}
+
+.mf-address-box {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--rs-bg-well);
+  font-size: 15px;
+}
+
+.mf-address-compare {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px 16px;
+  margin: 12px 0;
+}
+
+.mf-address-compare dt {
+  color: var(--rs-text-secondary);
+}
+
+.mf-address-compare dd {
+  margin: 0;
+}

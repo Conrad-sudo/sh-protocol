@@ -149,3 +149,14 @@ export type OwnerAction =
 export type OwnerTxConfirmResult =
   | { status: 'pending'; tx_hash: string }
   | { status: 'confirmed'; tx_hash: string }
+
+/**
+ * A saved payee, from GET /api/contacts. The assistant can only send money to these. They belong to
+ * the account, not to a network.
+ */
+export interface Contact {
+  /** Lowercase: the name the user gives the assistant. */
+  name: string
+  /** Checksummed. */
+  address: string
+}

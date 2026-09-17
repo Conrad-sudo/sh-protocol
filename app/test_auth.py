@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import time
+from urllib.parse import quote
 
 # A scratch database, set before app modules import and read db.DB_PATH.
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -475,6 +476,9 @@ def test_contacts_are_web_only_and_per_account():
         ("an empty name", {"name": "", "address": ADDR}),
         ("a name with a slash", {"name": "a/b", "address": ADDR}),
         ("an over-long name", {"name": "z" * 65, "address": ADDR}),
+        # A browser can't send DELETE /api/contacts/.. as written, so these could never be removed.
+        ("a '.' name", {"name": ".", "address": ADDR}),
+        ("a '..' name", {"name": " .. ", "address": ADDR}),
     ]:
         r = c.post("/api/contacts", headers=a_headers, json=body)
         check(f"{label} is rejected", r.status_code == 422, f"{r.status_code} {r.text[:90]}")
@@ -489,6 +493,14 @@ def test_contacts_are_web_only_and_per_account():
     c.post("/api/contacts", headers=a_headers, json={"name": "sandy", "address": other})
     contacts = c.get("/api/contacts", headers=a_headers).json()["contacts"]
     check("re-saving updates in place", contacts == [{"name": "sandy", "address": other}], str(contacts))
+
+    # The web app deletes by the name run through encodeURIComponent, so a name with spaces and
+    # URL characters must survive that round trip.
+    odd = "o'neil & co? #1"
+    c.post("/api/contacts", headers=a_headers, json={"name": odd, "address": ADDR})
+    r = c.delete("/api/contacts/" + quote(odd, safe="-_.!~*'()"), headers=a_headers)
+    check("a name with spaces, ?, & and # deletes by its encoded form",
+          r.status_code == 200 and r.json()["name"] == odd, f"{r.status_code} {r.text[:90]}")
 
     check("deleting works", c.delete("/api/contacts/SANDY", headers=a_headers).status_code == 200)
     check("the list is empty again", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])

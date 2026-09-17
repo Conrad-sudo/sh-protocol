@@ -4,6 +4,7 @@ import { RequireAuth } from './auth/RequireAuth'
 import { AppShell } from './layouts/AppShell'
 import { AuthLayout } from './layouts/AuthLayout'
 import { PublicLayout } from './layouts/PublicLayout'
+import { ContactsPage } from './pages/ContactsPage'
 import { ControlsPage } from './pages/ControlsPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { HomePage } from './pages/HomePage'
@@ -52,15 +53,7 @@ export const routes: RouteObject[] = [
               />
             ),
           },
-          {
-            path: 'contacts',
-            element: (
-              <PlaceholderPage
-                title="Contacts"
-                summary="The people your assistant is allowed to pay. Only you can add them, here."
-              />
-            ),
-          },
+          { path: 'contacts', element: <ContactsPage /> },
           { path: 'controls', element: <ControlsPage /> },
           { path: 'settings', element: <SettingsPage /> },
           { path: 'onboarding', element: <OnboardingPage /> },
