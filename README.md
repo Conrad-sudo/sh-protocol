@@ -1,8 +1,8 @@
 # SessionHandler Protocol 🤖⛓️
 
-**Agentic wallet infrastructure for DeFi.**
+**Agentic wallet infrastructure.**
 
-SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
+SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them — sending payments, managing tokens and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
 
 It is built from the standards the ecosystem is converging on:
 
@@ -23,7 +23,7 @@ The reference application is a **web app** in `web/`: sign in, deploy a wallet w
 
 ## How the protocol is built
 
-The protocol is built in layers: a small on-chain core that enforces the rules, shared contracts that configure it, integrations with DeFi and identity protocols, a runtime for the agent, and the applications people actually use.
+The protocol is built in layers: a small on-chain core that enforces the rules, shared contracts that configure it, integrations with token, exchange and identity protocols, a runtime for the agent, and the applications people actually use.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -35,8 +35,8 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 │  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)     │
 │                     the account is injected — the model can't choose it     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  INTEGRATIONS       ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004         │
-│                     Chainlink pricing · UserOp builder and bundler          │
+│  INTEGRATIONS       ERC-20 · ERC-8004 · Chainlink · Uniswap V2              │
+│                     UserOp builder and bundler                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted        │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -53,7 +53,7 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 **`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or an approved session key. Session keys can move value but can never touch the account's own settings, so an agent can't loosen its own rules.
 
-Every transaction the account executes is wrapped by **`SpendingLimitModule`**, an ERC-7579 hook. It measures how much US-dollar value left the wallet (native coin plus the watched tokens, before vs. after) and refuses anything that would go past the owner's limit for the current window. Because it measures the result rather than reading calldata, it works the same for a transfer, a swap on any venue, or a liquidity move: a fair swap costs almost nothing against the limit, a bad-rate or draining swap costs what was actually lost. It also forbids standing token approvals — an approval must be used up within the same transaction, unless it goes to a spender the owner trusts (like the DEX router).
+Every transaction the account executes is wrapped by **`SpendingLimitModule`**, an ERC-7579 hook. It measures how much US-dollar value left the wallet (native coin plus the watched tokens, before vs. after) and refuses anything that would go past the owner's limit for the current window. Because it measures the result rather than reading calldata, it works the same for a transfer, a swap on any venue, or a liquidity move: a fair swap costs almost nothing against the limit, a bad-rate or draining swap costs what was actually lost. It also forbids standing token approvals — an approval must be used up within the same transaction, unless it goes to a spender the owner trusts (like an exchange router).
 
 This hook is what turns "an AI holds a key to my money" into "an AI can spend at most $X per day from my money". Everything above it in the stack can fail — a confused model, a bad prompt, a compromised server — and the most that can leave the wallet is still bounded here. It is a standalone module, so any ERC-7579 account can install it.
 
@@ -85,27 +85,27 @@ SHTreasury  (operator — admin root, fee sink)
 ### How one instruction flows through the system
 
 ```
-"Swap $200 of ETH for USDC"
+"Send 50 USDC to Alice"
    │
    ▼  app (web / Telegram / CLI) → API → agent runtime
-   │     agent checks remaining budget, gets a quote, runs a preflight
-   ▼  integrations build [approve, swap, approve 0] as one batch
+   │     agent finds Alice in the owner's contacts, checks remaining budget, runs a preflight
+   ▼  integrations build the ERC-20 transfer
    ▼  Vault decrypts the session key just long enough to sign the UserOp
    ▼  ERC-4337 EntryPoint → SessionHandler.validateUserOp
    ▼  SpendingLimitModule.preCheck  → snapshot the wallet's USD value
-   ▼  the swap runs on Uniswap / PancakeSwap
-   ▼  SpendingLimitModule.postCheck → value lost ≤ remaining limit? else revert
+   ▼  the transfer runs
+   ▼  SpendingLimitModule.postCheck → value sent ≤ remaining limit? else revert
    ▼  receipt back to the user in plain language
 ```
 
-### DeFi and AI capabilities
+### What the agent can do
 
 The agent has 60+ tools across four areas:
 
 - **Payments** — native and ERC-20 transfers to contacts the owner has saved on the web (the contact list is the destination allowlist; the agent can read it, never edit it)
-- **Trading and liquidity** — quotes, all six V2 swap types, add/remove liquidity, wrapping, with sufficiency and preflight checks before any write
 - **Budget awareness** — remaining limit, whether a planned spend fits, live USD prices
 - **Identity and reputation (ERC-8004)** — look up agents, read and give feedback, resolve registration files; the protocol's own agent is registered on-chain and user wallets act as its reviewers
+- **Token exchange** — swaps and liquidity on Uniswap V2-style exchanges, with quotes and preflight checks before any write
 
 The LLM is Anthropic's Claude by default; any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) can be swapped in with a small edit to `app/smart_wallet_agent.py`.
 
@@ -117,13 +117,13 @@ The owner key never leaves the user's browser wallet — deploying and every own
 
 ## Networks
 
-| Network | Chain ID | DEX | Status |
-|---|---|---|---|
-| Ethereum mainnet | 1 | Uniswap V2 | fork-tested |
-| Arbitrum One | 42161 | Uniswap V2 | fork-tested, with L2 sequencer check |
-| BNB Chain | 56 | PancakeSwap V2 | fork-tested, live deploy path |
-| Sepolia | 11155111 | Uniswap V2 | live testnet + fork |
-| Anvil | 31337 | mocks | local |
+| Network | Chain ID | Status |
+|---|---|---|
+| Ethereum mainnet | 1 | fork-tested |
+| Arbitrum One | 42161 | fork-tested, with L2 sequencer check |
+| BNB Chain | 56 | fork-tested, live deploy path |
+| Sepolia | 11155111 | live testnet + fork |
+| Anvil | 31337 | local |
 
 Celo has partial scaffolding in the Python layer but no contract deployment path yet. New chains are added with the `add-network` skill in `.claude/skills/`.
 
