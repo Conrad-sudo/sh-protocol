@@ -26,27 +26,27 @@ The reference application is a **web app** in `web/`: sign in, deploy a wallet w
 The project is organised the way an operating system is: a small trusted core that enforces the rules, shared system services, drivers for the outside world, a runtime for the agent, and the applications people actually use.
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  APPLICATIONS       web app  ·  Telegram bot  ·  CLI agent                  │
-├──────────────────────────────────────────────────────────────────────────┤
-│  SERVICE LAYER      FastAPI  ·  accounts, sign-in (email / Google / SIWE)  │
-│                     contacts allowlist  ·  owner actions signed in-browser │
-├──────────────────────────────────────────────────────────────────────────┤
-│  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)    │
-│                     the account is injected — the model can't choose it    │
-├──────────────────────────────────────────────────────────────────────────┤
-│  DRIVERS            ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004        │
-│                     Chainlink pricing · UserOp builder and bundler         │
-├──────────────────────────────────────────────────────────────────────────┤
-│  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted       │
-├──────────────────────────────────────────────────────────────────────────┤
-│  KERNEL (on-chain)  SessionHandler account  +  SpendingLimitModule hook    │
-│                     every agent transaction is checked here                │
-├──────────────────────────────────────────────────────────────────────────┤
-│  SYSTEM SERVICES    SHTreasury · SHRegistry · SHOracle · SHFactory         │
-├──────────────────────────────────────────────────────────────────────────┤
-│  HARDWARE           Ethereum · Arbitrum · BNB Chain · Sepolia · Anvil      │
-└──────────────────────────────────────────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────────────────────┤
+│  SERVICE LAYER      FastAPI  ·  accounts, sign-in (email / Google / SIWE)   │
+│                     contacts allowlist  ·  owner actions signed in-browser  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)     │
+│                     the account is injected — the model can't choose it     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  DRIVERS            ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004         │
+│                     Chainlink pricing · UserOp builder and bundler          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  KERNEL (on-chain)  SessionHandler account  +  SpendingLimitModule hook     │
+│                     every agent transaction is checked here                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  SYSTEM SERVICES    SHTreasury · SHRegistry · SHOracle · SHFactory          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  HARDWARE           Ethereum · Arbitrum · BNB Chain · Sepolia · Anvil       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Kernel — the smart account and its enforcement hook
