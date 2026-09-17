@@ -473,3 +473,113 @@
 .rs-theme-dark .rs-message {
   background: var(--rs-bg-card);
 }
+
+/* ── Wallet connection ──────────────────────────────────────────────────── */
+
+.mf-connector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.mf-connector.rs-btn {
+  display: flex;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.mf-connector img {
+  border-radius: 6px;
+}
+
+.mf-wallet-menu-head {
+  line-height: 1.5;
+}
+
+.mf-error-text {
+  color: var(--mf-danger);
+}
+
+/* ── Onboarding ─────────────────────────────────────────────────────────── */
+
+.mf-onboarding {
+  background: var(--rs-bg-card);
+}
+
+.mf-steps {
+  margin-bottom: 24px;
+}
+
+.mf-step-counter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+
+.mf-step-body {
+  max-width: 640px;
+}
+
+.mf-step-title {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.mf-step-action {
+  margin-top: 16px;
+}
+
+.mf-step-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.mf-tiles {
+  margin-top: 16px;
+}
+
+.mf-tile-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mf-summary {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 10px 24px;
+  margin: 16px 0;
+}
+
+.mf-summary dt {
+  color: var(--rs-text-secondary);
+}
+
+.mf-summary dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 479px) {
+  .mf-summary {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .mf-summary dd {
+    margin-bottom: 10px;
+  }
+}
+
+.mf-deploy-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}

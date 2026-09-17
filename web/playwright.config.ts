@@ -10,6 +10,9 @@ const screens = {
 
 export default defineConfig({
   testDir: './e2e',
+  // e2e/real/ signs and sends real transactions on the local fork and writes to wallet.db; it runs
+  // only when asked for (E2E_REAL=1, with Vault, `make sepolia-fork` and the API running).
+  testIgnore: process.env.E2E_REAL ? [] : ['real/**'],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   reporter: [['list']],

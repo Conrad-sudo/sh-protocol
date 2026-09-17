@@ -1,26 +1,14 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN } from './helpers.ts'
 
 /*
  * The app shell at real screen sizes, in both themes. The API is mocked in the browser, so these
  * runs need no back end and write nothing to wallet.db.
  */
 
-const TOKEN = { access_token: 'e2e-token', token_type: 'bearer', expires_in: 900, user_id: 7 }
-const ME = {
-  user_id: 7,
-  email: 'sam@example.com',
-  owner_addr: null as string | null,
-  has_password: true,
-  google_linked: false,
-  telegram_linked: false,
-  wallet_chains: [],
-}
-
 async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; me?: typeof ME }) {
   let session = signedIn
-  // A predicate, not the glob '**/api/**': in dev, Vite serves source files such as
-  // /src/api/client.ts, and the glob would answer those with mock JSON too.
-  await page.route(url => url.pathname.startsWith('/api/'), route => {
+  await page.route(isApiUrl, route => {
     switch (new URL(route.request().url()).pathname) {
       case '/api/auth/refresh':
         return session
@@ -38,20 +26,6 @@ async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; m
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
   })
-}
-
-async function expectNoSidewaysScroll(page: Page) {
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
-  expect(overflow, 'page is wider than the screen').toBeLessThanOrEqual(0)
-}
-
-async function expectTheme(page: Page, testInfo: TestInfo) {
-  const dark = testInfo.project.use.colorScheme === 'dark'
-  await expect(page.locator('body')).toHaveClass(dark ? /rs-theme-dark/ : /rs-theme-light/)
-}
-
-function snap(page: Page, testInfo: TestInfo, name: string) {
-  return page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: true })
 }
 
 test('home page', async ({ page }, testInfo) => {

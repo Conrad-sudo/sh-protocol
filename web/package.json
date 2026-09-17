@@ -19,6 +19,7 @@
     "@react-oauth/google": "^0.13.5",
     "@rsuite/icons": "^1.4.1",
     "@tanstack/react-query": "^5.103.0",
+    "@walletconnect/ethereum-provider": "^2.25.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.4.0",

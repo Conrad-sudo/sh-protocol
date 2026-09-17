@@ -8,6 +8,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
+import { OnboardingPage } from './pages/onboarding/OnboardingPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
 import { RouteError } from './pages/RouteError'
 import { SettingsPage } from './pages/SettingsPage'
@@ -69,15 +70,8 @@ export const routes: RouteObject[] = [
             ),
           },
           { path: 'settings', element: <SettingsPage /> },
-          {
-            path: 'onboarding',
-            element: (
-              <PlaceholderPage
-                title="Create your wallet"
-                summary="Connect a wallet, prove you own it, and deploy your Mitfah wallet."
-              />
-            ),
-          },
+          { path: 'onboarding', element: <OnboardingPage /> },
+          { path: 'wallets/new', element: <OnboardingPage /> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },
