@@ -7,6 +7,12 @@ import { routes } from '../routes'
 import { makeWalletState, SEPOLIA } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
+// Owner transactions poll with a 2 s gap; the tests don't wait.
+vi.mock('../lib/tx', async importOriginal => ({
+  ...(await importOriginal<typeof import('../lib/tx')>()),
+  sleep: () => Promise.resolve(),
+}))
+
 const BSC = 56
 const TX_HASH = `0x${'34'.repeat(32)}`
 const CHAINS = [
@@ -27,6 +33,7 @@ interface ServerOptions {
 function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = {}) {
   const walletCalls: number[] = []
   const sent: Record<string, string>[] = []
+  const prepared: { path: string; body: unknown }[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
@@ -46,6 +53,13 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = 
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
       if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
+      if (url.endsWith('/prepare')) {
+        prepared.push({ path: url, body: JSON.parse(String(init?.body)) })
+        return Promise.resolve(json(200, { tx: { to: '0x2222222222222222222222222222222222222222', data: '0x1234' } }))
+      }
+      if (url === '/api/wallet/tx/confirm') {
+        return Promise.resolve(json(200, { status: 'confirmed', tx_hash: TX_HASH }))
+      }
       const match = /^\/api\/wallet\/(\d+)$/.exec(url)
       if (match) {
         const chainId = Number(match[1])
@@ -57,7 +71,7 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = 
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { walletCalls, sent }
+  return { walletCalls, sent, prepared }
 }
 
 function receipt() {
@@ -248,5 +262,99 @@ describe('DashboardPage', () => {
     ])
     // The balance was read again once the transfer confirmed.
     await waitFor(() => expect(walletCalls).toEqual([SEPOLIA, SEPOLIA]))
+  })
+
+  it('withdraws to the owner wallet, checking the amount against the balance', async () => {
+    const { prepared } = stubServer()
+    const user = userEvent.setup()
+    renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Withdraw' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    expect(await within(drawer).findByText('Owner connected')).toBeInTheDocument()
+
+    expect(within(drawer).getByRole('combobox', { name: 'Token' })).toHaveTextContent('ETH · 1.5 available')
+    expect(within(drawer).getByLabelText('Send to')).toHaveValue(WALLET)
+    expect(within(drawer).getByText('Your owner wallet.')).toBeInTheDocument()
+    const amount = within(drawer).getByLabelText('Amount')
+    const withdraw = within(drawer).getByRole('button', { name: 'Withdraw' })
+
+    await user.type(amount, '2')
+    expect(within(drawer).getByText('The wallet holds only 1.5 ETH.')).toBeInTheDocument()
+    expect(withdraw).toBeDisabled()
+    await user.click(within(drawer).getByRole('button', { name: 'Max' }))
+    expect(amount).toHaveValue('1.5')
+    expect(withdraw).toBeEnabled()
+
+    await user.clear(amount)
+    await user.type(amount, '0.25')
+    await user.click(withdraw)
+    expect(await within(drawer).findByText(/Sent. The balance above is up to date./)).toBeInTheDocument()
+    expect(screen.getByText('Withdrew 0.25 ETH.')).toBeInTheDocument()
+    expect(prepared).toEqual([
+      { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: 'eth', amount: '0.25', to: WALLET } },
+    ])
+  })
+
+  it('asks before withdrawing to an address that is not the owner', async () => {
+    const other = '0x3333333333333333333333333333333333333333'
+    const { prepared } = stubServer()
+    const user = userEvent.setup()
+    renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Withdraw' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await within(drawer).findByText('Owner connected')
+
+    await user.click(within(drawer).getByRole('combobox', { name: 'Token' }))
+    await user.click(await screen.findByRole('option', { name: 'USDC · 25 available' }))
+    await user.type(within(drawer).getByLabelText('Amount'), '10')
+    expect(within(drawer).getByRole('button', { name: 'Max' })).toBeInTheDocument()
+    const to = within(drawer).getByLabelText('Send to')
+    await user.clear(to)
+    await user.type(to, 'not an address')
+    expect(within(drawer).getByText('Enter a full address starting with 0x.')).toBeInTheDocument()
+    await user.clear(to)
+    await user.type(to, other)
+    expect(within(drawer).getByText(/Not your owner wallet./)).toBeInTheDocument()
+
+    await user.click(within(drawer).getByRole('button', { name: 'Withdraw' }))
+    const confirm = await screen.findByRole('alertdialog')
+    expect(confirm).toHaveTextContent("which isn't your owner wallet")
+    await user.click(within(confirm).getByRole('button', { name: 'Withdraw' }))
+    expect(await screen.findByText('Withdrew 10 USDC.')).toBeInTheDocument()
+    expect(prepared).toEqual([
+      { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: 'usdc', amount: '10', to: other } },
+    ])
+  })
+
+  it('pauses from the dashboard', async () => {
+    const { prepared } = stubServer({
+      wallets: { [SEPOLIA]: [makeWalletState(), makeWalletState({ paused: true })] },
+    })
+    const user = userEvent.setup()
+    renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Pause wallet' }))
+    const modal = await screen.findByRole('dialog')
+    expect(within(modal).getByText('Pause this wallet?')).toBeInTheDocument()
+    expect(within(modal).getByRole('button', { name: 'Pause wallet' })).toBeDisabled()
+    await user.click(within(modal).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await within(modal).findByText('Owner connected')
+    await user.click(within(modal).getByRole('button', { name: 'Pause wallet' }))
+
+    expect(await screen.findByText('Wallet paused. Nothing can go out until you unpause it.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Pause this wallet?')).toBeNull())
+    expect(prepared).toEqual([{ path: '/api/wallet/pause/prepare', body: { chain_id: SEPOLIA } }])
+    expect(await screen.findByRole('button', { name: 'Unpause' })).toBeInTheDocument()
+    expect(screen.getByText('Paused')).toBeInTheDocument()
   })
 })

@@ -57,6 +57,12 @@
   --rs-red-700: #a52b2b;
   --rs-red-800: #8a2323;
 
+  /* Amber buttons (color="orange") mark a change that loosens a limit. #9a6412 is 5:1 against white. */
+  --rs-orange-500: #9a6412;
+  --rs-orange-600: #8a5a10;
+  --rs-orange-700: #7a4f0e;
+  --rs-orange-800: #6b450c;
+
   /* Type */
   --rs-font-family-base: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --rs-font-family-monospace: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -124,6 +130,12 @@
   --rs-red-600: #a8332f;
   --rs-red-700: #962c29;
   --rs-red-800: #7a2421;
+
+  /* 5.6:1 against white text. --mf-warning stays the lighter amber, for text on the dark page. */
+  --rs-orange-500: #8f5d10;
+  --rs-orange-600: #83550e;
+  --rs-orange-700: #7a4f0e;
+  --rs-orange-800: #6b450c;
 
   --rs-sidenav-inverse-bg: #0a1a2e;
   /* RSuite's dark default (primary-600) is 3.3:1 against the white item text. */

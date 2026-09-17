@@ -127,3 +127,25 @@ export interface WalletState {
   }
   balances: TokenBalance[]
 }
+
+/**
+ * A change only the wallet's owner can sign. Each maps to one /api/wallet/…/prepare endpoint.
+ * Tokens are tickers: the API resolves them for the chain ("eth" or the chain's own ticker for the
+ * native asset, withdraw only). Decimal amounts travel as strings.
+ */
+export type OwnerAction =
+  | { kind: 'pause' }
+  | { kind: 'unpause' }
+  | { kind: 'withdraw'; token: string; amount: string; to: string }
+  | { kind: 'watched-token'; token: string; action: 'add' | 'remove' }
+  | { kind: 'daily-limit'; dailyLimitUsd: number }
+  | { kind: 'window'; windowSecs: number }
+  /** The assistant's own key; the API fills it in. */
+  | { kind: 'session'; action: 'add' | 'remove' }
+  | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
+  | { kind: 'max-gas'; maxCostEth: string }
+
+/** POST /api/wallet/tx/confirm: 202 while the transaction is pending, 200 once it has mined. */
+export type OwnerTxConfirmResult =
+  | { status: 'pending'; tx_hash: string }
+  | { status: 'confirmed'; tx_hash: string }

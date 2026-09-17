@@ -1,5 +1,4 @@
 import { useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { useConnection, useSwitchChain } from 'wagmi'
 import {
@@ -19,7 +18,6 @@ import {
   Text,
   useToaster,
 } from 'rsuite'
-import { fetchTokens } from '../../api/wallet'
 import type { Chain, Token } from '../../api/types'
 import { useSelectedChain } from '../../chain/useSelectedChain'
 import { AddressText } from '../../components/AddressText'
@@ -32,8 +30,10 @@ import { NetworkBanner } from '../../components/wallet/NetworkBanner'
 import { SiweVerifyCard } from '../../components/wallet/SiweVerifyCard'
 import { useDeploy, type DeployPhase } from '../../hooks/useDeploy'
 import { useMe } from '../../hooks/useMe'
+import { useTokens } from '../../hooks/useTokens'
 import { useLayoutMode } from '../../layouts/useLayoutMode'
 import { formatUsd, formatWindow, isValidAmount } from '../../lib/format'
+import { WINDOW_CHOICES } from '../../lib/spending'
 import { chainName, isSupportedChainId } from '../../wallet/chains'
 import { DeployProgress } from './DeployProgress'
 
@@ -45,12 +45,6 @@ const STEP_TITLES = [
   'Add gas funds',
   'Review and create',
 ] as const
-
-const WINDOWS = [
-  { label: '12 hours', value: 43_200 },
-  { label: '24 hours', value: 86_400 },
-  { label: '7 days', value: 604_800 },
-]
 
 type WizardStep = 'network' | 'limits' | 'fund' | 'review'
 const WIZARD_INDEX: Record<WizardStep, number> = { network: 2, limits: 3, fund: 4, review: 5 }
@@ -339,10 +333,6 @@ function StepNav({ onBack, onNext, nextDisabled }: { onBack: () => void; onNext:
   )
 }
 
-function useTokens(chainId: number) {
-  return useQuery({ queryKey: ['tokens', chainId], queryFn: () => fetchTokens(chainId), staleTime: 5 * 60_000 })
-}
-
 function LimitsStep({
   chainId,
   nativeTicker,
@@ -388,7 +378,7 @@ function LimitsStep({
           <Form.Label>Period</Form.Label>
           <SegmentedControl
             aria-label="Period"
-            data={WINDOWS}
+            data={WINDOW_CHOICES}
             value={draft.windowSecs}
             onChange={value => onChange({ windowSecs: Number(value) })}
           />

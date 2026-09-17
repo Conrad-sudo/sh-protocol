@@ -1,6 +1,7 @@
 import { BaseError, UserRejectedRequestError, type Address, type Hex } from 'viem'
 import { ApiError } from '../api/client'
 import type { PreparedTx } from '../api/types'
+import { explainError } from './errors'
 
 /**
  * Turns an API-built transaction into what the wallet should send. `to`, `data` and `value` are
@@ -31,7 +32,7 @@ export function isUserRejection(error: unknown): boolean {
 
 /** A one-line message for any error the wallet flows can raise. */
 export function errorText(error: unknown): string {
-  if (error instanceof ApiError) return error.message
+  if (error instanceof ApiError) return explainError(error.message)
   // viem leaves shortMessage undefined when it wraps a plain Error; its message still leads with a
   // readable line.
   if (error instanceof BaseError && error.shortMessage) return error.shortMessage

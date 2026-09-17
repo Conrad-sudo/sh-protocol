@@ -74,13 +74,34 @@ export function isRpc(url: string) {
   return !url.startsWith('/api/')
 }
 
-/** Answers a JSON-RPC request from `handlers`; a method with no handler is an error response. */
+/** Thrown from an RPC handler to answer with a JSON-RPC error, e.g. 4001 for "user rejected". */
+export class RpcError {
+  readonly code: number
+  readonly message: string
+
+  constructor(code: number, message: string) {
+    this.code = code
+    this.message = message
+  }
+}
+
+/**
+ * Answers a JSON-RPC request from `handlers`; a method with no handler, or a handler that throws an
+ * `RpcError`, is an error response.
+ */
 export function answerRpc(init: RequestInit | undefined, handlers: RpcHandlers) {
   const body = JSON.parse(String(init?.body)) as RpcRequest | RpcRequest[]
-  const answer = ({ id, method, params = [] }: RpcRequest) =>
-    method in handlers
-      ? { jsonrpc: '2.0', id, result: handlers[method](params) }
-      : { jsonrpc: '2.0', id, error: { code: -32601, message: `No test handler for ${method}` } }
+  const answer = ({ id, method, params = [] }: RpcRequest) => {
+    if (!(method in handlers)) {
+      return { jsonrpc: '2.0', id, error: { code: -32601, message: `No test handler for ${method}` } }
+    }
+    try {
+      return { jsonrpc: '2.0', id, result: handlers[method](params) }
+    } catch (error) {
+      if (!(error instanceof RpcError)) throw error
+      return { jsonrpc: '2.0', id, error: { code: error.code, message: error.message } }
+    }
+  }
   return json(200, Array.isArray(body) ? body.map(answer) : answer(body))
 }
 

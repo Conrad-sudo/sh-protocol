@@ -474,6 +474,52 @@
   background: var(--rs-bg-card);
 }
 
+/*
+ * Red and amber outline/link buttons take their text from the same 500 shade as the filled ones,
+ * which is dark enough for white text but only 3:1 on the dark page. Use the lighter text tones.
+ */
+.rs-theme-dark .rs-btn[data-color='red'] {
+  --rs-btn-ghost-text: var(--mf-danger);
+  --rs-btn-ghost-border: var(--mf-danger);
+  --rs-btn-link-text: var(--mf-danger);
+}
+
+.rs-theme-dark .rs-btn[data-color='orange'] {
+  --rs-btn-ghost-text: var(--mf-warning);
+  --rs-btn-ghost-border: var(--mf-warning);
+  --rs-btn-link-text: var(--mf-warning);
+}
+
+/* ── Owner actions ──────────────────────────────────────────────────────── */
+
+.mf-owner-bar {
+  margin: 12px 0 4px;
+}
+
+.mf-owner-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.mf-tx-status {
+  margin-top: 12px;
+}
+
+.mf-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* RSuite spaces footer buttons with a left margin; the gap already does that, and wraps cleanly. */
+.mf-modal-actions .rs-btn + .rs-btn {
+  margin-left: 0;
+}
+
 /* ── Wallet connection ──────────────────────────────────────────────────── */
 
 .mf-connector-list {
@@ -801,4 +847,132 @@
   height: 8px;
   border-radius: 50%;
   background: var(--mf-green);
+}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+
+.mf-control-row {
+  padding: 14px 0;
+}
+
+.mf-control-row + .mf-control-row {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-control-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+
+.mf-control-label {
+  display: flex;
+  flex: 1 1 280px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mf-control-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mf-control-title h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.mf-control-action {
+  flex: none;
+}
+
+/* Holds an editor or a transaction's progress; a row whose progress is idle adds no space. */
+.mf-control-body {
+  margin-top: 8px;
+}
+
+.mf-control-body:empty {
+  display: none;
+}
+
+/* A section that opens and closes: the whole heading is the button. */
+.mf-disclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.mf-disclosure:focus-visible {
+  outline: 2px solid var(--rs-primary-500);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.mf-disclosure-caret {
+  flex: none;
+  font-size: 16px;
+  transition: transform 0.2s ease;
+}
+
+.mf-disclosure[aria-expanded='true'] .mf-disclosure-caret {
+  transform: rotate(180deg);
+}
+
+.mf-control-form {
+  margin-top: 12px;
+}
+
+.mf-control-form + .mf-control-form {
+  margin-top: 20px;
+}
+
+/* An input and its Save button on one line, wrapping on narrow screens. */
+.mf-inline-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mf-inline-field > .rs-input-group,
+.mf-inline-field > .rs-input,
+.mf-inline-field > .rs-picker {
+  flex: 1 1 200px;
+  max-width: 360px;
+}
+
+.mf-token-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-token-list > li {
+  padding: 8px 0;
+}
+
+.mf-token-list > li + li {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
 }

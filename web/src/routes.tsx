@@ -4,6 +4,7 @@ import { RequireAuth } from './auth/RequireAuth'
 import { AppShell } from './layouts/AppShell'
 import { AuthLayout } from './layouts/AuthLayout'
 import { PublicLayout } from './layouts/PublicLayout'
+import { ControlsPage } from './pages/ControlsPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
@@ -60,15 +61,7 @@ export const routes: RouteObject[] = [
               />
             ),
           },
-          {
-            path: 'controls',
-            element: (
-              <PlaceholderPage
-                title="Controls"
-                summary="Pause the wallet, change the daily limit, and choose which tokens count."
-              />
-            ),
-          },
+          { path: 'controls', element: <ControlsPage /> },
           { path: 'settings', element: <SettingsPage /> },
           { path: 'onboarding', element: <OnboardingPage /> },
           { path: 'wallets/new', element: <OnboardingPage /> },
