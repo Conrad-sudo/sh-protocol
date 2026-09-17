@@ -1,5 +1,6 @@
 import { Link, Outlet } from 'react-router'
 import { Logo } from '../components/brand/Logo'
+import { LegalLinks } from '../components/LegalLinks'
 
 /** A single centred card for sign-in and sign-up. */
 export function AuthLayout() {
@@ -11,6 +12,7 @@ export function AuthLayout() {
         </Link>
         <Outlet />
       </div>
+      <LegalLinks />
     </div>
   )
 }

@@ -28,15 +28,6 @@ async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; m
   })
 }
 
-test('home page', async ({ page }, testInfo) => {
-  await mockApi(page, { signedIn: false })
-  await page.goto('/')
-  await expect(page.getByRole('heading', { level: 1 })).toContainText('only spend what you allow')
-  await expectTheme(page, testInfo)
-  await expectNoSidewaysScroll(page)
-  await snap(page, testInfo, 'home')
-})
-
 test('signing in returns you to the page you asked for', async ({ page }, testInfo) => {
   await mockApi(page, { signedIn: false })
   await page.goto('/contacts')

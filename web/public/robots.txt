@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /assistant
+Disallow: /contacts
+Disallow: /controls
+Disallow: /settings
+Disallow: /onboarding
+Disallow: /wallets/
+
+Sitemap: https://mitfah.com/sitemap.xml

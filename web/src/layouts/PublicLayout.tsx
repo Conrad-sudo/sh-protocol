@@ -1,9 +1,10 @@
 import { Link, Outlet } from 'react-router'
 import { useAuth } from '../auth/useAuth'
 import { Logo } from '../components/brand/Logo'
+import { LegalLinks } from '../components/LegalLinks'
 import { LinkButton } from '../components/LinkButton'
 
-/** Header for public pages. The full landing page and footer arrive in phase 9. */
+/** Header and footer around the landing and legal pages. */
 export function PublicLayout() {
   const { status } = useAuth()
 
@@ -33,6 +34,11 @@ export function PublicLayout() {
       <main>
         <Outlet />
       </main>
+      <footer className="mf-public-footer">
+        <Logo variant="mark" size={24} />
+        <span>© {new Date().getFullYear()} Mitfah</span>
+        <LegalLinks />
+      </footer>
     </div>
   )
 }

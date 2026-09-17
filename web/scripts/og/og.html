@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- The 1200×630 social share image. Render it with `npm run og` (scripts/og/render.ts). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      @font-face {
+        font-family: 'Manrope';
+        src: url('../../node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2') format('woff2');
+        font-weight: 200 800;
+      }
+      @font-face {
+        font-family: 'Inter';
+        src: url('../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2');
+        font-weight: 100 900;
+      }
+      html, body { margin: 0; }
+      .card {
+        box-sizing: border-box;
+        width: 1200px;
+        height: 630px;
+        padding: 72px 80px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        color: #ffffff;
+        font-family: 'Inter', sans-serif;
+        background:
+          radial-gradient(circle at 88% 18%, rgb(43 183 126 / 28%), transparent 42%),
+          linear-gradient(135deg, #062a4e 0%, #07111f 100%);
+      }
+      .brand { display: flex; align-items: center; gap: 18px; }
+      .brand img { height: 64px; }
+      .brand span { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 48px; letter-spacing: -0.02em; }
+      h1 {
+        margin: 0;
+        max-width: 960px;
+        font-family: 'Manrope', sans-serif;
+        font-weight: 800;
+        font-size: 60px;
+        line-height: 1.1;
+        letter-spacing: -0.02em;
+      }
+      h1 em { font-style: normal; color: #2bb77e; }
+      ul { display: flex; gap: 36px; margin: 0; padding: 0; list-style: none; font-size: 26px; color: #c3cedb; }
+      li::before { content: '✓'; margin-right: 10px; color: #2bb77e; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="brand"><img src="../../public/brand/mark-dark.png" alt="" /><span>mitfah</span></div>
+      <h1>An AI assistant for your crypto wallet that can <em>only spend what you allow.</em></h1>
+      <ul>
+        <li>You own it</li>
+        <li>Daily dollar limit</li>
+        <li>Pause any time</li>
+      </ul>
+    </div>
+  </body>
+</html>

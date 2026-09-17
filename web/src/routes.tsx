@@ -11,6 +11,8 @@ import { DashboardPage } from './pages/DashboardPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
+import { PrivacyPage } from './pages/legal/PrivacyPage'
+import { TermsPage } from './pages/legal/TermsPage'
 import { OnboardingPage } from './pages/onboarding/OnboardingPage'
 import { RouteError } from './pages/RouteError'
 import { SettingsPage } from './pages/SettingsPage'
@@ -23,7 +25,11 @@ export const routes: RouteObject[] = [
     children: [
       {
         element: <PublicLayout />,
-        children: [{ index: true, element: <HomePage /> }],
+        children: [
+          { index: true, element: <HomePage /> },
+          { path: 'terms', element: <TermsPage /> },
+          { path: 'privacy', element: <PrivacyPage /> },
+        ],
       },
       {
         element: (
