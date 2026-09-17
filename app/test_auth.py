@@ -334,6 +334,50 @@ def test_telegram_link_nonce():
     check("an unknown nonce redeems to nothing", db.consume_telegram_link_nonce("made-up") is None)
 
 
+def test_bot_start_explains_a_chat_linked_elsewhere():
+    """
+    A chat already linked to one account that follows another account's link is told why nothing
+    happened; otherwise that account's settings page would wait out the link's expiry in silence.
+    """
+    print("\n[6b] /start with another account's link says the chat is linked elsewhere")
+    import asyncio
+    from types import SimpleNamespace
+
+    import telebot
+
+    c = make_client()
+    first = c.post("/api/auth/signup", json={"email": "tg1@example.com", "password": "hunter2hunter2"}).json()
+    second = c.post("/api/auth/signup", json={"email": "tg2@example.com", "password": "hunter2hunter2"}).json()
+    chat_id = 424242
+    db.link_telegram(first["user_id"], chat_id)
+
+    def start(user):
+        link = c.post(
+            "/api/integrations/telegram/link",
+            headers={"Authorization": f"Bearer {user['access_token']}"},
+        ).json()
+        replies = []
+
+        async def reply_text(text):
+            replies.append(text)
+
+        update = SimpleNamespace(message=SimpleNamespace(chat_id=chat_id, reply_text=reply_text))
+        job_queue = SimpleNamespace(get_jobs_by_name=lambda name: [], run_repeating=lambda *a, **k: None)
+        context = SimpleNamespace(args=[link["nonce"]], job_queue=job_queue)
+        asyncio.run(telebot.start(update, context))
+        return link["nonce"], replies
+
+    nonce, replies = start(second)
+    check("the chat is told it belongs to another account",
+          any("already linked to a different account" in r for r in replies), str(replies))
+    check("the chat stays with its account", db.get_user_by_id(second["user_id"])["telegram_chat_id"] is None)
+    check("the link is burned", db.consume_telegram_link_nonce(nonce) is None)
+
+    _, replies = start(first)
+    check("its own account's link gets no such warning",
+          not any("different account" in r for r in replies), str(replies))
+
+
 def test_owner_actions_are_guarded():
     print("\n[7] owner actions need a token AND a proved owner address")
     c = make_client()
@@ -743,6 +787,7 @@ if __name__ == "__main__":
         test_identity_comes_from_token_not_body()
         test_siwe_binding_and_deployer_check()
         test_telegram_link_nonce()
+        test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()

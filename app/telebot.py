@@ -115,7 +115,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Telegram linked to your wallet account.")
     elif nonce and user_id is not None:
         # Already linked. Burn the nonce anyway so a leaked link cannot sit around unredeemed.
-        consume_telegram_link_nonce(nonce)
+        linked_to = consume_telegram_link_nonce(nonce)
+        if linked_to is not None and linked_to != user_id:
+            # Otherwise the web page that minted the link would wait out its expiry in silence.
+            await update.message.reply_text(
+                "This Telegram chat is already linked to a different account. "
+                "Unlink it in that account's settings first, then generate a new link."
+            )
 
     if user_id is None:
         await update.message.reply_text(UNLINKED_MESSAGE)

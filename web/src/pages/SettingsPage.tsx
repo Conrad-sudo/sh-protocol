@@ -2,11 +2,12 @@ import { Button, Message, Panel, Placeholder, Stack } from 'rsuite'
 import { PageHeader } from '../components/PageHeader'
 import { OwnerAddressCard } from '../components/settings/OwnerAddressCard'
 import { SignInMethods } from '../components/settings/SignInMethods'
+import { TelegramCard } from '../components/settings/TelegramCard'
 import { ThemeSwitch } from '../components/ThemeSwitch'
 import { useMe } from '../hooks/useMe'
 import { useSignOut } from '../hooks/useSignOut'
 
-/** Account, wallet owner, appearance and session. Telegram joins in phase 8. */
+/** Account, wallet owner, Telegram, appearance and session. */
 export function SettingsPage() {
   const { data: me, isPending, isError, refetch } = useMe()
   const signOut = useSignOut()
@@ -32,6 +33,7 @@ export function SettingsPage() {
       <>
         <SignInMethods me={me} />
         <OwnerAddressCard ownerAddr={me.owner_addr} />
+        <TelegramCard me={me} />
       </>
     )
   }

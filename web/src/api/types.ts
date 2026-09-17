@@ -20,6 +20,13 @@ export interface Me {
   wallet_chains: number[]
 }
 
+/** POST /api/integrations/telegram/link — the link works once, for `expires_in` seconds. */
+export interface TelegramLink {
+  url: string
+  nonce: string
+  expires_in: number
+}
+
 /** A token this deployment can price, from GET /api/tokens. */
 export interface Token {
   ticker: string

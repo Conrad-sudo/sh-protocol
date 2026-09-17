@@ -427,6 +427,38 @@
   margin-top: 12px;
 }
 
+.mf-telegram-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-telegram-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.mf-telegram-qr .mf-qr {
+  margin-bottom: 4px;
+}
+
+/* A touch screen opens the link itself; a QR code of it is only useful on a desktop. */
+@media (pointer: coarse) {
+  .mf-telegram-qr {
+    display: none;
+  }
+}
+
+.mf-telegram-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+}
+
 /* Status tags */
 
 .mf-tag {
