@@ -20,14 +20,19 @@ export interface WalletBackend {
    * was on when asked, as a real wallet would use.
    */
   sendTransaction: (tx: WalletTx, chainId: number) => Promise<string>
+  /**
+   * Any other request the app sends through the wallet — reads such as eth_getTransactionReceipt,
+   * which a real wallet forwards to its node. Without it those requests fail.
+   */
+  request?: (method: string, params: unknown[]) => Promise<unknown>
 }
 
 export const FAKE_WALLET_NAME = 'Test Wallet'
 
 /**
  * Installs a browser wallet the app discovers like any other (EIP-6963). Account and network
- * requests are answered in the page; signing and sending are handed to `backend` in Node, so a
- * spec can return fixed values or use a real key against a local fork.
+ * requests are answered in the page; everything else — signing, sending and node reads — is handed
+ * to `backend` in Node, so a spec can return fixed values or use a real key against a local fork.
  *
  * Call before the first `page.goto`. The wallet starts disconnected on every page load, like a
  * wallet that has not yet approved this site.
@@ -36,6 +41,7 @@ export async function installFakeWallet(page: Page, backend: WalletBackend) {
   await page.exposeFunction('__fakeWalletBackend', (method: string, params: unknown[], chainId: number) => {
     if (method === 'personal_sign') return backend.signMessage(params[0] as string)
     if (method === 'eth_sendTransaction') return backend.sendTransaction(params[0] as WalletTx, chainId)
+    if (backend.request) return backend.request(method, params)
     throw new Error(`The test wallet does not support ${method}`)
   })
 
@@ -76,11 +82,8 @@ export async function installFakeWallet(page: Page, backend: WalletBackend) {
               emit('chainChanged', hex(chainId))
               return null
             }
-            case 'personal_sign':
-            case 'eth_sendTransaction':
-              return backendCall(method, params)
             default:
-              throw Object.assign(new Error(`The test wallet does not support ${method}`), { code: 4200 })
+              return backendCall(method, params)
           }
         },
         on(event: string, fn: Listener) {

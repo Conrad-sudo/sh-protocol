@@ -1,6 +1,5 @@
-import { Link } from 'react-router'
-import { Button } from 'rsuite'
 import { EmptyState } from '../components/EmptyState'
+import { LinkButton } from '../components/LinkButton'
 
 export function NotFoundPage() {
   return (
@@ -9,9 +8,9 @@ export function NotFoundPage() {
       <EmptyState
         title="Page not found"
         action={
-          <Button as={Link} to="/" appearance="primary">
+          <LinkButton to="/" appearance="primary">
             Go home
-          </Button>
+          </LinkButton>
         }
       >
         That link doesn't lead anywhere.

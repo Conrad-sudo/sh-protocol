@@ -11,12 +11,14 @@ import {
 } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
+import { formatTokenAmount } from '../../src/lib/format.ts'
 import { installFakeWallet } from '../fakeWallet.ts'
 import { walkOnboarding } from '../onboardingFlow.ts'
 
 /*
  * The whole journey for real: sign up against the running API, prove a fresh key owns the account,
- * and have that key sign and send deployWallet on the local Sepolia fork. Nothing is mocked, so
+ * have that key sign and send deployWallet on the local Sepolia fork, then top the new wallet up
+ * from the dashboard. Nothing is mocked, so
  * this writes a user and a wallet to wallet.db and needs Vault, `make sepolia-fork` and the API
  * with APP_FORK_MODE=1. Run with: E2E_REAL=1 npx playwright test real
  */
@@ -56,7 +58,7 @@ async function requireLocalFork(request: APIRequestContext) {
   }
 }
 
-test('a new user creates a wallet on the local fork', async ({ page, request }, testInfo) => {
+test('a new user creates and funds a wallet on the local fork', async ({ page, request }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-light', 'One real deploy per run is enough.')
   test.setTimeout(180_000)
   await requireLocalFork(request)
@@ -81,6 +83,9 @@ test('a new user creates a wallet on the local fork', async ({ page, request }, 
         gas: tx.gas ? BigInt(tx.gas) : undefined,
       })
     },
+    // Reads the app sends through the wallet (the funding receipt) go to the fork, as a real
+    // wallet pointed at it would send them.
+    request: (method, params) => publicClient.request({ method, params } as never),
   })
 
   const email = `e2e-deploy-${Date.now()}@example.com`
@@ -93,9 +98,7 @@ test('a new user creates a wallet on the local fork', async ({ page, request }, 
 
   // The defaults: Sepolia (where the wallet is), $100 a day, every token, 1 ETH of gas funds.
   await walkOnboarding(page)
-  await expect(page.getByRole('heading', { name: 'Your wallet is ready on Sepolia' })).toBeVisible({
-    timeout: 120_000,
-  })
+  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
   expect(sentOn).toEqual([sepolia.id])
   await page.screenshot({ path: testInfo.outputPath('deployed.png') })
 
@@ -131,4 +134,22 @@ test('a new user creates a wallet on the local fork', async ({ page, request }, 
   })
   expect(onChainOwner).toBe(owner.address)
   expect(await publicClient.getBalance({ address: wallet.address })).toBeGreaterThanOrEqual(parseEther('1'))
+
+  // Topping up from the dashboard with the connected wallet.
+  const before = await publicClient.getBalance({ address: wallet.address })
+  await page.getByRole('button', { name: 'Add funds' }).click()
+  const drawer = page.getByRole('dialog').filter({ hasText: 'Add funds' })
+  await drawer.getByLabel('Amount').fill('0.5')
+  await drawer.getByRole('button', { name: 'Send' }).click()
+  await expect(drawer.getByText('Received. Your balance is up to date.')).toBeVisible({ timeout: 60_000 })
+  const after = await publicClient.getBalance({ address: wallet.address })
+  expect(after - before).toBe(parseEther('0.5'))
+  expect(sentOn).toEqual([sepolia.id, sepolia.id])
+
+  // The dashboard shows the new balance, read back through the API.
+  await page.keyboard.press('Escape')
+  await expect(drawer).toBeHidden()
+  const ethRow = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'ETH', exact: true }) })
+  await expect(ethRow).toContainText(formatTokenAmount(after.toString(), 18))
+  await page.screenshot({ path: testInfo.outputPath('funded.png') })
 })

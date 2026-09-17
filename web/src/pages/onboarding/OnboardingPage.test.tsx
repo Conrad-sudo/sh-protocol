@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { parseSiweMessage } from 'viem/siwe'
 import { resetClientForTests } from '../../api/client'
 import { routes } from '../../routes'
+import { makeWalletState } from '../../test/fixtures'
 import { answerRpc, isRpc, json, makeWagmiConfig, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../../test/utils'
 
 // Polling waits 2 s between checks; the tests don't.
@@ -98,6 +99,12 @@ function stubServer({ ownerAddr = null as string | null, reverted = false } = {}
               session_key_authorized: true,
             }),
           )
+        case `/api/wallet/${SEPOLIA}`:
+          return Promise.resolve(
+            me.wallet_chains.includes(SEPOLIA)
+              ? json(200, makeWalletState({ address: PREDICTED, owner: WALLET }))
+              : json(404, { detail: 'You have no wallet on this chain.' }),
+          )
         default:
           return Promise.resolve(json(404, { detail: 'Not Found' }))
       }
@@ -169,7 +176,7 @@ describe('OnboardingPage', () => {
     expect(summary('Gas funds')).toHaveTextContent('1 ETH')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
 
-    expect(await screen.findByRole('heading', { name: 'Your wallet is ready on Sepolia' })).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
 
     expect(calls.deploy).toEqual([
@@ -215,7 +222,7 @@ describe('OnboardingPage', () => {
 
     // No wallet connection needed: the transaction is already out.
     expect(await step('Creating your wallet')).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'Your wallet is ready on Sepolia' })).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
     expect(calls.confirm).toEqual([
       { chain_id: SEPOLIA, deployer: WALLET, tx_hash: TX_HASH, predicted_address: PREDICTED },

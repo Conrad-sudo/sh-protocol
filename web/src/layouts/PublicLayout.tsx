@@ -1,7 +1,7 @@
 import { Link, Outlet } from 'react-router'
-import { Button } from 'rsuite'
 import { useAuth } from '../auth/useAuth'
 import { Logo } from '../components/brand/Logo'
+import { LinkButton } from '../components/LinkButton'
 
 /** Header for public pages. The full landing page and footer arrive in phase 9. */
 export function PublicLayout() {
@@ -15,17 +15,17 @@ export function PublicLayout() {
         </Link>
         <nav className="mf-public-nav" aria-label="Account">
           {status === 'signedIn' ? (
-            <Button as={Link} to="/dashboard" appearance="primary">
+            <LinkButton to="/dashboard" appearance="primary">
               Open app
-            </Button>
+            </LinkButton>
           ) : (
             <>
-              <Button as={Link} to="/login" appearance="subtle">
+              <LinkButton to="/login" appearance="subtle">
                 Sign in
-              </Button>
-              <Button as={Link} to="/signup" appearance="primary">
+              </LinkButton>
+              <LinkButton to="/signup" appearance="primary">
                 Get started
-              </Button>
+              </LinkButton>
             </>
           )}
         </nav>

@@ -77,3 +77,53 @@ export interface Chain {
   /** True when this server points the chain at a local fork. */
   fork: boolean
 }
+
+/** One row of GET /api/wallet/{chain_id} `balances`. A token that could not be read has `error`. */
+export interface TokenBalance {
+  ticker: string
+  /** null for the native asset. */
+  address: string | null
+  native: boolean
+  decimals: number | null
+  /** Integer string in the token's smallest unit. Display from this, never from `amount`. */
+  raw: string | null
+  amount: number | null
+  error?: string
+}
+
+/** GET /api/wallet/{chain_id} (get_wallet_state): everything the dashboard shows. */
+export interface WalletState {
+  chain_id: number
+  chain_name: string
+  address: string
+  owner: string
+  /** False when this account is not linked to the on-chain owner, so owner actions can't be offered. */
+  is_owner: boolean
+  paused: boolean
+  spending: {
+    /** False means the spending-limit hook is not installed: nothing caps the assistant. */
+    hook_installed: boolean
+    daily_limit_usd: number
+    /** As stored on chain; stale once the period has ended (the next spend resets it). */
+    spent_usd: number
+    /** What the assistant may still spend now, with an ended period already counted as reset. */
+    remaining_usd: number
+    window_hours: number
+    /** Unix seconds. The period ends `window_hours` later. */
+    window_start: number
+    /** ERC-20s that count toward the limit. The native asset always counts and is not listed. */
+    watched_tokens: { ticker: string | null; address: string }[]
+  }
+  session: {
+    /** The assistant's key, or null when this app holds none for the wallet. */
+    key: string | null
+    /** Whether the assistant may act for the wallet. */
+    active: boolean
+  }
+  limits: {
+    max_op_gas_cost_wei: string
+    allowlist_enabled: boolean
+    trusted_spenders: string[]
+  }
+  balances: TokenBalance[]
+}

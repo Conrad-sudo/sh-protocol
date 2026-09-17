@@ -583,3 +583,222 @@
   gap: 8px;
   margin-top: 16px;
 }
+
+/* ── Dashboard ──────────────────────────────────────────────────────────── */
+
+.mf-muted {
+  color: var(--rs-text-secondary);
+}
+
+.mf-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mf-card {
+  background: var(--rs-bg-card);
+}
+
+.mf-card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.mf-wallet-header {
+  background: var(--rs-bg-card);
+}
+
+.mf-wallet-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+
+.mf-wallet-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mf-wallet-address {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 18px;
+}
+
+.mf-wallet-address a {
+  font-size: 14px;
+}
+
+.mf-wallet-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mf-spending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  margin-bottom: 12px;
+}
+
+.mf-spending .rs-progress-circle {
+  flex: none;
+}
+
+.mf-spending-left {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+}
+
+.mf-spending-left strong {
+  font-size: 16px;
+  color: var(--rs-text-primary);
+}
+
+.mf-spending-left small {
+  color: var(--rs-text-secondary);
+}
+
+.mf-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+}
+
+.mf-facts dt {
+  color: var(--rs-text-secondary);
+  font-size: 13px;
+}
+
+.mf-facts dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.mf-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.mf-table th,
+.mf-table td {
+  padding: 10px 0;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.mf-table thead th {
+  padding-top: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--rs-text-secondary);
+}
+
+.mf-table tbody tr {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-table tbody th {
+  font-weight: 600;
+}
+
+.mf-table .mf-table-end {
+  text-align: right;
+  padding-left: 12px;
+  overflow-wrap: anywhere;
+}
+
+.mf-token {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* Fund drawer */
+
+.mf-fund-drawer {
+  --rs-drawer-body-padding: 20px 24px;
+}
+
+.mf-drawer-section + .mf-drawer-section {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-drawer-section h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+/* Scanners need dark modules on a light ground, whatever the theme. */
+.mf-qr {
+  display: flex;
+  justify-content: center;
+  width: fit-content;
+  margin: 0 auto 12px;
+  padding: 8px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.mf-fund-address {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.mf-fund-address .mf-mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Network switcher */
+
+/* Shrinks before the wallet button does: the name truncates, the actions keep their size. */
+.mf-chain-toggle.rs-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.mf-chain-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mf-shell[data-mode='mobile'] .mf-chain-name {
+  max-width: 8.5rem;
+}
+
+.mf-topbar-actions {
+  flex: none;
+}
+
+.mf-chain-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mf-green);
+}

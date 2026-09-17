@@ -1,6 +1,6 @@
-import { Link } from 'react-router'
-import { Button, Text } from 'rsuite'
+import { Text } from 'rsuite'
 import { useAuth } from '../auth/useAuth'
+import { LinkButton } from '../components/LinkButton'
 
 /** Placeholder landing page; the full one is phase 9. */
 export function HomePage() {
@@ -15,17 +15,17 @@ export function HomePage() {
       </Text>
       <div className="mf-hero-actions">
         {status === 'signedIn' ? (
-          <Button as={Link} to="/dashboard" appearance="primary" size="lg">
+          <LinkButton to="/dashboard" appearance="primary" size="lg">
             Open your dashboard
-          </Button>
+          </LinkButton>
         ) : (
           <>
-            <Button as={Link} to="/signup" appearance="primary" size="lg">
+            <LinkButton to="/signup" appearance="primary" size="lg">
               Get started
-            </Button>
-            <Button as={Link} to="/login" size="lg">
+            </LinkButton>
+            <LinkButton to="/login" size="lg">
               Sign in
-            </Button>
+            </LinkButton>
           </>
         )}
       </div>

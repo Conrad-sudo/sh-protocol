@@ -1,5 +1,5 @@
-import { apiFetch } from './client'
-import type { DeployConfirmResult, DeployPrepared, DeployRequest, Token } from './types'
+import { ApiError, apiFetch } from './client'
+import type { DeployConfirmResult, DeployPrepared, DeployRequest, Token, WalletState } from './types'
 
 /** A single-use nonce to put in the SIWE message. */
 export function siweNonce() {
@@ -30,4 +30,14 @@ export function confirmDeploy(body: {
   predicted_address: string
 }) {
   return apiFetch<DeployConfirmResult>('/api/deploy/confirm', { method: 'POST', body })
+}
+
+/** The wallet's state on `chainId`, or null when the account has no wallet there (404). */
+export async function fetchWallet(chainId: number): Promise<WalletState | null> {
+  try {
+    return await apiFetch<WalletState>(`/api/wallet/${chainId}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
 }

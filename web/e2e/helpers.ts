@@ -20,8 +20,11 @@ export function isApiUrl(url: URL) {
 }
 
 export async function expectNoSidewaysScroll(page: Page) {
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
-  expect(overflow, 'page is wider than the screen').toBeLessThanOrEqual(0)
+  // Against the emulated screen, not window.innerWidth: a mobile browser zooms out to fit content
+  // that overflows, which widens innerWidth to match and would hide the very overflow checked for.
+  const screenWidth = page.viewportSize()!.width
+  const pageWidth = await page.evaluate(() => document.documentElement.scrollWidth)
+  expect(pageWidth, 'page is wider than the screen').toBeLessThanOrEqual(screenWidth)
 }
 
 export async function expectTheme(page: Page, testInfo: TestInfo) {
@@ -31,4 +34,40 @@ export async function expectTheme(page: Page, testInfo: TestInfo) {
 
 export function snap(page: Page, testInfo: TestInfo, name: string) {
   return page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: true })
+}
+
+export const USDC = '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8'
+export const WETH = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'
+
+/**
+ * A GET /api/wallet/{chain_id} answer: active, the assistant on, $40 of $100 spent an hour into a
+ * 24-hour period, with ETH, USDC (watched) and WETH (not watched). Mirrors src/test/fixtures.ts,
+ * which the e2e build cannot import.
+ */
+export function walletState(chainId: number, address: string, overrides: Record<string, unknown> = {}) {
+  return {
+    chain_id: chainId,
+    chain_name: 'sepolia-fork',
+    address,
+    owner: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+    is_owner: true,
+    paused: false,
+    spending: {
+      hook_installed: true,
+      daily_limit_usd: 100,
+      spent_usd: 40,
+      remaining_usd: 60,
+      window_hours: 24,
+      window_start: Math.floor(Date.now() / 1000) - 3_600,
+      watched_tokens: [{ ticker: 'usdc', address: USDC }],
+    },
+    session: { key: '0x5555555555555555555555555555555555555555', active: true },
+    limits: { max_op_gas_cost_wei: '10000000000000000', allowlist_enabled: false, trusted_spenders: [] },
+    balances: [
+      { ticker: 'eth', address: null, native: true, decimals: 18, raw: '1500000000000000000', amount: 1.5 },
+      { ticker: 'usdc', address: USDC, native: false, decimals: 6, raw: '25000000', amount: 25 },
+      { ticker: 'weth', address: WETH, native: false, decimals: 18, raw: '0', amount: 0 },
+    ],
+    ...overrides,
+  }
 }
