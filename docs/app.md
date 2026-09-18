@@ -19,7 +19,10 @@ app/
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── tools.py               ← LangChain tool wrappers for the AI agent
+├── agent_context.py       ← The runtime context (user_id, chain_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
+├── auth.py                ← Passwords, JWTs, Google tokens, SIWE verification
+├── api.py                 ← FastAPI HTTP API — what the web app in web/ talks to
 ├── telebot.py             ← Telegram bot front end
 ├── agent_card.json        ← ERC-8004/v1 agent card (hosted publicly, referenced by tokenURI)
 └── abi.py                 ← ABIs for EntryPoint, ERC20, the ERC-8004 registry, and mocks
@@ -443,3 +446,29 @@ The user's message goes to the model verbatim; the `user_id` travels beside it a
 A daily **`budget_alert`** job (registered per user on `/start`, replacing the old session-expiry alert since keys no longer expire) reads the wallet's on-chain status via `get_all_sessions` and warns the user when the session key is inactive, or when the remaining budget has dropped below **10%** (`BUDGET_ALERT_THRESHOLD`) of the window cap.
 
 `post_init` opens the checkpointer and calls `init_agent()` once before polling. `invoke()` is synchronous and offloaded via `asyncio.to_thread()`; SQLite thread safety is handled in `db.py` via `threading.local()`.
+
+---
+
+## Section 5 — Web Front End
+
+`web/` is a React app served at mitfah.com and the main way people use any of this; Telegram is the
+other. It has no privileges of its own: everything goes through `api.py`, with the same `user_id`
+rules as the bot, so nothing below this layer has to trust the browser.
+
+Two things it does that the bot cannot:
+
+- **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
+  is owned by a key the server has never seen. The API only prepares the transaction and records it
+  once the network has it (`POST /api/deploy`, then `POST /api/deploy/confirm`).
+- **Owner-only actions.** Pausing, limits, watched tokens, trusted spenders and withdrawals are all
+  signed by that same owner key in the browser, each one prepared by its own
+  `/api/wallet/<action>/prepare` endpoint and finished with `POST /api/wallet/tx/confirm`. The agent
+  has no way to reach them: the module's guard blocks execute-routed admin calls even for the owner
+  ([THREAT_MODEL.md](../THREAT_MODEL.md) §3.5).
+
+Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
+never write to it. The chat page is a front end over `chat(user_id, chain_id, …)` — the same agent,
+the same history, shared with Telegram through the checkpointer's `thread_id`.
+
+Setup, scripts, the production settings and the front end's own layout are in
+[web/README.md](../web/README.md).

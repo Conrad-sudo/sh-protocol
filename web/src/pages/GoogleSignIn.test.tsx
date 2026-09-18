@@ -64,7 +64,7 @@ describe('Google sign-in', () => {
 
   it('signs in with Google and lands on the dashboard', async () => {
     const fetch = stubApi({ signedIn: false, routes: { '/api/auth/google': () => json(200, TOKEN) } })
-    const router = renderRoutes(routes, '/login')
+    const router = await renderRoutes(routes, '/login')
 
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Google signin_with' }))
 
@@ -84,7 +84,7 @@ describe('Google sign-in', () => {
           }),
       },
     })
-    renderRoutes(routes, '/signup?next=%2Fcontacts')
+    await renderRoutes(routes, '/signup?next=%2Fcontacts')
 
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Google signup_with' }))
 
@@ -95,7 +95,7 @@ describe('Google sign-in', () => {
 
   it('says so when the Google popup is closed', async () => {
     stubApi({ signedIn: false, routes: {} })
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
 
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Close Google popup' }))
 
@@ -125,7 +125,7 @@ describe('Settings: sign-in methods and wallet owner', () => {
         },
       },
     })
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     expect(await screen.findByText('Set')).toBeInTheDocument()
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Google continue_with' }))
@@ -142,7 +142,7 @@ describe('Settings: sign-in methods and wallet owner', () => {
         '/api/auth/google/link': () => json(409, { detail: 'That Google account is already linked.' }),
       },
     })
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Google continue_with' }))
     expect(await screen.findByText('That Google account is already linked.')).toBeInTheDocument()
@@ -153,7 +153,7 @@ describe('Settings: sign-in methods and wallet owner', () => {
       signedIn: true,
       routes: { '/api/me': () => json(200, { ...ME, has_password: false, google_linked: true }) },
     })
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     expect(await screen.findByText('Not set')).toBeInTheDocument()
     expect(screen.getByText('Linked')).toBeInTheDocument()
@@ -162,7 +162,7 @@ describe('Settings: sign-in methods and wallet owner', () => {
   it('shows the owner address when one is linked, and says why it matters', async () => {
     const owner = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
     stubApi({ signedIn: true, routes: { '/api/me': () => json(200, { ...ME, owner_addr: owner }) } })
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     expect(await screen.findByTitle(owner)).toHaveTextContent('0xf39F…2266')
     expect(screen.getByRole('button', { name: 'Copy address' })).toBeInTheDocument()
@@ -171,7 +171,7 @@ describe('Settings: sign-in methods and wallet owner', () => {
 
   it('says the owner address is not linked yet', async () => {
     stubApi({ signedIn: true, routes: {} })
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     expect(await screen.findByText('Not linked yet')).toBeInTheDocument()
     expect(screen.getByText(/You'll link it when you create your wallet/)).toBeInTheDocument()

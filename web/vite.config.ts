@@ -37,6 +37,9 @@ export default defineConfig(({ mode }) => {
       include: ['src/**/*.test.{ts,tsx}'],
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
+      // The first test in a file also loads the app's lazy pages (routes.tsx), which on a cold
+      // transform costs more than the 5 s default.
+      testTimeout: 20_000,
     },
   }
 })

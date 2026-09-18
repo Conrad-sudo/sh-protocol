@@ -107,7 +107,7 @@ describe('ContactsPage', () => {
 
   it('lists the contacts, and says what the list is for', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }, { name: 'alex', address: ALEX }] })
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     expect(await screen.findByRole('heading', { name: 'Your contacts (2)' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Contacts', level: 1 })).toBeInTheDocument()
@@ -121,7 +121,7 @@ describe('ContactsPage', () => {
 
   it('invites the first contact when there are none', async () => {
     stubServer()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     expect(await screen.findByRole('heading', { name: 'No contacts yet' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Your contacts (0)' })).toBeInTheDocument()
@@ -131,7 +131,7 @@ describe('ContactsPage', () => {
   it('offers a retry when the list fails to load', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }], listFailures: 1 })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     expect(await screen.findByText(/Couldn't load your contacts: Something went wrong on our side/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Try again' }))
@@ -141,7 +141,7 @@ describe('ContactsPage', () => {
   it('adds a contact after a look at the whole address', async () => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     expect(within(dialog).getByRole('button', { name: 'Continue' })).toBeDisabled()
@@ -174,7 +174,7 @@ describe('ContactsPage', () => {
   it('keeps showing the list when a refresh fails', async () => {
     stubServer({ listFailsLater: true })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
@@ -191,7 +191,7 @@ describe('ContactsPage', () => {
     let answer = () => {}
     const { posted } = stubServer({ saveGate: new Promise<void>(resolve => (answer = resolve)) })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
@@ -225,7 +225,7 @@ describe('ContactsPage', () => {
   ])('refuses the name %j with the address %s', async (name, address, problem) => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, name, address)
@@ -239,7 +239,7 @@ describe('ContactsPage', () => {
   it('asks before replacing the address of a name already saved', async () => {
     const { posted } = stubServer({ contacts: [{ name: 'sam', address: SAM }] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'SAM', NEW)
@@ -264,7 +264,7 @@ describe('ContactsPage', () => {
   it('says when a save would change nothing', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM.toLowerCase())
@@ -275,7 +275,7 @@ describe('ContactsPage', () => {
   it('points out an address saved under another name', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sammy', SAM)
@@ -286,7 +286,7 @@ describe('ContactsPage', () => {
   it('shows why a save failed, and keeps the dialog open', async () => {
     stubServer({ saveError: { status: 422, detail: "'me' is reserved — it always refers to your own wallet" } })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
@@ -308,7 +308,7 @@ describe('ContactsPage', () => {
       ],
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     await user.click(await screen.findByRole('button', { name: "Remove o'neil & co?" }))
     const confirm = await screen.findByRole('alertdialog', { name: "Remove o'neil & co??" })
@@ -325,7 +325,7 @@ describe('ContactsPage', () => {
   it('keeps a contact when cancelling the removal', async () => {
     const { deleted } = stubServer({ contacts: [{ name: 'sam', address: SAM }] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     await user.click(await screen.findByRole('button', { name: 'Remove sam' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
@@ -337,7 +337,7 @@ describe('ContactsPage', () => {
   it('treats a contact already removed elsewhere as removed', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }], deleteStatus: 404 })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     await user.click(await screen.findByRole('button', { name: 'Remove sam' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove' }))
@@ -348,7 +348,7 @@ describe('ContactsPage', () => {
   it('keeps the contact and says why when removing fails', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }], deleteStatus: 500 })
     const user = userEvent.setup()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     await user.click(await screen.findByRole('button', { name: 'Remove sam' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove' }))

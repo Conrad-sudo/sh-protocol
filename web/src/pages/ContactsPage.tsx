@@ -12,6 +12,7 @@ import { CopyButton } from '../components/CopyButton'
 import { EmptyState } from '../components/EmptyState'
 import { ConfirmModal } from '../components/owner/ConfirmModal'
 import { PageHeader } from '../components/PageHeader'
+import { QueryError } from '../components/QueryError'
 import { CONTACTS_KEY, useContacts } from '../hooks/useContacts'
 import { errorText } from '../lib/tx'
 
@@ -80,12 +81,7 @@ export function ContactsPage() {
   if (contacts.data === undefined && !contacts.isError) body = <Placeholder.Paragraph rows={4} active />
   else if (contacts.data === undefined) {
     body = (
-      <Message type="error" showIcon>
-        Couldn't load your contacts: {errorText(contacts.error)}{' '}
-        <Button appearance="link" size="sm" onClick={() => void contacts.refetch()}>
-          Try again
-        </Button>
-      </Message>
+      <QueryError what="your contacts" error={contacts.error} onRetry={() => void contacts.refetch()} />
     )
   } else {
     const list = contacts.data

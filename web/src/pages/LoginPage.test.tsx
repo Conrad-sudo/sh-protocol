@@ -36,14 +36,14 @@ describe('LoginPage', () => {
 
   it('says so plainly when the password is wrong', async () => {
     stubApi(() => json(401, { detail: 'Incorrect email or password' }))
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
     await fillAndSubmit('sam@example.com', 'wrong-password')
     expect(await screen.findByText('Incorrect email or password.')).toBeInTheDocument()
   })
 
   it('offers no Google button when no client ID is configured', async () => {
     stubApi(() => json(200, TOKEN))
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
     expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
     expect(screen.queryByRole('separator', { name: 'or' })).toBeNull()
     expect(document.querySelector('.mf-google-button')).toBeNull()
@@ -51,14 +51,14 @@ describe('LoginPage', () => {
 
   it('explains rate limiting', async () => {
     stubApi(() => json(429, { error: 'Rate limit exceeded' }))
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
     await fillAndSubmit('sam@example.com', 'hunter2hunter2')
     expect(await screen.findByText(/too many attempts/i)).toBeInTheDocument()
   })
 
   it('does not call the API for an invalid email', async () => {
     const fetch = stubApi(() => json(200, TOKEN))
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
     await fillAndSubmit('not-an-email', 'hunter2hunter2')
     expect(await screen.findByText('Enter a valid email address')).toBeInTheDocument()
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/api/auth/login'))).toBe(false)
@@ -66,7 +66,7 @@ describe('LoginPage', () => {
 
   it('goes on to `next` after signing in', async () => {
     stubApi(() => json(200, TOKEN))
-    const router = renderRoutes(routes, `/login?next=${encodeURIComponent('/contacts')}`)
+    const router = await renderRoutes(routes, `/login?next=${encodeURIComponent('/contacts')}`)
     await fillAndSubmit('sam@example.com', 'hunter2hunter2')
     expect(await screen.findByRole('heading', { name: 'Contacts' })).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/contacts')
@@ -74,7 +74,7 @@ describe('LoginPage', () => {
 
   it('ignores a `next` that points off the site', async () => {
     stubApi(() => json(200, TOKEN))
-    const router = renderRoutes(routes, `/login?next=${encodeURIComponent('//evil.example')}`)
+    const router = await renderRoutes(routes, `/login?next=${encodeURIComponent('//evil.example')}`)
     await fillAndSubmit('sam@example.com', 'hunter2hunter2')
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')

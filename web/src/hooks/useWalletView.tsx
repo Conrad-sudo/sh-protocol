@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react'
 import KeyIcon from '@rsuite/icons/Key'
-import { Button, Message, Placeholder } from 'rsuite'
+import { Placeholder } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { EmptyState } from '../components/EmptyState'
 import { LinkButton } from '../components/LinkButton'
-import { errorText } from '../lib/tx'
+import { QueryError } from '../components/QueryError'
 import { chainName } from '../wallet/chains'
 import { useMe } from './useMe'
 import { useWallet } from './useWallet'
@@ -47,12 +47,12 @@ export function useWalletView(): { wallet: WalletState; fallback: null } | { wal
     return {
       wallet: null,
       fallback: (
-        <Message type="error" showIcon className="mf-settings-note">
-          Couldn't load your wallet: {errorText(query.error)}{' '}
-          <Button appearance="link" size="sm" onClick={() => void query.refetch()}>
-            Try again
-          </Button>
-        </Message>
+        <QueryError
+          what="your wallet"
+          error={query.error}
+          onRetry={() => void query.refetch()}
+          className="mf-settings-note"
+        />
       ),
     }
   }

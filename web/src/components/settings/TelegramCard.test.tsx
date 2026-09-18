@@ -47,9 +47,9 @@ function stubServer({ linked = false, notConfigured = false, unlinkFails = false
   return server
 }
 
-function setup() {
+async function setup() {
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) })
-  renderRoutes(routes, '/settings')
+  await renderRoutes(routes, '/settings')
   return user
 }
 
@@ -69,7 +69,7 @@ describe('TelegramCard', () => {
 
   it('hands out the link, waits, and shows the chat as linked once the bot has it', async () => {
     const server = stubServer()
-    const user = setup()
+    const user = await setup()
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
     const open = await screen.findByRole('link', { name: 'Open Telegram' })
@@ -102,7 +102,7 @@ describe('TelegramCard', () => {
 
   it('stops waiting when the link expires, and gets a fresh one on request', async () => {
     const server = stubServer()
-    const user = setup()
+    const user = await setup()
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
     await screen.findByRole('link', { name: 'Open Telegram' })
@@ -122,7 +122,7 @@ describe('TelegramCard', () => {
 
   it('says so when the server has no Telegram bot', async () => {
     stubServer({ notConfigured: true })
-    const user = setup()
+    const user = await setup()
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
     expect(await screen.findByText("Telegram isn't set up on this server.")).toBeInTheDocument()
@@ -131,7 +131,7 @@ describe('TelegramCard', () => {
 
   it('unlinks a linked chat', async () => {
     const server = stubServer({ linked: true })
-    const user = setup()
+    const user = await setup()
 
     expect(await screen.findByText('Linked')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Unlink' }))
@@ -142,7 +142,7 @@ describe('TelegramCard', () => {
 
   it('keeps the chat linked and says so when unlinking fails', async () => {
     stubServer({ linked: true, unlinkFails: true })
-    const user = setup()
+    const user = await setup()
 
     await user.click(await screen.findByRole('button', { name: 'Unlink' }))
     expect(

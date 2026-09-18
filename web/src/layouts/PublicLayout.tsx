@@ -3,6 +3,8 @@ import { useAuth } from '../auth/useAuth'
 import { Logo } from '../components/brand/Logo'
 import { LegalLinks } from '../components/LegalLinks'
 import { LinkButton } from '../components/LinkButton'
+import { RouteProgress } from '../components/RouteProgress'
+import { SkipLink } from '../components/SkipLink'
 
 /** Header and footer around the landing and legal pages. */
 export function PublicLayout() {
@@ -10,6 +12,8 @@ export function PublicLayout() {
 
   return (
     <div className="mf-public">
+      <SkipLink />
+      <RouteProgress />
       <header className="mf-public-header">
         <Link to="/" aria-label="Mitfah home">
           <Logo size={30} />
@@ -31,7 +35,7 @@ export function PublicLayout() {
           )}
         </nav>
       </header>
-      <main>
+      <main id="main-content" tabIndex={-1}>
         <Outlet />
       </main>
       <footer className="mf-public-footer">

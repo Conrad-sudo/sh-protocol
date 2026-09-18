@@ -1,5 +1,6 @@
-import { Button, Message, Panel, Placeholder, Stack } from 'rsuite'
+import { Button, Panel, Placeholder, Stack } from 'rsuite'
 import { PageHeader } from '../components/PageHeader'
+import { QueryError } from '../components/QueryError'
 import { OwnerAddressCard } from '../components/settings/OwnerAddressCard'
 import { SignInMethods } from '../components/settings/SignInMethods'
 import { TelegramCard } from '../components/settings/TelegramCard'
@@ -21,12 +22,7 @@ export function SettingsPage() {
     )
   } else if (isError || !me) {
     account = (
-      <Message type="error" showIcon>
-        Couldn't load your account.{' '}
-        <Button appearance="link" size="sm" onClick={() => void refetch()}>
-          Try again
-        </Button>
-      </Message>
+      <QueryError what="your account" onRetry={() => void refetch()} />
     )
   } else {
     account = (

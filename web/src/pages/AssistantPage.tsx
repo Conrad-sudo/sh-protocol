@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Message, Placeholder, Text } from 'rsuite'
+import { Button, Placeholder, Text } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { AssistantNotice } from '../components/assistant/AssistantNotice'
@@ -8,11 +8,11 @@ import { ChatLog } from '../components/assistant/ChatLog'
 import { Composer } from '../components/assistant/Composer'
 import { SuggestedPrompts } from '../components/assistant/SuggestedPrompts'
 import { PageHeader } from '../components/PageHeader'
+import { QueryError } from '../components/QueryError'
 import { useChatHistory, useChatSend, type ChatSend } from '../hooks/useChat'
 import { useKeyboardResizesPage } from '../hooks/useKeyboardResizesPage'
 import { useWalletView } from '../hooks/useWalletView'
 import { useLayoutMode, type LayoutMode } from '../layouts/useLayoutMode'
-import { errorText } from '../lib/tx'
 
 /** How close to the end counts as "reading the latest", in pixels. */
 const NEAR_END = 160
@@ -110,12 +110,7 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
         <AssistantNotice wallet={wallet} />
         {history.isPending && <Placeholder.Paragraph rows={4} active />}
         {history.isError && !history.data && (
-          <Message type="error" showIcon>
-            Couldn't load the conversation: {errorText(history.error)}{' '}
-            <Button appearance="link" size="sm" onClick={() => void history.refetch()}>
-              Try again
-            </Button>
-          </Message>
+          <QueryError what="the conversation" error={history.error} onRetry={() => void history.refetch()} />
         )}
         {history.data && messages.length === 0 && !unanswered && (
           <SuggestedPrompts

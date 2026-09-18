@@ -23,6 +23,7 @@ import { useSelectedChain } from '../../chain/useSelectedChain'
 import { AddressText } from '../../components/AddressText'
 import { AmountInput } from '../../components/AmountInput'
 import { PageHeader } from '../../components/PageHeader'
+import { QueryError } from '../../components/QueryError'
 import { StatusTag } from '../../components/StatusTag'
 import { AccountMismatchBanner } from '../../components/wallet/AccountMismatchBanner'
 import { ConnectDialog } from '../../components/wallet/ConnectDialog'
@@ -296,7 +297,12 @@ export function OnboardingPage() {
               Step {index + 1} of {STEP_TITLES.length}
             </Text>
             <Text weight="semibold">{STEP_TITLES[index]}</Text>
-            <Progress percent={((index + 1) / STEP_TITLES.length) * 100} showInfo={false} />
+            {/* The line repeats the step count above it, so it needs a name of its own. */}
+            <Progress
+              percent={((index + 1) / STEP_TITLES.length) * 100}
+              showInfo={false}
+              aria-label={`Step ${index + 1} of ${STEP_TITLES.length}`}
+            />
           </div>
         ) : (
           <Steps current={index} small className="mf-steps">
@@ -390,12 +396,7 @@ function LimitsStep({
           {tokens.isPending ? (
             <Placeholder.Paragraph rows={2} active />
           ) : tokens.isError ? (
-            <Message type="error" showIcon>
-              Couldn't load the token list.{' '}
-              <Button appearance="link" size="sm" onClick={() => void tokens.refetch()}>
-                Try again
-              </Button>
-            </Message>
+            <QueryError what="the token list" onRetry={() => void tokens.refetch()} />
           ) : (
             <CheckboxGroup
               name="tokens"

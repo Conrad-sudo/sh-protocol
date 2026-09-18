@@ -108,7 +108,7 @@ describe('DashboardPage', () => {
 
   it('shows an active wallet: status, what is left to spend, and balances', async () => {
     stubServer()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     expect(await walletHeader()).toHaveTextContent('Your Mitfah wallet on Sepolia')
     expect(screen.getByText('Active')).toBeInTheDocument()
@@ -153,7 +153,7 @@ describe('DashboardPage', () => {
         ],
       },
     })
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
     expect(screen.getByText('Paused')).toBeInTheDocument()
@@ -174,7 +174,7 @@ describe('DashboardPage', () => {
         [SEPOLIA]: [makeWalletState({ spending: { ...makeWalletState().spending, window_start: twoDaysAgo } })],
       },
     })
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     expect(await screen.findByText('Full limit available. A new period starts with the next spend.')).toBeInTheDocument()
     expect(screen.getByRole('progressbar', { name: '100% of the limit left' })).toBeInTheDocument()
@@ -183,7 +183,7 @@ describe('DashboardPage', () => {
 
   it('offers to create a wallet when there is none, without asking for one', async () => {
     const { walletCalls } = stubServer({ walletChains: [] })
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     expect(await screen.findByRole('heading', { name: 'Create your wallet' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Network:/ })).toBeNull()
@@ -192,7 +192,7 @@ describe('DashboardPage', () => {
 
   it("says so when the account's wallet on this network is gone", async () => {
     stubServer({ wallets: { [SEPOLIA]: [{ status: 404, detail: 'You have no wallet on chain 11155111.' }] } })
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     expect(await screen.findByRole('heading', { name: 'No wallet on Sepolia' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Create one' })).toHaveAttribute('href', '/wallets/new')
@@ -202,7 +202,7 @@ describe('DashboardPage', () => {
     stubServer({
       wallets: { [SEPOLIA]: [{ status: 503, detail: 'The Sepolia node is not responding.' }, makeWalletState()] },
     })
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     expect(await screen.findByText(/Couldn't load your wallet: The Sepolia node is not responding./)).toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Try again' }))
@@ -215,7 +215,7 @@ describe('DashboardPage', () => {
       wallets: { [BSC]: [makeWalletState({ chain_id: BSC, paused: true })] },
     })
     const user = userEvent.setup()
-    const router = renderRoutes(routes, '/dashboard')
+    const router = await renderRoutes(routes, '/dashboard')
 
     expect(await walletHeader()).toHaveTextContent('on Sepolia')
     await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
@@ -236,7 +236,7 @@ describe('DashboardPage', () => {
   it('funds the wallet from the connected browser wallet', async () => {
     const { walletCalls, sent } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
     await user.click(screen.getByRole('button', { name: 'Add funds' }))
@@ -267,7 +267,7 @@ describe('DashboardPage', () => {
   it('withdraws to the owner wallet, checking the amount against the balance', async () => {
     const { prepared } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
     await user.click(screen.getByRole('button', { name: 'Withdraw' }))
@@ -303,7 +303,7 @@ describe('DashboardPage', () => {
     const other = '0x3333333333333333333333333333333333333333'
     const { prepared } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
     await user.click(screen.getByRole('button', { name: 'Withdraw' }))
@@ -339,7 +339,7 @@ describe('DashboardPage', () => {
       wallets: { [SEPOLIA]: [makeWalletState(), makeWalletState({ paused: true })] },
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
     await user.click(screen.getByRole('button', { name: 'Pause wallet' }))

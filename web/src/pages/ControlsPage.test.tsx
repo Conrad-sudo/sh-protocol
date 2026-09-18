@@ -139,7 +139,7 @@ describe('ControlsPage', () => {
     const paused = makeWalletState({ paused: true })
     const server = stubServer({ wallets: [makeWalletState(), paused] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     expect(within(row('Wallet')).getByText('Active')).toBeInTheDocument()
@@ -164,7 +164,7 @@ describe('ControlsPage', () => {
   it('asks before unpausing, and sends nothing if cancelled', async () => {
     const server = stubServer({ wallets: [makeWalletState({ paused: true })] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Unpause' }))
@@ -186,7 +186,7 @@ describe('ControlsPage', () => {
       wallets: [makeWalletState(), makeWalletState({ session: { key: '0x5555555555555555555555555555555555555555', active: false } })],
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Turn off assistant' }))
@@ -206,7 +206,7 @@ describe('ControlsPage', () => {
 
   it('offers no assistant switch when Mitfah holds no key for the wallet', async () => {
     stubServer({ wallets: [makeWalletState({ session: { key: null, active: false } })] })
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     expect(await screen.findByText(/Mitfah holds no signing key for this wallet/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /assistant$/ })).toBeNull()
@@ -215,7 +215,7 @@ describe('ControlsPage', () => {
   it('asks before raising the limit', async () => {
     const server = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     const limit = screen.getByLabelText('Limit per period')
@@ -239,7 +239,7 @@ describe('ControlsPage', () => {
   it('lowers the limit straight away, and explains a $0 limit', async () => {
     const server = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     const limit = screen.getByLabelText('Limit per period')
@@ -258,7 +258,7 @@ describe('ControlsPage', () => {
     const daily = makeWalletState()
     const server = stubServer({ wallets: [weekly, daily] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     const period = screen.getByRole('radiogroup', { name: 'Period' })
@@ -280,7 +280,7 @@ describe('ControlsPage', () => {
   it('counts a new token, and asks before it stops counting one', async () => {
     const server = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     const counted = screen.getByRole('list', { name: 'Counted tokens' })
@@ -321,7 +321,7 @@ describe('ControlsPage', () => {
         }),
       ],
     })
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     expect(await screen.findByText('Every token Mitfah lists on this network already counts.')).toBeInTheDocument()
     expect(screen.getByText("Not a token Mitfah lists, so it can't be removed here.")).toBeInTheDocument()
@@ -330,7 +330,7 @@ describe('ControlsPage', () => {
   it('trusts a spender only after a warning, and checks the address first', async () => {
     const server = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Advanced' }))
@@ -362,7 +362,7 @@ describe('ControlsPage', () => {
       wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: [router] } })],
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Advanced' }))
@@ -374,7 +374,7 @@ describe('ControlsPage', () => {
   it('asks before raising the network fee cap', async () => {
     const server = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Advanced' }))
@@ -399,7 +399,7 @@ describe('ControlsPage', () => {
       refuse: { '/api/wallet/pause/prepare': 'This transaction would fail: EnforcedPause()' },
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Pause wallet' }))
@@ -410,7 +410,7 @@ describe('ControlsPage', () => {
   it('says so when the change is declined in the wallet', async () => {
     const server = stubServer({ rejectSend: true })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Pause wallet' }))
@@ -422,7 +422,7 @@ describe('ControlsPage', () => {
 
   it('asks for the owner wallet before anything can change', async () => {
     stubServer()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     expect(await screen.findByText(/Connect your owner wallet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeDisabled()
@@ -433,7 +433,7 @@ describe('ControlsPage', () => {
     const owner = '0x9999999999999999999999999999999999999999'
     stubServer({ wallets: [makeWalletState({ owner })] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connectFromOwnerBar(user)
     expect(await screen.findByText(/Switch to the linked account in your wallet\./)).toBeInTheDocument()
@@ -443,7 +443,7 @@ describe('ControlsPage', () => {
 
   it("is read-only for an account that isn't linked to the owner", async () => {
     stubServer({ wallets: [makeWalletState({ is_owner: false })] })
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     expect(await screen.findByText(/so they're switched off here/)).toBeInTheDocument()
     expect(screen.queryByText(/Connect your owner wallet/)).toBeNull()
@@ -454,7 +454,7 @@ describe('ControlsPage', () => {
   it('switches the wallet to the right network before signing', async () => {
     const server = stubServer({ walletChains: [MAINNET], wallets: [makeWalletState({ chain_id: MAINNET })] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     await connect(user)
     expect(screen.getByText(/Your wallet is on Sepolia/)).toBeInTheDocument()
@@ -473,7 +473,7 @@ describe('ControlsPage', () => {
       JSON.stringify({ chainId: SEPOLIA, txHash: TX_HASH, key: 'pause', success: 'Wallet paused. Nothing can go out until you unpause it.' }),
     )
     const server = stubServer()
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     // No wallet connected: waiting needs only the API.
     expect(await screen.findByText('Wallet paused. Nothing can go out until you unpause it.')).toBeInTheDocument()
@@ -488,7 +488,7 @@ describe('ControlsPage', () => {
     let approve!: () => void
     const server = stubServer({ walletPrompt: new Promise(resolve => (approve = resolve)) })
     const user = userEvent.setup()
-    const router = renderRoutes(routes, '/controls')
+    const router = await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Pause wallet' }))
@@ -507,7 +507,7 @@ describe('ControlsPage', () => {
 
   it('offers to create a wallet when there is none', async () => {
     stubServer({ walletChains: [] })
-    renderRoutes(routes, '/controls')
+    await renderRoutes(routes, '/controls')
 
     expect(await screen.findByRole('heading', { name: 'Create your wallet' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Controls', level: 1 })).toBeInTheDocument()

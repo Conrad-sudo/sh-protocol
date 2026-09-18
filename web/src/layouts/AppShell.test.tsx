@@ -26,7 +26,7 @@ describe('AppShell', () => {
   it('shows the full sidebar on desktop, with the current page marked', async () => {
     setViewportWidth(1280)
     stubSignedIn()
-    renderRoutes(routes, '/contacts')
+    await renderRoutes(routes, '/contacts')
 
     const nav = await screen.findByRole('navigation', { name: 'Main' })
     expect(nav.closest('.mf-sidebar')).toHaveAttribute('data-expanded', 'true')
@@ -39,7 +39,7 @@ describe('AppShell', () => {
   it('collapses to an icon rail on tablets', async () => {
     setViewportWidth(820)
     stubSignedIn()
-    renderRoutes(routes, '/dashboard')
+    await renderRoutes(routes, '/dashboard')
 
     const nav = await screen.findByRole('navigation', { name: 'Main' })
     expect(nav.closest('.mf-sidebar')).toHaveAttribute('data-expanded', 'false')
@@ -48,7 +48,7 @@ describe('AppShell', () => {
   it('uses bottom tabs on phones', async () => {
     setViewportWidth(390)
     stubSignedIn()
-    renderRoutes(routes, '/settings')
+    await renderRoutes(routes, '/settings')
 
     const tabs = await screen.findByRole('navigation', { name: 'Main' })
     expect(tabs).toHaveClass('mf-tabbar')
@@ -60,7 +60,7 @@ describe('AppShell', () => {
   it('signs out to /login without a `next`', async () => {
     setViewportWidth(1280)
     const fetch = stubSignedIn()
-    const router = renderRoutes(routes, '/settings')
+    const router = await renderRoutes(routes, '/settings')
 
     // Two on this page: the sidebar's and the Settings panel's. Either will do.
     const [signOut] = await screen.findAllByRole('button', { name: 'Sign out' })

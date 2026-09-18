@@ -127,12 +127,33 @@ export function Providers({
   )
 }
 
+interface MaybeLazyRoute {
+  lazy?: () => Promise<object>
+  children?: MaybeLazyRoute[]
+}
+
+/**
+ * Loads every `lazy` route in place. The app fetches its signed-in pages on demand (routes.tsx);
+ * a test wants them all there on the first render, and the import has to happen from the test's
+ * own module graph so that its `vi.mock` calls still apply.
+ */
+async function loadLazyRoutes(routes: MaybeLazyRoute[]) {
+  for (const route of routes) {
+    if (route.lazy) {
+      Object.assign(route, await route.lazy())
+      delete route.lazy
+    }
+    if (route.children) await loadLazyRoutes(route.children)
+  }
+}
+
 /** Mounts `routes` at `path` with every app-level provider, and returns the router for assertions. */
-export function renderRoutes(
+export async function renderRoutes(
   routes: RouteObject[],
   path: string,
   { wagmiConfig = makeWagmiConfig() }: { wagmiConfig?: ReturnType<typeof makeWagmiConfig> } = {},
 ) {
+  await loadLazyRoutes(routes as MaybeLazyRoute[])
   const router = createMemoryRouter(routes, { initialEntries: [path] })
   render(
     <Providers wagmiConfig={wagmiConfig}>

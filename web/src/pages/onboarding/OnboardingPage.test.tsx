@@ -136,7 +136,7 @@ describe('OnboardingPage', () => {
   it('connects, verifies, and creates the wallet with the chosen settings', async () => {
     const calls = stubServer()
     const user = userEvent.setup()
-    const router = renderRoutes(routes, '/onboarding')
+    const router = await renderRoutes(routes, '/onboarding')
 
     await connect(user)
 
@@ -204,7 +204,7 @@ describe('OnboardingPage', () => {
   it('says so when the signature is declined', async () => {
     const calls = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/onboarding', { wagmiConfig: makeWagmiConfig({ signMessageError: true }) })
+    await renderRoutes(routes, '/onboarding', { wagmiConfig: makeWagmiConfig({ signMessageError: true }) })
 
     await connect(user)
     const verify = await step('Prove this wallet is yours')
@@ -218,7 +218,7 @@ describe('OnboardingPage', () => {
     const pending = { chainId: SEPOLIA, deployer: WALLET, txHash: TX_HASH, predictedAddress: PREDICTED }
     sessionStorage.setItem('mitfah-pending-deploy', JSON.stringify(pending))
     const calls = stubServer({ ownerAddr: WALLET })
-    const router = renderRoutes(routes, '/onboarding')
+    const router = await renderRoutes(routes, '/onboarding')
 
     // No wallet connection needed: the transaction is already out.
     expect(await step('Creating your wallet')).toBeInTheDocument()
@@ -237,7 +237,7 @@ describe('OnboardingPage', () => {
     sessionStorage.setItem('mitfah-pending-deploy', JSON.stringify(pending))
     stubServer({ ownerAddr: WALLET, reverted: true })
     const user = userEvent.setup()
-    renderRoutes(routes, '/onboarding')
+    await renderRoutes(routes, '/onboarding')
 
     const creating = await step('Creating your wallet')
     expect(await within(creating).findByText(/deployWallet reverted/)).toBeInTheDocument()
@@ -250,7 +250,7 @@ describe('OnboardingPage', () => {
   it('skips verification when the wallet is already linked', async () => {
     const calls = stubServer({ ownerAddr: WALLET })
     const user = userEvent.setup()
-    renderRoutes(routes, '/onboarding')
+    await renderRoutes(routes, '/onboarding')
 
     await connect(user)
 

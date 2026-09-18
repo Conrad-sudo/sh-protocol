@@ -130,7 +130,7 @@ describe('AssistantPage', () => {
         },
       ],
     })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     expect(await screen.findByText('what can I spend?')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Assistant', level: 1 })).toBeInTheDocument()
@@ -153,7 +153,7 @@ describe('AssistantPage', () => {
 
   it('shows what the assistant can spend and whom it can pay beside the chat', async () => {
     stubServer({ contacts: [SAM, { name: 'alex', address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' }] })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const aside = await screen.findByRole('complementary', { name: 'What the assistant can do' })
     expect(within(aside).getByText('$60.00')).toBeInTheDocument()
@@ -169,7 +169,7 @@ describe('AssistantPage', () => {
     const reply = deferred()
     const { posted, calls } = stubServer({ answers: [{ reply: 'You have 1.5 ETH.' }], gate: reply.promise })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await waitFor(() => expect(calls.wallet).toBe(1))
@@ -200,7 +200,7 @@ describe('AssistantPage', () => {
   it('keeps the chat, and what is being typed, when a wallet refresh fails', async () => {
     const { calls } = stubServer({ walletFailsLater: true })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await user.type(input, 'hello{Enter}')
@@ -217,7 +217,7 @@ describe('AssistantPage', () => {
   it('starts a new line with Shift+Enter', async () => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await user.type(input, 'line one{Shift>}{Enter}{/Shift}line two')
@@ -232,7 +232,7 @@ describe('AssistantPage', () => {
     ;(window as { coarsePointer?: boolean }).coarsePointer = true
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await user.type(input, 'one{Enter}two')
@@ -243,7 +243,7 @@ describe('AssistantPage', () => {
   it('does not send a word still being composed with an input method', async () => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await user.type(input, 'こんにちは')
@@ -254,7 +254,7 @@ describe('AssistantPage', () => {
   it('never sends a blank or over-long message', async () => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const input = await composer()
     await user.type(input, '   {Enter}')
@@ -273,7 +273,7 @@ describe('AssistantPage', () => {
   it('offers questions to start with, and drafts a payment without sending it', async () => {
     const { posted } = stubServer()
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
     await user.click(await within(suggestions).findByRole('button', { name: 'Send 5 USDC to sam…' }))
@@ -289,7 +289,7 @@ describe('AssistantPage', () => {
 
   it('leaves out the payment suggestion when there is no one to pay', async () => {
     stubServer({ contacts: [] })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
     expect(within(suggestions).getAllByRole('button')).toHaveLength(3)
@@ -301,7 +301,7 @@ describe('AssistantPage', () => {
       answers: [{ status: 422, detail: 'String should have at most 4000 characters' }, { reply: 'Hello!' }],
     })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     await user.type(await composer(), 'hello{Enter}')
     expect(await screen.findByText('Not sent.')).toBeInTheDocument()
@@ -317,7 +317,7 @@ describe('AssistantPage', () => {
   it('puts a refused message back in the composer to edit', async () => {
     const { posted } = stubServer({ answers: [{ status: 400, detail: 'Unsupported chain ID: 11155111' }] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     await user.type(await composer(), 'hello{Enter}')
     await user.click(await screen.findByRole('button', { name: 'Edit message' }))
@@ -331,7 +331,7 @@ describe('AssistantPage', () => {
   it('never offers to resend a message that may have reached the assistant, and gives it back only if it did not', async () => {
     const { posted } = stubServer({ answers: ['offline'] })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     await user.type(await composer(), 'send 5 usdc to sam{Enter}')
     expect(await screen.findByText('No reply arrived.')).toBeInTheDocument()
@@ -348,7 +348,7 @@ describe('AssistantPage', () => {
   it('shows a message the server kept after the connection dropped, without giving it back', async () => {
     const { posted, calls } = stubServer({ answers: [{ status: 502 }], keepsFailed: true })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     await user.type(await composer(), 'send 5 usdc to sam{Enter}')
     expect(await screen.findByText('No reply arrived.')).toBeInTheDocument()
@@ -367,7 +367,7 @@ describe('AssistantPage', () => {
     const reply = deferred()
     const { posted } = stubServer({ gate: reply.promise })
     const user = userEvent.setup()
-    const router = renderRoutes(routes, '/assistant')
+    const router = await renderRoutes(routes, '/assistant')
 
     await user.type(await composer(), 'first{Enter}')
     expect(await screen.findByText(/Mitfah is working/)).toBeInTheDocument()
@@ -388,7 +388,7 @@ describe('AssistantPage', () => {
 
   it('says why the assistant cannot send while the wallet is paused or it is turned off', async () => {
     stubServer({ wallet: makeWalletState({ paused: true }) })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
     expect(
       await screen.findByText('Your wallet is paused, so the assistant can answer questions but can’t send anything.'),
     ).toBeInTheDocument()
@@ -396,7 +396,7 @@ describe('AssistantPage', () => {
     cleanup()
 
     stubServer({ wallet: makeWalletState({ session: { key: null, active: false }, is_owner: false }) })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
     expect(
       await screen.findByText('The assistant is turned off, so it can answer questions but can’t send anything.'),
     ).toBeInTheDocument()
@@ -406,7 +406,7 @@ describe('AssistantPage', () => {
   it('warns in red when nothing caps what the assistant can spend', async () => {
     const spending = { ...makeWalletState().spending, hook_installed: false, daily_limit_usd: 0, remaining_usd: 0 }
     stubServer({ wallet: makeWalletState({ spending }) })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     const notice = (await screen.findByText(/nothing caps what the assistant can spend/)).closest('.rs-message')
     expect(notice).toHaveClass('rs-message-error')
@@ -418,13 +418,13 @@ describe('AssistantPage', () => {
 
     setViewportWidth(390)
     stubServer({ wallet: makeWalletState({ spending }) })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
     expect(await screen.findByText('No spending limit')).toBeInTheDocument()
   })
 
   it('asks for a wallet first when there is none', async () => {
     stubServer({ walletChains: [] })
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
     expect(await screen.findByRole('heading', { name: 'Create your wallet' })).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument()
   })
@@ -432,7 +432,7 @@ describe('AssistantPage', () => {
   it('offers a retry when the conversation fails to load, and can still send', async () => {
     const { posted } = stubServer({ historyFailures: 1 })
     const user = userEvent.setup()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     expect(await screen.findByText(/Couldn't load the conversation/)).toBeInTheDocument()
     await user.type(await composer(), 'hi{Enter}')
@@ -448,7 +448,7 @@ describe('AssistantPage', () => {
     document.head.append(meta)
     try {
       stubServer()
-      const router = renderRoutes(routes, '/assistant')
+      const router = await renderRoutes(routes, '/assistant')
       await composer()
       expect(meta.content).toBe('width=device-width, initial-scale=1.0, interactive-widget=resizes-content')
 
@@ -463,7 +463,7 @@ describe('AssistantPage', () => {
   it('fits a phone: one summary line instead of the side panel, and an icon send button', async () => {
     setViewportWidth(390)
     stubServer()
-    renderRoutes(routes, '/assistant')
+    await renderRoutes(routes, '/assistant')
 
     expect(await screen.findByRole('link', { name: '1 contact' })).toHaveAttribute('href', '/contacts')
     expect(screen.getByText('$60.00').closest('p')).toHaveTextContent('$60.00 of $100.00 left')

@@ -35,7 +35,7 @@ describe('HomePage', () => {
 
   it('invites a visitor to sign up and lists the served networks', async () => {
     stubApi()
-    renderRoutes(routes, '/')
+    await renderRoutes(routes, '/')
 
     const networks = await screen.findByRole('region', { name: 'Networks' })
     const items = within(networks).getAllByRole('listitem')
@@ -53,7 +53,7 @@ describe('HomePage', () => {
 
   it('sends a signed-in user to the app instead', async () => {
     stubApi({ signedIn: true })
-    renderRoutes(routes, '/')
+    await renderRoutes(routes, '/')
 
     const main = within(screen.getByRole('main'))
     expect(await main.findAllByRole('link', { name: 'Open your dashboard' })).toHaveLength(2)
@@ -64,7 +64,7 @@ describe('HomePage', () => {
 
   it('leaves the networks out when the server cannot list them', async () => {
     stubApi({ chains: () => json(500, { detail: 'boom' }) })
-    renderRoutes(routes, '/')
+    await renderRoutes(routes, '/')
 
     expect(await screen.findByRole('heading', { name: 'Questions' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Networks' })).toBeNull()
@@ -72,7 +72,7 @@ describe('HomePage', () => {
 
   it('links to the legal pages from the footer', async () => {
     stubApi()
-    renderRoutes(routes, '/')
+    await renderRoutes(routes, '/')
 
     const legal = await screen.findByRole('navigation', { name: 'Legal' })
     expect(within(legal).getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms')
@@ -92,7 +92,7 @@ describe('legal pages', () => {
     ['/privacy', 'Privacy Policy'],
   ])('%s is marked as a draft', async (path, title) => {
     stubApi()
-    renderRoutes(routes, path)
+    await renderRoutes(routes, path)
 
     expect(await screen.findByRole('heading', { level: 1, name: title })).toBeInTheDocument()
     expect(screen.getByText(/hasn't been reviewed by a lawyer/)).toBeInTheDocument()
@@ -100,7 +100,7 @@ describe('legal pages', () => {
 
   it('are linked from the sign-in card', async () => {
     stubApi()
-    renderRoutes(routes, '/login')
+    await renderRoutes(routes, '/login')
 
     const legal = await screen.findByRole('navigation', { name: 'Legal' })
     expect(within(legal).getByRole('link', { name: 'Privacy' })).toHaveAttribute('href', '/privacy')

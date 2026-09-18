@@ -25,6 +25,72 @@
   color: #ffffff;
 }
 
+/* ── Getting around ────────────────────────────────────────────────────── */
+
+/*
+ * Out of the way until it is focused, then the first thing on the page. `left` moves rather than
+ * `transform` so it stays put when a page below it animates.
+ */
+.mf-skip-link {
+  position: fixed;
+  top: 12px;
+  left: -200vw;
+  z-index: 100;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--rs-primary-500);
+  color: #ffffff;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.mf-skip-link:focus {
+  left: 12px;
+  color: #ffffff;
+}
+
+/* The next page is on its way (route `lazy` imports). */
+.mf-route-progress {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 99;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--rs-primary-500), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: mf-route-progress 1.1s ease-in-out infinite;
+}
+
+@keyframes mf-route-progress {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-route-progress {
+    animation: none;
+    background: var(--rs-primary-500);
+    background-size: 100% 100%;
+    opacity: 0.6;
+  }
+}
+
+/* A keyboard user must always see where they are; RSuite leaves some controls without a ring. */
+:focus-visible {
+  outline: 2px solid var(--rs-focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* The sidebar is navy in both themes, so its ring is white rather than green. */
+.mf-sidebar :focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: -2px;
+}
+
 /* ── Shared ─────────────────────────────────────────────────────────────── */
 
 .mf-fullpage {
@@ -109,6 +175,12 @@
 }
 
 /* Sidebar (desktop expanded, tablet rail) */
+
+.mf-nav-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
 
 .mf-sidebar {
   position: sticky;
@@ -542,6 +614,11 @@
 
 .mf-legal-draft {
   margin: 16px 0 24px;
+}
+
+main p a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* ── Utilities ──────────────────────────────────────────────────────────── */

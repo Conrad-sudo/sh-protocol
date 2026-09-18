@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Button, Form, Message, Panel, Placeholder, SelectPicker, Text } from 'rsuite'
+import { Form, Panel, Placeholder, SelectPicker, Text } from 'rsuite'
 import type { Chain } from '../../api/types'
 import { useTokens } from '../../hooks/useTokens'
 import { AddressText } from '../AddressText'
+import { QueryError } from '../QueryError'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
 import { StatusTag } from '../StatusTag'
@@ -85,12 +86,7 @@ function AddToken({ wallet, tx, locked, start }: ControlPanelProps) {
   if (tokens.isPending) return <Placeholder.Paragraph rows={1} active />
   if (tokens.isError) {
     return (
-      <Message type="error" showIcon className="mf-settings-note">
-        Couldn't load the token list.{' '}
-        <Button appearance="link" size="sm" onClick={() => void tokens.refetch()}>
-          Try again
-        </Button>
-      </Message>
+      <QueryError what="the token list" onRetry={() => void tokens.refetch()} className="mf-settings-note" />
     )
   }
   if (addable.length === 0) {

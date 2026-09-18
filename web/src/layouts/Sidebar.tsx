@@ -1,6 +1,6 @@
 import ExitIcon from '@rsuite/icons/Exit'
 import { Link, useLocation } from 'react-router'
-import { Button, IconButton, Nav, Sidenav, Text, Tooltip, Whisper } from 'rsuite'
+import { Button, IconButton, Sidenav, Text, Tooltip, Whisper } from 'rsuite'
 import { Logo } from '../components/brand/Logo'
 import { useMe } from '../hooks/useMe'
 import { useSignOut } from '../hooks/useSignOut'
@@ -29,25 +29,31 @@ export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
           </Link>
         </Sidenav.Header>
         <Sidenav.Body>
-          <Nav>
+          {/*
+           * The list is written out rather than built from RSuite's Nav, which puts its links
+           * straight inside the <ul> and marks the current one aria-selected — an attribute links
+           * may not carry. Its classes still do the styling.
+           */}
+          <ul className="rs-sidenav-nav rs-nav mf-nav-list">
             {NAV_ITEMS.map(({ to, label, Icon }) => {
               const active = isActive(pathname, to)
               return (
-                <Nav.Item
-                  key={to}
-                  as={Link}
-                  to={to}
-                  icon={<Icon />}
-                  active={active}
-                  // The collapsed rail drops the text, leaving screen readers nothing to announce.
-                  aria-label={label}
-                  aria-current={active ? 'page' : undefined}
-                >
-                  {label}
-                </Nav.Item>
+                <li key={to}>
+                  <Link
+                    to={to}
+                    className="rs-sidenav-item"
+                    data-active={active}
+                    // The collapsed rail drops the text, leaving screen readers nothing to announce.
+                    aria-label={label}
+                    aria-current={active ? 'page' : undefined}
+                  >
+                    <Icon className="rs-sidenav-item-icon rs-icon" aria-hidden />
+                    <span className="rs-sidenav-item-title">{label}</span>
+                  </Link>
+                </li>
               )
             })}
-          </Nav>
+          </ul>
         </Sidenav.Body>
         {collapsible && <Sidenav.Toggle onToggle={onToggle} />}
       </Sidenav>

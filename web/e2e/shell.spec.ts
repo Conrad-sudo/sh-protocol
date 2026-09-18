@@ -74,9 +74,8 @@ test('the app shell fits the screen', async ({ page }, testInfo) => {
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'dashboard')
 
-  // RSuite renders the collapsed rail's items as menu items rather than links.
   const nav = page.getByRole('navigation', { name: 'Main' })
-  await nav.getByRole('link', { name: 'Settings' }).or(nav.getByRole('menuitem', { name: 'Settings' })).click()
+  await nav.getByRole('link', { name: 'Settings' }).click()
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'settings')

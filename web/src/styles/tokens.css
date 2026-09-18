@@ -31,6 +31,12 @@
   --rs-primary-800: #055236;
   --rs-primary-900: #033826;
 
+  /*
+   * RSuite's focus ring is the primary colour at 25% opacity, which all but disappears on a card
+   * and entirely on the navy sidebar. A keyboard user has to see where they are, so it is solid.
+   */
+  --rs-focus-ring-color: var(--rs-primary-600);
+
   /* 500 with white text is 4.4:1, just under AA; 600 is 5.4:1. */
   --rs-btn-primary-bg: var(--rs-primary-600);
   --rs-btn-primary-hover-bg: var(--rs-primary-700);
@@ -104,6 +110,8 @@
   --rs-primary-700: #1a8659;
   --rs-primary-800: #136b47;
   --rs-primary-900: #0b4a31;
+
+  --rs-focus-ring-color: var(--rs-primary-400);
 
   /* 700 with white text is 4.6:1. */
   --rs-btn-primary-bg: var(--rs-primary-700);
