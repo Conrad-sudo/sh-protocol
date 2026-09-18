@@ -1,7 +1,7 @@
 import { useTheme } from '../../theme/useTheme'
 
 // Intrinsic size of public/brand/mark-*.png, for the width/height the browser reserves.
-const MARK_RATIO = 349 / 384
+const MARK_RATIO = 348 / 384
 
 interface LogoProps {
   /** `mark` is the key alone; `lockup` adds the "mitfah" wordmark. */

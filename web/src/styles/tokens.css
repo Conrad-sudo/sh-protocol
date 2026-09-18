@@ -5,7 +5,7 @@
  * .rs-theme-dark (a class CustomProvider puts on <body>), and these use the same selectors so the
  * later declaration wins.
  *
- * Colours are sampled from Key-logo.png: navy ring, green circuit. RSuite's primary scale runs light
+ * Colours are sampled from the logo: navy ring, green circuit. RSuite's primary scale runs light
  * (50) to dark (900) in both themes; primary buttons use 500 in light and 700 in dark.
  */
 

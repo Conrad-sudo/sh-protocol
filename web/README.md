@@ -29,6 +29,7 @@ the API, so the page and the API share an origin.
 | `npm test` | Unit tests (Vitest) |
 | `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
 | `npm run og` | Re-renders the social share image to `public/og.png` |
+| `npm run marks` | Rebuilds the light and dark logo marks from `scripts/brand/Key-logo.png` |
 | `npm run lint` | Oxlint |
 | `npm run typecheck` | TypeScript only |
 
@@ -98,5 +99,10 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   Inter's version also widens hyphens).
 - `src/theme/` — light/dark handling. `index.html` repeats the same rule in a small script so dark
   mode applies before the first paint.
-- `public/brand/`, `public/favicon.svg`, `public/icon-*.png` — logo assets derived from
-  `../Key-logo.png`.
+- `scripts/brand/` — `Key-logo.png` is the logo as drawn; `npm run marks` crops it, knocks the
+  white paper out to alpha and writes `public/brand/mark-light.png` plus a `mark-dark.png`
+  recoloured for a navy background (pale-blue ring, green traces, white key). To change the logo,
+  replace `Key-logo.png`, run the script, and set `MARK_RATIO` in `src/components/brand/Logo.tsx`
+  to the size it prints. `public/favicon.svg` and `public/icon-*.png` are a hand-drawn
+  simplification of the same ring-and-circuit idea — at 32px a scaled-down copy of the real mark
+  turns to mush, so they are deliberately not generated from it.
