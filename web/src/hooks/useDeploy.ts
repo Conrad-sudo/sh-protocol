@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useSendTransaction } from 'wagmi'
 import { ApiError } from '../api/client'
 import { confirmDeploy, prepareDeploy } from '../api/wallet'
+import { useAuth } from '../auth/useAuth'
 import type { DeployRequest } from '../api/types'
 import { errorText, isUserRejection, sleep, toTxRequest } from '../lib/tx'
 import { isSupportedChainId } from '../wallet/chains'
@@ -42,23 +43,27 @@ type PollOutcome =
   /** A newer polling loop took over; this one reports nothing. */
   | { kind: 'stale' }
 
-const PENDING_KEY = 'mitfah-pending-deploy'
 const POLL_GAP_MS = 2_000
 const GIVE_UP_MS = 10 * 60_000
 
-function readPending(): PendingDeploy | null {
+// Per account: the tab outlives a sign-out, and another account's deploy is not this one's to wait
+// for — the API refuses to confirm it, so it would hold this account's wizard on a deploy it can
+// never finish.
+const pendingKey = (userId: number | null) => `mitfah-pending-deploy:${userId ?? 'anon'}`
+
+function readPending(storageKey: string): PendingDeploy | null {
   try {
-    const raw = sessionStorage.getItem(PENDING_KEY)
+    const raw = sessionStorage.getItem(storageKey)
     return raw ? (JSON.parse(raw) as PendingDeploy) : null
   } catch {
     return null
   }
 }
 
-function writePending(pending: PendingDeploy | null) {
+function writePending(storageKey: string, pending: PendingDeploy | null) {
   try {
-    if (pending) sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending))
-    else sessionStorage.removeItem(PENDING_KEY)
+    if (pending) sessionStorage.setItem(storageKey, JSON.stringify(pending))
+    else sessionStorage.removeItem(storageKey)
   } catch {
     // Storage blocked: a reload mid-deploy will not resume, but the deploy itself is unaffected.
   }
@@ -72,10 +77,12 @@ function writePending(pending: PendingDeploy | null) {
  * a phone switching to the wallet app and back — resumes waiting instead of losing the deploy.
  */
 export function useDeploy(onDeployed: (result: DeployResult) => void) {
+  const { userId } = useAuth()
+  const storageKey = pendingKey(userId)
   const { mutateAsync: sendTransactionAsync } = useSendTransaction()
   const queryClient = useQueryClient()
   const [state, setState] = useState<DeployState>(() => {
-    const pending = readPending()
+    const pending = readPending(storageKey)
     return pending ? { phase: 'confirming', txHash: pending.txHash, chainId: pending.chainId } : { phase: 'idle' }
   })
   // Bumped on every mount and unmount. A polling loop stops once the counter moves past the value
@@ -96,7 +103,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
         error: errorText(error),
         txHash: pending?.txHash,
         chainId: pending?.chainId,
-        canResume: readPending() !== null,
+        canResume: readPending(storageKey) !== null,
       })
   }
 
@@ -120,7 +127,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
         })
         if (stale()) return { kind: 'stale' }
         if (result.status === 'deployed') {
-          writePending(null)
+          writePending(storageKey, null)
           await queryClient.invalidateQueries({ queryKey: ['me'] })
           await queryClient.invalidateQueries({ queryKey: ['wallet'] })
           return {
@@ -140,9 +147,10 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
       }
     } catch (error) {
       if (stale()) return { kind: 'stale' }
-      // A 400 is final (the transaction reverted, or isn't a deploy): stop tracking it so the
-      // user can start over. Anything else — a network blip — leaves it to check again.
-      if (error instanceof ApiError && error.status === 400) writePending(null)
+      // A 400 is final (the transaction reverted, or isn't a deploy), and so is a 403 (this account
+      // isn't linked to the address that sent it): stop tracking it so the user can start over.
+      // Anything else — a network blip — leaves it to check again.
+      if (error instanceof ApiError && (error.status === 400 || error.status === 403)) writePending(storageKey, null)
       return { kind: 'failed', error }
     }
   }
@@ -158,7 +166,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
 
   /** "Check again" after polling gave up or the network dropped. */
   const resume = () => {
-    const pending = readPending()
+    const pending = readPending(storageKey)
     if (!pending) return
     setState({ phase: 'confirming', txHash: pending.txHash, chainId: pending.chainId })
     void poll(pending).then(outcome => settle(outcome, pending))
@@ -167,7 +175,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
   // Pick up a deploy that was waiting when the page was left (the initial state already says
   // `confirming`). Runs once per mount.
   const onMount = useEffectEvent(() => {
-    const pending = readPending()
+    const pending = readPending(storageKey)
     if (pending) void poll(pending).then(outcome => settle(outcome, pending))
   })
   useEffect(() => {
@@ -199,7 +207,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
       fail(error)
       return
     }
-    writePending(pending)
+    writePending(storageKey, pending)
     setState({ phase: 'confirming', txHash: pending.txHash, chainId: pending.chainId })
     settle(await poll(pending), pending)
   }

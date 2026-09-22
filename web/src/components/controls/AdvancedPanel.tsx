@@ -18,6 +18,11 @@ const MAX_TRUSTED_SPENDERS = 16
 export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefined }) {
   const { wallet, tx, locked, start, chain } = props
   const spenders = wallet.limits.trusted_spenders
+  // The router stays off the list, so it has no Remove button: without it the assistant can't
+  // remove liquidity, and one stray click would break that.
+  const router = chain?.router ? getAddress(chain.router) : null
+  const shown = spenders.filter(spender => getAddress(spender) !== router)
+  const routerTrusted = shown.length < spenders.length
   const [open, setOpen] = useState(false)
 
   // A heading holding a toggle button, not RSuite's collapsible Panel: that one puts the heading
@@ -42,15 +47,16 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
       <div id="advanced-controls" hidden={!open}>
         <ControlRow
           title="Trusted spenders"
-          help="Contracts that may be approved for tokens Mitfah can't price, such as liquidity-pool tokens. Your exchange's router is usually the only one needed."
+          help="Contracts that may be approved for tokens Mitfah can't price, such as liquidity-pool tokens."
         >
-          {spenders.length === 0 ? (
+          {shown.length === 0 && !routerTrusted ? (
             <Text size="sm" muted>
               None.
             </Text>
-          ) : (
+          ) : null}
+          {shown.length > 0 ? (
             <ul className="mf-token-list" aria-label="Trusted spenders">
-              {spenders.map(spender => {
+              {shown.map(spender => {
                 const key = `spender:${spender}`
                 return (
                   <li key={spender}>
@@ -79,7 +85,13 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
                 )
               })}
             </ul>
-          )}
+          ) : null}
+          {routerTrusted ? (
+            <Text size="sm" muted>
+              Your exchange's router is trusted too. It isn't listed here because the assistant needs it to remove
+              liquidity.
+            </Text>
+          ) : null}
           <AddSpender key={spenders.length} {...props} />
         </ControlRow>
 

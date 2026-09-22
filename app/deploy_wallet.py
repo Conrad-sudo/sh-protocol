@@ -1,10 +1,7 @@
 import os
 import sys
 from web3.logs import DISCARD
-from constants import (
-    get_native_wrapped_ticker,
-    get_router,
-)
+from constants import get_router
 from network_config import load_network_config_by_name, load_network_config
 from db import (
     save_wallet_address,

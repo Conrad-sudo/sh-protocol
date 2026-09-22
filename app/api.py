@@ -10,7 +10,6 @@ from slowapi.util import get_remote_address
 
 import os
 import secrets
-import sys
 import time
 from decimal import Decimal
 
@@ -28,10 +27,9 @@ from constants import (
     CHAIN_ID_SEPOLIA,
     ETH_SENTINEL,
     get_native_asset_ticker,
-    get_native_wrapped_ticker,
     get_router,
 )
-from network_config import load_network_config_by_name, load_network_config
+from network_config import load_network_config_by_name
 from db import (
     get_json,
     get_factory_address,
@@ -54,20 +52,12 @@ from db import (
     get_user_by_owner_addr,
     link_google,
     link_owner_addr,
-    link_telegram,
     unlink_telegram,
     save_telegram_link_nonce,
     set_password_hash,
-    revoke_all_refresh_tokens,
 )
 from userop import get_or_create_session_key
-from tx_sender import send_and_confirm
-from contracts import (
-    invalidate_cache,
-    load_factory,
-    load_session_handler,
-    load_ierc20,
-)
+from contracts import invalidate_cache, read_spending_config
 import auth
 from auth import get_current_user
 from smart_wallet_agent import (
@@ -241,6 +231,17 @@ def _to_json_tx(tx: dict) -> dict:
         k: to_hex(v) if isinstance(v, (int, bytes, bytearray)) and not isinstance(v, bool) else v
         for k, v in tx.items()
     }
+
+
+def _router_or_none(chain_id: int) -> str | None:
+    """
+    The exchange router every wallet on `chain_id` is deployed trusting, checksummed, or None where
+    the chain has none (a bare Anvil). RPC-free: it reads constants only.
+    """
+    try:
+        return Web3.to_checksum_address(get_router(chain_id))
+    except ValueError:
+        return None
 
 
 def _load_factory_for_chain(w3: Web3, chain_id: int):
@@ -806,8 +807,11 @@ def list_chains():
     Public and RPC-free, like /api/tokens: it reads two local tables and says nothing that is not
     already public on chain.
 
-    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork"}, ...]}, by chain ID.
+    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "router"}, ...]}, by chain ID.
              `fork` is true when this server points that chain at a local fork (APP_FORK_MODE).
+             `router` is the exchange router every wallet on that chain is deployed trusting (see
+             /api/deploy), or None where there is none; the Controls page keeps it off the
+             removable list.
     """
     chains = []
     for chain_id, name in sorted(CHAIN_NAME_BY_ID.items()):
@@ -824,6 +828,7 @@ def list_chains():
             "name": name,
             "native_ticker": native_ticker,
             "fork": FORK_MODE and chain_id in FORKABLE_CHAIN_IDS,
+            "router": _router_or_none(chain_id),
         })
     return {"chains": chains}
 
@@ -1382,9 +1387,8 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     w3, chain_name = _resolve_chain(chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, chain_id)
 
-    # (installed, windowStart, windowDuration, dailyLimitUsd, spentInWindow, watchedTokens,
-    #  trustedSpenders) -- mirrors tools._get_all_sessions, which reads the same tuple.
-    cfg = wallet.functions.getConfig().call()
+    # By field name, never position: see contracts.read_spending_config.
+    cfg = read_spending_config(wallet)
     remaining = wallet.functions.getRemainingBudget().call()
     tickers = _ticker_map(chain_id)
 
@@ -1404,17 +1408,17 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
         "is_owner": bool(bound_owner) and bound_owner == on_chain_owner,
         "paused": wallet.functions.paused().call(),
         "spending": {
-            "hook_installed": cfg[0],
-            "daily_limit_usd": cfg[3] / USD_DECIMALS,
-            "spent_usd": cfg[4] / USD_DECIMALS,
+            "hook_installed": cfg["installed"],
+            "daily_limit_usd": cfg["dailyLimitUsd"] / USD_DECIMALS,
+            "spent_usd": cfg["spentInWindow"] / USD_DECIMALS,
             "remaining_usd": remaining / USD_DECIMALS,
-            "window_hours": cfg[2] / 3600,
-            "window_start": cfg[1],
+            "window_hours": cfg["windowDuration"] / 3600,
+            "window_start": cfg["windowStart"],
             # Watched ERC20s are what the cap meters. The native asset is ALWAYS metered and is
             # deliberately absent here -- see SpendingLimitModule. Unknown addresses fall back to
             # the raw address rather than being dropped.
             "watched_tokens": [
-                {"ticker": tickers.get(a.lower()), "address": w3.to_checksum_address(a)} for a in cfg[5]
+                {"ticker": tickers.get(a.lower()), "address": w3.to_checksum_address(a)} for a in cfg["watchedTokens"]
             ],
         },
         # `key` null means this app holds no session key for the wallet, so the assistant cannot
@@ -1427,7 +1431,7 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
         "limits": {
             "max_op_gas_cost_wei": str(wallet.functions.maxOpGasCost().call()),
             "allowlist_enabled": wallet.functions.sessionAllowlistEnabled().call(),
-            "trusted_spenders": [w3.to_checksum_address(s) for s in cfg[6]],
+            "trusted_spenders": [w3.to_checksum_address(s) for s in cfg["trustedSpenders"]],
         },
         "balances": _token_balances(w3, chain_id, wallet.address),
     }
@@ -1565,14 +1569,14 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
             status.HTTP_400_BAD_REQUEST, f"That transaction reverted (tx: {req.tx_hash})"
         )
 
-    config = wallet.functions.getConfig().call()
+    config = read_spending_config(wallet)
     return {
         "status": "confirmed",
         "tx_hash": req.tx_hash,
         "wallet_state": {
             "paused": wallet.functions.paused().call(),
-            "watched_tokens": config[5],
-            "daily_limit_usd": config[3] / USD_DECIMALS,
+            "watched_tokens": config["watchedTokens"],
+            "daily_limit_usd": config["dailyLimitUsd"] / USD_DECIMALS,
             "remaining_usd": wallet.functions.getRemainingBudget().call() / USD_DECIMALS,
         },
     }
@@ -1731,16 +1735,29 @@ def prepare_trusted_spender(req: TrustedSpenderRequest, user_id: int = Depends(g
 
     Adding one is a genuine loosening of the spending controls — treat it as such in the UI.
 
+    Removing the chain's exchange router is refused: the agent's liquidity removal approves the
+    router for an LP token the oracle cannot price, which only a trusted spender may receive, so
+    without it every remove_liquidity reverts. The owner can still call removeTrustedSpender on the
+    wallet directly — this stops an accidental removal from the app, not a deliberate one.
+
     @return  {"tx", "spender"}.
     """
     owner = _require_owner(user_id)
-    w3, _ = _resolve_chain(req.chain_id)
 
     try:
-        spender = w3.to_checksum_address(req.spender)
+        spender = Web3.to_checksum_address(req.spender)
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Not a valid address: {req.spender}")
 
+    # Before _resolve_chain, like the owner check: a request that can only be refused should not
+    # cost an RPC round trip.
+    if req.action == "remove" and spender == _router_or_none(req.chain_id):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Your exchange's router can't be removed: the assistant needs it to remove liquidity.",
+        )
+
+    w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
     fn = (
         wallet.functions.addTrustedSpender(spender)

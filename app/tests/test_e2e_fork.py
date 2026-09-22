@@ -14,13 +14,14 @@ Requires (see the plan, Phase 7):
     make sepolia-fork
     make setup-test ARGS=sepolia-fork
 
-Run: make e2e-test   (or: python app/test_e2e_fork.py)
+Run: make e2e-test   (or: python app/tests/test_e2e_fork.py)
 """
 import os
-import sys
 import time
 
 from dotenv import load_dotenv
+
+from checks import check, finish   # first: it puts app/ on sys.path for the imports below
 
 load_dotenv()
 os.environ["COOKIE_SECURE"] = "0"
@@ -32,22 +33,13 @@ from fastapi.testclient import TestClient             # noqa: E402
 from web3 import Web3                                 # noqa: E402
 
 import api                                            # noqa: E402
-from constants import CHAIN_ID_SEPOLIA, ETH_SENTINEL  # noqa: E402
+from constants import CHAIN_ID_SEPOLIA  # noqa: E402
+from contracts import read_spending_config           # noqa: E402
 from db import get_token_address                      # noqa: E402
 
 RPC = "http://127.0.0.1:8545"
 CHAIN_ID = CHAIN_ID_SEPOLIA          # 11155111 — the fork reports its parent's id
 w3 = Web3(Web3.HTTPProvider(RPC))
-
-failures: list[str] = []
-
-
-def check(label: str, condition: bool, detail: str = ""):
-    if condition:
-        print(f"  PASS  {label}")
-    else:
-        print(f"  FAIL  {label}{': ' + detail if detail else ''}")
-        failures.append(label)
 
 
 def require_local_fork():
@@ -226,14 +218,14 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
 
     abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     on_chain = w3.eth.contract(address=wallet, abi=abi)
-    cfg = on_chain.functions.getConfig().call()
+    cfg = read_spending_config(on_chain)
 
     check("the address is this account's wallet", state["address"] == wallet, state["address"])
     check("the owner matches chain", state["owner"] == on_chain.functions.owner().call())
     check("is_owner true for the SIWE-bound deployer", state["is_owner"] is True)
     check("not paused", state["paused"] is False)
-    check("the cap matches chain", state["spending"]["daily_limit_usd"] == cfg[3] / api.USD_DECIMALS,
-          f'{state["spending"]["daily_limit_usd"]} vs {cfg[3] / api.USD_DECIMALS}')
+    check("the cap matches chain", state["spending"]["daily_limit_usd"] == cfg["dailyLimitUsd"] / api.USD_DECIMALS,
+          f'{state["spending"]["daily_limit_usd"]} vs {cfg["dailyLimitUsd"] / api.USD_DECIMALS}')
     check("nothing spent yet", state["spending"]["spent_usd"] == 0.0, str(state["spending"]["spent_usd"]))
     check("remaining matches getRemainingBudget",
           state["spending"]["remaining_usd"] == on_chain.functions.getRemainingBudget().call() / api.USD_DECIMALS)
@@ -272,11 +264,11 @@ def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
 
     owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 1234})
     check("daily limit changed on chain",
-          sh.functions.getConfig().call()[3] == 1234 * 10**18,
-          str(sh.functions.getConfig().call()[3]))
+          read_spending_config(sh)["dailyLimitUsd"] == 1234 * 10**18,
+          str(read_spending_config(sh)["dailyLimitUsd"]))
 
     owner_action(c, headers, acct, "/api/wallet/window-duration/prepare", {"window_secs": 3600})
-    check("window duration changed on chain", sh.functions.getConfig().call()[2] == 3600)
+    check("window duration changed on chain", read_spending_config(sh)["windowDuration"] == 3600)
 
     owner_action(c, headers, acct, "/api/wallet/max-op-gas-cost/prepare", {"max_cost_eth": "0.25"})
     check("gas ceiling changed on chain",
@@ -294,7 +286,7 @@ def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
     owner_action(c, headers, acct, "/api/wallet/trusted-spenders/prepare",
                  {"spender": spender, "action": "add"})
     check("the trusted spender was added",
-          spender in [Web3.to_checksum_address(a) for a in sh.functions.getConfig().call()[6]])
+          spender in [Web3.to_checksum_address(a) for a in read_spending_config(sh)["trustedSpenders"]])
 
     # The session key: revoke, then restore. Both default to the app's own key.
     r = c.post("/api/wallet/session/prepare", headers=headers,
@@ -429,8 +421,4 @@ if __name__ == "__main__":
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers)
 
-    print()
-    if failures:
-        print(f"FAILED ({len(failures)}): {failures}")
-        sys.exit(1)
-    print("All fork e2e checks passed.")
+    finish("All fork e2e checks passed.")

@@ -18,6 +18,8 @@ const NONCE = 'k3n9v2x8q1w7'
 const SIGNATURE = `0x${'ab'.repeat(65)}`
 const TX_HASH = `0x${'12'.repeat(32)}`
 const PREDICTED = '0x2222222222222222222222222222222222222222'
+// The signed-in test account is user 7 (test/utils ME/TOKEN).
+const PENDING_KEY = 'mitfah-pending-deploy:7'
 const TOKENS = [
   { ticker: 'usdc', address: '0x3333333333333333333333333333333333333333' },
   { ticker: 'weth', address: '0x4444444444444444444444444444444444444444' },
@@ -41,7 +43,7 @@ interface Calls {
  * A signed-in API with no wallet yet. SIWE binds `WALLET`; confirm answers "pending" once, then
  * "deployed". The mock wallet's signatures and transactions arrive as JSON-RPC.
  */
-function stubServer({ ownerAddr = null as string | null, reverted = false } = {}) {
+function stubServer({ ownerAddr = null as string | null, reverted = false, unlinked = false } = {}) {
   let me = { ...ME, owner_addr: ownerAddr, wallet_chains: [] as number[] }
   const calls: Calls = { siwe: [], deploy: [], confirm: [], sent: [] }
 
@@ -87,6 +89,14 @@ function stubServer({ ownerAddr = null as string | null, reverted = false } = {}
           return Promise.resolve(json(200, PREPARED))
         case '/api/deploy/confirm':
           calls.confirm.push(body)
+          if (unlinked) {
+            return Promise.resolve(
+              json(403, {
+                detail:
+                  'Link your wallet address first: GET /api/auth/siwe/nonce, sign the message, then POST /api/auth/siwe/verify.',
+              }),
+            )
+          }
           if (calls.confirm.length === 1) return Promise.resolve(json(202, { status: 'pending', tx_hash: TX_HASH }))
           if (reverted) return Promise.resolve(json(400, { detail: `deployWallet reverted (tx: ${TX_HASH})` }))
           me = { ...me, wallet_chains: [SEPOLIA] }
@@ -198,7 +208,7 @@ describe('OnboardingPage', () => {
       tx_hash: TX_HASH,
       predicted_address: PREDICTED,
     })
-    expect(sessionStorage.getItem('mitfah-pending-deploy')).toBeNull()
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
   })
 
   it('says so when the signature is declined', async () => {
@@ -216,7 +226,7 @@ describe('OnboardingPage', () => {
 
   it('picks up a deploy that was still waiting when the page was reloaded', async () => {
     const pending = { chainId: SEPOLIA, deployer: WALLET, txHash: TX_HASH, predictedAddress: PREDICTED }
-    sessionStorage.setItem('mitfah-pending-deploy', JSON.stringify(pending))
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending))
     const calls = stubServer({ ownerAddr: WALLET })
     const router = await renderRoutes(routes, '/onboarding')
 
@@ -229,22 +239,49 @@ describe('OnboardingPage', () => {
       { chain_id: SEPOLIA, deployer: WALLET, tx_hash: TX_HASH, predicted_address: PREDICTED },
     ])
     expect(calls.deploy).toHaveLength(0)
-    expect(sessionStorage.getItem('mitfah-pending-deploy')).toBeNull()
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
   })
 
   it('lets the user start over when the deploy reverted', async () => {
     const pending = { chainId: SEPOLIA, deployer: WALLET, txHash: TX_HASH, predictedAddress: PREDICTED }
-    sessionStorage.setItem('mitfah-pending-deploy', JSON.stringify(pending))
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending))
     stubServer({ ownerAddr: WALLET, reverted: true })
     const user = userEvent.setup()
     await renderRoutes(routes, '/onboarding')
 
     const creating = await step('Creating your wallet')
     expect(await within(creating).findByText(/deployWallet reverted/)).toBeInTheDocument()
-    expect(sessionStorage.getItem('mitfah-pending-deploy')).toBeNull()
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
 
     await user.click(within(creating).getByRole('button', { name: 'Try again' }))
     expect(await step('Connect the wallet that will own your Mitfah wallet')).toBeInTheDocument()
+  })
+
+  it('ignores a deploy another account left waiting in this tab', async () => {
+    const pending = { chainId: SEPOLIA, deployer: WALLET, txHash: TX_HASH, predictedAddress: PREDICTED }
+    sessionStorage.setItem('mitfah-pending-deploy:3', JSON.stringify(pending))
+    const calls = stubServer()
+    await renderRoutes(routes, '/onboarding')
+
+    expect(await step('Connect the wallet that will own your Mitfah wallet')).toBeInTheDocument()
+    expect(calls.confirm).toHaveLength(0)
+    expect(sessionStorage.getItem('mitfah-pending-deploy:3')).not.toBeNull()
+  })
+
+  it("stops waiting for a deploy this account isn't linked to, and lets the user link a wallet", async () => {
+    const pending = { chainId: SEPOLIA, deployer: WALLET, txHash: TX_HASH, predictedAddress: PREDICTED }
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending))
+    stubServer({ unlinked: true })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    const creating = await step('Creating your wallet')
+    expect(await within(creating).findByText(/isn't linked to a wallet yet/)).toBeInTheDocument()
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
+
+    await user.click(within(creating).getByRole('button', { name: 'Try again' }))
+    await connect(user)
+    expect(await step('Prove this wallet is yours')).toBeInTheDocument()
   })
 
   it('skips verification when the wallet is already linked', async () => {

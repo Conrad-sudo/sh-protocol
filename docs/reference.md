@@ -12,6 +12,11 @@
 | `make pancakeswap-test` | Run PancakeSwap V2 fork tests against `BSC_RPC_URL` |
 | `make arbitrum-uniswap-test` | Run Uniswap V2 fork tests against `ARB_RPC_URL` (`test/fork/SHArbitrumUniswapV2Test.t.sol`) |
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
+| `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
+| `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
+| `make py-test` | Both offline Python suites: `identity-test` + `auth-test` |
+| `make e2e-test` | The full user journey against a running Sepolia fork (`app/tests/test_e2e_fork.py`); needs `make setup-test ARGS=sepolia-fork` first |
+| `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |
 | `make clean` | Remove build artifacts |
 | `make install` | Install Forge dependencies |
@@ -28,6 +33,7 @@
 | `make db` | Initialise SQLite database and run migrations |
 | `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) and register its single session key |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
+| `make api` | Start the FastAPI server on port 8000 — what the web app in `web/` talks to |
 | `make bot` | Start the Telegram bot — **optional**; the only target that needs `TELEGRAM_TOKEN` and `python-telegram-bot` |
 | `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
 | `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bot |
@@ -88,13 +94,18 @@ sh-protocol/
 │   ├── userop.py                    ← shared UserOp construction/signing (both backends)
 │   ├── anvil.py
 │   ├── live_network.py
+│   ├── tx_sender.py                 ← nonce-safe EOA broadcast
 │   ├── vault_signer.py
 │   ├── deploy_wallet.py
 │   ├── tools.py
+│   ├── agent_context.py             ← (user_id, chain_id) injected into every tool
 │   ├── smart_wallet_agent.py
+│   ├── auth.py                      ← passwords, JWTs, Google, SIWE
+│   ├── api.py                       ← FastAPI HTTP API for web/
 │   ├── telebot.py
 │   ├── agent_card.json
 │   ├── abi.py                       ← IEntryPoint, IERC20Extended, IReputationRegistry, mocks
+│   ├── tests/                       ← Python test scripts, run through make (see above)
 │   └── wallet.db                    ← not committed
 ├── docs/
 │   ├── contracts.md

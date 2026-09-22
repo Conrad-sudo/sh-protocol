@@ -5,13 +5,14 @@ The property under test is the one the whole identity refactor exists to establi
 on the account its TOKEN names, and on no other. Everything here is offline -- no RPC, no chain, no
 Vault -- so it is safe to run anywhere.
 
-Run: make auth-test   (or: python app/test_auth.py)
+Run: make auth-test   (or: python app/tests/test_auth.py)
 """
 import os
-import sys
 import tempfile
 import time
 from urllib.parse import quote
+
+from checks import check, finish   # first: it puts app/ on sys.path for the imports below
 
 # A scratch database, set before app modules import and read db.DB_PATH.
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -28,22 +29,14 @@ db.init_db()
 from fastapi.testclient import TestClient   # noqa: E402
 from eth_account import Account             # noqa: E402
 from eth_account.messages import encode_defunct  # noqa: E402
+from web3 import Web3                       # noqa: E402
 
 import api                                  # noqa: E402
 import auth                                 # noqa: E402
-
-failures: list[str] = []
+from constants import get_router            # noqa: E402
 
 # A checksummed address, used by the contacts tests to prove the API normalises what it stores.
 ADDR = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-
-
-def check(label: str, condition: bool, detail: str = ""):
-    if condition:
-        print(f"  PASS  {label}")
-    else:
-        print(f"  FAIL  {label}{': ' + detail if detail else ''}")
-        failures.append(label)
 
 
 # The agent's checkpointer is not needed for auth, and opening it would touch the real DB path;
@@ -440,6 +433,25 @@ def test_owner_actions_are_guarded():
     check("a zero daily limit is accepted by the schema", r.status_code == 403, str(r.status_code))
 
 
+def test_router_removal_is_refused():
+    print("\n[7b] the exchange router can't be removed through the app")
+    c = make_client()
+    headers = new_signed_in(c, "router@example.com")
+    acct = Account.create()
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111), nonce)
+
+    router = get_router(11155111)
+    # Lower case on purpose: the comparison must not depend on how the address is written.
+    r = c.post(
+        "/api/wallet/trusted-spenders/prepare",
+        headers=headers,
+        json={"chain_id": 11155111, "spender": router.lower(), "action": "remove"},
+    )
+    check("removing the router -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("the refusal says why", "remove liquidity" in r.json().get("detail", ""), r.text[:160])
+
+
 def test_wallet_state_read_is_guarded():
     """
     GET /api/wallet/{chain_id} needs a token, and only ever reads the CALLER's wallet.
@@ -705,6 +717,8 @@ def test_chains_lists_only_deployed_served_chains():
           by_id[11155111]["name"] == "sepolia" and by_id[11155111]["native_ticker"] == "ETH"
           and by_id[56]["native_ticker"] == "BNB", str(chains))
     check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == api.FORK_MODE, str(chains))
+    check("each carries the router its wallets trust",
+          by_id[11155111]["router"] == Web3.to_checksum_address(get_router(11155111)), str(chains))
 
 
 def test_google_sign_in_and_linking():
@@ -789,6 +803,7 @@ if __name__ == "__main__":
         test_telegram_link_nonce()
         test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
+        test_router_removal_is_refused()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
         test_chat_history_shows_only_the_conversation()
@@ -799,8 +814,4 @@ if __name__ == "__main__":
     finally:
         os.unlink(_tmp_db.name)
 
-    print()
-    if failures:
-        print(f"FAILED ({len(failures)}): {failures}")
-        sys.exit(1)
-    print("All auth checks passed.")
+    finish("All auth checks passed.")

@@ -40,12 +40,12 @@ snapshot:
 # talk the agent into acting as somebody else. Pure Python, no chain or RPC, so it is cheap to run
 # on every change to app/tools.py.
 identity-test:
-	.venv/bin/python3 app/test_identity.py
+	.venv/bin/python3 app/tests/test_identity.py
 
 # Full auth flow against a throwaway DB: signup, login, refresh rotation and reuse detection,
 # token forgery, SIWE binding, the deployer check and the Telegram link nonce. Also offline.
 auth-test:
-	.venv/bin/python3 app/test_auth.py
+	.venv/bin/python3 app/tests/test_auth.py
 
 # Everything that runs without a chain.
 py-test: identity-test auth-test
@@ -54,13 +54,13 @@ py-test: identity-test auth-test
 # action -> the eth_call simulations. Needs `make vault`, `make sepolia-fork` and
 # `make setup-test ARGS=sepolia-fork` first. Refuses to run if it is not on a local fork.
 e2e-test:
-	.venv/bin/python3 app/test_e2e_fork.py
+	.venv/bin/python3 app/tests/test_e2e_fork.py
 
 # The prompt-regression gate: a REAL conversation against the fork, checking the agent still
 # reaches the right tools in the right order now that the prompt no longer spells out an id
 # argument. Costs Anthropic credits. Needs the same stack as e2e-test.
 agent-smoke:
-	.venv/bin/python3 app/test_agent_smoke.py
+	.venv/bin/python3 app/tests/test_agent_smoke.py
 
 unit-test:
 	forge test --match-path test/unit/SHProtocolTest.t.sol -vvvv

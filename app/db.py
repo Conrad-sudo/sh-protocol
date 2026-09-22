@@ -6,7 +6,7 @@ import time
 from web3 import Web3
 from constants import (
     CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
-    CHAIN_ID_SEPOLIA, WEI_PER_ETH,
+    CHAIN_ID_SEPOLIA,
 )
 from seed_data import SEEDS
 

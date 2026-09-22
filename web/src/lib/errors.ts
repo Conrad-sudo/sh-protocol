@@ -15,6 +15,7 @@ const PLAIN: Record<string, string> = {
   SafeERC20FailedOperation: "The token contract didn't allow the transfer.",
   SessionHandler_InvalidSessionKey: "That isn't a valid assistant key.",
   SessionHandler_InvalidMaxOpGasCost: 'The gas limit must be more than zero.',
+  SessionHandler_MaxOpGasCostTooHigh: 'That gas limit is too high. Choose one under 1.2 million ETH.',
   SpendingLimitModule_InvalidDailyLimit: "The limit can't be negative.",
   SpendingLimitModule_InvalidWindowDuration: 'The period must be longer than zero.',
   SpendingLimitModule_TokenNotPriced: "Mitfah can't price this token, so it can't count toward your limit.",
@@ -31,5 +32,7 @@ export function explainError(message: string): string {
     if (Object.hasOwn(PLAIN, name)) return PLAIN[name]
   }
   if (/^That transaction reverted/.test(message)) return 'The transaction failed on the network, so nothing changed.'
+  // The API's wording is written for API clients: it names the endpoints to call.
+  if (/^Link your wallet address first/.test(message)) return "Your account isn't linked to a wallet yet."
   return message
 }

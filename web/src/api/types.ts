@@ -83,6 +83,8 @@ export interface Chain {
   native_ticker: string | null
   /** True when this server points the chain at a local fork. */
   fork: boolean
+  /** The exchange router every wallet here is deployed trusting, or null where there is none. */
+  router: string | null
 }
 
 /** One row of GET /api/wallet/{chain_id} `balances`. A token that could not be read has `error`. */

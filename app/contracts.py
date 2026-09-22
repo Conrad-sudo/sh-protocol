@@ -73,6 +73,25 @@ def load_session_handler(user_id: int) -> Contract:
     return _session_handler_cache[key]
 
 
+def read_spending_config(wallet: Contract) -> dict:
+    """
+    Reads a wallet's getConfig() struct as a dict keyed by its Solidity field names.
+
+    Always use this rather than indexing the returned tuple. The struct's field order follows its
+    storage packing, so it changes when the layout does -- it did on 2026-09-22, swapping
+    spentInWindow and dailyLimitUsd -- and a positional read like cfg[3] would then silently
+    return the wrong field. The names come from the ABI the contract was built with, so they
+    always match the compiled layout.
+
+    @param wallet  A SessionHandler Contract (its getConfig() takes no arguments).
+    @return        {"installed", "windowStart", "windowDuration", "spentInWindow",
+                    "dailyLimitUsd", "watchedTokens", "trustedSpenders"}.
+    """
+    fn = wallet.functions.getConfig
+    names = [c["name"] for c in fn.abi["outputs"][0]["components"]]
+    return dict(zip(names, fn().call()))
+
+
 def load_spending_limit_module(user_id: int) -> Contract:
     """
     Loads the SpendingLimitModule contract ABI, bound to the address the wallet reports

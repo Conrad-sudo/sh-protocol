@@ -7,32 +7,20 @@ prepended to the user's message. Anything that puts it back into a tool's argume
 tool written to the old pattern, a refactor that "restores" the parameter -- reopens an
 account-takeover path that no other test in this repo would notice. Hence this file.
 
-Run: make identity-test   (or: python app/test_identity.py)
+Run: make identity-test   (or: python app/tests/test_identity.py)
 """
-import sys
-from dataclasses import dataclass
-
 from langchain.agents import create_agent
 from langchain.tools import ToolRuntime, tool
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
+from checks import check, finish   # first: it puts app/ on sys.path for the imports below
 from agent_context import AgentContext
 from tools import get_tools
 
 # Names that must never appear in a tool's model-visible argument schema.
 FORBIDDEN_ARGS = ("user_id", "chat_id", "runtime")
-
-failures: list[str] = []
-
-
-def check(label: str, condition: bool, detail: str = ""):
-    if condition:
-        print(f"  PASS  {label}")
-    else:
-        print(f"  FAIL  {label}{': ' + detail if detail else ''}")
-        failures.append(label)
 
 
 class StubModel(GenericFakeChatModel):
@@ -188,8 +176,4 @@ if __name__ == "__main__":
     test_no_tool_writes_the_contact_list()
     test_thread_id_is_per_chain()
 
-    print()
-    if failures:
-        print(f"FAILED ({len(failures)}): {failures}")
-        sys.exit(1)
-    print("All identity guards passed.")
+    finish("All identity guards passed.")

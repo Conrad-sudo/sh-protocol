@@ -1,6 +1,3 @@
-from decimal import Decimal
-
-from langchain_erc8004 import ERC8004Toolkit
 # db.save_contact and db.delete_contact are deliberately NOT imported here. The contact list is the
 # allowlist of destinations for value (see _resolve_contact), so the agent READS it and never writes
 # it in either direction; both writes belong to the authenticated web session (POST and DELETE
@@ -29,10 +26,10 @@ from langchain_erc20.amounts import to_base_units
 from contracts import (
     load_session_handler,
     load_ierc20,
+    read_spending_config,
 )
 from toolkits import get_erc20_tools, get_erc8004_tools, get_uniswap_tools
 from db import get_token_address
-from network_config import load_network_config
 from langchain.tools import tool, ToolRuntime
 from langchain_core.tools import ToolException
 from agent_context import AgentContext
@@ -314,13 +311,15 @@ def get_all_sessions(runtime: ToolRuntime[AgentContext]) -> dict:
 
     This wallet authorizes ONE session key for every action, bounded by a single wallet-wide USD
     spending cap per rolling window (there are no per-token limits, and the key does not expire).
-    Use this whenever the user asks about their session, spending limit, remaining budget, or how
-    much they can still spend.
+    Use this whenever the user asks about their session, spending limit, remaining budget, how
+    much they can still spend, or whether the wallet is paused.
 
     Args:
 
     Returns:
         A dict with:
+          - paused (bool): whether the owner has paused the wallet. A paused wallet rejects every
+            transaction until the owner unpauses it in the web app.
           - session_active (bool): whether the wallet's session key is currently authorized.
           - daily_limit_usd (float): the per-window spending cap, in whole USD.
           - spent_usd (float): net USD value spent so far in the current window.
@@ -346,18 +345,18 @@ def _get_all_sessions(user_id: int) -> dict:
     print("Running get_all_sessions")
     session_handler = load_session_handler(user_id)
     session_key, _ = _get_session_keys(user_id)
-    # Config tuple: (installed, windowStart, windowDuration, dailyLimitUsd, spentInWindow,
-    #                watchedTokens, trustedSpenders)
-    cfg = session_handler.functions.getConfig().call()
+    # By field name, never position: see contracts.read_spending_config.
+    cfg = read_spending_config(session_handler)
     remaining = session_handler.functions.getRemainingBudget().call()
 
     return {
+        "paused": session_handler.functions.paused().call(),
         "session_active": session_handler.functions.allowedSession(session_key).call(),
-        "daily_limit_usd": cfg[3] / WEI_PER_ETH,
-        "spent_usd": cfg[4] / WEI_PER_ETH,
+        "daily_limit_usd": cfg["dailyLimitUsd"] / WEI_PER_ETH,
+        "spent_usd": cfg["spentInWindow"] / WEI_PER_ETH,
         "remaining_usd": remaining / WEI_PER_ETH,
-        "window_hours": cfg[2] / 3600,
-        "watched_tokens": _addresses_to_tickers(user_id, cfg[5]),
+        "window_hours": cfg["windowDuration"] / 3600,
+        "watched_tokens": _addresses_to_tickers(user_id, cfg["watchedTokens"]),
     }
 
 
@@ -704,49 +703,112 @@ def get_usd_value(runtime: ToolRuntime[AgentContext], token: str, amount: float)
     return price * amount
 
 
-@tool
-def preflight_check(runtime: ToolRuntime[AgentContext], token: str, amount: float) -> dict:
+def _metered_usd(
+    user_id: int, session_handler, token: str, amount: float, price_unmetered: bool
+) -> tuple[int | None, bool]:
     """
-    Runs all pre-transaction checks in one call: session validity, budget check, and USD value.
-    Call this instead of check_session_validity, check_spending_within_budget, and get_usd_value
+    Prices one side of a transaction the way SpendingLimitModule.postCheck will meter it.
+
+    The cap counts the native asset always (priced through the address(0) sentinel) and an ERC20
+    only while it is on the wallet's watched list. Unwatched tokens move without touching the cap.
+
+    @param user_id          The application user ID.
+    @param session_handler  The user's SessionHandler, already loaded.
+    @param token            The token ticker, or "eth"/"bnb" for the native asset.
+    @param amount           The amount in whole token units.
+    @param price_unmetered  Whether to price the token even when the cap ignores it. False skips the
+                            oracle call, which matters because an unwatched token may have no feed.
+    @return                 (usd, metered): the USD value with 18 decimals — None when skipped —
+                            and whether the cap counts this token.
+    """
+    if token.lower() in ("eth", "bnb"):
+        address, decimals, metered = ETH_SENTINEL, 18, True
+    else:
+        erc20 = load_ierc20(user_id=user_id, token=token)
+        address = erc20.address
+        metered = session_handler.functions.isWatched(address).call()
+        if not metered and not price_unmetered:
+            return None, False
+        decimals = erc20.functions.decimals().call()
+    usd = session_handler.functions.getUsdValue(address, _to_base_units(amount, decimals)).call()
+    return usd, metered
+
+
+@tool
+def preflight_check(
+    runtime: ToolRuntime[AgentContext],
+    token: str,
+    amount: float,
+    token_received: str | None = None,
+    amount_received: float | None = None,
+) -> dict:
+    """
+    Runs all pre-transaction checks in one call: pause state, session validity, budget check, and
+    USD value. Call this instead of check_session_validity, check_spending_within_budget, and get_usd_value
     separately before any on-chain action. It applies to every operation — plain transfers and
     swaps alike — because the wallet has a single session key and a single USD spending cap.
 
+    The budget check charges what the wallet's spending cap will actually charge: the value that
+    leaves the wallet minus the value that comes back, counting only metered tokens (the native
+    asset, and ERC20s on the watched list). So a wrap of ETH into a watched WETH costs nothing, and
+    a swap into a watched token costs roughly its fees and price impact.
+
     Args:
-        token: The token ticker to price for the budget check (e.g. "usdc"). For a swap, pass the
-               token being SOLD (the value leaving the wallet). Pass "eth"/"bnb" for a native send —
-               native value is metered against the cap too, so it is priced and budget-checked like
-               any other spend.
-        amount: The proposed amount in whole token units (e.g. 100 for 100 USDC).
+        token: The ticker of the token leaving the wallet (e.g. "usdc"), or "eth"/"bnb" for the
+               native asset. For a swap, the token being SOLD; for a wrap, "eth"/"bnb".
+        amount: How much of `token` leaves the wallet, in whole units (e.g. 100 for 100 USDC).
+        token_received: For a swap or wrap only, the ticker of the token that comes back to the
+               wallet (the token bought, or the wrapped-native ticker for a wrap). Leave unset for a
+               transfer, a native send, or a swap whose output goes to someone else.
+        amount_received: How much of `token_received` comes back, in whole units: the quote's
+               amount for a swap, the same amount for a wrap. Pass it together with `token_received`.
 
     Returns:
         A dict with:
+          - "is_paused" (bool): True if the owner has paused the wallet. A paused wallet rejects
+            every transaction until the owner unpauses it in the web app.
           - "session_active" (bool): True if the wallet's session key is authorized.
-          - "within_budget" (bool): True if the amount fits the remaining USD budget.
-          - "usd_value" (float): The USD equivalent of `amount` at the current price.
-        If "session_active" is False, abort and notify the user. If "within_budget" is False,
-        abort and notify the user. Only proceed if both are True.
+          - "within_budget" (bool): True if `charged_usd` fits the remaining USD budget.
+          - "usd_value" (float): The USD value of `amount` of `token` at the current price.
+          - "charged_usd" (float): What the transaction will count toward the spending limit. For a
+            swap it is an estimate from the quote: the wallet is charged on what actually arrives,
+            which can be a little less if the price moves.
+          - "remaining_usd" (float): The budget left in the current window.
+        If "is_paused" is True, abort and notify the user. If "session_active" is False, abort and
+        notify the user. If "within_budget" is False, abort and notify the user. Only proceed if
+        the wallet is not paused and both of the others are True.
     """
     user_id = runtime.context.user_id
     print("Running preflight_check")
+    if (token_received is None) != (amount_received is None):
+        raise ToolException("Pass token_received and amount_received together, or neither.")
+
     session_key, _ = _get_session_keys(user_id)
     session_handler = load_session_handler(user_id)
 
+    is_paused = session_handler.functions.paused().call()
     session_active = session_handler.functions.allowedSession(session_key).call()
 
-    usd_value = _get_price(user_id, token) * amount
-    remaining = session_handler.functions.getRemainingBudget().call() / WEI_PER_ETH
-
-    # Native value (ETH/BNB) is metered against the cap just like watched ERC20s — get_price prices
-    # it through the address(0) sentinel — so every spend is compared in USD against the wallet-wide
-    # remaining window budget. Gross value is a conservative bound: swaps are actually charged only
-    # their NET portfolio value change on-chain.
-    within_budget = usd_value <= remaining
+    # Mirrors postCheck: the net USD decrease across metered tokens, and nothing for a net increase.
+    # The sent token is priced even when unmetered, because usd_value is shown to the user either way.
+    sent_usd, sent_metered = _metered_usd(user_id, session_handler, token, amount, price_unmetered=True)
+    charged = sent_usd if sent_metered else 0
+    if token_received is not None:
+        received_usd, received_metered = _metered_usd(
+            user_id, session_handler, token_received, amount_received, price_unmetered=False
+        )
+        if received_metered:
+            charged -= received_usd
+    charged = max(charged, 0)
+    remaining = session_handler.functions.getRemainingBudget().call()
 
     return {
+        "is_paused": is_paused,
         "session_active": session_active,
-        "within_budget": within_budget,
-        "usd_value": usd_value,
+        "within_budget": charged <= remaining,
+        "usd_value": sent_usd / WEI_PER_ETH,
+        "charged_usd": charged / WEI_PER_ETH,
+        "remaining_usd": remaining / WEI_PER_ETH,
     }
 
 

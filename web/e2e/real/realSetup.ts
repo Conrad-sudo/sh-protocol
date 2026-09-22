@@ -25,7 +25,7 @@ export const publicClient = createPublicClient({ chain: sepolia, transport })
 export const testClient = createTestClient({ chain: sepolia, mode: 'anvil', transport })
 
 /**
- * Refuses to go on anywhere but a local fork, like app/test_e2e_fork.py. A Sepolia fork and live
+ * Refuses to go on anywhere but a local fork, like app/tests/test_e2e_fork.py. A Sepolia fork and live
  * Sepolia report the same chain id; only a local node accepts anvil_setBalance, so a balance that
  * really changed is proof of where the transaction would go. The API must be serving Sepolia from
  * a fork too, or it would build and confirm against the live network.

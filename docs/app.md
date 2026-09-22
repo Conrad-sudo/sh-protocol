@@ -25,7 +25,13 @@ app/
 ├── api.py                 ← FastAPI HTTP API — what the web app in web/ talks to
 ├── telebot.py             ← Telegram bot front end
 ├── agent_card.json        ← ERC-8004/v1 agent card (hosted publicly, referenced by tokenURI)
-└── abi.py                 ← ABIs for EntryPoint, ERC20, the ERC-8004 registry, and mocks
+├── abi.py                 ← ABIs for EntryPoint, ERC20, the ERC-8004 registry, and mocks
+└── tests/
+    ├── checks.py          ← Shared check()/finish() helpers; importing it puts app/ on sys.path
+    ├── test_identity.py   ← No tool lets the model choose the account (make identity-test)
+    ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
+    ├── test_e2e_fork.py   ← Full user journey on a Sepolia fork (make e2e-test)
+    └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
 
 > **ERC20 and Uniswap V2 calldata comes from two external packages.**
@@ -319,12 +325,12 @@ The wrappers exist — rather than exposing the package tools directly — becau
 
 | Tool | Description |
 |---|---|
-| `get_all_sessions(user_id)` | On-chain wallet status: `{session_active, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `getConfig`/`getRemainingBudget`/`allowedSession`) |
+| `get_all_sessions(user_id)` | On-chain wallet status: `{paused, session_active, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `paused`/`getConfig`/`getRemainingBudget`/`allowedSession`) |
 | `get_session_keys(user_id, token)` | Returns `(key_address, vault_ciphertext)` for the wallet's session key |
 | `check_session_validity(user_id, token)` | Whether the session key is on the `allowedSession` allowlist |
 | `check_remaining_budget(user_id)` | Remaining USD budget this window (no token arg — the cap is global) |
 | `check_spending_within_budget(user_id, token, amount)` | Prices `amount` via the oracle and compares to remaining budget |
-| `preflight_check(user_id, token, amount)` | Session validity + budget check + USD value in one call (no `is_uniswap` arg) |
+| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, within_budget, usd_value, charged_usd, remaining_usd`; the agent proceeds only if not paused, session active and within budget |
 | `get_price(user_id, token)` / `get_usd_value(user_id, token, amount)` | Unit price / USD value via `SHOracle.getPrice` |
 
 ### Read / quote / sufficiency tools
@@ -422,8 +428,9 @@ The `SYSTEM_PROMPT` teaches the agent the new model up front:
 - **One session key, one global USD budget** per rolling window — no per-token limits, no expiry. `get_all_sessions` reports cap/spent/remaining/watched tokens.
 - **Watched tokens and native value count against the cap;** only unwatched tokens move freely. A swap is charged its **net** value change, not the gross input.
 - **Approvals are automatic** — there is no approve step or tool; swap/liquidity tools batch them atomically. A "please approve X" request should be declined with an explanation.
-- **Removing liquidity is free** against the cap (it returns value — a net inflow).
-- One **`preflight_check(token, amount)`** before any spend; **never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` only); resolve the wrapped-native ticker per chain; never invent addresses; always confirm before an on-chain write; never expose the ciphertext.
+- **Removing liquidity is free** against the cap (it returns value — a net inflow); it checks the pause and the session via `get_all_sessions` instead of `preflight_check`.
+- **A paused wallet rejects every transaction** until the owner unpauses it in the web app; the agent can't unpause, and says so.
+- A fresh **`preflight_check`** before every spend, never reusing an earlier result (the owner can change the limit in the web app mid-conversation); pass the incoming leg (`token_received`/`amount_received`) for swaps and wraps; **never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` only); resolve the wrapped-native ticker per chain; never invent addresses; always confirm before an on-chain write; never expose the ciphertext.
 
 The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
 

@@ -26,6 +26,8 @@ import sys
 
 from dotenv import load_dotenv
 
+import checks  # noqa: F401  -- first: it puts app/ on sys.path for the imports below
+
 load_dotenv()
 
 from langchain_core.messages import HumanMessage   # noqa: E402

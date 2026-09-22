@@ -21,6 +21,8 @@ const TOKENS = [
   { ticker: 'weth', address: WETH },
 ]
 const PENDING_KEY = 'mitfah-pending-owner-tx:7'
+// Sepolia's exchange router, as /api/chains names it.
+const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
 
 interface ServerOptions {
   walletChains?: number[]
@@ -78,8 +80,8 @@ function stubServer({
         return Promise.resolve(
           json(200, {
             chains: [
-              { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false },
-              { chain_id: MAINNET, name: 'mainnet', native_ticker: 'ETH', fork: false },
+              { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false, router: ROUTER },
+              { chain_id: MAINNET, name: 'mainnet', native_ticker: 'ETH', fork: false, router: null },
             ],
           }),
         )
@@ -357,18 +359,40 @@ describe('ControlsPage', () => {
   })
 
   it('removes a trusted spender without asking', async () => {
-    const router = '0xeb2A2b8F6e0b1a1b3e5ec2dF1d2B2E1ad2E1F0A7'
+    const spender = '0xeb2A2b8F6e0b1a1b3e5ec2dF1d2B2E1ad2E1F0A7'
     const server = stubServer({
-      wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: [router] } })],
+      wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: [spender] } })],
     })
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Advanced' }))
-    await user.click(await screen.findByRole('button', { name: `Stop trusting ${router}` }))
+    await user.click(await screen.findByRole('button', { name: `Stop trusting ${spender}` }))
     expect(await screen.findByText('Spender removed.')).toBeInTheDocument()
-    expect(server.prepared[0].body).toEqual({ chain_id: SEPOLIA, spender: router, action: 'remove' })
+    expect(server.prepared[0].body).toEqual({ chain_id: SEPOLIA, spender, action: 'remove' })
+  })
+
+  it("keeps the exchange's router off the list, so it can't be removed by accident", async () => {
+    const other = '0xeb2A2b8F6e0b1a1b3e5ec2dF1d2B2E1ad2E1F0A7'
+    // Lower case on purpose: the match must not depend on how the address is written.
+    const trusted = [ROUTER.toLowerCase(), other]
+    stubServer({ wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: trusted } })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    const list = await screen.findByRole('list', { name: 'Trusted spenders' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(list).getByRole('button', { name: `Stop trusting ${other}` })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: new RegExp(`Stop trusting ${ROUTER}`, 'i') })).toBeNull()
+    expect(screen.getByText(/Your exchange's router is trusted too/)).toBeInTheDocument()
+    expect(screen.queryByText('None.')).toBeNull()
+
+    // Still counted as trusted, so it can't be added a second time.
+    await user.type(screen.getByLabelText('Trust a spender'), ROUTER)
+    expect(screen.getByText('Already trusted.')).toBeInTheDocument()
   })
 
   it('asks before raising the network fee cap', async () => {
