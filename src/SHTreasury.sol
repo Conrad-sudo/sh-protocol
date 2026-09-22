@@ -25,9 +25,8 @@ import {SHFactory} from "./SHFactory.sol";
  *        SessionHandler.execute() → payable(REGISTRY.treasury()).call{value: fee}()
  *                                 → SHTreasury.receive()
  *
- *      The fee is configured in USD on the registry and converted to native per execution by
- *      {SHRegistry-getFee}, so what arrives here is a wei amount that varies with the ETH price
- *      while the dollar value each user paid stays fixed.
+ *      The fee is a flat wei amount set on the registry and read per execution through
+ *      {SHRegistry-getFee}, so every execution pays the same wei until the operator changes it.
  *
  *      Admin flow:
  *        Protocol operator → SHTreasury.<passthrough>() → SHRegistry / SHOracle / SHFactory
@@ -77,10 +76,9 @@ contract SHTreasury is Ownable, ReentrancyGuard {
     SHRegistry public REGISTRY;
 
     /// @notice Cumulative ETH received as protocol fees since deployment.
-    /// @dev Wei, not USD. Fees are set in USD but arrive converted, so this sums amounts struck at
-    ///      different ETH prices and multiplying it by a spot price does not give dollar revenue.
-    ///      Deriving that needs each execution's price, which is off-chain work: ProtocolFeePaid
-    ///      carries the wei charged, not the rate it was charged at.
+    /// @dev Wei, not USD. Fees collected at different ETH prices are summed here, so multiplying it
+    ///      by a spot price does not give dollar revenue; that needs each execution's price, which is
+    ///      off-chain work.
     uint256 public totalFeesCollected;
 
     /*//////////////////////////////////////////////////////////////
@@ -202,10 +200,9 @@ contract SHTreasury is Ownable, ReentrancyGuard {
 
     /**
      * @notice Updates the protocol fee charged on every session-key execution. Only callable by the owner.
-     * @dev The fee is USD-denominated; each SessionHandler converts it to native at execution time
-     *      through {SHRegistry-getFee}. So this sets what a user pays in dollars, and the wei amount
-     *      follows the ETH price on its own.
-     * @param newFee The new fee, in USD with 18 decimals. Must be within
+     * @dev The fee is a flat wei amount, so its dollar value moves with the native price; calling
+     *      this again is how the operator brings it back in line.
+     * @param newFee The new fee, in wei. Must be within
      *               [SHRegistry.MIN_PROTOCOL_FEE, SHRegistry.MAX_PROTOCOL_FEE].
      */
     function setProtocolFee(uint256 newFee) external onlyOwner registrySet {

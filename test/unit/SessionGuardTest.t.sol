@@ -551,6 +551,23 @@ contract SessionGuardTest is Test {
         assertEq(wallet.maxOpGasCost(), 1 ether);
     }
 
+    /// @notice {maxOpGasCost} is a uint80 (so it packs beside `_paused`): the setter must refuse a
+    ///         value that does not fit rather than silently truncate it, and still accept the largest
+    ///         value that does.
+    function test_setMaxOpGasCost_rejectsValuesAboveUint80() public {
+        uint256 limit = type(uint80).max;
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_MaxOpGasCostTooHigh.selector, limit + 1, limit)
+        );
+        wallet.setMaxOpGasCost(limit + 1);
+
+        vm.prank(owner);
+        wallet.setMaxOpGasCost(limit);
+        assertEq(wallet.maxOpGasCost(), limit);
+    }
+
     /// @notice MaxOpGasCostUpdated must report the PREVIOUS ceiling as oldMax, not the new one.
     /// @dev Regression test: the emit ran after the assignment, so both arguments carried the new
     ///      value and the old ceiling was unrecoverable by anything indexing the event.
@@ -566,16 +583,16 @@ contract SessionGuardTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                  PROTOCOL FEE (USD-denominated, native-paid)
+                  PROTOCOL FEE (flat wei, native-paid)
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Every test here drives execute() as the EntryPoint rather than through handleOps, so a
     ///      revert surfaces as its own error instead of being absorbed into UserOperationRevertReason,
     ///      and the wallet's balance moves only by the fee — no prefund noise.
 
-    /// @notice A session-key execution transfers the fee to the registry's treasury, in the native
+    /// @notice A session-key execution transfers the fee to the registry's treasury, in the wei
     ///         amount getFee() quotes at the time of the call.
-    function test_sessionExecution_paysUsdDenominatedFeeToTreasury() public {
+    function test_sessionExecution_paysFeeToTreasury() public {
         uint256 expectedFee = registry.getFee();
         uint256 treasuryBefore = address(treasury).balance;
         uint256 walletBefore = address(wallet).balance;
@@ -590,16 +607,16 @@ contract SessionGuardTest is Test {
         assertEq(treasury.totalFeesCollected(), expectedFee, "receive() did not tally the fee");
     }
 
-    /// @notice The point of USD denomination, observed end-to-end: double the ETH price and the same
-    ///         execution costs half the wei, because the DOLLAR cost is what is fixed.
-    function test_sessionExecution_feeChargedHalvesWhenEthPriceDoubles() public {
+    /// @notice A flat wei fee, observed end-to-end: double the ETH price and the same execution
+    ///         costs the same wei.
+    function test_sessionExecution_feeChargedUnchangedWhenEthPriceDoubles() public {
         uint256 feeAtBasePrice = _feeChargedByOneSessionExecution();
 
         MockV3Aggregator doubled = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 2);
         vm.prank(owner);
         treasury.setFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
 
-        assertEq(_feeChargedByOneSessionExecution(), feeAtBasePrice / 2, "fee did not re-price with ETH");
+        assertEq(_feeChargedByOneSessionExecution(), feeAtBasePrice, "fee re-priced with ETH");
     }
 
     /// @notice The fee is deliberately OUTSIDE the metered window. `_extractFee` runs before
@@ -623,8 +640,7 @@ contract SessionGuardTest is Test {
     }
 
     /// @notice Owner-initiated executions pay no fee at all — `execute` charges only when
-    ///         msg.sender != owner(). This is what keeps a wallet fully usable by its owner even
-    ///         when the fee path cannot run (see the stale-feed test below).
+    ///         msg.sender != owner().
     function test_ownerExecution_paysNoFee() public {
         vm.prank(owner);
         wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
@@ -633,32 +649,20 @@ contract SessionGuardTest is Test {
         assertEq(treasury.totalFeesCollected(), 0);
     }
 
-    /// @notice The liveness surface the USD fee introduced (THREAT_MODEL §3.7): because every session
-    ///         execution prices native to compute the fee, a stale ETH/USD feed reverts even an
-    ///         ERC-20-only transfer — which touches no native value and, under the old flat-wei fee,
-    ///         would never have consulted that feed.
-    /// @dev Only the native feed is left stale: the token feeds are re-stamped after the warp, so the
-    ///      revert can only be coming from `_extractFee`, not from the module's postCheck.
-    function test_sessionExecution_revertsWhenNativeFeedIsStale_evenForErc20OnlyTransfer() public {
+    /// @notice The fee path makes no oracle call, so a session-key ERC-20 transfer — which moves no
+    ///         native value of its own — goes through with the ETH/USD feed stale, and still pays
+    ///         the fee.
+    /// @dev Only the native feed is left stale: the token feeds are re-stamped after the warp, so
+    ///      the only thing that could have consulted the native feed is `_extractFee`.
+    function test_sessionExecution_erc20OnlyTransfer_survivesAStaleNativeFeed() public {
         _staleNativeFeedOnly();
+        uint256 fee = registry.getFee();
 
         vm.prank(config.entryPoint);
-        vm.expectRevert(SHOracle.PriceOracle_StalePrice.selector);
         wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
 
-        assertEq(usdc.balanceOf(kani), 0, "transfer executed despite the stale feed");
-    }
-
-    /// @notice The contrast that isolates the cause: the very same ERC-20 transfer succeeds with the
-    ///         native feed just as stale, when the owner drives it and no fee is charged. The block
-    ///         above is the fee path, not the spending meter.
-    function test_ownerExecution_survivesAStaleNativeFeed() public {
-        _staleNativeFeedOnly();
-
-        vm.prank(owner);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
-
-        assertEq(usdc.balanceOf(kani), 1e6, "owner path blocked by a feed it does not need");
+        assertEq(usdc.balanceOf(kani), 1e6, "transfer blocked by a feed the fee no longer reads");
+        assertEq(address(treasury).balance, fee, "fee was not paid");
     }
 
     /// @notice A wallet that cannot cover the fee is refused before anything executes, rather than

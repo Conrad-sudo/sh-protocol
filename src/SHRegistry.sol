@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {SHOracle} from "./SHOracle.sol";
 
 /**
@@ -10,19 +11,28 @@ import {SHOracle} from "./SHOracle.sol";
  * @notice Central configuration registry for the SessionHandler Protocol. Stores the
  *         protocol fee, treasury address, price oracle, and agent identity used across all
  *         deployed SessionHandler wallets.
- * @dev SessionHandler wallets read all protocol parameters from this contract at
- *      execution time rather than storing them as immutables, so any update here
- *      propagates instantly to every deployed wallet without redeployment.
+ * @dev SessionHandler wallets read the MUTABLE parameters here (fee, treasury, price oracle, agent
+ *      id) at execution time rather than storing them, so an update propagates instantly to every
+ *      deployed wallet without redeployment. Two kinds of address do not work that way: the
+ *      EntryPoint and both ERC-8004 registries are immutable here and baked into the SessionHandler
+ *      implementation by SHFactory, and the SpendingLimitModule is copied into each wallet when it is
+ *      deployed, so changing it only affects wallets deployed afterwards.
  *
- *      The protocol fee is denominated in USD (18 decimals), not in wei. SessionHandler converts it
- *      to native at execution time via {getFee}, which prices it through the registry's own
- *      priceOracle. That keeps what a user actually pays per execution stable in dollar terms
- *      across ETH price moves, where a stored wei amount would silently re-price itself.
+ *      The protocol fee is a flat amount of native token, in wei, and is charged as stored — no
+ *      oracle read on the fee path. That keeps a session execution from paying for a Chainlink read
+ *      (and, on an L2, the sequencer check) just to price a fee, and keeps the fee collectable
+ *      while the native feed is stale. The trade: its dollar value moves with the native price, so
+ *      the operator re-sets it with {setProtocolFee} when that drifts too far.
  *
  *      Owned by the treasury operator. protocolFee is bounded to
  *      [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]: the ceiling bounds the worst-case impact of a
  *      compromised owner key, and the floor means SessionHandler never sends a zero-value fee
  *      transfer. Note the floor also means fees cannot be switched off protocol-wide.
+ *
+ *      The bounds are wei, so they differ per chain: the deploy script converts one pair of dollar
+ *      targets through each chain's native price at deploy time. They are immutable, and so drift
+ *      in dollar terms as the native price moves; the gap between them is what leaves the operator
+ *      room to keep the fee where it wants within them.
  */
 contract SHRegistry is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -31,6 +41,10 @@ contract SHRegistry is Ownable {
 
     /// @dev Thrown when a proposed protocolFee falls outside [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE].
     error SHRegistry_FeeNotInRange();
+    /// @dev Thrown at construction when the fee bounds are unusable: a zero floor (which would allow
+    ///      a zero-value fee transfer), a floor above the ceiling, or a ceiling past uint96, the
+    ///      width {protocolFee} is stored in.
+    error SHRegistry_InvalidFeeBounds();
     /// @dev Thrown when address(0) is passed as the treasury address.
     error SHRegistry_InvalidTreasury();
     /// @dev Thrown when address(0) is passed as the price oracle address.
@@ -55,24 +69,16 @@ contract SHRegistry is Ownable {
                              STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Maximum protocol fee that can ever be set, protecting wallet owners from runaway fees.
-    /// @dev USD with 18 decimals: 15e16 is $0.15 per execution. A ceiling in USD is the meaningful
-    ///      one — a wei ceiling would tighten or loosen on its own every time ETH moved.
-    uint256 public constant MAX_PROTOCOL_FEE = 15e16;
+    /// @notice Maximum protocol fee that can ever be set, in wei, protecting wallet owners from
+    ///         runaway fees.
+    /// @dev Immutable, so no later owner action — including a compromised owner key — can raise it.
+    ///      It deliberately does not consult the oracle: the owner also controls the oracle's feeds,
+    ///      so a ceiling checked in dollars could be lifted by faking a low native price first.
+    uint256 public immutable MAX_PROTOCOL_FEE;
 
-    /// @notice Minimum protocol fee that can ever be set. Guarantees SessionHandler's fee transfer is
-    ///         never a zero-value call, so the fee path always records value.
-    /// @dev USD with 18 decimals: 15e15 is $0.015 per execution. Converted through {getFee}, this
-    ///      floor only truncates to zero wei at an ETH price around 1e16 USD, so the guarantee holds
-    ///      for any price this protocol will ever see.
-    uint256 public constant MIN_PROTOCOL_FEE = 15e15;
-
-    /// @notice USD-denominated fee (18 decimals) charged on every session-key execution across all
-    ///         wallets. Read {getFee} for the native amount a wallet actually transfers.
-    uint256 public protocolFee;
-
-    /// @notice Id of the SessionHandler ERC-4337 AI agent registered on ERC-8004 Identity Registery
-    uint256 public agentId;
+    /// @notice Minimum protocol fee that can ever be set, in wei. Guarantees SessionHandler's fee
+    ///         transfer is never a zero-value call, so the fee path always records value.
+    uint256 public immutable MIN_PROTOCOL_FEE;
 
     /// @notice Delay between proposing an oracle change and being able to commit it.
     /// @dev The oracle governs every wallet's spending cap, so a repoint is the single highest-impact
@@ -81,10 +87,25 @@ contract SHRegistry is Ownable {
     ///      for this long — wallet owners can {SessionHandler-pause} in the meantime.
     uint256 public constant ORACLE_TIMELOCK = 2 days;
 
-    
+    // Storage is ordered to pack: each uint below is sized to share a slot with the address it is
+    // read alongside. Slot 0 is Ownable's `_owner`; `forge inspect SHRegistry storageLayout` shows
+    // the rest. The registry is not upgradeable, so this layout only matters for a fresh deploy.
+
+    /// @notice Canonical SHOracle used by all SessionHandler wallets for USD spending limit enforcement.
+    address public priceOracle;
+
+    /// @notice Oracle awaiting commit, or address(0) when no proposal is outstanding.
+    address public pendingPriceOracle;
     /// @notice Timestamp from which {pendingPriceOracle} may be committed. Meaningless when there is
     ///         no pending proposal.
-    uint256 public pendingPriceOracleEta;
+    /// @dev uint48 (enough seconds for millions of years) so it shares a slot with
+    ///      {pendingPriceOracle}; the two are always written, read and cleared together.
+    uint48 public pendingPriceOracleEta;
+
+    /// @notice Id of the SessionHandler ERC-4337 AI agent registered on the ERC-8004 Identity Registry.
+    /// @dev Left uint256: the id is minted by the external identity registry, so its range is not
+    ///      this contract's to narrow.
+    uint256 public agentId;
 
     /// @notice SpendingLimitModule installed as a hook on every SessionHandler deployed from here on.
     /// @dev Settable rather than immutable, and deliberately NOT a constructor argument: the module's
@@ -95,14 +116,13 @@ contract SHRegistry is Ownable {
     ///      they were initialized with, since SessionHandler copies it into its own storage.
     address public spendingLimitModule;
 
-    /// @notice Oracle awaiting commit, or address(0) when no proposal is outstanding.
-    address public pendingPriceOracle;
-
     /// @notice Address that receives protocol fees collected by SessionHandler wallets.
     address public treasury;
-
-    /// @notice Canonical SHOracle used by all SessionHandler wallets for USD spending limit enforcement.
-    address public priceOracle;
+    /// @notice Fee in wei charged on every session-key execution across all wallets.
+    /// @dev uint96 so it shares a slot with {treasury}: SessionHandler's fee path reads both on every
+    ///      session-key execution, and packed they cost one storage read instead of two. The value is
+    ///      bounded by {MAX_PROTOCOL_FEE}, which the constructor caps at uint96's maximum.
+    uint96 public protocolFee;
 
     /// @notice The SHFactory that deploys SessionHandler wallets against this registry.
     /// @dev Recorded for off-chain discoverability — no contract here reads it. Set after deployment
@@ -110,10 +130,10 @@ contract SHRegistry is Ownable {
     address public factory;
 
     /// @notice The canonical ERC-4337 EntryPoint that deployed wallets validate UserOps against.
-    /// @dev Immutable, like the two ERC-8004 registries below: SessionHandler.initialize copies this
-    ///      into the wallet's own storage at deploy time, so a later change here could never reach an
-    ///      existing wallet anyway. Making that permanence explicit is more honest than a setter that
-    ///      silently applies only to future wallets.
+    /// @dev Immutable, like the two ERC-8004 registries below. SHFactory's constructor bakes all three
+    ///      into its SessionHandler implementation as immutables, so a later change here could never
+    ///      reach a wallet anyway. Making that permanence explicit is more honest than a setter that
+    ///      would do nothing for any wallet.
     address public immutable ENTRY_POINT;
 
     /// @notice Reputation Registry baked into every SessionHandler deployed from this registry.
@@ -121,14 +141,13 @@ contract SHRegistry is Ownable {
     /// @notice ERC-8004 Identity Registry baked into every SessionHandler deployed from this registry.
     address public immutable IDENTITY_REGISTRY;
 
-    
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Emitted when the protocol fee is updated.
-    /// @param oldFee The previous fee, in USD with 18 decimals.
-    /// @param newFee The new fee, in USD with 18 decimals.
+    /// @param oldFee The previous fee, in wei.
+    /// @param newFee The new fee, in wei.
     event ProtocolFeeUpdated(uint256 oldFee, uint256 newFee);
 
     /// @notice Emitted when the treasury address is updated.
@@ -180,14 +199,16 @@ contract SHRegistry is Ownable {
      *      exist first). The deploy script sets it right after; SHFactory refuses to deploy wallets
      *      until it is set.
      * @dev Rejects an initial oracle that cannot price native, the same check {proposePriceOracle}
-     *      makes on a replacement. Two separate paths depend on the native feed: SpendingLimitModule
-     *      meters the account's native balance delta, and {getFee} prices the protocol fee. An oracle
-     *      without it would leave every deployed wallet unable to execute at all, so it is caught at
-     *      construction rather than at the first user transaction. It also rejects any address with
-     *      no isPriced() to call, catching a wrong-network or mistyped oracle address.
+     *      makes on a replacement. SpendingLimitModule meters the account's native balance delta, so
+     *      an oracle without it would revert every native-moving execution on every deployed wallet;
+     *      it is caught at construction rather than at the first user transaction. It also rejects
+     *      any address with no isPriced() to call, catching a wrong-network or mistyped oracle address.
      * @param initialOwner       Address that will own this registry — the SHTreasury.
-     * @param initialFee         Starting protocol fee, in USD with 18 decimals. Must be within
-     *        [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE].
+     * @param initialFee         Starting protocol fee, in wei. Must be within
+     *        [minProtocolFee, maxProtocolFee].
+     * @param minProtocolFee     Lowest fee the owner may ever set, in wei. Must be non-zero.
+     * @param maxProtocolFee     Highest fee the owner may ever set, in wei. Must be at least
+     *        `minProtocolFee` and fit in a uint96.
      * @param initialTreasury    Address that will receive protocol fees. Must not be address(0).
      * @param initialOracle      Address of the deployed SHOracle. Must not be address(0), and must be
      *        able to price native — see the native-feed check below.
@@ -200,6 +221,8 @@ contract SHRegistry is Ownable {
     constructor(
         address initialOwner,
         uint256 initialFee,
+        uint256 minProtocolFee,
+        uint256 maxProtocolFee,
         address initialTreasury,
         address initialOracle,
         address reputationRegistry,
@@ -207,7 +230,10 @@ contract SHRegistry is Ownable {
         address entryPointAddress,
         uint256 initialAgentId
     ) Ownable(initialOwner) {
-        if (initialFee > MAX_PROTOCOL_FEE || initialFee < MIN_PROTOCOL_FEE) {
+        if (minProtocolFee == 0 || minProtocolFee > maxProtocolFee || maxProtocolFee > type(uint96).max) {
+            revert SHRegistry_InvalidFeeBounds();
+        }
+        if (initialFee > maxProtocolFee || initialFee < minProtocolFee) {
             revert SHRegistry_FeeNotInRange();
         }
         if (initialTreasury == address(0)) revert SHRegistry_InvalidTreasury();
@@ -219,7 +245,11 @@ contract SHRegistry is Ownable {
         IDENTITY_REGISTRY = identityRegistry;
         REPUTATION_REGISTRY = reputationRegistry;
         ENTRY_POINT = entryPointAddress;
-        protocolFee = initialFee;
+        MIN_PROTOCOL_FEE = minProtocolFee;
+        MAX_PROTOCOL_FEE = maxProtocolFee;
+        // Safe: range-checked above, and the ceiling was checked to fit uint96.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        protocolFee = uint96(initialFee);
         treasury = initialTreasury;
         priceOracle = initialOracle;
         agentId = initialAgentId;
@@ -232,15 +262,17 @@ contract SHRegistry is Ownable {
     /**
      * @notice Updates the protocol fee charged on every session-key execution. Only callable by the owner.
      * @dev Takes effect protocol-wide on the next execution — wallets read the fee from here rather
-     *      than storing it. The value is USD, so it does not need revisiting when ETH moves; {getFee}
-     *      re-derives the native amount on every call.
-     * @param newFee The new fee, in USD with 18 decimals. Must be within
+     *      than storing it. The value is wei, so its dollar value moves with the native price; this is
+     *      how the operator brings it back in line.
+     * @param newFee The new fee, in wei. Must be within
      *        [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE].
      */
     function setProtocolFee(uint256 newFee) external onlyOwner {
         if (newFee > MAX_PROTOCOL_FEE || newFee < MIN_PROTOCOL_FEE) revert SHRegistry_FeeNotInRange();
         uint256 oldFee = protocolFee;
-        protocolFee = newFee;
+        // Safe: range-checked above, and the constructor capped MAX_PROTOCOL_FEE at uint96.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        protocolFee = uint96(newFee);
         emit ProtocolFeeUpdated(oldFee, newFee);
     }
 
@@ -300,7 +332,7 @@ contract SHRegistry is Ownable {
         if (!SHOracle(newOracle).isPriced(address(0))) revert SHRegistry_InvalidPriceOracle();
 
         pendingPriceOracle = newOracle;
-        pendingPriceOracleEta = block.timestamp + ORACLE_TIMELOCK;
+        pendingPriceOracleEta = SafeCast.toUint48(block.timestamp + ORACLE_TIMELOCK);
         emit PriceOracleProposed(newOracle, pendingPriceOracleEta);
     }
 
@@ -353,19 +385,12 @@ contract SHRegistry is Ownable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice The protocol fee for one execution, converted to native at the current oracle price.
-     * @dev What SessionHandler actually transfers to the treasury. Resolved live on every call — off
-     *      the registry's CURRENT priceOracle, so a committed oracle swap changes it immediately, and
-     *      off the CURRENT protocolFee, so a {setProtocolFee} lands without touching any wallet.
-     * @dev Reverts if the native feed is stale or unregistered (see {SHOracle-getNativeFee}). Because
-     *      every session-key execution charges the fee, that makes the ETH/USD feed's freshness a
-     *      liveness dependency for session execution as a whole, not only for native-moving calls as
-     *      it was when the fee was a flat wei amount. Wallet owners can still {SessionHandler-pause}
-     *      and the owner path never charges a fee, so an owner keeps full access to a wallet
-     *      throughout. See THREAT_MODEL.md §3.7.
-     * @return The fee in wei at the oracle's current price.
+     * @notice The protocol fee for one session-key execution, in wei.
+     * @dev What SessionHandler transfers to the treasury. Read per call, so a {setProtocolFee} lands on
+     *      every wallet at once. Makes no oracle call, so it cannot revert on a stale feed.
+     * @return The fee in wei.
      */
     function getFee() external view returns (uint256) {
-        return SHOracle(priceOracle).getNativeFee(protocolFee);
+        return protocolFee;
     }
 }

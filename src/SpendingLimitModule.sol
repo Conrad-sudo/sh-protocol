@@ -146,8 +146,9 @@ contract SpendingLimitModule is IERC7579Hook {
     error SpendingLimitModule_AlreadyInstalled();
     /// @notice Thrown when a call requires the module to be installed but the caller hasn't installed it.
     error SpendingLimitModule_NotInstalled();
-    /// @notice Thrown when a negative daily limit is supplied. The limit is signed for arithmetic
-    ///         convenience with the int256 oracle values, but a spending cap can never be below zero.
+    /// @notice Thrown when a daily limit is negative or larger than type(int128).max (~1.7e20 USD).
+    ///         The limit is signed for arithmetic convenience with the int256 oracle values, but a
+    ///         spending cap can never be below zero; the ceiling is what the int128 field can hold.
     error SpendingLimitModule_InvalidDailyLimit();
     /// @notice Thrown when the window duration is 0 (a window must have length) or exceeds the
     ///         uint48-seconds storage ceiling (~8.9 million years, so no real window trips this).
@@ -208,18 +209,26 @@ contract SpendingLimitModule is IERC7579Hook {
     address public immutable REGISTRY;
 
     /// @dev Per-account settings and running spend state. One entry per installing account.
-    /// @dev Field order is chosen for storage packing: `installed` + the two uint48 window fields
-    ///      share a single 32-byte slot (1 + 6 + 6 = 13 bytes), so preCheck reads the install flag
-    ///      and rolls the window from ONE cold SLOAD instead of three. The two int256 USD values are
-    ///      left full-width on purpose — they are the money accumulator, and narrowing them to save
-    ///      one more slot would introduce a truncating cast on `spentInWindow` for no meaningful gain.
-    ///      uint48 seconds spans ~8.9 million years, so both window fields are effectively unbounded.
+    /// @dev Field order is chosen for storage packing: `installed`, the two uint48 window fields and
+    ///      `spentInWindow` share one 32-byte slot (1 + 6 + 6 + 16 = 29 bytes). preCheck already reads
+    ///      that slot for the install flag and the window, so postCheck then reads the tally warm; a
+    ///      window reset writes the new start and the zeroed tally in ONE store; and because the slot
+    ///      always holds `installed == true`, writing the tally never pays the 20,000-gas cost of
+    ///      filling an all-zero slot, which a slot of its own did on every wallet's first spend.
+    /// @dev int128 holds ~1.7e20 USD at 18 decimals. It cannot be cut off: {_setDailyLimit} keeps the
+    ///      limit inside int128, and postCheck checks the new tally against the limit BEFORE storing
+    ///      it, so any value that gets stored is at most the limit. The per-transaction outflow is
+    ///      still computed at full int256; only the stored running total is narrow.
+    /// @dev uint48 seconds spans ~8.9 million years, so both window fields are effectively unbounded.
+    /// @dev Consumers must read this struct by FIELD NAME, not position: the order follows the packing,
+    ///      so it can change (it did on 2026-09-22), and a positional read would then silently return
+    ///      the wrong field. The Python app goes through contracts.read_spending_config for this.
     struct Config {
         bool installed; // true once onInstall has run; gates every hook and setter for the account
         uint48 windowStart; // timestamp anchoring the current window
         uint48 windowDuration; // seconds
-        int256 dailyLimitUsd; // 18-decimal USD
-        int256 spentInWindow; // 18-decimal USD net value spent so far in the current window
+        int128 spentInWindow; // 18-decimal USD net value spent so far in the current window
+        int128 dailyLimitUsd; // 18-decimal USD
         address[] watchedTokens; // tokens whose value changes are metered (max MAX_WATCHED_TOKENS)
         address[] trustedSpenders; // spenders approvable even for unpriced tokens (max MAX_TRUSTED_SPENDERS)
     }
@@ -306,7 +315,8 @@ contract SpendingLimitModule is IERC7579Hook {
      *      account already has the module installed. The first spending window starts counting
      *      from the moment of install (windowStart = block.timestamp).
      * @param data ABI-encoded initial settings, in this exact order:
-     *        - int256 dailyLimitUsd    Max USD (18 decimals) the account may spend per window. Must be >= 0.
+     *        - int256 dailyLimitUsd    Max USD (18 decimals) the account may spend per window. Must be
+     *                                  >= 0 and <= type(int128).max.
      *        - uint256 windowDuration  Window length in seconds (e.g. 86400 for one day). Must be > 0.
      *        - address[] watchedTokens Tokens to meter; each must already be priced by the oracle.
      */
@@ -377,7 +387,7 @@ contract SpendingLimitModule is IERC7579Hook {
     /**
      * @notice Changes the calling account's maximum spend per window.
      * @dev Takes effect immediately for the current window.
-     * @param dailyLimitUsd New cap in USD with 18 decimals. Must be >= 0.
+     * @param dailyLimitUsd New cap in USD with 18 decimals. Must be >= 0 and <= type(int128).max.
      */
     function setDailyLimit(int256 dailyLimitUsd) external onlyInstalled {
         _setDailyLimit(msg.sender, dailyLimitUsd);
@@ -474,10 +484,13 @@ contract SpendingLimitModule is IERC7579Hook {
         emit TrustedSpenderRemoved(account, spender);
     }
 
-    /// @dev Writes the new daily limit; reverts on a negative value (0 is allowed — it disables spending).
+    /// @dev Writes the new daily limit; reverts on a negative value (0 is allowed — it disables
+    ///      spending) and on anything past type(int128).max, so the cast below can never truncate.
+    ///      Keeping the limit inside int128 is also what makes postCheck's store of the tally safe.
     function _setDailyLimit(address account, int256 dailyLimitUsd) internal {
-        if (dailyLimitUsd < 0) revert SpendingLimitModule_InvalidDailyLimit();
-        _configs[account].dailyLimitUsd = dailyLimitUsd;
+        if (dailyLimitUsd < 0 || dailyLimitUsd > type(int128).max) revert SpendingLimitModule_InvalidDailyLimit();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        _configs[account].dailyLimitUsd = int128(dailyLimitUsd);
     }
 
     /// @dev Writes the window length; reverts on 0 (zero-length window makes no sense) and on any
@@ -612,13 +625,16 @@ contract SpendingLimitModule is IERC7579Hook {
             }
         }
         if (netOutflowUsd > 0) {
-            config.spentInWindow += netOutflowUsd;
-
-            if (config.spentInWindow > config.dailyLimitUsd) {
-                revert SpendingLimitModule_BudgetExceeded(config.spentInWindow, config.dailyLimitUsd);
+            // Summed at full width and checked against the limit BEFORE it is stored.
+            int256 spent = int256(config.spentInWindow) + netOutflowUsd;
+            if (spent > config.dailyLimitUsd) {
+                revert SpendingLimitModule_BudgetExceeded(spent, config.dailyLimitUsd);
             }
+            // Safe: 0 < spent <= dailyLimitUsd, and the limit is itself an int128.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            config.spentInWindow = int128(spent);
 
-            emit SpendMetered(account, netOutflowUsd, config.spentInWindow);
+            emit SpendMetered(account, netOutflowUsd, spent);
         }
 
         // (2) No standing approvals: any allowance approved in this transaction must be fully
@@ -883,7 +899,7 @@ contract SpendingLimitModule is IERC7579Hook {
     function _remainingBudget(Config storage config) internal view returns (int256) {
         // Widen to uint256 before adding so the window-end sum can never overflow the uint48 fields.
         bool windowExpired = block.timestamp >= uint256(config.windowStart) + uint256(config.windowDuration);
-        int256 spent = windowExpired ? int256(0) : config.spentInWindow;
+        int256 spent = windowExpired ? int256(0) : int256(config.spentInWindow);
         return spent >= config.dailyLimitUsd ? int256(0) : config.dailyLimitUsd - spent;
     }
 

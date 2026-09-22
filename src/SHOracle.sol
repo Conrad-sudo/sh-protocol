@@ -136,16 +136,6 @@ contract SHOracle is Ownable {
     /// @dev Chainlink returns prices with 8 decimals. Multiply by 1e10 to get 18 decimals.
     int256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
 
-    /// @notice The 18-decimal fixed-point scale every USD figure in this protocol is expressed in.
-    uint256 private constant PRECISION = 1e18;
-
-    /// @notice One whole native token, in wei — the amount {getNativeFee} prices to learn the current
-    ///         USD-per-ETH rate.
-    /// @dev Numerically equal to {PRECISION}, kept separate because the two mean different things:
-    ///      one is a fixed-point scale, the other is a token quantity. Collapsing them would make
-    ///      {getNativeFee}'s formula read as a coincidence rather than a conversion.
-    uint256 private constant ONE_NATIVE = 1 ether;
-
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -244,37 +234,6 @@ contract SHOracle is Ownable {
         // amount is a token balance/allowance that cannot approach 2**255, so the cast never truncates.
         // forge-lint: disable-next-line(unsafe-typecast)
         return (int256(amount) * price * ADDITIONAL_FEED_PRECISION) / int256(10 ** f.decimals);
-    }
-
-    /**
-     * @notice Converts a USD amount into the equivalent amount of native token, in wei, at the
-     *         native feed's current price.
-     * @dev This is what keeps the protocol fee stable in USD terms. {SHRegistry} stores the fee as a
-     *      USD figure and every SessionHandler converts it here at execution time, so the wei charged
-     *      tracks the ETH price instead of drifting against it as a hardcoded wei amount would.
-     *
-     *      Formula: (usdAmount × 1e18) / usdPerNative
-     *      Example — $0.015 at ETH = $2500:
-     *        usdPerNative = getPrice(address(0), 1e18) = 2500e18
-     *        (0.015e18 × 1e18) / 2500e18 = 6e12 wei = 0.000006 ETH
-     *
-     *      Reverts through {getPrice} if the native feed is stale or unregistered, so a broken
-     *      ETH/USD feed blocks fee collection rather than charging a wrong amount. Callers should
-     *      know that makes every fee-charging execution depend on this one feed's freshness.
-     *
-     *      The division truncates in the payer's favour. Reaching zero would take an ETH price
-     *      around 1e16 USD, so within {SHRegistry}'s fee bounds the result is always non-zero.
-     *
-     * @param usdAmount USD amount with 18 decimals.
-     * @return          The equivalent native amount in wei.
-     */
-    function getNativeFee(uint256 usdAmount) external view returns (uint256) {
-        // Positive by construction — _stalePriceCheck rejects any non-positive answer — so the cast
-        // cannot wrap and the division below can never be by zero.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint256 usdPerNative = uint256(getPrice(ETH_TOKEN_ADDRESS, ONE_NATIVE));
-
-        return (usdAmount * PRECISION) / usdPerNative;
     }
 
     /**

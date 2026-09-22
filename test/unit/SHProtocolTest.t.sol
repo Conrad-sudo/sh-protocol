@@ -147,6 +147,8 @@ contract SHProtocolTest is Test {
         SHRegistry bareRegistry = new SHRegistry(
             address(this),
             feeRegistry.MIN_PROTOCOL_FEE(),
+            feeRegistry.MIN_PROTOCOL_FEE(),
+            feeRegistry.MAX_PROTOCOL_FEE(),
             address(treasury),
             address(oracle),
             config.reputationRegistry,
@@ -184,10 +186,6 @@ contract SHProtocolTest is Test {
         wallet.initialize(
             SessionHandler.InitConfig({
                 owner: rando,
-                entryPoint: config.entryPoint,
-                reputationRegistry: address(1),
-                identityRegistry: address(2),
-                registry: address(3),
                 walletId: 9,
                 spendingLimitModule: address(module),
                 dailyLimitUsd: 1,
@@ -415,6 +413,40 @@ contract SHProtocolTest is Test {
         wallet.setDailyLimit(-1);
     }
 
+    /// @notice The limit is stored as an int128, so anything larger must be refused rather than cut
+    ///         off; the largest value that fits is still accepted.
+    function test_setDailyLimit_aboveInt128Reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidDailyLimit.selector);
+        wallet.setDailyLimit(int256(type(int128).max) + 1);
+
+        vm.prank(owner);
+        wallet.setDailyLimit(type(int128).max);
+        assertEq(wallet.getConfig().dailyLimitUsd, type(int128).max);
+    }
+
+    /// @notice postCheck checks the new tally against the limit BEFORE storing it (that ordering is
+    ///         what keeps the int128 store safe). A spend landing exactly ON the limit must still be
+    ///         stored in full, and the next unit of spend must then be refused.
+    function test_spendExactlyToTheLimit_isStoredThenNextSpendReverts() public {
+        uint256 amount = 1000e6;
+        int256 exact = oracle.getPrice(address(usdc), amount);
+        vm.prank(owner);
+        wallet.setDailyLimit(exact);
+
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+        assertEq(_spentInWindow(), exact, "a spend exactly at the limit must be stored in full");
+        assertEq(wallet.getRemainingBudget(), 0);
+
+        int256 oneMore = oracle.getPrice(address(usdc), 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_BudgetExceeded.selector, exact + oneMore, exact
+            )
+        );
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1)));
+    }
+
     function test_setDailyLimit_nonOwnerReverts() public {
         vm.prank(rando);
         vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, rando));
@@ -495,6 +527,8 @@ contract SHProtocolTest is Test {
         SHRegistry bigRegistry = new SHRegistry(
             address(this),
             feeRegistry.MIN_PROTOCOL_FEE(),
+            feeRegistry.MIN_PROTOCOL_FEE(),
+            feeRegistry.MAX_PROTOCOL_FEE(),
             address(this),
             address(bigOracle),
             config.reputationRegistry,

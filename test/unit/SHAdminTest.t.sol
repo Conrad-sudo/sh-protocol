@@ -163,8 +163,9 @@ contract SHAdminTest is Test {
                        REGISTRY-SOURCED WALLET CONFIG
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The factory stores none of these itself — it reads them off the registry at deploy time,
-    ///      so a wallet's baked-in addresses must match what the registry held.
+    /// @dev The first four are read off the registry once, when the factory builds the implementation,
+    ///      and every clone shares them as immutables; the module is read per deploy and stored in the
+    ///      wallet. Either way, what a wallet reports must match what the registry held.
     function test_walletInheritsAddressesFromRegistry() public view {
         assertEq(wallet.ENTRY_POINT(), registry.ENTRY_POINT());
         assertEq(wallet.REPUTATION_REGISTRY(), registry.REPUTATION_REGISTRY());
@@ -446,23 +447,16 @@ contract SHAdminTest is Test {
                               PROTOCOL FEE
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The conversion itself: protocolFee is USD (18 dec), getFee returns wei at the native
-    ///      feed's current price. On anvil ETH is $1000, so the deploy script's $0.02 fee is 2e13 wei.
-    function test_getFee_convertsUsdFeeToNativeAtOraclePrice() public view {
-        uint256 usdFee = registry.protocolFee();
-        uint256 usdPerEth = uint256(oracle.getPrice(address(0), 1 ether));
-
-        assertEq(usdPerEth, uint256(ETH_USD_PRICE) * 1e10, "fixture ETH price moved");
-        assertEq(registry.getFee(), (usdFee * 1e18) / usdPerEth, "getFee is not the USD/price quotient");
-        // Pinned literal, so a silent decimals change in either direction fails here rather than
-        // agreeing with a recomputed expectation: $0.02 at $1000/ETH is 0.00002 ETH.
-        assertEq(registry.getFee(), 2e13, "$0.02 at $1000/ETH should be 2e13 wei");
+    /// @dev getFee is the stored wei figure as-is — no conversion. Pinned literal: the deploy
+    ///      script's $0.015 starting fee at the fixture's $1000 ETH is 1.5e13 wei, so a decimals
+    ///      slip in the deploy-time conversion fails here.
+    function test_getFee_returnsTheStoredWeiFee() public view {
+        assertEq(registry.getFee(), registry.protocolFee(), "getFee is not the stored fee");
+        assertEq(registry.getFee(), 1.5e13, "$0.015 at $1000/ETH should be 1.5e13 wei");
     }
 
-    /// @dev The property USD denomination exists to provide: the wei charged moves inversely with
-    ///      the ETH price, so the DOLLAR cost of an execution stays put. A flat wei fee would do the
-    ///      opposite — unchanged wei, doubled dollar cost.
-    function test_getFee_movesInverselyWithEthPriceSoUsdCostIsConstant() public {
+    /// @dev A flat wei fee: the wei charged does not follow the ETH price.
+    function test_getFee_doesNotMoveWithEthPrice() public {
         uint256 feeBefore = registry.getFee();
 
         // Repoint native at 2x the price. setFeed is immediate and not timelocked (THREAT_MODEL 3.8).
@@ -470,15 +464,7 @@ contract SHAdminTest is Test {
         vm.prank(owner);
         treasury.setFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
 
-        uint256 feeAfter = registry.getFee();
-        assertEq(feeAfter, feeBefore / 2, "wei charged did not halve when ETH doubled");
-
-        // The invariant that actually matters: same dollars, both times.
-        assertEq(
-            uint256(oracle.getPrice(address(0), feeAfter)),
-            registry.protocolFee(),
-            "USD value of the fee drifted from the configured fee"
-        );
+        assertEq(registry.getFee(), feeBefore, "fee moved with the ETH price");
     }
 
     /// @dev A fee change lands protocol-wide with no wallet redeployment, because wallets read
@@ -488,34 +474,27 @@ contract SHAdminTest is Test {
         vm.prank(owner);
         treasury.setProtocolFee(maxFee);
 
-        assertEq(registry.getFee(), (maxFee * 1e18) / uint256(oracle.getPrice(address(0), 1 ether)));
+        assertEq(registry.getFee(), maxFee);
     }
 
-    /// @dev The liveness surface the USD fee introduced: getFee prices native, so a stale ETH/USD
-    ///      feed makes the fee uncollectable rather than collectable at a wrong price. See the
-    ///      end-to-end consequence in SessionGuardTest (every session execution reverts).
-    function test_getFee_revertsWhenNativeFeedIsStale() public {
+    /// @dev The fee path makes no oracle call, so a stale or broken native feed cannot block it.
+    function test_getFee_unaffectedByABrokenNativeFeed() public {
+        uint256 fee = registry.protocolFee();
+
         skip(config.ethHeartbeat + 1);
+        assertEq(registry.getFee(), fee, "stale feed changed or blocked the fee");
 
-        vm.expectRevert(SHOracle.PriceOracle_StalePrice.selector);
-        registry.getFee();
-    }
-
-    /// @dev A non-positive answer is a feed malfunction, and must be rejected before the cast in
-    ///      getNativeFee would turn it into an enormous divisor.
-    function test_getFee_revertsOnNonPositiveNativePrice() public {
         MockV3Aggregator(config.ethUsdPriceFeed).updateAnswer(0);
-
-        vm.expectRevert(SHOracle.PriceOracle_InvalidPrice.selector);
-        registry.getFee();
+        assertEq(registry.getFee(), fee, "non-positive price changed or blocked the fee");
     }
 
-    /// @dev The bounds are USD figures now: $0.015 to $0.15 per execution.
-    function test_setProtocolFee_enforcesUsdBounds() public {
+    /// @dev The bounds are wei, converted from $0.005 and $0.10 at deploy. At the fixture's
+    ///      $1000 ETH that is 5e12 and 1e14 wei — 20x apart.
+    function test_setProtocolFee_enforcesBounds() public {
         uint256 minFee = registry.MIN_PROTOCOL_FEE();
         uint256 maxFee = registry.MAX_PROTOCOL_FEE();
-        assertEq(minFee, 15e15, "MIN is $0.015 at 18 decimals");
-        assertEq(maxFee, 15e16, "MAX is $0.15 at 18 decimals");
+        assertEq(minFee, 5e12, "MIN should be $0.005 at $1000/ETH");
+        assertEq(maxFee, 1e14, "MAX should be $0.10 at $1000/ETH");
 
         vm.startPrank(owner);
         vm.expectRevert(SHRegistry.SHRegistry_FeeNotInRange.selector);
@@ -532,21 +511,9 @@ contract SHAdminTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev The floor exists so the fee transfer is never zero-value. Confirm it survives the USD
-    ///      conversion at a price far above anything real — $1M ETH still yields non-zero wei.
-    function test_minFee_staysNonZeroInNativeAtExtremeEthPrices() public {
-        MockV3Aggregator expensive = new MockV3Aggregator(DECIMALS, 1_000_000e8);
-        vm.startPrank(owner);
-        treasury.setFeed(address(oracle), address(0), address(expensive), config.ethHeartbeat);
-        treasury.setProtocolFee(registry.MIN_PROTOCOL_FEE());
-        vm.stopPrank();
-
-        assertGt(registry.getFee(), 0, "floor truncated to a zero-value transfer");
-    }
-
-    /// @dev Same check proposePriceOracle makes on a replacement, now made at construction too: two
-    ///      paths need the native feed (the module's balance metering and getFee), so an oracle
-    ///      without it would leave every wallet deployed against this registry unable to execute.
+    /// @dev Same check proposePriceOracle makes on a replacement, now made at construction too: the
+    ///      module meters every account's native balance delta, so an oracle without a native feed
+    ///      would revert every native-moving execution on every wallet deployed against this registry.
     function test_constructor_revertsWhenOracleCannotPriceNative() public {
         address[] memory tokens = new address[](1);
         address[] memory feeds = new address[](1);
@@ -556,11 +523,14 @@ contract SHAdminTest is Test {
         beats[0] = config.usdcHeartbeat;
         SHOracle noNative = new SHOracle(address(treasury), address(0), tokens, feeds, beats);
         uint256 minFee = registry.MIN_PROTOCOL_FEE(); // read before expectRevert, or it latches here
+        uint256 maxFee = registry.MAX_PROTOCOL_FEE();
 
         vm.expectRevert(SHRegistry.SHRegistry_InvalidPriceOracle.selector);
         new SHRegistry(
             address(treasury),
             minFee,
+            minFee,
+            maxFee,
             address(treasury),
             address(noNative),
             config.reputationRegistry,
@@ -574,14 +544,64 @@ contract SHAdminTest is Test {
     ///      a mistyped oracle, a wrong-network address, or the registry address passed to itself.
     function test_constructor_revertsOnOracleWithNoCode() public {
         uint256 minFee = registry.MIN_PROTOCOL_FEE(); // read before expectRevert, or it latches here
+        uint256 maxFee = registry.MAX_PROTOCOL_FEE();
         address notAnOracle = makeAddr("notAnOracle");
 
         vm.expectRevert();
         new SHRegistry(
             address(treasury),
             minFee,
+            minFee,
+            maxFee,
             address(treasury),
             notAnOracle,
+            config.reputationRegistry,
+            config.identityRegistry,
+            config.entryPoint,
+            0
+        );
+    }
+
+    /// @dev The bounds arrive from the deployer, so the registry checks them: a zero floor would
+    ///      allow a zero-value fee transfer, an inverted pair leaves no fee settable, and a ceiling
+    ///      past uint96 would truncate when stored in protocolFee.
+    function test_constructor_rejectsUnusableFeeBounds() public {
+        vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
+        _registryWithFeeBounds(0, 0, 1e14);
+
+        vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
+        _registryWithFeeBounds(2e14, 2e14, 1e14);
+
+        uint256 pastUint96 = uint256(type(uint96).max) + 1;
+        vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
+        _registryWithFeeBounds(1e14, 1e14, pastUint96);
+    }
+
+    /// @dev The starting fee must sit inside the bounds it is deployed with, both ends inclusive.
+    function test_constructor_rejectsInitialFeeOutsideBounds() public {
+        vm.expectRevert(SHRegistry.SHRegistry_FeeNotInRange.selector);
+        _registryWithFeeBounds(5e12 - 1, 5e12, 1e14);
+
+        vm.expectRevert(SHRegistry.SHRegistry_FeeNotInRange.selector);
+        _registryWithFeeBounds(1e14 + 1, 5e12, 1e14);
+
+        SHRegistry atFloor = _registryWithFeeBounds(5e12, 5e12, 1e14);
+        assertEq(atFloor.MIN_PROTOCOL_FEE(), 5e12);
+        assertEq(atFloor.MAX_PROTOCOL_FEE(), 1e14);
+        assertEq(atFloor.protocolFee(), 5e12);
+    }
+
+    function _registryWithFeeBounds(uint256 initialFee, uint256 minFee, uint256 maxFee)
+        internal
+        returns (SHRegistry)
+    {
+        return new SHRegistry(
+            address(treasury),
+            initialFee,
+            minFee,
+            maxFee,
+            address(treasury),
+            address(oracle),
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
@@ -706,16 +726,6 @@ contract SHAdminTest is Test {
 
         vm.warp(SEQ_NOW + grace + 1);
         assertEq(gated.getPrice(address(0), 1 ether), int256(ETH_USD_PRICE) * 1e10, "grace period never cleared");
-    }
-
-    /// @notice The fee path is gated too — SHRegistry.getFee converts through getNativeFee — so an
-    ///         outage stops fee collection rather than striking the fee at a frozen price.
-    function test_getNativeFee_blockedWhileSequencerIsDown() public {
-        vm.warp(SEQ_NOW);
-        SHOracle gated = _sequencerGatedOracle(address(_uptimeFeed(SEQ_DOWN, SEQ_UP_SINCE)));
-
-        vm.expectRevert(SHOracle.PriceOracle_SequencerDown.selector);
-        gated.getNativeFee(0.02e18);
     }
 
     /// @notice isPriced is a plain storage read and must stay answerable through an outage:

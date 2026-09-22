@@ -76,11 +76,11 @@ SHTreasury  (operator — admin root, fee sink)
             └── SessionHandler  (per user, per chain)
                    ├── validates owner + session-key signatures
                    ├── guards its own admin surface from session keys
-                   ├── pays a small USD-priced protocol fee per agent action
+                   ├── pays a small flat protocol fee per agent action
                    └── hook ──▶ SpendingLimitModule ──▶ SHOracle
 ```
 
-**Protocol economics.** Each agent-driven execution pays a fee set in US dollars ($0.015–$0.15, converted to the native coin at the live price). Owner actions are free. See [docs/contracts.md](docs/contracts.md#protocol-fee).
+**Protocol economics.** Each agent-driven execution pays a flat fee in the chain's native coin: about $0.015 at launch, and always within bounds set at deploy to about $0.005–$0.10. Owner actions are free. See [docs/contracts.md](docs/contracts.md#protocol-fee).
 
 ### How one instruction flows through the system
 

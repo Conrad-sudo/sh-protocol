@@ -52,7 +52,8 @@ export function TermsPage() {
       <h2>Fees</h2>
       <p>
         Each action the assistant takes pays the network fee and a small protocol fee from your Mitfah wallet. The
-        protocol fee is set in dollars and paid in the network's own currency, and it may change.
+        protocol fee is a fixed amount of the network's own currency, so its dollar value moves with that
+        currency's price, and it may change.
       </p>
 
       <h2>Acceptable use</h2>

@@ -81,6 +81,9 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     error SessionHandler_OpGasCostTooHigh(uint256 cost, uint256 max);
     /// @dev Thrown on setMaxOpGasCost(0), which would reject every UserOp.
     error SessionHandler_InvalidMaxOpGasCost();
+    /// @dev Thrown when setMaxOpGasCost is given more than {maxOpGasCost} can hold (type(uint80).max,
+    ///      ~1.2 million ETH).
+    error SessionHandler_MaxOpGasCostTooHigh(uint256 newMax, uint256 limit);
     /// @dev Thrown on enabling an empty allowlist, which would reject every session-key execution.
     error SessionHandler_EmptyAllowlist();
     /// @dev Thrown when address(0) is passed as a session-key allowlist target.
@@ -118,24 +121,51 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev Deliberately generous — it clears a ~600k-gas swap at 2x a spiking base fee, so a fee
     ///      spike never rejects a legitimate op. A bound on abuse, not a gas budget.
     uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
+
+    /// @notice This deployment's ERC-4337 EntryPoint. Overrides Account's default (OZ's canonical v0.8
+    ///         singleton), since this project uses a v0.7 EntryPoint (see HelperConfig.s.sol).
+    /// @dev This and the next three are immutables of the IMPLEMENTATION, set once when SHFactory
+    ///      constructs it (see {ProtocolAddresses}). A wallet is an EIP-1167 clone that runs the
+    ///      implementation's code, so every wallet reads these same values out of that code: no wallet
+    ///      stores them, and no two wallets from one factory can differ. That is only correct because
+    ///      all four are the same for every wallet — anything per-wallet stays in storage below.
+    address public immutable ENTRY_POINT;
+    /// @notice ERC-8004 reputation registry, read by {getAgentReputation}.
+    address public immutable REPUTATION_REGISTRY;
+    /// @notice ERC-8004 identity registry, read by {getAgentIdentity}.
+    address public immutable IDENTITY_REGISTRY;
+    /// @notice SHRegistry this wallet resolves the fee, treasury, oracle and agent id from, per call.
+    SHRegistry public immutable REGISTRY;
+
+    // Storage below is ordered to pack. The inherited layout ends with a slot holding
+    // AccountERC7579Hooked's `_hook` (20 bytes) and Pausable's `_paused` (1 byte); the first two
+    // variables fill that slot's remaining 11 bytes, and the next three share one slot. Every UserOp
+    // reads `_paused` and {maxOpGasCost}; a session-key execution also reads {SH_MODULE} and
+    // {sessionAllowlistEnabled} -- two slots in all. `forge inspect SessionHandler storageLayout` shows
+    // the assignment. Wallets are non-upgradeable clones, so a layout change only ever applies to a
+    // new implementation, never to a wallet already deployed.
+
+    /// @notice Whether {sessionTargetAllowlist} is being enforced. See {toggleAllowList}.
+    bool public sessionAllowlistEnabled;
     /// @notice Maximum total ETH (wei) one UserOp may cost this account, however it is paid.
     /// @dev Owner-settable because gas prices differ per chain and over time; a compile-time constant
     ///      would be too tight somewhere (legitimate ops fail in a fee spike) and too loose elsewhere.
     ///      Enforced in both {_validateUserOp} and {_payPrefund} — see each for why one is not enough.
-    uint256 public maxOpGasCost;
+    /// @dev uint80 holds up to ~1.2 million ETH per op, against a 0.1 ETH default; {setMaxOpGasCost}
+    ///      rejects anything larger.
+    uint80 public maxOpGasCost;
 
-    /// @dev Overrides Account's default (OZ's canonical v0.8 singleton) with this deployment's own
-    ///      EntryPoint, since this project actually uses a v0.7 EntryPoint (see HelperConfig.s.sol).
-    /// @dev Set once in initialize() rather than the constructor: this account is deployed behind an
-    ///      EIP-1167 minimal proxy by SHFactory, so per-wallet state cannot live in immutables (those
-    ///      are baked into the shared implementation bytecode). initialize() is one-time (initializer).
-    address public ENTRY_POINT;
-    address public REPUTATION_REGISTRY;
-    address public IDENTITY_REGISTRY;
-    SHRegistry public REGISTRY;
-    uint256 public WALLET_ID;
-    /// @dev Installed as MODULE_TYPE_HOOK in initialize(); enforces the account's USD spending cap.
+    /// @notice SpendingLimitModule installed as this wallet's hook in {initialize}; enforces the
+    ///         account's USD spending cap.
+    /// @dev Per-wallet storage, NOT an immutable like the four above: the operator can change the
+    ///      registry's module, and each wallet keeps the one that was current when it was deployed.
     SpendingLimitModule public SH_MODULE;
+    /// @notice Sequential id assigned by the factory. Bookkeeping only.
+    /// @dev uint64 (~1.8e19 wallets), the same type as SHFactory's {SHFactory-totalWallets}.
+    uint64 public WALLET_ID;
+    /// @dev Entry count for {sessionTargetAllowlist}; lets {toggleAllowList} refuse an empty one.
+    ///      uint32 (~4.3 billion) is far more targets than any owner could pay gas to add.
+    uint32 public allowedTargetCount;
 
     /// @notice Targets a session key may call, when {sessionAllowlistEnabled} is true. OFF by default.
     /// @dev Confines a key to a fixed set of venues — mainly to keep it away from protocols where the
@@ -143,10 +173,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     ///      (THREAT_MODEL §3.13). Address-granular, never selector-granular, so the account needs no
     ///      ABI knowledge of what it calls.
     mapping(address target => bool allowed) public sessionTargetAllowlist;
-    /// @notice Whether {sessionTargetAllowlist} is being enforced. See {toggleAllowList}.
-    bool public sessionAllowlistEnabled;
-    /// @dev Entry count for {sessionTargetAllowlist}; lets {toggleAllowList} refuse an empty one.
-    uint256 public allowedTargetCount;
 
     /// @notice Session keys authorized to sign UserOps for this account (the owner is always
     ///         authorized separately, in {_rawSignatureValidation}). A bare allowlist: an allowed
@@ -158,7 +184,31 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
                                 Constructor
     //////////////////////////////////////////////////////////////*/
 
-    constructor() {
+    /**
+     * @notice The four protocol addresses every wallet shares. SHFactory passes them once, when it
+     *         constructs the implementation that all of its wallets are cloned from.
+     * @dev Kept out of {InitConfig} because they are identical for every wallet a factory deploys, so
+     *      they become immutables of the implementation instead of per-wallet storage. Nothing is lost
+     *      by fixing them: SHRegistry holds the EntryPoint and both ERC-8004 registries as immutables
+     *      too, and a factory is bound to one registry for life.
+     * @param entryPoint         This deployment's ERC-4337 EntryPoint (v0.7).
+     * @param reputationRegistry ERC-8004 reputation registry.
+     * @param identityRegistry   ERC-8004 identity registry.
+     * @param registry           SHRegistry every wallet reads protocol config from.
+     */
+    struct ProtocolAddresses {
+        address entryPoint;
+        address reputationRegistry;
+        address identityRegistry;
+        address registry;
+    }
+
+    /// @param protocol See {ProtocolAddresses}.
+    constructor(ProtocolAddresses memory protocol) {
+        ENTRY_POINT = protocol.entryPoint;
+        REPUTATION_REGISTRY = protocol.reputationRegistry;
+        IDENTITY_REGISTRY = protocol.identityRegistry;
+        REGISTRY = SHRegistry(protocol.registry);
         _disableInitializers();
     }
 
@@ -167,17 +217,14 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Everything {initialize} needs, bundled so the wallet is fully usable after ONE
-     *         transaction: protocol wiring, the spending-cap config, and the two owner-only grants
-     *         that used to require a follow-up transaction each ({addSession}, {addTrustedSpender}).
-     * @dev A struct rather than a flat parameter list purely for stack depth — twelve value
-     *      parameters overflow the stack in the initializer body. Order mirrors the assignments.
+     * @notice The per-wallet settings {initialize} needs, bundled so the wallet is fully usable after
+     *         ONE transaction: ownership, the spending-cap config, and the two owner-only grants that
+     *         used to require a follow-up transaction each ({addSession}, {addTrustedSpender}).
+     * @dev The protocol addresses every wallet shares are not here; the constructor fixes them in the
+     *      implementation (see {ProtocolAddresses}). A struct rather than a flat parameter list so the
+     *      factory's call names every field.
      * @param owner               Account owner. SHFactory passes its own msg.sender, so the user
      *                            who signs the deploy owns the wallet.
-     * @param entryPoint          This deployment's ERC-4337 EntryPoint (v0.7).
-     * @param reputationRegistry  ERC-8004 reputation registry.
-     * @param identityRegistry    ERC-8004 identity registry.
-     * @param registry            SHRegistry this wallet reads protocol config from.
      * @param walletId            Sequential id assigned by the factory. Bookkeeping only.
      * @param spendingLimitModule SpendingLimitModule to install as MODULE_TYPE_HOOK.
      * @param dailyLimitUsd       Max USD (18 decimals) spendable per window. Must be >= 0.
@@ -189,11 +236,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     struct InitConfig {
         address owner;
-        address entryPoint;
-        address reputationRegistry;
-        address identityRegistry;
-        address registry;
-        uint256 walletId;
+        uint64 walletId;
         address spendingLimitModule;
         int256 dailyLimitUsd;
         uint256 windowDuration;
@@ -212,13 +255,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     function initialize(InitConfig calldata cfg) external initializer {
         __Ownable_init(cfg.owner);
-        ENTRY_POINT = cfg.entryPoint;
-        REPUTATION_REGISTRY = cfg.reputationRegistry;
-        IDENTITY_REGISTRY = cfg.identityRegistry;
-        REGISTRY = SHRegistry(cfg.registry);
         WALLET_ID = cfg.walletId;
         SH_MODULE = SpendingLimitModule(cfg.spendingLimitModule);
-        maxOpGasCost = DEFAULT_MAX_OP_GAS_COST;
+        // Safe: the default is 0.1 ETH, far inside uint80.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        maxOpGasCost = uint80(DEFAULT_MAX_OP_GAS_COST);
 
         // Install the spending-limit hook. Its onInstall
         // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens) tuple, so the config
@@ -450,15 +491,19 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /**
      * @notice Sets the maximum total ETH one UserOp may cost this account. See {maxOpGasCost}.
      * @dev Raise it on an expensive chain, lower it to tighten the bound on a compromised key.
-     *      Reverts on 0, which would reject every UserOp.
-     * @param newMax New ceiling in wei. Must be > 0.
+     *      Reverts on 0, which would reject every UserOp, and above type(uint80).max, which the
+     *      storage slot cannot hold. Takes a uint256 so the ABI is unchanged for callers.
+     * @param newMax New ceiling in wei. Must be > 0 and <= type(uint80).max.
      */
     function setMaxOpGasCost(uint256 newMax) external onlyOwner {
         if (newMax == 0) revert SessionHandler_InvalidMaxOpGasCost();
+        if (newMax > type(uint80).max) revert SessionHandler_MaxOpGasCostTooHigh(newMax, type(uint80).max);
         // Cached before the write: emitting after assigning would report the NEW value as `oldMax`,
         // losing the previous ceiling for anything indexing this event.
         uint256 oldMax = maxOpGasCost;
-        maxOpGasCost = newMax;
+        // Safe: bounded by type(uint80).max above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        maxOpGasCost = uint80(newMax);
         emit MaxOpGasCostUpdated(oldMax, newMax);
     }
 
@@ -614,12 +659,10 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @dev Pays the protocol fee for one session-key execution. Both the recipient and the amount are
      *      resolved from the registry per call, never stored here, so a fee or treasury change lands
      *      on every deployed wallet at once.
-     * @dev The amount is USD-denominated on the registry and converted to native by
-     *      {SHRegistry-getFee} at the oracle's current price. Two consequences worth stating plainly:
-     *      the wei charged differs between two identical executions minutes apart, and a stale
-     *      ETH/USD feed reverts the execution outright — including one that moves only ERC-20s, which
-     *      would otherwise never touch the native feed. That trade is deliberate: charging a wrong
-     *      amount is worse than not charging, and the owner path never reaches here.
+     * @dev The amount is a flat wei figure read straight off the registry, with no oracle call, so
+     *      an ERC-20-only execution never touches the native feed and a stale ETH/USD feed does not
+     *      block fee collection. {SHRegistry} packs the fee beside the treasury address, so the two
+     *      calls below cost one storage read between them.
      * @dev Called BEFORE {_execute}, so the transfer lands outside the hook's preCheck→postCheck
      *      window and is NOT charged against the account's USD spending cap. That is intentional —
      *      the cap meters what the user spends, and a protocol fee is not the user's spend. It does

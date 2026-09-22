@@ -7,6 +7,7 @@ import {SHTreasury} from "../src/SHTreasury.sol";
 import {SHRegistry} from "../src/SHRegistry.sol";
 import {SHFactory} from "../src/SHFactory.sol";
 import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
+import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol";
 import {SpendingLimitModule} from "../src/SpendingLimitModule.sol";
 import "./Constants.s.sol";
 
@@ -35,7 +36,16 @@ import "./Constants.s.sol";
  *      - Live networks: uses the canonical ERC-4337 EntryPoint and the configured account
  */
 contract DeploySHProtocol is Script {
-    uint256 public constant INITIAL_PROTOCOL_FEE = 0.02e18;
+    /// @notice The protocol fee's bounds and starting value, in USD with 18 decimals. SHRegistry
+    ///         stores wei, so {run} converts these through the chain's native price feed at deploy
+    ///         time, giving every chain the same dollar range in its own native token.
+    /// @dev The bounds are immutable once deployed and so drift in dollar terms as the native price
+    ///      moves. The 20x gap is the room for that: the starting fee sits near the floor, so the
+    ///      native price can triple before the floor forces the fee up, and fall ~6x before the
+    ///      ceiling forces it down.
+    uint256 public constant MIN_PROTOCOL_FEE_USD = 0.005e18;
+    uint256 public constant MAX_PROTOCOL_FEE_USD = 0.1e18;
+    uint256 public constant INITIAL_PROTOCOL_FEE_USD = 0.015e18;
     string public constant AGENT_URI = "ipfs://QmZyYpLh7qjH1n9Zt2Xqj8Vh5v6s9z5X7w8y9z0a1b2c3/metadata.json";
 
     /**
@@ -138,6 +148,11 @@ contract DeploySHProtocol is Script {
         priceFeeds[19] = config.usdtUsdPriceFeed;
         heartbeats[19] = config.usdtHeartbeat;
 
+        // The fee in wei, at this chain's current native price. priceFeeds[0] is the native feed.
+        uint256 initialFee = _usdToNative(INITIAL_PROTOCOL_FEE_USD, priceFeeds[0]);
+        uint256 minFee = _usdToNative(MIN_PROTOCOL_FEE_USD, priceFeeds[0]);
+        uint256 maxFee = _usdToNative(MAX_PROTOCOL_FEE_USD, priceFeeds[0]);
+
         vm.deal(config.account, 100 ether); // Fund the deployer account with 10 ETH for deployment costs
 
         // Broadcast as config.account so it becomes the Ownable owner of SHTreasury — and, through
@@ -157,7 +172,9 @@ contract DeploySHProtocol is Script {
         //    a deployed wallet needs, so the factory below stores none of them itself.
         SHRegistry registry = new SHRegistry(
             address(treasury),
-            INITIAL_PROTOCOL_FEE,
+            initialFee,
+            minFee,
+            maxFee,
             address(treasury),
             address(oracle),
             config.reputationRegistry,
@@ -184,5 +201,20 @@ contract DeploySHProtocol is Script {
         treasury.setFactory(address(factory));
 
         vm.stopBroadcast();
+    }
+
+    /**
+     * @dev Converts a USD amount (18 decimals) into wei at `nativeFeed`'s latest answer.
+     * @dev Reads the feed directly rather than through SHOracle, skipping its staleness and sequencer
+     *      checks: a deploy-time fee bound does not need a to-the-minute price, and a stale testnet
+     *      feed must not block a deployment. Rounds down, so ordered USD inputs stay ordered in wei
+     *      and the starting fee always lands inside the bounds.
+     */
+    function _usdToNative(uint256 usdAmount, address nativeFeed) internal view returns (uint256) {
+        (, int256 answer,,,) = AggregatorV3Interface(nativeFeed).latestRoundData();
+        require(answer > 0, "DeploySHProtocol: native price feed returned a non-positive price");
+        // Positive, checked above, so the cast cannot wrap.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return (usdAmount * 10 ** AggregatorV3Interface(nativeFeed).decimals()) / uint256(answer);
     }
 }

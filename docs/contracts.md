@@ -61,23 +61,24 @@ The `SHRegistry` is the central configuration store. Deployed `SessionHandler` w
 
 | Parameter | Type | Purpose |
 |---|---|---|
-| `protocolFee` | `uint256` | **USD-denominated** fee (18 decimals) charged on every session-key execution, bounded to `[MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]` = **$0.015–$0.15**. Converted to native per execution by `getFee()`. See [Protocol fee](#protocol-fee) below. |
+| `protocolFee` | `uint96` | Flat fee **in wei** charged on every session-key execution, bounded to `[MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]`. `getFee()` returns it as stored — no oracle call. See [Protocol fee](#protocol-fee) below. |
+| `MIN_PROTOCOL_FEE` / `MAX_PROTOCOL_FEE` | `uint256` (immutable) | The fee's bounds in wei, set by the constructor. The deploy script converts **$0.005 and $0.10** through the chain's native price, so each chain gets the same dollar range in its own coin. |
 | `treasury` | `address` | `SHTreasury` — fee sink and admin root (owns this registry, the oracle, and the factory) |
 | `priceOracle` | `address` | Canonical `SHOracle` address for USD accounting. **Also governs spending-cap enforcement** — `SpendingLimitModule` resolves it from here on every valuation, so changing it changes how every deployed wallet meters spending. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8. |
 | `agentId` | `uint256` | ERC-8004 token ID of the registered protocol agent. **`0` is a valid id** — ERC-8004 registries mint from 0, so no zero-check exists or should. |
 | `spendingLimitModule` | `address` | Hook installed on wallets deployed from here on. Owner-settable; **not** a constructor arg — see below. Changing it never touches existing wallets. |
-| `ENTRY_POINT` | `address` (immutable) | Canonical ERC-4337 EntryPoint baked into every wallet |
-| `REPUTATION_REGISTRY` | `address` (immutable) | Reputation Registry baked into every wallet |
-| `IDENTITY_REGISTRY` | `address` (immutable) | ERC-8004 Identity Registry baked into every wallet |
+| `ENTRY_POINT` | `address` (immutable) | Canonical ERC-4337 EntryPoint; `SHFactory` bakes it into the `SessionHandler` implementation, so every wallet shares it |
+| `REPUTATION_REGISTRY` | `address` (immutable) | Reputation Registry, baked into the implementation the same way |
+| `IDENTITY_REGISTRY` | `address` (immutable) | ERC-8004 Identity Registry, baked into the implementation the same way |
 | `factory` | `address` | The SHFactory deploying against this registry. Off-chain discoverability only — no contract reads it. |
 
 ```solidity
-uint256 public constant MAX_PROTOCOL_FEE = 15e16;   // $0.15, USD @ 18 decimals
-uint256 public constant MIN_PROTOCOL_FEE = 15e15;   // $0.015, USD @ 18 decimals
+uint256 public immutable MIN_PROTOCOL_FEE;   // wei — $0.005 at the native price on deploy day
+uint256 public immutable MAX_PROTOCOL_FEE;   // wei — $0.10 at the native price on deploy day
 
 uint256 public constant ORACLE_TIMELOCK = 2 days;
 
-function getFee() external view returns (uint256);   // protocolFee priced into wei, live
+function getFee() external view returns (uint256);   // protocolFee in wei, as stored
 function setProtocolFee(uint256 newFee) external onlyOwner;
 function setTreasury(address newTreasury) external onlyOwner;
 function setAgentId(uint256 newId) external onlyOwner;
@@ -89,33 +90,42 @@ function proposePriceOracle(address newOracle) external onlyOwner;
 function commitPriceOracle() external onlyOwner;
 function cancelPriceOracle() external onlyOwner;
 address public pendingPriceOracle;
-uint256 public pendingPriceOracleEta;
+uint48 public pendingPriceOracleEta;
 ```
 
-> **`setPriceOracle` was replaced by a two-phase timelock.** The oracle governs every wallet's spending cap, so repointing it is the single highest-impact action the operator key can take. `proposePriceOracle` records the candidate and starts a 2-day delay; `commitPriceOracle` applies it once the ETA passes; `cancelPriceOracle` withdraws it. `proposePriceOracle` also **rejects an oracle that cannot price native (`address(0)`)**, and **the constructor makes the same check on the initial oracle**. Two paths depend on that feed: the module meters the native balance delta on every metered transaction, and `getFee` prices the protocol fee on every session-key execution — so an oracle without it would leave deployed wallets unable to execute at all. The check also catches a mistyped or wrong-network address, which has no `isPriced()` to call. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8.
+> **Storage is packed.** `protocolFee` is a `uint96` sharing a slot with `treasury` (so `_extractFee`'s two registry reads cost one storage read, not two), and `pendingPriceOracleEta` is a `uint48` sharing a slot with `pendingPriceOracle`. Both are wide enough: the constructor refuses a `MAX_PROTOCOL_FEE` past `uint96`, and a `uint48` timestamp lasts millions of years. The setters still take `uint256`. `agentId` stays `uint256` because an external registry mints it.
+
+> **`setPriceOracle` was replaced by a two-phase timelock.** The oracle governs every wallet's spending cap, so repointing it is the single highest-impact action the operator key can take. `proposePriceOracle` records the candidate and starts a 2-day delay; `commitPriceOracle` applies it once the ETA passes; `cancelPriceOracle` withdraws it. `proposePriceOracle` also **rejects an oracle that cannot price native (`address(0)`)**, and **the constructor makes the same check on the initial oracle**. The module meters the native balance delta on every metered transaction, so an oracle without that feed would revert every native-moving execution on every deployed wallet. The check also catches a mistyped or wrong-network address, which has no `isPriced()` to call. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8.
 
 > **Why `spendingLimitModule` is not a constructor argument.** `SpendingLimitModule`'s own constructor reads `priceOracle()` off the registry — that check is what catches a mis-wired deployment (passing the oracle address where the registry belongs). So the registry must exist before the module can be deployed. Taking the module as a registry constructor argument would make the two mutually undeployable. The deploy script constructs the module against the live registry and then calls `setSpendingLimitModule`; `SHFactory.deployWallet` reverts with `SHFactory_SpendingLimitModuleNotSet` in the window between.
 
 ### Protocol fee
 
-The fee is **stored in USD and charged in native**. `SHRegistry` holds `protocolFee` as an 18-decimal dollar figure; `SessionHandler` converts it at execution time:
+The fee is a **flat amount of native token, in wei**. `SessionHandler._extractFee` reads it off the registry and sends it — the fee path makes no oracle call:
 
 ```
 SessionHandler._extractFee()
-  └─ SHRegistry.getFee()
-       └─ SHOracle.getNativeFee(protocolFee)
-            └─ (protocolFee × 1e18) / getPrice(address(0), 1e18)
+  ├─ SHRegistry.treasury()
+  └─ SHRegistry.getFee()        // protocolFee, as stored (same storage slot as treasury)
 ```
 
-At $0.015 with ETH at $2500 that is `0.015e18 × 1e18 / 2500e18` = `6e12` wei. The dollar cost per execution stays fixed as ETH moves, where a stored wei amount would silently re-price itself. `setProtocolFee` therefore sets what users pay in dollars, and needs no revisiting on price moves.
+It used to be a USD figure converted at execution time. That cost every session execution a Chainlink read (~18k gas, plus the sequencer check on an L2), and a stale ETH/USD feed halted *all* agent activity. A stored wei amount avoids both.
 
-Three properties worth knowing:
+**Bounds are per chain.** The same wei is a different dollar amount on each chain (ETH vs BNB), so `MIN_PROTOCOL_FEE` and `MAX_PROTOCOL_FEE` are constructor arguments, not constants. `DeploySHProtocol` holds the dollar targets — **$0.005 floor, $0.10 ceiling, $0.015 starting fee** — and converts each to wei through the chain's native Chainlink feed at deploy time (`_usdToNative`). It reads the feed directly, skipping the oracle's staleness check, so a stale testnet feed cannot block a deploy. The constructor rejects a zero floor, a floor above the ceiling, a ceiling past `uint96`, and a starting fee outside the bounds.
+
+What follows from a flat fee:
+
+- **Its dollar value moves with the native price.** The operator re-sets it with `setProtocolFee` when it drifts too far.
+- **The bounds drift too, and are permanent.** They are immutable, so if ETH doubles the range becomes ≈ $0.01–$0.20; if it halves, ≈ $0.0025–$0.05. The 20x gap is the room for that: the starting fee sits near the floor, so the price can triple before the floor forces the fee up, and fall ~6x before the ceiling forces it down. New bounds mean a new registry, which means redeploying the protocol.
+- **The ceiling does not consult the oracle, on purpose.** The operator controls the oracle's feeds with no delay, so a ceiling checked in dollars could be lifted by first faking a low native price. A wei ceiling holds regardless.
+
+Three more properties worth knowing:
 
 - **Only session-key executions pay.** `execute` charges the fee when `msg.sender != owner()`; owner-initiated calls pay nothing. `executeFromExecutor` always charges.
 - **The fee is outside the spending cap.** `_extractFee` runs *before* `_execute`, and the hook's `preCheck`→`postCheck` window opens inside `_execute` — so the fee never counts against the account's USD cap. This is deliberate: the cap meters what the *user* spends, and a protocol fee is not the user's spend. It does mean the fee is native outflow the cap cannot see, bounded per execution by `MAX_PROTOCOL_FEE` rather than by the cap.
-- **The ETH/USD feed is now a liveness dependency for all session execution.** Every fee charge prices native, so a stale ETH/USD feed reverts *any* session-key execution — including one that only moves ERC-20s, which under the old flat-wei fee never touched the native feed. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.7.
+- **A stale ETH/USD feed does not block the fee.** An ERC-20-only session execution never touches the native feed. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.7.
 
-`totalFeesCollected` on `SHTreasury` sums **wei**, struck at whatever price applied to each execution. It is not a dollar total and cannot be converted into one with a spot price after the fact.
+`totalFeesCollected` on `SHTreasury` sums **wei** collected across different native prices. It is not a dollar total and cannot be converted into one with a spot price after the fact.
 
 > `router` / `setUniswapRouter` were **removed**: which DEX a wallet trades on is a wallet-level choice, not protocol configuration. Wallets now start with an empty trusted-spender list and the owner grants a router explicitly via `addTrustedSpender`.
 
@@ -229,7 +239,7 @@ function unpause() external onlyOwner;    // via SHTreasury.unpauseFactory
 
 SHRegistry public immutable REGISTRY;
 address public immutable IMPLEMENTATION;
-uint256 public totalWallets;               // next walletId to assign (wallet IDs start at 0)
+uint64 public totalWallets;                // next walletId to assign (wallet IDs start at 0); packed beside _owner/_paused
 mapping(uint256 => address) public wallets;
 
 event WalletDeployed(address indexed walletAddress, address indexed owner, uint256 indexed walletId);
@@ -249,7 +259,7 @@ The module calls it directly (there is no interpreter layer). `getPrice` returns
 
 **Staleness protection:** each registered feed has its **own** heartbeat, set once at construction — volatile assets (ETH, LINK, BTC) update roughly hourly, stablecoins every 23–24 hours. `getPrice` reverts with `PriceOracle_StalePrice` if `block.timestamp - updatedAt > heartbeat` for that feed, and with `PriceOracle_InvalidPrice` on a non-positive answer. (The error names retain the `PriceOracle_` prefix from the contract's earlier name.)
 
-**L2 sequencer gate:** on an L2 the heartbeat check alone is not enough — Chainlink publishes updates *through* the sequencer, so an outage freezes every feed at an answer whose `updatedAt` still looks recent. `_requireSequencerUp()` runs at the top of `_stalePriceCheck` (so it covers `getPrice`, `getNativeFee`, and every module valuation) and reverts with `PriceOracle_SequencerDown` while the uptime feed reads down or reports an uninitialised round, and `PriceOracle_SequencerGracePeriod` until the sequencer has been back for longer than `SEQUENCER_GRACE_PERIOD` (1 hour). `SEQUENCER_UPTIME_FEED` is **immutable**, comes from `HelperConfig.sequencerUptimeFeed`, and is `address(0)` on chains with no sequencer — which skips the check entirely. The constructor probes a non-zero feed once and rejects anything that cannot answer or that answers with something other than the 0/1 status flag (`PriceOracle_InvalidSequencerFeed`), catching a price feed passed in by mistake. `isPriced` is a plain storage read and stays answerable through an outage. Blast radius and rationale: [THREAT_MODEL.md](../THREAT_MODEL.md) §3.14.
+**L2 sequencer gate:** on an L2 the heartbeat check alone is not enough — Chainlink publishes updates *through* the sequencer, so an outage freezes every feed at an answer whose `updatedAt` still looks recent. `_requireSequencerUp()` runs at the top of `_stalePriceCheck` (so it covers `getPrice` and every module valuation) and reverts with `PriceOracle_SequencerDown` while the uptime feed reads down or reports an uninitialised round, and `PriceOracle_SequencerGracePeriod` until the sequencer has been back for longer than `SEQUENCER_GRACE_PERIOD` (1 hour). `SEQUENCER_UPTIME_FEED` is **immutable**, comes from `HelperConfig.sequencerUptimeFeed`, and is `address(0)` on chains with no sequencer — which skips the check entirely. The constructor probes a non-zero feed once and rejects anything that cannot answer or that answers with something other than the 0/1 status flag (`PriceOracle_InvalidSequencerFeed`), catching a price feed passed in by mistake. `isPriced` is a plain storage read and stays answerable through an outage. Blast radius and rationale: [THREAT_MODEL.md](../THREAT_MODEL.md) §3.14.
 
 ```solidity
 constructor(
@@ -289,17 +299,22 @@ Session-key management and cap configuration are plain `onlyOwner`. Note that th
 **Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and `removeLiquidity`'s LP-token approval then fails until the owner grants a router. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
 ```solidity
-/// Called once by SHFactory on each freshly cloned wallet (replaces the constructor).
-/// Installs the module as a HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens),
-/// authorizes cfg.sessionKey if non-zero, and grants each cfg.trustedSpenders entry.
-/// A struct rather than a flat parameter list purely for stack depth.
-struct InitConfig {
-    address owner;
+/// Passed ONCE, when SHFactory's constructor creates the implementation. The four become
+/// immutables of the implementation's code, which every clone runs, so no wallet stores them.
+struct ProtocolAddresses {
     address entryPoint;
     address reputationRegistry;
     address identityRegistry;
     address registry;
-    uint256 walletId;
+}
+constructor(ProtocolAddresses memory protocol);
+
+/// Called once by SHFactory on each freshly cloned wallet, for the per-wallet settings.
+/// Installs the module as a HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens),
+/// authorizes cfg.sessionKey if non-zero, and grants each cfg.trustedSpenders entry.
+struct InitConfig {
+    address owner;
+    uint64 walletId;
     address spendingLimitModule;
     int256 dailyLimitUsd;
     uint256 windowDuration;
@@ -347,13 +362,13 @@ function getAgentReputation() public view returns (uint256 agentId, uint64 feedb
 
 // Per-UserOp gas ceiling (THREAT_MODEL 3.12) - the cap cannot see gas, these bound it
 uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
-uint256 public maxOpGasCost;
-function setMaxOpGasCost(uint256 newMax) external onlyOwner;
+uint80 public maxOpGasCost;                     // up to ~1.2M ETH
+function setMaxOpGasCost(uint256 newMax) external onlyOwner;   // rejects 0 and > type(uint80).max
 
 // Optional session-key target allowlist (THREAT_MODEL 3.13), off by default
 mapping(address => bool) public sessionTargetAllowlist;
 bool public sessionAllowlistEnabled;
-uint256 public allowedTargetCount;
+uint32 public allowedTargetCount;
 function toggleAllowList(bool enabled) external onlyOwner;      // refuses to enable while empty
 function addAllowedTarget(address target) external onlyOwner;
 function addAllowedTargets(address[] calldata targets) external onlyOwner;
@@ -366,6 +381,8 @@ event SessionAllowlistToggled(bool enabled);
 event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
+
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) and `allowedTargetCount` (`uint32`) share one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of six (mapping lookups aside). `forge inspect SessionHandler storageLayout` shows the assignment.
 
 > The account currently has **no validator module**. Until a validator (an owner/ECDSA validator or Smart Sessions) is added, this self-validation path is what makes UserOps work — the bot's nonce-key scheme still validates fine because any extracted "validator" isn't installed and the account falls through to `_rawSignatureValidation`.
 
@@ -417,15 +434,26 @@ function preCheck(address, uint256, bytes calldata msgData) external returns (by
 function postCheck(bytes calldata hookData) external;
 
 // Config setters (onlyInstalled — the account calls these as itself, via SessionHandler passthroughs)
-function setDailyLimit(int256 dailyLimitUsd) external;
+function setDailyLimit(int256 dailyLimitUsd) external;   // 0 <= limit <= type(int128).max
 function setWindowDuration(uint256 windowDuration) external;
 function addWatchedToken(address token) external;
 function removeWatchedToken(address token) external;
 function addTrustedSpender(address spender) external;
 function removeTrustedSpender(address spender) external;
 
+// Per-account state. Field order follows storage packing: the first four fields share ONE slot.
+struct Config {
+    bool installed;
+    uint48 windowStart;
+    uint48 windowDuration;
+    int128 spentInWindow;      // 18-decimal USD, running total for the current window
+    int128 dailyLimitUsd;      // 18-decimal USD
+    address[] watchedTokens;
+    address[] trustedSpenders;
+}
+
 // Views (keyed by account)
-function getConfig(address account) external view returns (Config memory);
+function getConfig(address account) external view returns (Config memory);   // read by field NAME
 function isWatched(address account, address token) external view returns (bool);
 function isTrustedSpender(address account, address spender) external view returns (bool);
 function getRemainingBudget(address account) external view returns (int256);
@@ -443,6 +471,8 @@ event SpendMetered(address indexed account, int256 netOutflowUsd, int256 spentIn
 ```
 
 **Errors:** `AlreadyInstalled`, `NotInstalled`, `InvalidDailyLimit`, `InvalidWindowDuration`, `TokenNotPriced(token)`, `TooManyWatchedTokens`, `TooManyTrustedSpenders`, `InvalidTrustedSpender`, `UnlimitedApprovalRejected`, `StandingApprovalNotAllowed(token, spender, residual)`, `BudgetExceeded(spentUsd, dailyLimitUsd)`, `AdminExecution`, `OracleNotSet` — each prefixed `SpendingLimitModule_`.
+
+**The running total shares a slot with the install flag and the window.** `preCheck` already reads that slot, so `postCheck` reads the total cheaply, a window reset writes the new start and the zeroed total in one store, and writing the total never pays the 20,000-gas cost of filling an empty slot. Both money values are `int128` (~$1.7e20 at 18 decimals); the stored total can never be cut off because `setDailyLimit` keeps the limit inside `int128` and `postCheck` checks the new total against the limit *before* storing it. The per-transaction outflow is still computed at full `int256`. Measured on a session-key token transfer: about −1,900 gas on a normal spend, −4,900 on a spend that starts a new window, and −19,000 on a wallet's first spend. Because the field order follows the packing, read `getConfig()` by field name, never by position — the Python app uses `contracts.read_spending_config`.
 
 **Native value IS metered.** preCheck snapshots the account's native balance and postCheck prices its net change through the `address(0)` sentinel feed, alongside the watched tokens — so a native send, and the native leg of a swap (e.g. `swapExactETHForTokens`), count against the cap. Gas is excluded: the ERC-4337 prefund leaves the account before preCheck and the refund settles to the EntryPoint deposit after postCheck, never touching the metered delta.
 
@@ -493,11 +523,11 @@ Orchestrates deployment of all shared infrastructure. Individual `SessionHandler
 
 **Deployment sequence:**
 
-1. Instantiate `HelperConfig`; build parallel `(tokens, priceFeeds, heartbeats)` arrays.
+1. Instantiate `HelperConfig`; build parallel `(tokens, priceFeeds, heartbeats)` arrays. Convert the fee's dollar targets (`MIN_PROTOCOL_FEE_USD`, `MAX_PROTOCOL_FEE_USD`, `INITIAL_PROTOCOL_FEE_USD`) to wei through the native feed, `priceFeeds[0]`.
 2. Deploy `SHTreasury()` — the admin root, deployed **first** so its address can own everything below.
 3. Deploy `SHOracle(address(treasury), config.sequencerUptimeFeed, tokens, priceFeeds, heartbeats)` — born owned by the treasury.
 4. Call `IIdentityRegistry.register(AGENT_URI)` to mint the agent NFT and obtain `agentId`.
-5. Deploy `SHRegistry(address(treasury), initialFee, address(treasury), address(oracle), agentId)` — owned by the treasury and paying fees to it.
+5. Deploy `SHRegistry(address(treasury), initialFee, minFee, maxFee, address(treasury), address(oracle), …, agentId)` — owned by the treasury and paying fees to it.
 6. Call `treasury.setRegistry(address(registry))` — write-once, fixing the pairing.
 6b. Deploy `SpendingLimitModule(address(registry))` — wired to the **registry**, from which it resolves the current oracle on every valuation (no interpreter). Must come after the registry: its constructor reads `priceOracle()` off it.
 7. Call `treasury.setSpendingLimitModule(address(module))` — the module could not be a registry constructor argument (see the registry section), so it is registered here.

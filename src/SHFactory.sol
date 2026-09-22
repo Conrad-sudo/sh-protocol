@@ -12,16 +12,21 @@ contract SHFactory is Ownable, Pausable {
     /// @dev Thrown by deployWallet when no SpendingLimitModule has been configured yet.
     error SHFactory_SpendingLimitModuleNotSet();
 
-    /// @notice The SHRegistry deployed SessionHandlers read all protocol configuration from —
-    ///         EntryPoint, the two ERC-8004 registries, and the SpendingLimitModule to install.
+    /// @notice The SHRegistry this factory's wallets are wired to. Its EntryPoint and ERC-8004
+    ///         registries are baked into {IMPLEMENTATION} at construction; its SpendingLimitModule is
+    ///         read on every {deployWallet}.
     /// @dev Immutable: a factory is bound to one registry for life. Point wallets at a different
     ///      registry by deploying a new factory and recording it with SHRegistry.setFactory.
     SHRegistry public immutable REGISTRY;
 
+    /// @notice The SessionHandler every wallet is an EIP-1167 clone of.
     address public immutable IMPLEMENTATION;
 
     /// @notice Total number of wallets deployed. Doubles as the next walletId to assign.
-    uint256 public totalWallets;
+    /// @dev uint64 (~1.8e19 wallets) so it shares slot 0 with Ownable's `_owner` and Pausable's
+    ///      `_paused`. {deployWallet} reads `_paused` first (whenNotPaused), so reading and bumping
+    ///      this counter then costs no extra cold storage read.
+    uint64 public totalWallets;
     /// @notice Maps each sequential walletId to its deployed wallet address.
     mapping(uint256 => address) public wallets;
 
@@ -39,9 +44,11 @@ contract SHFactory is Ownable, Pausable {
 
     /**
      * @notice Deploys the factory and the SessionHandler implementation it clones from.
-     * @dev Every other address a wallet needs (EntryPoint, reputation/identity registries, the
-     *      SpendingLimitModule) is read from the registry at deploy-wallet time rather than stored
-     *      here, so those can be corrected in one place without redeploying this factory.
+     * @dev The EntryPoint and both ERC-8004 registries are read from the registry ONCE, here, and
+     *      become immutables of the implementation (see {SessionHandler-ProtocolAddresses}). They are
+     *      immutable on the registry too, so there is no later change for wallets to miss. The
+     *      SpendingLimitModule is the exception: the operator can change it, so {deployWallet} reads
+     *      it fresh for every wallet. The registry must therefore already be deployed.
      * @param owner     Address that will own this factory — the SHTreasury, the protocol's single
      *                  admin root. Supplied rather than taken from msg.sender so no follow-up
      *                  transferOwnership is needed; the operator reaches {pause}/{unpause} through
@@ -50,15 +57,25 @@ contract SHFactory is Ownable, Pausable {
      */
     constructor(address owner, address _registry) Ownable(owner) {
         REGISTRY = SHRegistry(_registry);
-        IMPLEMENTATION = address(new SessionHandler());
+        IMPLEMENTATION = address(
+            new SessionHandler(
+                SessionHandler.ProtocolAddresses({
+                    entryPoint: SHRegistry(_registry).ENTRY_POINT(),
+                    reputationRegistry: SHRegistry(_registry).REPUTATION_REGISTRY(),
+                    identityRegistry: SHRegistry(_registry).IDENTITY_REGISTRY(),
+                    registry: _registry
+                })
+            )
+        );
     }
 
-    /// @notice Pauses the contract, disabling execute(). Only callable by the owner.
+    /// @notice Pauses the factory, blocking {deployWallet}. Existing wallets are unaffected. Only
+    ///         callable by the owner.
     function pause() public onlyOwner {
         _pause();
     }
 
-    /// @notice Unpauses the contract, re-enabling execute(). Only callable by the owner.
+    /// @notice Unpauses the factory, re-enabling {deployWallet}. Only callable by the owner.
     function unpause() public onlyOwner {
         _unpause();
     }
@@ -121,7 +138,7 @@ contract SHFactory is Ownable, Pausable {
 
         bytes32 salt = _salt(msg.sender, deployCount[msg.sender]++);
 
-        uint256 walletId = totalWallets;
+        uint64 walletId = totalWallets;
         address walletInstance = Clones.cloneDeterministic(IMPLEMENTATION, salt);
 
         // Bookkeeping BEFORE the external initialize() call (checks-effects-interactions). The
@@ -137,10 +154,6 @@ contract SHFactory is Ownable, Pausable {
             .initialize(
                 SessionHandler.InitConfig({
                     owner: msg.sender,
-                    entryPoint: REGISTRY.ENTRY_POINT(),
-                    reputationRegistry: REGISTRY.REPUTATION_REGISTRY(),
-                    identityRegistry: REGISTRY.IDENTITY_REGISTRY(),
-                    registry: address(REGISTRY),
                     walletId: walletId,
                     spendingLimitModule: module,
                     dailyLimitUsd: dailyLimitUsd,
