@@ -6,6 +6,7 @@ import ShieldIcon from '@rsuite/icons/Shield'
 import { Link } from 'react-router'
 import { Text } from 'rsuite'
 import { useAuth } from '../auth/useAuth'
+import { Wallpaper } from '../components/brand/Wallpaper'
 import { LinkButton } from '../components/LinkButton'
 import { StatusTag } from '../components/StatusTag'
 import { useChains } from '../hooks/useChains'
@@ -93,6 +94,7 @@ export function HomePage() {
   return (
     <>
       <title>Mitfah — an AI assistant for your crypto wallet</title>
+      <Wallpaper place="hero" />
 
       <section className="mf-hero">
         <h1>An AI assistant for your crypto wallet that can only spend what you allow.</h1>

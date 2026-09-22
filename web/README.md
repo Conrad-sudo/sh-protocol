@@ -30,6 +30,7 @@ the API, so the page and the API share an origin.
 | `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
 | `npm run og` | Re-renders the social share image to `public/og.png` |
 | `npm run marks` | Rebuilds the light and dark logo marks from `scripts/brand/Key-logo.png` |
+| `npm run wallpaper` | Redraws the wallpaper (landing, sign-in, dashboard) to `public/brand/wallpaper-*.svg` |
 | `npm run lint` | Oxlint |
 | `npm run typecheck` | TypeScript only |
 
@@ -103,6 +104,19 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   white paper out to alpha and writes `public/brand/mark-light.png` plus a `mark-dark.png`
   recoloured for a navy background (pale-blue ring, green traces, white key). To change the logo,
   replace `Key-logo.png`, run the script, and set `MARK_RATIO` in `src/components/brand/Logo.tsx`
-  to the size it prints. `public/favicon.svg` and `public/icon-*.png` are a hand-drawn
-  simplification of the same ring-and-circuit idea — at 32px a scaled-down copy of the real mark
-  turns to mush, so they are deliberately not generated from it.
+  to the size it prints. The same run writes the icons — `public/favicon.svg`, `favicon-32.png`,
+  `apple-touch-icon.png` and `icon-*.png` — from the key's handle alone: the ring and its circuit,
+  cut from the artwork with the key's shaft left out, so their circuitry is the logo's own. The app
+  icons put it on navy; `favicon.svg` holds a light and a dark copy and shows whichever suits the
+  browser's colour scheme. At 16px the circuit is only a texture inside the ring; that is accepted
+  so every icon matches the logo.
+- `scripts/wallpaper/` — `npm run wallpaper` draws the wallpaper behind the landing page, the
+  sign-in and sign-up card and the dashboard: the logo's ring as a polished metal band (with its
+  crescent, and a gap where the key's shaft would cross), and circuit traces running from it to
+  every edge. Light mode has raised steel traces; dark mode has glowing emerald ones. The 3D and the
+  glow are drawn, not filtered, so the files stay sharp and cheap to paint. A fixed seed lays out
+  the traces, so a re-run writes the same files; change `SEED` for a different layout.
+  `components/brand/Wallpaper.tsx` puts it on a page as a fixed layer, so the page scrolls over it;
+  its `place` picks where the ring sits, and `app.css` (the Wallpaper section) positions it by the
+  ring, which is the centre of the 2880px square. Over it, cards turn to frosted glass and text on
+  the wallpaper gets a halo in the page colour; it's hidden for anyone asking for more contrast.

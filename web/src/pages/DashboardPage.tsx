@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
+import { Wallpaper } from '../components/brand/Wallpaper'
 import { BalancesCard } from '../components/dashboard/BalancesCard'
 import { FundDrawer } from '../components/dashboard/FundDrawer'
 import { SpendingCard } from '../components/dashboard/SpendingCard'
@@ -21,6 +22,7 @@ export function DashboardPage() {
 
   return (
     <>
+      <Wallpaper place="dashboard" />
       <PageHeader
         title="Dashboard"
         description={me?.email ? `Signed in as ${me.email}` : undefined}

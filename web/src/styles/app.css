@@ -324,6 +324,169 @@
   color: var(--rs-primary-600);
 }
 
+/* ── Wallpaper ──────────────────────────────────────────────────────────── */
+
+/*
+ * The logo's ring and circuit (components/brand/Wallpaper.tsx, drawn by scripts/wallpaper/render.ts),
+ * held still behind the page so the content scrolls over it. A fixed layer rather than
+ * `background-attachment: fixed`, which iOS ignores and other browsers repaint on every scroll. It
+ * is as tall as the LARGE viewport, so a phone's address bar sliding away doesn't resize it and
+ * nudge the ring. The ring is the centre of the square image and sits at (--mf-ring-x, --mf-ring-y).
+ */
+.mf-wallpaper {
+  --mf-ring-x: 50%;
+  --mf-ring-y: 50%;
+  --mf-wallpaper-size: 2880px;
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 100lvh;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/*
+ * <html> and <body> both paint the page colour, and body's paint lands ON the layer behind the page.
+ * <html>'s is the same colour, so body can step aside.
+ */
+body:has(.mf-wallpaper) {
+  background: transparent;
+}
+
+.mf-wallpaper::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--mf-ring-x) - var(--mf-wallpaper-size) / 2);
+  top: calc(var(--mf-ring-y) - var(--mf-wallpaper-size) / 2);
+  width: var(--mf-wallpaper-size);
+  height: var(--mf-wallpaper-size);
+  background: url('/brand/wallpaper-light.svg') center / contain no-repeat;
+}
+
+.rs-theme-dark .mf-wallpaper::before {
+  background-image: url('/brand/wallpaper-dark.svg');
+}
+
+/*
+ * Landing: round the headline, 300px down. It fades in under the header, where the ring is cut off
+ * and a trace's pad beside a link would read as a notification dot.
+ */
+.mf-wallpaper[data-place='hero'] {
+  --mf-ring-y: 300px;
+}
+
+.mf-wallpaper[data-place='hero']::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 160px;
+  background: linear-gradient(var(--rs-body), transparent);
+}
+
+/*
+ * Dashboard: in the middle of the content area, right of the sidebar, a little below centre. It is
+ * a working screen full of small text, so the wallpaper is quieter here than on the landing page.
+ */
+.mf-wallpaper[data-place='dashboard'] {
+  --mf-ring-y: 55%;
+}
+
+.mf-wallpaper[data-place='dashboard']::before {
+  opacity: 0.6;
+}
+
+.mf-shell[data-mode='desktop'] .mf-wallpaper {
+  --mf-ring-x: calc(50% + 120px);
+}
+
+.mf-shell[data-mode='tablet'] .mf-wallpaper {
+  --mf-ring-x: calc(50% + 32px);
+}
+
+/*
+ * On a phone the ring would be far wider than the screen — only two arcs would show, and none of
+ * the circuit — so it shrinks to just wider than the screen.
+ */
+@media (max-width: 599px) {
+  .mf-wallpaper {
+    --mf-wallpaper-size: 1500px;
+  }
+}
+
+/*
+ * Text lying straight on the wallpaper gets a halo in the page colour, so a trace running under a
+ * word breaks round it (as map labels are drawn) instead of crossing the letters. Anything with its
+ * own surface — cards, filled buttons, tags, fields — stops the inherited halo; see-through buttons
+ * keep it.
+ */
+body:has(.mf-wallpaper) :is(.mf-public, .mf-auth, .mf-content) {
+  text-shadow:
+    0 0 2px var(--rs-body),
+    0 0 4px var(--rs-body),
+    0 0 12px var(--rs-body);
+}
+
+body:has(.mf-wallpaper)
+  :is(.mf-public, .mf-auth, .mf-content)
+  :is(.rs-btn:not([data-appearance='ghost'], [data-appearance='subtle'], [data-appearance='link']), .rs-panel, .rs-tag, .rs-input, .rs-picker, .mf-landing-card, .mf-auth-card, .mf-network-list li) {
+  text-shadow: none;
+}
+
+/*
+ * Outline and subtle buttons are see-through, so over the wallpaper their labels would sit on the
+ * traces. They get a frosted backing — as a background image, which RSuite's hover colours (set as
+ * background-color) don't replace; a subtle button drops it while its own hover colour shows.
+ */
+body:has(.mf-wallpaper)
+  :where(.mf-public, .mf-auth, .mf-content)
+  :where(.rs-btn[data-appearance='ghost'], .rs-btn[data-appearance='subtle']:not(:hover, :active)) {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--rs-body) 82%, transparent),
+    color-mix(in srgb, var(--rs-body) 82%, transparent)
+  );
+  backdrop-filter: blur(6px);
+}
+
+/* A card is already a surface. */
+body:has(.mf-wallpaper) :is(.rs-panel, .mf-landing-card, .mf-auth-card) .rs-btn {
+  background-image: none;
+  backdrop-filter: none;
+}
+
+/*
+ * Over the wallpaper the cards hover: frosted glass, so the circuit shows through them blurred, and
+ * a soft shadow below. 85% is solid enough to read on where a browser can't blur, and a light 6px
+ * blur is enough over thin traces: 12px dropped 1 frame in 20 while scrolling, 6px about none.
+ * Fully solid for anyone whose system asks for less transparency.
+ */
+body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
+  background: color-mix(in srgb, var(--rs-bg-card) 85%, transparent);
+  backdrop-filter: blur(6px) saturate(1.4);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 70%),
+    0 20px 44px -22px rgb(6 42 78 / 40%);
+}
+
+.rs-theme-dark:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 6%),
+    0 24px 48px -20px rgb(0 0 0 / 70%);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
+    background: var(--rs-bg-card);
+    backdrop-filter: none;
+  }
+}
+
+/* Someone who asks for more contrast, or forces their own colours, gets a plain page. */
+@media (prefers-contrast: more), (forced-colors: active) {
+  .mf-wallpaper {
+    display: none;
+  }
+}
+
 /* ── Auth pages ─────────────────────────────────────────────────────────── */
 
 .mf-auth {
