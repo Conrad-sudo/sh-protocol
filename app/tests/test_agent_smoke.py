@@ -14,8 +14,8 @@ Scenarios run SEQUENTIALLY and in one process on purpose: tx_sender hands out bu
 cache guarded by a process-wide lock, so concurrent conversations against the same wallet would race
 on the same EOA's nonce.
 
-Requires the Phase 7 stack (make vault / make sepolia-fork / make setup-test ARGS=sepolia-fork).
-Costs real Anthropic credits.
+Requires the Phase 7 stack (make vault / a running fork / make setup-test ARGS=<that fork>). Runs
+on whichever network the harness user was last deployed to. Costs real Anthropic credits.
 
 Run: make agent-smoke
 """
@@ -34,10 +34,15 @@ from langchain_core.messages import HumanMessage   # noqa: E402
 
 import smart_wallet_agent as swa                   # noqa: E402
 from agent_context import AgentContext             # noqa: E402
+from constants import CHAIN_ID_ARBITRUM            # noqa: E402
 from deploy_wallet import resolve_harness_user     # noqa: E402
 from network_config import load_network_config     # noqa: E402
 
 TRACE_PATH = os.getenv("AGENT_TRACE_PATH", "/tmp/agent_smoke_traces.json")
+
+# What the swap scenario buys: LINK, unless the chain's Uniswap V2 LINK pool is too thin to trade.
+# Arbitrum's is empty (V2 is thin there; most volume is on V3), so it buys USDC, its deepest V2 pair.
+SWAP_TOKEN = {CHAIN_ID_ARBITRUM: "USDC"}
 
 
 def tool_calls(messages) -> list[dict]:
@@ -104,7 +109,7 @@ SCENARIOS = [
             "inside the same UserOp, so a standalone approve must never appear."
         ),
         "turns": [
-            "Swap 0.01 ETH for LINK.",
+            "Swap 0.01 ETH for {swap_token}.",
             "Yes, 0.5% slippage is fine. Go ahead.",
         ],
     },
@@ -157,6 +162,7 @@ async def main():
             thread = f"smoke-{scenario['id']}:{chain_id}"
             turns = []
             for text in scenario["turns"]:
+                text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK"))
                 print(f"  > {text[:70]}")
                 turn = await run_turn(user_id, chain_id, thread, text)
                 names = [t["name"] for t in turn["tools"]]

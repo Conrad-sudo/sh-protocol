@@ -358,8 +358,9 @@ def deploy(user_id: int, network: str):
     Top-level deployment dispatcher. Deploys a SessionHandler wallet for user_id via
     SHFactory.deployWallet() on the given network.
 
-    Supported networks: "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "sepolia", "bsc".
-    Each one must already have the shared protocol infrastructure deployed (see
+    Supported networks: "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork",
+    "arbitrum-fork", "sepolia", "bsc", "celo". Each one must already have the shared protocol
+    infrastructure deployed (see
     deploy_wallet()). "sepolia" and "bsc" are live networks — SEPOLIA_PRIVATE_KEY /
     BSC_PRIVATE_KEY must be set and funded with real ETH/BNB before deploying (see
     LIVE_PRIVATE_KEY_ENV).
@@ -373,7 +374,10 @@ def deploy(user_id: int, network: str):
     @param network  Target network name (see supported values above).
     @raises ValueError  If network is not one of the supported values.
     """
-    if network in ("anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork", "sepolia", "bsc", "celo"):
+    if network in (
+        "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork", "arbitrum-fork",
+        "sepolia", "bsc", "celo",
+    ):
         deploy_wallet(user_id, network)
     else:
         raise ValueError(f"Unsupported network '{network}'")

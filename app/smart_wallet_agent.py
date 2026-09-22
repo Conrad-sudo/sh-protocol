@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from db import DB_PATH
+from contract_errors import name_revert
 import asyncio
 import logging
 
@@ -44,6 +45,16 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
 - **Removing liquidity is free against the cap.** It returns value to the wallet (a net inflow),
   so it never charges the budget — only the pause state and session validity need checking.
 
+- **Prices can pause for a while.** Any transaction that moves the native asset or a metered
+  token, and any price lookup (including `preflight_check`), fails while price data can't be
+  trusted. `PriceOracle_SequencerDown` means the network (e.g. Arbitrum) is having an outage;
+  `PriceOracle_SequencerGracePeriod` means it has just recovered, and prices stay paused until it
+  has been running for an hour; `PriceOracle_StalePrice` means a price feed hasn't updated
+  recently. None of these is a problem with the user's wallet or funds, and the owner can still
+  withdraw or pause from the web app meanwhile. Say so plainly, tell them to try again later, and
+  stop: don't retry, and don't look for a way around it (another token, a smaller amount, a
+  different tool).
+
 ## Hard Rules
 
 - **Never estimate swap quantities using prices.** When the user asks how much of a token they will
@@ -54,7 +65,7 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
   (e.g. "how much AVAX will I get for 1 ETH?", "how much ETH do I need to buy 100 LINK?").
 
 - **The wrapped-native ticker depends on the chain the wallet is deployed on**: it's `"weth"` on
-  Ethereum/Sepolia, `"wbnb"` on BSC. Tool defaults (e.g. `add_liquidity`'s `token_b`) resolve this
+  Ethereum/Sepolia/Arbitrum, `"wbnb"` on BSC. Tool defaults (e.g. `add_liquidity`'s `token_b`) resolve this
   automatically — leave those parameters unset rather than hardcoding `"weth"`. Where a ticker must
   be passed explicitly, call `get_supported_tokens()` first if you're unsure which one the
   current network uses.
@@ -294,6 +305,20 @@ async def close_checkpointer():
         _checkpointer_cm = None
         _checkpointer = None
 
+def _tool_failure_message(exc: Exception) -> str:
+    """
+    What the agent is told when a tool raises something other than a ToolException.
+
+    Mostly a contract revert on a read, which web3 reports as bare hex (ContractCustomError). Named,
+    the agent can tell a price pause from a real fault; the middleware's default text would also
+    end in "Please try again.", which is exactly wrong for an outage.
+    """
+    reason = name_revert(str(exc))
+    if reason:
+        return f"The contract call reverted with {reason}."
+    return f"The tool failed with {type(exc).__name__}: {exc}"
+
+
 def init_agent():
     global agent
     tools = get_tools()
@@ -312,7 +337,7 @@ def init_agent():
         # tool-call args, not runtime failures — and crashes the process mid-tool-call,
         # leaving an orphaned tool_use with no tool_result in the sqlite checkpoint. That
         # corrupts the thread permanently: Anthropic rejects every future message in it.
-        middleware=[ToolRetryMiddleware(max_retries=0, on_failure="continue"),
+        middleware=[ToolRetryMiddleware(max_retries=0, on_failure=_tool_failure_message),
                     AnthropicPromptCachingMiddleware(ttl="5m")
                     
                     ],

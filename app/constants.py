@@ -4,6 +4,7 @@
 
 from langchain_erc20.tokens import ZERO_ADDRESS
 from langchain_uniswap_v2 import KNOWN_NETWORKS
+from web3 import Web3
 
 CHAIN_ID_ANVIL = 31337
 CHAIN_ID_MAINNET = 1
@@ -33,13 +34,15 @@ def get_router(chain_id: int) -> str:
     not trust, so a mismatch turns every LP-token approval into a revert.
 
     @param chain_id  The numeric chain ID.
+    @return             The router address, checksummed. The package stores some in lowercase
+                        (Arbitrum's, for one), which web3 refuses as a contract argument.
     @raises ValueError  If the package knows no V2 deployment for the chain (e.g. a bare Anvil
                         node — fork modes inherit the forked chain's ID and so resolve normally).
     """
     network = KNOWN_NETWORKS.get(chain_id)
     if network is None:
         raise ValueError(f"No Uniswap-V2-compatible router configured for chain_id {chain_id}")
-    return network["router"]
+    return Web3.to_checksum_address(network["router"])
 
 # The V2 factory address is not hardcoded per chain: langchain-uniswap-v2 reads router.factory()
 # off the router above, so pair lookups can never drift from the router in use.

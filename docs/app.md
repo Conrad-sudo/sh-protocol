@@ -16,6 +16,7 @@ app/
 ├── anvil.py               ← UserOp execution (self-bundled: local/fork/sepolia) — single + batch
 ├── live_network.py        ← UserOp execution via Alchemy bundler — single + batch
 ├── tx_sender.py           ← Nonce-safe EOA broadcast: locked nonce allocation + fee-bump/timeout
+├── contract_errors.py     ← Names contract reverts (custom errors incl. SHOracle's, Error(string)) for the API and the agent
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── tools.py               ← LangChain tool wrappers for the AI agent
@@ -30,7 +31,7 @@ app/
     ├── checks.py          ← Shared check()/finish() helpers; importing it puts app/ on sys.path
     ├── test_identity.py   ← No tool lets the model choose the account (make identity-test)
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
-    ├── test_e2e_fork.py   ← Full user journey on a Sepolia fork (make e2e-test)
+    ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
 
@@ -69,10 +70,12 @@ CHAIN_ID_MAINNET    = 1
 CHAIN_ID_SEPOLIA    = 11155111
 CHAIN_ID_BSC        = 56
 CHAIN_ID_CELO       = 42220
+CHAIN_ID_ARBITRUM   = 42161
 WEI_PER_ETH         = 10**18
 ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 
-# ROUTER maps each chain ID to its canonical V2 router; get_router(chain_id) resolves it.
+# get_router(chain_id) returns the chain's canonical V2 router from langchain-uniswap-v2's
+# KNOWN_NETWORKS, checksummed (the package stores some, e.g. Arbitrum's, in lowercase).
 # V2 factory addresses stay unhardcoded: langchain-uniswap-v2 reads router.factory()
 # off that router. See toolkits.py.
 ```

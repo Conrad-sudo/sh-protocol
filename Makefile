@@ -50,11 +50,12 @@ auth-test:
 # Everything that runs without a chain.
 py-test: identity-test auth-test
 
-# The real journey against a running Sepolia fork: signup -> SIWE -> deploy -> every owner
-# action -> the eth_call simulations. Needs `make vault`, `make sepolia-fork` and
-# `make setup-test ARGS=sepolia-fork` first. Refuses to run if it is not on a local fork.
+# The real journey against a running fork: signup -> SIWE -> deploy -> every owner action -> the
+# eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia
+# unless ARGS names another fork, e.g. `make e2e-test ARGS=arbitrum-fork`. Needs `make vault`, that
+# fork running and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.
 e2e-test:
-	.venv/bin/python3 app/tests/test_e2e_fork.py
+	.venv/bin/python3 app/tests/test_e2e_fork.py $(ARGS)
 
 # The prompt-regression gate: a REAL conversation against the fork, checking the agent still
 # reaches the right tools in the right order now that the prompt no longer spells out an id

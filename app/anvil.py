@@ -6,6 +6,7 @@ from network_config import load_network_config
 from constants import CHAIN_ID_ANVIL
 from userop import create_signed_user_op, prepare_execute_call, prepare_execute_batch_call
 from tx_sender import send_and_confirm
+from contract_errors import describe_revert_data
 
 load_dotenv()
 
@@ -324,10 +325,15 @@ def _submit_user_op(
     )
     for evt in events:
         if not evt["args"]["success"]:
+            # The EntryPoint records WHY in a separate event, carrying the call's raw revert data.
+            # Naming it is what lets the agent tell a user "prices are paused" (an L2 sequencer
+            # outage) apart from "not enough balance", rather than guessing from a bare failure.
+            reasons = entry_point.events.UserOperationRevertReason().process_receipt(receipt, errors=DISCARD)
+            reason = describe_revert_data(reasons[0]["args"]["revertReason"]) if reasons else "reason not reported"
             raise RuntimeError(
-                f"UserOperation inner call failed "
+                f"UserOperation inner call failed with {reason} "
                 f"(nonce={evt['args']['nonce']}, gas_cost={evt['args']['actualGasCost']} wei). "
-                f"The transaction was mined but the inner call reverted — check token balances and allowances."
+                f"The transaction was mined but the inner call reverted."
             )
 
     return tx_hash, receipt

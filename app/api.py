@@ -13,7 +13,7 @@ import secrets
 import time
 from decimal import Decimal
 
-from eth_utils import keccak, to_hex
+from eth_utils import to_hex
 from hexbytes import HexBytes
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
@@ -58,6 +58,7 @@ from db import (
 )
 from userop import get_or_create_session_key
 from contracts import invalidate_cache, read_spending_config
+from contract_errors import name_revert
 import auth
 from auth import get_current_user
 from smart_wallet_agent import (
@@ -1222,39 +1223,6 @@ def _prepare_owner_tx(w3: Web3, owner: str, fn, chain_id: int) -> dict:
     return {"tx": _to_json_tx(tx)}
 
 
-def _error_selectors() -> dict[str, str]:
-    """
-    Builds a 4-byte-selector -> error-signature map from the wallet and module ABIs.
-
-    Solidity custom errors reach web3 as a bare selector like `0x4c0a7758`, which is useless in a
-    UI. The ABIs carry every error's name and argument types, and the selector is just
-    keccak(signature)[:4], so the mapping can be rebuilt locally with no chain access.
-
-    Both ABIs are needed: a reverting owner call may fail in SessionHandler itself
-    (SessionHandler_NotEnoughBalance) or inside the module it forwards to
-    (SpendingLimitModule_TokenNotPriced).
-    """
-    selectors: dict[str, str] = {}
-    for path in (
-        "./out/SessionHandler.sol/SessionHandler.json",
-        "./out/SpendingLimitModule.sol/SpendingLimitModule.json",
-    ):
-        try:
-            abi = get_json(path)["abi"]
-        except (FileNotFoundError, KeyError):
-            continue  # not built — fall back to the raw selector rather than failing the request
-        for entry in abi:
-            if entry.get("type") != "error":
-                continue
-            signature = f"{entry['name']}({','.join(i['type'] for i in entry['inputs'])})"
-            selectors["0x" + keccak(text=signature)[:4].hex()] = signature
-    return selectors
-
-
-# Built once at import: the ABIs do not change while the process runs.
-ERROR_SELECTORS = _error_selectors()
-
-
 def _revert_reason(e: Exception) -> str:
     """
     Turns a web3 revert into something worth showing a user.
@@ -1265,10 +1233,7 @@ def _revert_reason(e: Exception) -> str:
     is still better than nothing.
     """
     message = str(e).split("\n")[0].strip() or e.__class__.__name__
-    for selector, signature in ERROR_SELECTORS.items():
-        if selector in message:
-            return signature
-    return message
+    return name_revert(message) or message
 
 
 def _resolve_withdraw_token(w3: Web3, chain_id: int, token: str) -> tuple[str, int]:

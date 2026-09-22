@@ -174,7 +174,7 @@ To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run d
 ```bash
 forge test                  # unit, invariant and fork suites
 make py-test                # identity and auth tests
-make e2e-test               # full user journey against a running Sepolia fork
+make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork for Arbitrum)
 make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
 ```

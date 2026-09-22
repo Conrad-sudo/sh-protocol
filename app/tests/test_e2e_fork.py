@@ -1,5 +1,5 @@
 """
-End-to-end API tests against a running Sepolia fork.
+End-to-end API tests against a running local fork -- Sepolia unless another is named.
 
 This covers the half of the API that no offline test can reach: the transactions themselves, and
 the eth_call simulations that are the entire reason the prepare endpoints exist. A signed-in user
@@ -11,12 +11,13 @@ be covered by a wallet this API actually created.
 
 Requires (see the plan, Phase 7):
     make vault
-    make sepolia-fork
-    make setup-test ARGS=sepolia-fork
+    make sepolia-fork                    (or make arbitrum-fork, ...)
+    make setup-test ARGS=sepolia-fork    (the same fork name)
 
-Run: make e2e-test   (or: python app/tests/test_e2e_fork.py)
+Run: make e2e-test [ARGS=arbitrum-fork]   (or: python app/tests/test_e2e_fork.py [arbitrum-fork])
 """
 import os
+import sys
 import time
 
 from dotenv import load_dotenv
@@ -29,16 +30,24 @@ os.environ.setdefault("TELEGRAM_BOT_USERNAME", "test_wallet_bot")
 
 from eth_account import Account                       # noqa: E402
 from eth_account.messages import encode_defunct       # noqa: E402
+from eth_utils import keccak                          # noqa: E402
 from fastapi.testclient import TestClient             # noqa: E402
 from web3 import Web3                                 # noqa: E402
 
+import anvil                                          # noqa: E402
 import api                                            # noqa: E402
-from constants import CHAIN_ID_SEPOLIA  # noqa: E402
+import smart_wallet_agent                             # noqa: E402
 from contracts import read_spending_config           # noqa: E402
-from db import get_token_address                      # noqa: E402
+from db import get_session_key, get_token_address     # noqa: E402
 
 RPC = "http://127.0.0.1:8545"
-CHAIN_ID = CHAIN_ID_SEPOLIA          # 11155111 — the fork reports its parent's id
+# The fork under test, named as `make setup-test ARGS=...` names it. Requests speak its chain ID,
+# which is the live chain's: a fork reports its parent's id.
+FORK_CHAIN_IDS = {f"{name}-fork": cid for cid, name in api.CHAIN_NAME_BY_ID.items() if cid in api.FORKABLE_CHAIN_IDS}
+NETWORK = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "sepolia-fork"
+if NETWORK not in FORK_CHAIN_IDS:
+    raise SystemExit(f"Unknown fork '{NETWORK}'. One of: {sorted(FORK_CHAIN_IDS)}")
+CHAIN_ID = FORK_CHAIN_IDS[NETWORK]
 w3 = Web3(Web3.HTTPProvider(RPC))
 
 
@@ -46,15 +55,15 @@ def require_local_fork():
     """
     Refuses to run anywhere but a local fork.
 
-    This is a real safety gate, not a formality. A Sepolia fork and live Sepolia both report chain
-    id 11155111, so nothing else in the stack can tell them apart -- if APP_FORK_MODE were 0, every
-    transaction below would be broadcast to the real network with a real funded key. anvil_setBalance
-    exists only on a local node, so a successful call is positive proof of where we are.
+    This is a real safety gate, not a formality. A fork and its live chain report the same chain id
+    (11155111 for Sepolia), so nothing else in the stack can tell them apart -- if APP_FORK_MODE were
+    0, every transaction below would be broadcast to the real network with a real funded key.
+    anvil_setBalance exists only on a local node, so a successful call is positive proof of where we are.
     """
     if not w3.is_connected():
-        raise SystemExit(f"No node at {RPC}. Run: make sepolia-fork")
+        raise SystemExit(f"No node at {RPC}. Run: make {NETWORK}")
     if w3.eth.chain_id != CHAIN_ID:
-        raise SystemExit(f"Node reports chain {w3.eth.chain_id}, expected {CHAIN_ID}.")
+        raise SystemExit(f"Node reports chain {w3.eth.chain_id}, expected {CHAIN_ID} ({NETWORK}).")
     probe = Account.create().address
     try:
         w3.provider.make_request("anvil_setBalance", [probe, hex(10**18)])
@@ -62,11 +71,11 @@ def require_local_fork():
     except Exception as e:
         raise SystemExit(
             f"anvil_setBalance failed ({e}). This does not look like a local fork — refusing to "
-            f"sign anything. Check APP_FORK_MODE=1 and that `make sepolia-fork` is what is on {RPC}."
+            f"sign anything. Check APP_FORK_MODE=1 and that `make {NETWORK}` is what is on {RPC}."
         )
     if not api.FORK_MODE:
-        raise SystemExit("APP_FORK_MODE is not set; the API would target live Sepolia. Refusing.")
-    print(f"  local fork confirmed: chain {CHAIN_ID} at block {w3.eth.block_number}")
+        raise SystemExit("APP_FORK_MODE is not set; the API would target the live chain. Refusing.")
+    print(f"  local fork confirmed: {NETWORK}, chain {CHAIN_ID} at block {w3.eth.block_number}")
 
 
 def make_client() -> TestClient:
@@ -87,8 +96,8 @@ def new_funded_account(eth: int = 100):
     """
     Creates a fresh EOA and funds it on the fork.
 
-    Fresh rather than a stock anvil account for two reasons: on a Sepolia fork those well-known
-    addresses carry inherited EIP-7702 delegation code, and a new owner keeps deployCount clear of
+    Fresh rather than a stock anvil account for two reasons: on a fork those well-known addresses
+    carry inherited EIP-7702 delegation code, and a new owner keeps deployCount clear of
     every other test's, so nobody's CREATE2 prediction moves under them.
     """
     acct = Account.create()
@@ -333,7 +342,7 @@ def test_simulations_bite(c: TestClient, acct, headers: dict, wallet: str):
                      "to": "0x0000000000000000000000000000000000000000"})
     check("withdrawing to the zero address -> 400", r.status_code == 400, f"{r.status_code} {r.text[:150]}")
 
-    # dai IS in the sepolia token table but is NOT priced by this deployment's oracle.
+    # dai is in every chain's token table, but the oracle prices it only on some (not on Sepolia).
     r = c.post("/api/wallet/watched-tokens/prepare", headers=headers,
                json={"chain_id": CHAIN_ID, "token": "dai", "action": "add"})
     if r.status_code == 400:
@@ -404,6 +413,103 @@ def test_contacts_are_owner_managed(c: TestClient, headers: dict):
           not (exported & {"save_contact", "delete_contact"}), str(sorted(exported)))
 
 
+def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    An L2 sequencer outage must reach the agent as a NAMED error, not 4 bytes of hex -- and must NOT
+    lock the owner out.
+
+    The outage halts every valuation, so a session-key UserOp that moves native value fails, as does
+    a price read. The owner's web-app actions are direct calls that never reach the oracle
+    (THREAT_MODEL §3.14), so a withdraw must still prepare -- that is the user's way out meanwhile.
+
+    Runs only where the oracle has a sequencer uptime feed (Arbitrum); elsewhere there is nothing to
+    pause. The oracle holds the feed's address as an immutable, so the feed is faked IN PLACE: its
+    code is swapped for MockV3Aggregator's and the three storage slots latestRoundData reads are
+    written directly. Both are put back exactly afterwards -- the original code and the original
+    value of every slot written -- so the fork is left as it was found.
+
+    Last in the run on purpose: the agent-path check mines a (failing) UserOp.
+    """
+    print("\n[7] a sequencer outage: named for the agent, no lock-out for the owner")
+    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    registry = w3.eth.contract(address=sh.functions.REGISTRY().call(),
+                               abi=api.get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"])
+    oracle = w3.eth.contract(address=registry.functions.priceOracle().call(),
+                             abi=api.get_json("./out/SHOracle.sol/SHOracle.json")["abi"])
+    feed = oracle.functions.SEQUENCER_UPTIME_FEED().call()
+    if int(feed, 16) == 0:
+        print("  (skipped: this chain's oracle has no sequencer uptime feed)")
+        return
+
+    # MockV3Aggregator's latestRoundData returns (latestRound, getAnswer[r], getStartedAt[r], ...):
+    # slot 3, and the slot-4 and slot-6 mappings at key r.
+    rnd = 1
+    latest_round_slot = 3
+    answer_slot = int.from_bytes(keccak(rnd.to_bytes(32, "big") + (4).to_bytes(32, "big")), "big")
+    started_at_slot = int.from_bytes(keccak(rnd.to_bytes(32, "big") + (6).to_bytes(32, "big")), "big")
+    written = (latest_round_slot, answer_slot, started_at_slot)
+    saved_code = w3.eth.get_code(feed)
+    saved = {slot: w3.eth.get_storage_at(feed, slot) for slot in written}
+
+    def set_slot(slot: int, value: int):
+        w3.provider.make_request("anvil_setStorageAt", [feed, hex(slot), "0x" + value.to_bytes(32, "big").hex()])
+
+    def report(answer: int, started_at: int):
+        """Makes the feed report `answer` (0 up, 1 down) with the current status begun at `started_at`."""
+        set_slot(latest_round_slot, rnd)
+        set_slot(answer_slot, answer)
+        set_slot(started_at_slot, started_at)
+
+    def agent_read_message() -> str:
+        """What the agent would be told if a price read failed now, or "" if it succeeds."""
+        try:
+            sh.functions.getUsdValue(weth, 10**18).call()
+            return ""
+        except Exception as e:  # noqa: BLE001 -- web3 raises ContractCustomError here
+            return smart_wallet_agent._tool_failure_message(e)
+
+    sink = Account.create().address
+    withdraw = {"chain_id": CHAIN_ID, "token": "eth", "amount": "0.01", "to": sink}
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
+    mock_runtime = api.get_json("./out/MockV3Aggregator.sol/MockV3Aggregator.json")["deployedBytecode"]["object"]
+    w3.provider.make_request("anvil_setCode", [feed, mock_runtime])
+    try:
+        now = w3.eth.get_block("latest")["timestamp"]
+        report(answer=1, started_at=now)
+
+        r = c.post("/api/wallet/withdraw/prepare", headers=headers, json=withdraw)
+        check("the owner can still withdraw during an outage", r.status_code == 200, f"{r.status_code} {r.text[:150]}")
+
+        # The agent, on a read: what the tool-failure middleware turns a raw revert into.
+        message = agent_read_message()
+        check("the agent is told the error by name on a read", "PriceOracle_SequencerDown" in message, message[:200])
+
+        # The agent, on a transaction: a real session-key UserOp through the self-bundling path.
+        # Its inner call fails in the hook's valuation, so the op is mined with success=false and
+        # the reason lives only in the EntryPoint's UserOperationRevertReason event.
+        user_id = c.get("/api/me", headers=headers).json()["user_id"]
+        _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
+        try:
+            anvil.send_user_op_as_session(user_id, key_ciphertext, sink, 10**15, b"")
+            check("a UserOp fails during an outage", False, "it succeeded")
+        except RuntimeError as e:
+            check("the agent is told the error by name on a transaction",
+                  "PriceOracle_SequencerDown" in str(e), str(e)[:200])
+        check("...and nothing moved", w3.eth.get_balance(sink) == 0)
+
+        # Back up, but inside the one-hour grace window.
+        report(answer=0, started_at=w3.eth.get_block("latest")["timestamp"] - 60)
+        message = agent_read_message()
+        check("inside the grace window the agent is told that by name",
+              "PriceOracle_SequencerGracePeriod" in message, message[:200])
+    finally:
+        w3.provider.make_request("anvil_setCode", [feed, "0x" + bytes(saved_code).hex()])
+        for slot, value in saved.items():
+            w3.provider.make_request("anvil_setStorageAt", [feed, hex(slot), "0x" + bytes(value).hex()])
+
+    check("the real feed is back: prices read again", agent_read_message() == "", agent_read_message()[:200])
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     require_local_fork()
@@ -420,5 +526,6 @@ if __name__ == "__main__":
     test_simulations_bite(client, owner, auth_headers, deployed)
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers)
+    test_price_pause_is_named(client, owner, auth_headers, deployed)
 
-    finish("All fork e2e checks passed.")
+    finish(f"All fork e2e checks passed on {NETWORK}.")
