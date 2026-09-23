@@ -217,7 +217,7 @@ make sepolia-fork
 make deploy ARGS="sepolia-fork"
 ```
 
-`ARGS="sepolia-fork"` tells the Makefile to sign with `SEPOLIA_ACCOUNT` / `SEPOLIA_PRIVATE_KEY` while still broadcasting to the local fork at `http://127.0.0.1:8545`.
+`ARGS="sepolia-fork"` tells the Makefile to sign with `SEPOLIA_ACCOUNT` / `API_BUNDLER` while still broadcasting to the local fork at `http://127.0.0.1:8545`.
 
 **Step 3 — Start and configure Vault:**
 
@@ -329,7 +329,7 @@ make agent
 
 ## Sepolia Deployment (Live)
 
-Requires `SEPOLIA_RPC_URL` (Alchemy endpoint) and `SEPOLIA_PRIVATE_KEY` funded with Sepolia ETH.
+Requires `SEPOLIA_RPC_URL` (Alchemy endpoint), and `API_BUNDLER` and `TELEGRAM_BUNDLER` funded with Sepolia ETH — the first deploys and bundles for the API, the second bundles for the Telegram bot.
 
 There's no local node to start for a live deployment, so this flow skips step 1 above.
 
@@ -366,7 +366,7 @@ make db
 make deploy-wallet ARGS="sepolia"
 ```
 
-On Sepolia, `live_network.py` submits UserOps through the Alchemy bundler — no local bundler key is used. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
+On Sepolia, as everywhere, the app is its own bundler: `bundler.py` submits UserOps inside `handleOps` from `API_BUNDLER` (the API) or `TELEGRAM_BUNDLER` (the bot), which the EntryPoint repays out of each wallet's prefund. Nothing tops those keys up on a live chain, so keep them funded. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
 
 > Uniswap V2 is officially deployed on Sepolia, so swap, liquidity, and quote tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and one session key that can drive any external call within that cap.
 
@@ -435,7 +435,7 @@ make db
 make deploy-wallet ARGS="bsc"
 ```
 
-On live BSC, `live_network.py` submits UserOps through a bundler RPC — no local bundler key is used for that path. `bsc-fork` self-bundles instead, signing `handleOps` in `anvil.py` with `SEPOLIA_PRIVATE_KEY` (see `anvil.resolve_bundler`). Note that no bundler-capable RPC is currently configured for live BSC, so that path is untested.
+BSC is self-bundled like every other network: `bundler.py` signs `handleOps` with `API_BUNDLER` or `TELEGRAM_BUNDLER`, depending on which process is running (see `bundler.resolve_bundler`). On `bsc-fork` `make fund` tops both up; on live BSC they must hold real BNB. Live BSC has not been exercised yet.
 
 **Step 5 — Start:**
 

@@ -18,3 +18,10 @@ class AgentContext:
     """
 
     user_id: int
+    # Which turn of the conversation this is: a counter the caller of chat() bumps once per user
+    # message, never something the model can set or see. It exists so confirm_transaction can tell
+    # "the user replied to the quote" from "the same turn that raised the quote is now confirming
+    # it" -- the turn only advances when a real message arrives, so text the model merely READ
+    # (a tool result, an on-chain string, a registration file) cannot quote and send in one go.
+    # See app/quotes.py.
+    turn_id: int = 0

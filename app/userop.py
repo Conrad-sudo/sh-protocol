@@ -1,10 +1,10 @@
 """
-Shared, submission-agnostic building blocks for the ERC-4337 session-key flow.
+Building blocks for the ERC-4337 session-key flow: session-key management, UserOp calldata and
+nonce, and signing.
 
-Both execution backends -- anvil.py (direct handleOps) and live_network.py (Alchemy
-bundler RPC) -- use these identically; only the gas-estimation and submission strategy
-differs per backend and stays in those modules. Keeping key management, op construction,
-and signing here means there is exactly one place to fix a signing or nonce bug.
+bundler.py -- the app's own bundler, used on every network -- layers gas estimation and
+submission on top of these. Keeping key management, op construction and signing here means there
+is exactly one place to fix a signing or nonce bug.
 """
 import secrets
 from dotenv import load_dotenv
@@ -65,6 +65,26 @@ def get_or_create_session_key(user_id: int, chain_id: int, target_address: str) 
     return account.address, ciphertext
 
 
+def current_session_nonce(user_id: int, session_handler: Contract, entry_point: Contract) -> int:
+    """
+    The wallet's next UserOp nonce on the session-key path.
+
+    An ERC-4337 nonce is (key, sequence), and this account routes validation by the key: the one
+    derived from the installed SpendingLimitModule is what tells it to run the session-key checks
+    rather than the owner's. Read separately from prepare_execute_call because an op is quoted and
+    signed at two different moments, and only the nonce can move in between.
+
+    @param user_id         The application user ID.
+    @param session_handler The user's SessionHandler (the UserOp sender).
+    @param entry_point     Bound EntryPoint contract.
+    @return                The nonce to build the next op with.
+    """
+    module = load_spending_limit_module(user_id=user_id)
+    return entry_point.functions.getNonce(
+        session_handler.address, session_key_nonce_key(module.address)
+    ).call()
+
+
 def prepare_execute_call(
     user_id: int, target: str, value: int, data: bytes
 ) -> tuple[Contract, Contract, str, int]:
@@ -82,7 +102,6 @@ def prepare_execute_call(
     @return         (session_handler, entry_point, calldata_hex, nonce).
     """
     session_handler = load_session_handler(user_id=user_id)
-    module = load_spending_limit_module(user_id=user_id)
 
     execution_calldata = pack_execution_calldata(target, value, data)
     calldata = session_handler.encode_abi(
@@ -91,9 +110,7 @@ def prepare_execute_call(
     )
 
     entry_point = load_entry_point(user_id=user_id)
-    nonce = entry_point.functions.getNonce(
-        session_handler.address, session_key_nonce_key(module.address)
-    ).call()
+    nonce = current_session_nonce(user_id, session_handler, entry_point)
 
     return session_handler, entry_point, calldata, nonce
 
@@ -112,7 +129,6 @@ def prepare_execute_batch_call(
     @return            (session_handler, entry_point, calldata_hex, nonce).
     """
     session_handler = load_session_handler(user_id=user_id)
-    module = load_spending_limit_module(user_id=user_id)
 
     execution_calldata = encode_batch_execution_calldata(executions)
     calldata = session_handler.encode_abi(
@@ -121,9 +137,7 @@ def prepare_execute_batch_call(
     )
 
     entry_point = load_entry_point(user_id=user_id)
-    nonce = entry_point.functions.getNonce(
-        session_handler.address, session_key_nonce_key(module.address)
-    ).call()
+    nonce = current_session_nonce(user_id, session_handler, entry_point)
 
     return session_handler, entry_point, calldata, nonce
 

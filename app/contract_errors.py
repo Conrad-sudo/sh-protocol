@@ -24,6 +24,12 @@ _ARTIFACTS = (
 # Error(string): what a plain `require(cond, "message")` reverts with -- Uniswap's router, for one.
 _ERROR_STRING_SELECTOR = bytes.fromhex("08c379a0")
 
+# The EntryPoint's own rejections of a UserOp, which wrap the reason in an "AAxx" code and, for a
+# revert inside the account, the account's revert data -- e.g. FailedOpWithRevert(0, "AA23 reverted",
+# EnforcedPause()) for a paused wallet. They surface when bundler.py estimates handleOps.
+_FAILED_OP_SELECTOR = keccak(text="FailedOp(uint256,string)")[:4]
+_FAILED_OP_WITH_REVERT_SELECTOR = keccak(text="FailedOpWithRevert(uint256,string,bytes)")[:4]
+
 
 def _error_selectors() -> dict[str, str]:
     """
@@ -74,6 +80,17 @@ def describe_revert_data(data: bytes) -> str:
         try:
             return f'Error("{decode(["string"], data[4:])[0]}")'
         except Exception:  # noqa: BLE001 -- malformed payload; the hex below still says something
+            pass
+    if data[:4] == _FAILED_OP_SELECTOR:
+        try:
+            return decode(["uint256", "string"], data[4:])[1]
+        except Exception:  # noqa: BLE001
+            pass
+    if data[:4] == _FAILED_OP_WITH_REVERT_SELECTOR:
+        try:
+            _, reason, inner = decode(["uint256", "string", "bytes"], data[4:])
+            return f"{reason}: {describe_revert_data(inner)}"
+        except Exception:  # noqa: BLE001
             pass
     if not data:
         return "no revert data"

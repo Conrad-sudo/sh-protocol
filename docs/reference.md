@@ -27,7 +27,7 @@
 | `make bsc-fork` | Start a BSC fork at the latest block |
 | `make celo-fork` | Start a Celo fork at the latest block (no Solidity deployment path yet — see [docs/app.md](app.md)) |
 | `make arb-fork` | Start an Arbitrum One fork at the latest block (the app calls this network `arbitrum-fork`) |
-| `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. A prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — that address is deployer, protocol owner and bundler on a fork, and starts at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
+| `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` (the `API_BUNDLER` address) and on the `TELEGRAM_BUNDLER` address via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. A prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
 | `make vault` | Configure Vault and refresh `.env` credentials |
 | `make db` | Initialise SQLite database and run migrations |
@@ -91,9 +91,8 @@ sh-protocol/
 │   ├── network_config.py
 │   ├── contracts.py
 │   ├── toolkits.py                  ← per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits
-│   ├── userop.py                    ← shared UserOp construction/signing (both backends)
-│   ├── anvil.py
-│   ├── live_network.py
+│   ├── userop.py                    ← UserOp calldata, nonce and session-key signing
+│   ├── bundler.py                   ← the app's own ERC-4337 bundler, on every network
 │   ├── tx_sender.py                 ← nonce-safe EOA broadcast
 │   ├── vault_signer.py
 │   ├── deploy_wallet.py
@@ -166,5 +165,6 @@ sh-protocol/
 |---|---|
 | [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Runs the HashiCorp Vault container locally |
 | [HashiCorp Vault](https://developer.hashicorp.com/vault) | Transit encryption-as-a-service for session key custody |
-| [Alchemy](https://www.alchemy.com/) | Bundler-compatible RPC endpoint for live Sepolia/mainnet/BSC UserOp submission and fork RPC access |
+| [Alchemy](https://www.alchemy.com/) | RPC endpoint for live Sepolia/mainnet reads and fork RPC access (the app bundles its own UserOps — no bundler service) |
+| [Flashbots Protect](https://docs.flashbots.net/flashbots-protect/overview) | Private broadcast of the bundler's live-mainnet transactions, keeping them out of the public mempool |
 | [Chainlink Price Feeds](https://data.chain.link/) | On-chain USD price data read directly by `SHOracle` — no off-chain fetch/push step required |

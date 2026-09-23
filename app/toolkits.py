@@ -5,7 +5,7 @@ These three packages own all ERC20, Uniswap V2 and ERC-8004 registry calldata co
 balances, quotes, slippage bounds, approval sequencing, agent reads and registry writes. They
 return an ordered *execution plan* -- a list of account-agnostic (to, value, data) calls -- and
 never sign, submit, or hold a key. Turning a plan into a UserOperation is app/tools.py's job
-(see _submit_plan there).
+(see _quote_plan there, which prices one and parks it for the user to confirm).
 
 Two things force a wrapper layer rather than exposing the package tools to the agent directly:
 

@@ -1,5 +1,10 @@
 # Migrating the ERC20 + Uniswap V2 tools onto `langchain-erc20` / `langchain-uniswap-v2`
 
+> **Historical record (2026-08-10).** `_submit_plan` no longer exists: write tools now
+> return a quote through `_quote_plan` and only `confirm_transaction` sends (2026-09-23).
+> See [app.md](app.md) `quotes.py` and THREAT_MODEL §4.2. The plan shapes below are unchanged.
+
+
 **Status: IMPLEMENTED (2026-08-10).** All steps in §4 are done. Verified by running the real
 `app/tools.py` tool bodies against an anvil Sepolia fork and executing every plan through the
 live `SessionHandler` + `SpendingLimitModule` hook: **31/31 checks passed** (16 read tools,

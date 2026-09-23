@@ -21,6 +21,7 @@ _entry_point_cache: dict[tuple[int, int], Contract] = {}
 _erc20_cache: dict[tuple[int, int, str], Contract] = {}
 _sh_factory_cache: dict[tuple[int, int], Contract] = {}
 _spending_limit_module_cache: dict[tuple[int, int], Contract] = {}
+_registry_cache: dict[tuple[int, int], Contract] = {}
 
 # ERC-7579 single-call, default-execution-type mode (CALLTYPE_SINGLE = 0x00 in the top byte).
 ERC7579_SINGLE_CALL_MODE = b"\x00" * 32
@@ -50,6 +51,7 @@ def invalidate_cache(user_id: int) -> None:
         _entry_point_cache,
         _sh_factory_cache,
         _spending_limit_module_cache,
+        _registry_cache,
         _erc20_cache,
     ):
         for key in [k for k in cache if k[0] == user_id]:
@@ -113,6 +115,26 @@ def load_spending_limit_module(user_id: int) -> Contract:
         address = load_session_handler(user_id).functions.SH_MODULE().call()
         _spending_limit_module_cache[key] = w3.eth.contract(address=address, abi=abi)
     return _spending_limit_module_cache[key]
+
+
+def load_registry(user_id: int) -> Contract:
+    """
+    Loads SHRegistry, bound to the address the wallet reports via its public REGISTRY getter.
+
+    The registry is where the protocol fee and the treasury live. The wallet reads them per call
+    rather than storing them, so this is the only way to learn what one execution will cost before
+    running it -- see SessionHandler._extractFee.
+
+    @param user_id  The application user ID.
+    @return         A web3.py Contract instance pointing to the SHRegistry the wallet uses.
+    """
+    w3, chain_id, _ = load_network_config(user_id)
+    key = (user_id, chain_id)
+    if key not in _registry_cache:
+        abi = get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"]
+        address = load_session_handler(user_id).functions.REGISTRY().call()
+        _registry_cache[key] = w3.eth.contract(address=address, abi=abi)
+    return _registry_cache[key]
 
 
 def load_entry_point(user_id: int) -> Contract:

@@ -2,14 +2,16 @@
 Nonce-safe broadcast of transactions sent from the app's own EOAs.
 
 telebot.py runs every user request in its own thread (asyncio.to_thread), but the app signs its
-outer transactions with a small number of SHARED keys -- one bundler EOA per chain in anvil.py,
+outer transactions with a small number of SHARED keys -- one bundler EOA per process in bundler.py,
 one deployer/owner EOA per chain in deploy_wallet.py. Reading the nonce per-thread races: two
 threads read the same value, and the second transaction either silently replaces the first (same
 nonce) or is rejected as a duplicate. This never showed on a single-user Anvil run; it appears
 the moment two users act at once.
 
 Nonces are therefore handed out from a cached per-key counter under a process-wide lock instead
-of being read from the node on every send.
+of being read from the node on every send. The lock covers ONE process only, which is why the API
+and the Telegram bot each bundle with a key of their own (see bundler.use_bundler_key): two
+processes sharing a key would each keep their own counter and hand out the same nonces.
 """
 
 import threading
@@ -23,7 +25,7 @@ from web3.exceptions import TransactionNotFound
 from web3.types import TxReceipt
 
 # (chain_name, address) -> the next nonce to hand out. Keyed by chain as well as address because
-# one key is reused across networks (SEPOLIA_PRIVATE_KEY spans every fork plus live Sepolia), and
+# one key is reused across networks (API_BUNDLER spans every fork plus live Sepolia), and
 # each has its own nonce state. Guarded by _nonce_lock, which also covers the signing and
 # broadcast that consume a value.
 _nonce_lock = threading.Lock()
@@ -41,7 +43,9 @@ ATTEMPT_TIMEOUT_SECS = 45
 RECEIPT_POLL_INTERVAL_SECS = 2
 
 
-def send_tx(w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any]) -> HexBytes:
+def send_tx(
+    w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any], send_w3: Web3 | None = None
+) -> HexBytes:
     """
     Signs and broadcasts `tx` from `account`, allocating its nonce under a process-wide lock.
 
@@ -58,6 +62,11 @@ def send_tx(w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any]
     @param chain_name  Network name; part of the counter key, since one key spans several chains.
     @param account     Local signing account. Must match the transaction's "from".
     @param tx          A fully populated transaction dict apart from "nonce".
+    @param send_w3     Where to broadcast, when not `w3` -- a private RPC that keeps the transaction
+                       out of the public mempool. Nonces are still read from `w3`, which cannot see
+                       a privately sent transaction until it is mined: that is fine while this
+                       process's counter is warm, but a restart with one still pending re-seeds
+                       below it.
     @return            The broadcast transaction hash.
     """
     key = (chain_name, account.address)
@@ -70,7 +79,7 @@ def send_tx(w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any]
 
             tx["nonce"] = _next_nonce[key]
             try:
-                tx_hash = _broadcast(w3, account, tx)
+                tx_hash = _broadcast(send_w3 or w3, account, tx)
             except Exception:
                 # The nonce was not consumed, and the counter may be stale for a reason not
                 # visible from here -- a transaction sent from this key out of band, or a node
@@ -137,7 +146,11 @@ def _await_receipt(w3: Web3, tx_hashes: list[HexBytes], timeout: float) -> TxRec
 
 
 def send_and_confirm(
-    w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any]
+    w3: Web3,
+    chain_name: str,
+    account: LocalAccount,
+    tx: dict[str, Any],
+    send_w3: Web3 | None = None,
 ) -> TxReceipt:
     """
     Broadcasts `tx` and returns its receipt, replacing it at a higher fee if it stalls.
@@ -159,12 +172,14 @@ def send_and_confirm(
     @param account     Local signing account. Must match the transaction's "from".
     @param tx          Transaction dict, fully populated apart from "nonce". EIP-1559 fee fields
                        are bumped when present, otherwise a legacy "gasPrice" is.
+    @param send_w3     Optional private RPC to broadcast (and re-broadcast) through; see send_tx.
+                       Receipts are always polled from `w3`.
     @return            The mined transaction receipt, whichever broadcast won.
     @raises TimeoutError if no attempt is mined. The nonce stays allocated on purpose: the
             transactions are still live in the mempool and one may yet be included, so rolling
             the counter back would hand the same nonce out twice.
     """
-    tx_hashes = [send_tx(w3, chain_name, account, tx)]
+    tx_hashes = [send_tx(w3, chain_name, account, tx, send_w3)]
     rebroadcast_error: Exception | None = None
 
     for attempt in range(MAX_FEE_BUMPS + 1):
@@ -180,7 +195,7 @@ def send_and_confirm(
             f"replacing at a higher fee (bump {attempt + 1}/{MAX_FEE_BUMPS})"
         )
         try:
-            tx_hashes.append(_broadcast(w3, account, tx))
+            tx_hashes.append(_broadcast(send_w3 or w3, account, tx))
         except Exception as exc:
             # "already known" and "nonce too low" both mean a transaction we already sent is
             # pending or mined, so the hashes in hand are still the right things to poll. A

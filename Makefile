@@ -118,10 +118,15 @@ celo-fork:
 # ── Funding Wallets────────────────────────────────────────────────────────────────────
 
 # anvil_setBalance is a local-fork-only cheat RPC, so this always targets LOCAL_RPC_URL
-# regardless of which network ARGS names. SEPOLIA_ACCOUNT is the deployer, protocol owner and
-# bundler on every forked network (see deploy_wallet.LIVE_PRIVATE_KEY_ENV and anvil.py), so
-# there is one address to fund whatever ARGS names.
+# regardless of which network ARGS names. Two addresses need gas on a local node:
+#   SEPOLIA_ACCOUNT  API_BUNDLER's address: the deployer and protocol owner on every fork, and the
+#                    API process's bundler everywhere (deploy_wallet.LIVE_PRIVATE_KEY_ENV, bundler.py)
+#   the Telegram bot's bundler, TELEGRAM_BUNDLER -- a separate key, so the two processes never
+#                    hand out the same nonce (bundler.use_bundler_key)
+# The second is derived from its key rather than kept in .env twice. Recursively expanded (=), so
+# cast only runs when `fund` does, and inside an @-silenced recipe, so the key is never echoed.
 FUND_ADDRESS := $(SEPOLIA_ACCOUNT)
+TELEGRAM_BUNDLER_ADDRESS = $(shell cast wallet address --private-key $(TELEGRAM_BUNDLER))
 
 # anvil_setBalance only exists on a local node, so this runs for fork networks and bare "anvil"
 # and skips everything else. Stated as an ALLOWLIST on purpose: the previous form skipped a
@@ -129,11 +134,12 @@ FUND_ADDRESS := $(SEPOLIA_ACCOUNT)
 # (mainnet, celo, arbitrum). An allowlist makes a new or misspelt network skip harmlessly rather
 # than aim a cheat RPC at a real deployment.
 #
-# Plain "anvil" funds FUND_ADDRESS even though its own deploys use the pre-funded ANVIL_* keys —
-# harmless, and it keeps `make fund ARGS=anvil` from looking like a failure.
+# Plain "anvil" deploys with the pre-funded ANVIL_* keys, but both processes still bundle with
+# their own keys there, so both are funded on it too.
 fund:
 	@if echo "$(ARGS)" | grep -qE 'fork|^anvil$$'; then \
 		cast rpc anvil_setBalance $(FUND_ADDRESS) $(100_ETH) --rpc-url $(LOCAL_RPC_URL); \
+		cast rpc anvil_setBalance $(TELEGRAM_BUNDLER_ADDRESS) $(100_ETH) --rpc-url $(LOCAL_RPC_URL); \
 	else \
 		echo "Skipping fund — '$(ARGS)' has no local Anvil node to send anvil_setBalance to."; \
 	fi
@@ -147,8 +153,9 @@ fund:
 # every branch below used to repeat the same --rpc-url/--broadcast boilerplate to change one of:
 #
 #   DEPLOY_RPC     the local Anvil node for anvil and every fork; the real endpoint live
-#   DEPLOY_SIGNER  Anvil's burner on plain anvil, SEPOLIA_ACCOUNT everywhere else — see
-#                  deploy_wallet.LIVE_PRIVATE_KEY_ENV; one address deploys, owns and bundles
+#   DEPLOY_SIGNER  Anvil's burner on plain anvil, SEPOLIA_ACCOUNT (API_BUNDLER's address)
+#                  everywhere else — see deploy_wallet.LIVE_PRIVATE_KEY_ENV; one address deploys,
+#                  owns, and bundles for the API
 #   DEPLOY_EXTRA   per-network workarounds, each documented where it is set
 
 DEPLOY_RPC    := $(LOCAL_RPC_URL)
@@ -158,7 +165,7 @@ DEPLOY_EXTRA  :=
 # Forks inherit real chain state, so they must not sign with the Anvil burner: it is
 # EIP-7702-delegated on real mainnet/Sepolia/BSC and a fork inherits that code.
 ifneq ($(findstring fork,$(ARGS)),)
-	DEPLOY_SIGNER := --sender $(SEPOLIA_ACCOUNT) --private-key $(SEPOLIA_PRIVATE_KEY)
+	DEPLOY_SIGNER := --sender $(SEPOLIA_ACCOUNT) --private-key $(API_BUNDLER)
 endif
 
 # --legacy: BSC's EIP-1559 fee-history data confuses Forge's fee estimator into deriving a bogus
@@ -178,7 +185,7 @@ endif
 # verification, and no --sender (Forge derives the sender from --private-key).
 ifeq ($(ARGS),sepolia)
 	DEPLOY_RPC    := $(SEPOLIA_RPC_URL)
-	DEPLOY_SIGNER := --private-key $(SEPOLIA_PRIVATE_KEY)
+	DEPLOY_SIGNER := --private-key $(API_BUNDLER)
 	DEPLOY_EXTRA  := --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv
 endif
 
@@ -214,7 +221,10 @@ agent:
 
 # --workers 1 is not a default worth changing: tx_sender hands out bundler nonces from a cache
 # guarded by a process-wide lock, so a second worker process means a second nonce counter for the
-# same EOA and transactions that silently replace each other. --reload is for development.
+# same EOA (API_BUNDLER) and transactions that silently replace each other. The Telegram bot is
+# safe beside it only because it bundles with a different key (TELEGRAM_BUNDLER). The CLI agent
+# (`make agent`) and `make agent-smoke` bundle with API_BUNDLER, so don't run them beside the API.
+# --reload is for development.
 # --app-dir rather than `cd app`: db.DB_PATH is "./app/wallet.db", relative to the repo root, so
 # the working directory has to stay here while app/ goes on sys.path.
 api:

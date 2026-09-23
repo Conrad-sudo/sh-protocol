@@ -12,15 +12,15 @@ app/
 ├── network_config.py      ← Web3 connection factory
 ├── contracts.py           ← Contract loading with per-user_id caching; ERC-7579 calldata/nonce helpers
 ├── toolkits.py            ← Per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits (cached)
-├── userop.py              ← Shared UserOp construction + signing, used by both backends
-├── anvil.py               ← UserOp execution (self-bundled: local/fork/sepolia) — single + batch
-├── live_network.py        ← UserOp execution via Alchemy bundler — single + batch
+├── userop.py              ← UserOp calldata, nonce and session-key signing
+├── bundler.py             ← The app's own ERC-4337 bundler, on every network — single + batch
 ├── tx_sender.py           ← Nonce-safe EOA broadcast: locked nonce allocation + fee-bump/timeout
 ├── contract_errors.py     ← Names contract reverts (custom errors incl. SHOracle's, Error(string)) for the API and the agent
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
+├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
 ├── tools.py               ← LangChain tool wrappers for the AI agent
-├── agent_context.py       ← The runtime context (user_id, chain_id) injected into every tool
+├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
 ├── auth.py                ← Passwords, JWTs, Google tokens, SIWE verification
 ├── api.py                 ← FastAPI HTTP API — what the web app in web/ talks to
@@ -39,8 +39,8 @@ app/
 > [`langchain-erc20`](https://pypi.org/project/langchain-erc20/) and
 > [`langchain-uniswap-v2`](https://pypi.org/project/langchain-uniswap-v2/) build every balance
 > read, quote, slippage bound and approval sequence. They return an ordered *execution plan* of
-> `(to, value, data)` calls and never sign or submit; `tools._submit_plan` turns a plan into one
-> UserOperation. That is why `abi.py` no longer carries the router/factory/pair/WETH ABIs and
+> `(to, value, data)` calls and never sign or submit; `tools._quote_plan` prices a plan as one
+> UserOperation and parks it for the user to approve. That is why `abi.py` no longer carries the router/factory/pair/WETH ABIs and
 > `constants.py` no longer hardcodes factory addresses.
 
 > **Celo support is partial.** `celo_tokens` has a seeded table and the network routing handles `"celo"`/`"celo-fork"`, but there is no Solidity-side deployment path yet, and Celo is intentionally excluded from `deploy_wallet.py`'s default watched-token map (see [docs/contracts.md](contracts.md#helperconfigssol)).
@@ -50,8 +50,9 @@ app/
 ```
 telebot.py ──────────► smart_wallet_agent.py ──► tools.py ──► contracts.py ──► network_config.py ──► db.py
                                                   tools.py ──► toolkits.py ──► contracts.py
-                                                  tools.py ──► anvil.py ─────► userop.py ──► vault_signer.py
-                                                  tools.py ──► live_network.py ► userop.py ──► vault_signer.py
+                                                  tools.py ──► quotes.py  ───► bundler.py
+                                                  tools.py ──► bundler.py ───► userop.py ──► vault_signer.py
+                                                               bundler.py ───► tx_sender.py
                                                   tools.py ──► db.py
 deploy_wallet.py ───────────────────────────────────────────────────────────────────────────────────► db.py
 ```
@@ -178,7 +179,7 @@ def load_network_config_by_name(chain_name: str) -> tuple[Web3, int]  # bypasses
 
 ## `contracts.py`
 
-Contract loading with per-`user_id` caching, plus the ERC-7579 calldata/nonce helpers used by `userop.py`, `anvil.py`, and `live_network.py` so the packing logic lives in one place.
+Contract loading with per-`user_id` caching, plus the ERC-7579 calldata/nonce helpers used by `userop.py` and `bundler.py` so the packing logic lives in one place.
 
 ```python
 def load_session_handler(user_id) -> Contract
@@ -228,55 +229,104 @@ Three configuration choices carry weight:
 
 ## `tx_sender.py`
 
-Every transaction the app signs with one of *its own* EOAs goes out through here — the outer `handleOps` in `anvil.py`, and `deployWallet` / `addSession` in `deploy_wallet.py`.
+Every transaction the app signs with one of *its own* EOAs goes out through here — the outer `handleOps` in `bundler.py`, and `deployWallet` / `addSession` in `deploy_wallet.py`.
 
 Two problems it exists to solve, both invisible on a single-user Anvil run:
 
-- **Nonce races.** `telebot.py` serves each user request on its own thread (`asyncio.to_thread`), but a handful of shared keys sign for everyone — one bundler EOA per chain, one deployer per chain. Reading the nonce per-thread hands the same value to two threads, and the second transaction is dropped or replaces the first. `send_tx()` allocates from a cached `(chain_name, address) → nonce` counter under a process-wide lock spanning allocate → sign → broadcast. The counter is seeded from `pending` (not `latest`, which does not count the mempool) and advanced locally; any failure clears it so the next caller re-seeds, which also self-heals a counter left stale by an out-of-band transaction.
+- **Nonce races.** `telebot.py` serves each user request on its own thread (`asyncio.to_thread`), but a handful of shared keys sign for everyone — one bundler EOA per process, one deployer per chain. Reading the nonce per-thread hands the same value to two threads, and the second transaction is dropped or replaces the first. `send_tx()` allocates from a cached `(chain_name, address) → nonce` counter under a process-wide lock spanning allocate → sign → broadcast. The counter is seeded from `pending` (not `latest`, which does not count the mempool) and advanced locally; any failure clears it so the next caller re-seeds, which also self-heals a counter left stale by an out-of-band transaction. The lock covers **one process**: that is why the API and the Telegram bot bundle with different keys (`API_BUNDLER`, `TELEGRAM_BUNDLER`) — sharing one, each process would keep its own counter and hand out the same nonces.
 - **Stuck transactions.** A fee cap the base fee has since overtaken will never be mined, so an unbounded `wait_for_transaction_receipt` hangs a user's request permanently. `send_and_confirm()` gives each attempt `ATTEMPT_TIMEOUT_SECS`, then replaces the transaction at its own nonce with both fee fields bumped past the node's price floor, up to `MAX_FEE_BUMPS` times, and raises `TimeoutError` rather than hanging. The replacement cap is floored against the *current* base fee, not just scaled from the stale one. All broadcast hashes are polled, since a replacement races the transaction it replaces and either may win.
 
 Only the outer transaction is ever re-signed; an ERC-4337 UserOp in its calldata is untouched and its session-key signature stays valid, because the EntryPoint prices reimbursement purely from the UserOp's own gas fields.
 
 ```python
-send_tx(w3, chain_name, account, tx)          # → tx_hash, nonce allocated under the lock
-send_and_confirm(w3, chain_name, account, tx) # → receipt, with bounded wait + replace-by-fee
+send_tx(w3, chain_name, account, tx, send_w3=None)          # → tx_hash, nonce allocated under the lock
+send_and_confirm(w3, chain_name, account, tx, send_w3=None) # → receipt, with bounded wait + replace-by-fee
 ```
 
-## `anvil.py` / `live_network.py`
+`send_w3` broadcasts through a different endpoint than the one nonces and receipts are read from — the bundler passes a private RPC on live mainnet. A privately sent transaction is invisible to the normal node until mined, so after a restart with one still pending the counter re-seeds below it.
 
-The blockchain execution layer, split by how the UserOp reaches the EntryPoint. `anvil.py` **self-bundles** — it signs an outer `handleOps()` transaction with a bundler EOA of our own, fronting the gas and naming itself beneficiary so the EntryPoint reimburses it. `live_network.py` hands the op to an **Alchemy bundler** over JSON-RPC and pays no gas directly.
+## `bundler.py`
 
-`tools.py` routes on the chain *name*: anything matching `fork`, `anvil` or `sepolia` self-bundles, everything else goes to the bundler RPC. Live **Sepolia is therefore self-bundled**, using `SEPOLIA_PRIVATE_KEY` as the bundler ([`anvil.py`](../app/anvil.py)) — the same key that deploys wallets there.
-
-> **Note.** No chain other than Sepolia currently has a bundler-capable RPC configured (`mainnet` → cloudflare-eth, `bsc` → binance dataseed, `arbitrum` → arb1), so in practice `live_network.py` is unreachable: any chain routed to it fails on the first `eth_sendUserOperation`. Going live elsewhere means either adding a bundler URL for that chain or extending the self-bundling branch.
-
-Both expose a single-call and a batch entry point, sharing one `_submit_user_op` tail:
+The blockchain execution layer. The app is its **own ERC-4337 bundler on every network** — plain Anvil, every fork, every live chain. It signs an outer `handleOps()` transaction with a bundler EOA of its own, fronting the gas and naming itself beneficiary so the EntryPoint repays it out of the wallet's prefund. No third-party bundler ever holds a signed op. (An Alchemy-bundler path, `live_network.py`, existed until 2026-09-22; it was unreachable in practice and was deleted.)
 
 ```python
-# anvil.py
 send_user_op_as_session(user_id, key_ciphertext, target, value, data)
-send_batch_user_op_as_session(user_id, key_ciphertext, executions)     # atomic multi-call
+send_batch_user_op_as_session(user_id, key_ciphertext, executions)     # atomic multi-call, unattended
 
-# live_network.py
-send_live_user_op_as_session(user_id, key_ciphertext, target, value, data)
-send_live_batch_user_op_as_session(user_id, key_ciphertext, executions)
+quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler) -> UserOpQuote
+check_bundler_funds(user_id, quote, bundler)                           # can the service afford to send it
+prepare_user_op(user_id, key_ciphertext, session_handler, entry_point, quote, bundler) -> PreparedUserOp
+broadcast_user_op(user_id, prepared, bundler) -> (tx_hash, receipt)
+use_bundler_key(env_name)                                              # which key this process signs with
 ```
 
-**UserOp lifecycle (both backends):**
-1. Build `SessionHandler.execute(mode, executionCalldata)` — single-call (`pack_execution_calldata`) or batch (`encode_batch_execution_calldata`).
-2. Fetch a nonce keyed via `session_key_nonce_key()` (validated by the account's own `_rawSignatureValidation`).
-3. Estimate gas (dummy op → `eth_estimateGas` / `eth_estimateUserOperationGas`), then build the real op with a 20% buffer.
-4. **Decrypt the session key from Vault transiently, sign the EIP-191 digest, wipe.**
-5. Submit — `EntryPoint.handleOps` (self-bundled: signed by `ANVIL_BUNDLER` on plain anvil, `SEPOLIA_PRIVATE_KEY` on every fork and live Sepolia) or `eth_sendUserOperation` (bundler RPC).
-6. Surface inner-call reverts (`eth_call` replay / bundler reason).
+**Quote, then send.** `quote_user_op` does everything except sign; `prepare_user_op` signs a quote
+and `broadcast_user_op` sends it. The split is what lets the user be shown a price before an
+executable transaction exists anywhere — see `quotes.py`. `send_user_op_as_session` runs all three
+back to back for the unattended path (tests, and anything with nobody to ask).
 
-### Network routing in `tools.py`
+**Which key signs.** Chosen by the *process*, not the chain: the API bundles with `API_BUNDLER` (the default), and `telebot.py` switches to `TELEGRAM_BUNDLER` at startup. `tx_sender`'s nonce lock only coordinates threads within one process, so two processes sharing a key would hand out the same nonces. Anything else that runs the agent in its own process (`make agent`, `make agent-smoke`) uses `API_BUNDLER` and must not run beside the API. Both keys must be plain EOAs with no code on every chain they bundle for — the EntryPoint's bare ETH send to the beneficiary reverts AA91 against code — which is why the well-known Anvil keys are never used. `make fund` tops both up on a local node; on a live chain the operator funds them.
+
+**UserOp lifecycle:**
+1. Build `SessionHandler.execute(mode, executionCalldata)` — single-call (`pack_execution_calldata`) or batch (`encode_batch_execution_calldata`) — and fetch a nonce keyed via `session_key_nonce_key()`.
+2. **Estimate without the session key.** Execution gas: `execute()` estimated `from` the EntryPoint's address, exactly as `handleOps` will call it — no op, no signature. It walks the session-key path (admin guard, protocol fee, the spending-limit hook with every price read), so an op that would fail is refused here, *by name*, before anything is signed or paid. Validation gas: `validateUserOp()` estimated the same way, signed by a **throwaway key** the wallet never authorized — it fails the signature check without reverting, at the same cost as the real key. All estimates run against the `pending` block, whose timestamp is the next block's, so a price feed that goes stale before the op lands fails the estimate too.
+3. `preVerificationGas` = 21,000 + the handleOps calldata (4 gas per zero byte, 16 per non-zero) + a fixed 20,000 for handleOps' own bookkeeping, plus the Ethereum data fee on live Arbitrum (from NodeInterface). The fee cap is clamped under the wallet's `maxOpGasCost`.
+4. **Simulate the whole bundle, still without the session key.** The op is signed by the same throwaway key — over the op's *real* `userOpHash`, or validation fails on the signature — and `handleOps` is estimated with a **state override** writing `allowedSession[throwaway] = true` (slot `ALLOWED_SESSION_SLOT`). The override lives only inside that one call, so the op being simulated is executable by nobody. It catches everything a real submission would hit and measures what the transaction burns. The slot is verified against the live contract first (one `eth_call` of `allowedSession` under the override); if the node refuses overrides or the layout has moved, the outer gas falls back to the sum of the parts and the quote loses only precision.
+
+   This is where a quote stops. Two figures come out of it, and they are different on purpose:
+   `expected_gas` (`preVerificationGas` + the *unbuffered* validation and execution estimates + the
+   EntryPoint's 10%-above-40k fine for execution gas reserved and unused) is what the wallet will
+   actually be charged; `op_gas × maxFeePerGas` is the ceiling it *could* be charged. The bundle
+   simulation is deliberately **not** used for the price — `eth_estimateGas` must return enough to
+   forward both gas limits whether or not they are used, so it tracks the limits and over-states the
+   cost by the whole buffer (measured: 17% high). It sizes the outer transaction and nothing else.
+   On a mainnet fork the parts-based figure came in 7.8% above the real charge.
+5. **Decrypt the session key from Vault transiently, sign the EIP-191 digest, wipe.** Nothing before
+   this point produced a transaction anyone could execute.
+6. Re-read the nonce (only that: the gas limits and fee cap come from the quote unchanged, so what is sent is what was quoted) and estimate the whole `handleOps` with the real op — catches anything that moved between the quote and the user agreeing, and sizes the outer transaction.
+7. Broadcast via `tx_sender.send_and_confirm` — through Flashbots Protect on live mainnet (`MAINNET_PRIVATE_RPC_URL` overrides it), the chain's normal RPC everywhere else.
+8. If our transaction reverted or stalled, look the op up on chain by its hash: the signature does not cover the beneficiary, so someone else may have landed it first. The user's action then *has* happened, and that transaction is returned instead of a failure the user might retry.
+9. Surface an inner-call revert from `UserOperationRevertReason`, named via `contract_errors`.
+
+Two gaps remain. **Celo** is now an OP-stack L2, and any L1 data fee it charges the outer transaction is *not* priced into `preVerificationGas` — the bundler would absorb it, so watch its balance there before relying on it. **Forks** charge no L1 fee at all, so Arbitrum's L1 pricing is only exercised on the live chain.
+
+---
+
+## `quotes.py`
+
+The pending-transaction store: what stands between the agent describing a transaction and the chain
+executing one. Every write tool stops at a quote — the exact executions, priced — parked here under
+a random id. `confirm_transaction(quote_id)` is the only thing in the app that sends.
 
 ```python
-def send_user_op_as_session(user_id, key_ciphertext, target, value, data): ...       # → anvil.py or live_network.py
-def send_batch_user_op_as_session(user_id, key_ciphertext, executions): ...          # batch variant
+QUOTE_TTL_SECONDS = 300
+put(user_id, chain_id, turn_id, action, calls, key_ciphertext, quote, cost) -> PendingTransaction
+take(user_id, chain_id, quote_id, turn_id) -> PendingTransaction   # claims it; single-use
+drop(user_id, quote_id) -> bool                                    # the user said no
 ```
-`RuntimeError` from either backend is converted to `ToolException` so LangChain surfaces it to the agent cleanly.
+
+Three properties do the work:
+
+- **The transaction is fixed before the user sees it.** A quote holds the calldata and gas the
+  confirm will use, so there is no re-describing step in between for an instruction to sit in, and
+  `action` is composed from the calls themselves (the packages' own `description` fields, or
+  `tools.py` for a bare native send) rather than by the model. The most a confirmed quote can do is
+  what its quote said.
+- **Confirming takes a real turn boundary.** `take` refuses a quote whose `turn_id` is not strictly
+  less than the current one. `turn_id` comes from `smart_wallet_agent._next_turn_id()`, bumped once
+  per user message, so text arriving *within* a turn — a tool result, a token name, a registration
+  file, anything the model read rather than the user typed — cannot quote and confirm on its own.
+- **Quotes go stale and are single-use.** Five minutes, one claim. A broadcast that fails may still
+  have landed (§4.4a), so a quote must never be replayable.
+
+What it does *not* do: a user who approves without reading is still approving whatever the quote
+says. This makes the agent's claims checkable against text the agent did not write, and bounds one
+confirmation to one transaction. See THREAT_MODEL §4.2.
+
+The store is in memory and per process, deliberately: a pending transaction is a live intent and
+should die with the process rather than outlive a restart in a database. The practical consequence
+is that a quote raised in the web app cannot be confirmed from Telegram — the second process reports
+an unknown quote and the user asks again.
 
 ---
 
@@ -304,13 +354,13 @@ Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress
 
 ⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `[constants.get_router(chain_id)]`, or empty on bare Anvil, which has no Uniswap deployment. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
 
-The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. Because the same address also bundles (see `anvil.resolve_bundler`), one top-up covers the deployment and every UserOp after it — there is no separate bundler-funding step.
+The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. On a fork the deployer is also the API's bundler (`API_BUNDLER`, see `bundler.resolve_bundler`), and `make fund` tops up the Telegram bot's bundler (`TELEGRAM_BUNDLER`) at the same time, so there is no separate bundler-funding step.
 
 **`add_default_session(user_id)`** registers the wallet's **single** session key. It derives one key via `get_or_create_session_key(user_id, wallet_address)` (Vault-encrypted, keyed to the wallet address), then calls **`SessionHandler.addSession(key)`** as the owner. **No longer part of the deploy path** — `deploy_wallet` seeds the key inside `deployWallet` — it is kept for re-granting a key on a wallet deployed without one, or after `removeSession`. There are no per-target sessions, selectors, expiries, or budgets to configure — the wallet-wide cap and the admin guard replace all of that. (The old `add_session(targets, functions, ...)` and the `approve()` router-pre-approval helper were removed: standing approvals now revert on-chain, so approvals only ever happen atomically inside the swap/liquidity tools.)
 
 **`deploy(user_id, network)`** is the top-level dispatcher (validates the network, then calls `deploy_wallet`) — invoked by `make deploy-wallet` via the `__main__` block, which also seeds a demo contact. `__main__` no longer calls `add_default_session` or `trust_router`: `deployWallet` does both.
 
-**Signing-key resolution** (`LIVE_PRIVATE_KEY_ENV`): live BSC and Celo use their own key (`BSC_PRIVATE_KEY`, `CELO_PRIVATE_KEY`); **every fork plus live Sepolia uses `SEPOLIA_PRIVATE_KEY`**; plain `anvil` falls back to `ANVIL_PRIVATE_KEY`. Forks of a real chain must avoid the well-known Anvil burner key: it is EIP-7702-delegated to drainers on real Sepolia/BSC/mainnet, and a fork inherits that code — which both breaks fork tests and disqualifies it as a `handleOps` beneficiary (the EntryPoint's bare ETH send reverts AA91 against an address with code).
+**Signing-key resolution** (`LIVE_PRIVATE_KEY_ENV`): live BSC and Celo use their own key (`BSC_PRIVATE_KEY`, `CELO_PRIVATE_KEY`); **every fork plus live Sepolia uses `API_BUNDLER`** (formerly `SEPOLIA_PRIVATE_KEY`); plain `anvil` falls back to `ANVIL_PRIVATE_KEY`. Forks of a real chain must avoid the well-known Anvil burner key: it is EIP-7702-delegated to drainers on real Sepolia/BSC/mainnet, and a fork inherits that code — which both breaks fork tests and disqualifies it as a `handleOps` beneficiary (the EntryPoint's bare ETH send reverts AA91 against an address with code).
 
 ---
 
@@ -318,7 +368,9 @@ The deployer must already hold gas when this runs. On a fork it inherits the for
 
 Wraps blockchain operations as LangChain `@tool`-decorated functions; each docstring tells the LLM when/how to call it. `get_tools()` is the factory.
 
-**The ERC20 and Uniswap tools are wrappers.** Their bodies do three things: resolve tickers and contact names to addresses, invoke the matching `langchain-erc20` / `langchain-uniswap-v2` tool to get an execution plan, and hand that plan to `_submit_plan`. `_submit_plan` sends a one-call plan as an ERC-7579 single execution and anything longer as an atomic batch, then raises `ToolException` on a non-success receipt.
+**The ERC20 and Uniswap tools are wrappers.** Their bodies do three things: resolve tickers and contact names to addresses, invoke the matching `langchain-erc20` / `langchain-uniswap-v2` tool to get an execution plan, and hand that plan to `_quote_plan`. `_quote_plan` prices a one-call plan as an ERC-7579 single execution and anything longer as an atomic batch, and parks it in `quotes.py`.
+
+**No write tool sends anything.** They all stop at a quote — what the transaction does, what it costs in USD, and a `quote_id`. `confirm_transaction(quote_id)` is the only tool in the app that signs and broadcasts, and `cancel_transaction(quote_id)` discards one. See `quotes.py` above for why the send is a separate, turn-gated step.
 
 The wrappers exist — rather than exposing the package tools directly — because the package tools take no `user_id` (a toolkit instance is bound to one user's chain), `langchain-uniswap-v2` accepts raw addresses only, and neither package submits anything. Their docstrings describe a *different* function signature (addresses, `from_address`, `nonce`, returns an unsubmitted plan), so they are not interchangeable with the docstrings here, which are the contract the LLM actually sees. See [langchain-packages-migration.md](langchain-packages-migration.md) §3.
 
@@ -359,6 +411,16 @@ The wrappers exist — rather than exposing the package tools directly — becau
 | `swap_*` (all six variants) | Uniswap/PancakeSwap V2 swaps — **approve + swap sent as one atomic batch**. Optional `recipient` delivers the output straight to a saved contact (see below) |
 | `add_liquidity(...)` / `add_liquidity_eth(...)` | Add liquidity — approvals batched and residuals zeroed atomically |
 | `remove_liquidity(...)` / `remove_liquidity_eth(...)` | Remove liquidity — the pool's **LP token** is approved by address to the trusted router (granted in the `deployWallet` call itself) and consumed in one batch |
+| `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the session key and broadcasts it |
+| `cancel_transaction(quote_id)` | Discards a quote the user declined |
+
+> **Every row above except the last two returns a QUOTE, not a receipt.** The tool builds the exact
+> calldata, prices the whole UserOperation against the chain, and returns `action` (what it does,
+> composed from the calls rather than by the model), `total_usd`, `max_total_usd`, `protocol_fee_usd`
+> and a `quote_id`. Nothing is signed and nothing is sent until `confirm_transaction`, which must
+> come in a **later conversation turn** — so the user has actually replied to the price. The swap and
+> liquidity tools put their slippage bounds in the quote's `details`, where they are of some use,
+> rather than beside the receipt where they used to be.
 
 > **Swap-and-send in one transaction.** All six `swap_*` tools take an optional `recipient`, passed
 > through to the router's own recipient argument, so "swap 1 ETH for USDC and send it to Sandy" is
@@ -385,7 +447,7 @@ The wrappers exist — rather than exposing the package tools directly — becau
 > nothing coming back, so the module charges the **full** outgoing value against the cap instead of a
 > swap's usual near-zero net.
 
-> **There is no `approve_erc20` tool.** Standing approvals revert on-chain (the module forbids leaving an allowance outstanding), so a standalone approval can never succeed — which is also why `toolkits._BLOCKED_TOOLS` withholds the packages' own `approve` / `approve_token` / `revoke_approval`. The swap and liquidity tools instead receive the approval as `plan["calls"][0]`, already sized to what the router will actually pull, and `_submit_plan` sends the whole plan as one atomic ERC-7579 batch. Exact-output swaps and `addLiquidity` — where the router may pull less than approved — carry a trailing `approve(router, 0)` in the same plan. Each call's `role` (`approve`, `approve_reset`, `swap`, …) records which is which.
+> **There is no `approve_erc20` tool.** Standing approvals revert on-chain (the module forbids leaving an allowance outstanding), so a standalone approval can never succeed — which is also why `toolkits._BLOCKED_TOOLS` withholds the packages' own `approve` / `approve_token` / `revoke_approval`. The swap and liquidity tools instead receive the approval as `plan["calls"][0]`, already sized to what the router will actually pull, and the plan is sent as one atomic ERC-7579 batch. Exact-output swaps and `addLiquidity` — where the router may pull less than approved — carry a trailing `approve(router, 0)` in the same plan. Each call's `role` (`approve`, `approve_reset`, `swap`, …) records which is which.
 
 ### ERC-8004 tools
 
@@ -401,7 +463,7 @@ All 29 tools of [`langchain-erc8004`](https://pypi.org/project/langchain-erc8004
 | identity writes | `register_agent`, `parse_registration_receipt`, `set_agent_uri`, `set_agent_metadata`, `transfer_agent` | **no** |
 | agent wallet | `build_agent_wallet_typed_data`, `set_agent_wallet`, `unset_agent_wallet` | **no** |
 
-21 registered, 60 agent tools in total (was 62 until `save_contact` and `delete_contact` moved to the API — see above). Every write returns a plan and goes out through the same `_submit_plan` as the ERC20/Uniswap tools; all write tools accept `session_key_ciphertext` — the opaque Vault ciphertext; never decrypted or logged at the tool layer. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
+21 registered, 60 agent tools in total (was 62 until `save_contact` and `delete_contact` moved to the API — see above). Every write returns a plan and is quoted through the same `_quote_plan` as the ERC20/Uniswap tools (via `_quote_registry_plan`, which carries the package's `summary` into the quote), so a registry write is confirmed exactly like a transfer; all write tools accept `session_key_ciphertext` — the opaque Vault ciphertext; never decrypted or logged at the tool layer. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
 
 > **The eight identity writes are defined but withheld from `get_tools()`**, on the same principle as `toolkits._BLOCKED_TOOLS`: a tool that cannot succeed is worse than no tool. Changing the protocol agent is governance done with the operator's key, and a user's wallet cannot own an agent of its own either — `register_agent` mints the ERC-721 to the wallet, and `SessionHandler` installs no ERC-7579 fallback handler for `onERC721Received`, so any mint or `safeTransferFrom` to the account reverts with `ERC7579MissingFallbackHandler(0x150b7a02)`. Each wrapper additionally calls `_reject_protocol_agent_write`, which refuses the protocol's own agent before any calldata is built — so a deployment whose wallet *does* own an agent (or has been granted `setApprovalForAll`) can re-enable them by adding them back to the list, without exposing the protocol identity.
 

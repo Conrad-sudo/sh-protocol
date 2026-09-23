@@ -4,7 +4,9 @@ End-to-end API tests against a running local fork -- Sepolia unless another is n
 This covers the half of the API that no offline test can reach: the transactions themselves, and
 the eth_call simulations that are the entire reason the prepare endpoints exist. A signed-in user
 is walked through the real journey -- sign up, prove an address with SIWE, deploy a wallet, then
-drive every owner action -- with each on-chain effect asserted afterwards.
+drive every owner action -- with each on-chain effect asserted afterwards. The agent's side is
+covered too: session-key ERC20 transfers through the self-bundler, with what each one really cost
+written to COST_REPORT_PATH.
 
 A brand-new account is used rather than the harness's user 1, because the deploy endpoints can only
 be covered by a wallet this API actually created.
@@ -16,9 +18,12 @@ Requires (see the plan, Phase 7):
 
 Run: make e2e-test [ARGS=arbitrum-fork]   (or: python app/tests/test_e2e_fork.py [arbitrum-fork])
 """
+import itertools
+import json
 import os
 import sys
 import time
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 
@@ -34,13 +39,24 @@ from eth_utils import keccak                          # noqa: E402
 from fastapi.testclient import TestClient             # noqa: E402
 from web3 import Web3                                 # noqa: E402
 
-import anvil                                          # noqa: E402
 import api                                            # noqa: E402
+from abi import ientry_point                          # noqa: E402
+import bundler                                        # noqa: E402
 import smart_wallet_agent                             # noqa: E402
+import tools                                          # noqa: E402
+from agent_context import AgentContext                # noqa: E402
+from constants import ETH_SENTINEL, get_native_asset_ticker  # noqa: E402
 from contracts import read_spending_config           # noqa: E402
 from db import get_session_key, get_token_address     # noqa: E402
+from langchain_core.tools import ToolException        # noqa: E402
+from langchain_erc20 import ERC20_ABI                 # noqa: E402
+import quotes                                         # noqa: E402
+from userop import prepare_execute_call               # noqa: E402
+from web3.logs import DISCARD                         # noqa: E402
 
 RPC = "http://127.0.0.1:8545"
+# Where test_self_bundling writes the measured cost of each transfer, for reporting.
+COST_REPORT_PATH = os.getenv("E2E_COST_REPORT_PATH", "/tmp/e2e_cost_report.json")
 # The fork under test, named as `make setup-test ARGS=...` names it. Requests speak its chain ID,
 # which is the live chain's: a fork reports its parent's id.
 FORK_CHAIN_IDS = {f"{name}-fork": cid for cid, name in api.CHAIN_NAME_BY_ID.items() if cid in api.FORKABLE_CHAIN_IDS}
@@ -395,22 +411,302 @@ def test_contacts_are_owner_managed(c: TestClient, headers: dict):
     """
     print("\n[6] contacts are managed by the owner, not the agent")
 
+    # Compared against the account's own starting list rather than assumed empty: on a fresh
+    # wallet.db the first signup is handed user id 1 -- the harness user APP_USER_ID usually names,
+    # whose demo contact deploy_wallet.py has already saved.
+    baseline = c.get("/api/contacts", headers=headers).json()["contacts"]
     payee = Account.create().address
     r = c.post("/api/contacts", headers=headers, json={"name": "Sandy", "address": payee})
     check("the owner can add a contact", r.status_code == 201, f"{r.status_code} {r.text[:140]}")
 
     listed = c.get("/api/contacts", headers=headers).json()["contacts"]
-    check("it is listed back", listed == [{"name": "sandy", "address": payee}], str(listed)[:140])
+    check("it is listed back", {"name": "sandy", "address": payee} in listed and len(listed) == len(baseline) + 1,
+          str(listed)[:140])
 
     check("deleting works", c.delete("/api/contacts/sandy", headers=headers).status_code == 200)
-    check("the list is empty again",
-          c.get("/api/contacts", headers=headers).json()["contacts"] == [])
+    check("the list is back to where it started",
+          c.get("/api/contacts", headers=headers).json()["contacts"] == baseline)
 
     # The other half of the boundary, asserted against the tools the running agent would use.
     import tools
     exported = {t.name for t in tools.get_tools()}
     check("no contact-writing tool is exported to the agent",
           not (exported & {"save_contact", "delete_contact"}), str(sorted(exported)))
+
+
+def deal_erc20(token: str, holder: str, amount: int):
+    """
+    Sets `holder`'s balance of a standard ERC20 on the fork, by finding the token's balances mapping
+    slot -- what forge-std's deal() does. Tries each slot, keeps the one balanceOf reflects, and puts
+    every other slot back as it was.
+    """
+    erc20 = w3.eth.contract(address=token, abi=ERC20_ABI)
+    word = "0x" + amount.to_bytes(32, "big").hex()
+    for slot in range(64):
+        key = "0x" + keccak(bytes.fromhex(holder[2:].rjust(64, "0")) + slot.to_bytes(32, "big")).hex()
+        original = "0x" + bytes(w3.eth.get_storage_at(token, key)).hex()
+        w3.provider.make_request("anvil_setStorageAt", [token, key, word])
+        if erc20.functions.balanceOf(holder).call() == amount:
+            return
+        w3.provider.make_request("anvil_setStorageAt", [token, key, original])
+    raise AssertionError(f"could not find the balances slot of {token}")
+
+
+def user_op_cost(sh, receipt) -> dict:
+    """
+    What one session-key transaction really cost, read back from its receipt.
+
+    The wallet pays two things on top of the amount it sends: the network fee -- the EntryPoint's
+    actualGasCost, repaid to the bundler out of the wallet's deposit -- and the protocol fee, sent
+    to the treasury. The bundler's own outer transaction is shown beside it, to prove it was repaid.
+    """
+    entry_point = w3.eth.contract(address=sh.functions.ENTRY_POINT().call(), abi=ientry_point)
+    op = [e for e in entry_point.events.UserOperationEvent().process_receipt(receipt, errors=DISCARD)][0]["args"]
+    fee = sum(e["args"]["fee"] for e in sh.events.ProtocolFeePaid().process_receipt(receipt, errors=DISCARD))
+    handle_ops = entry_point.decode_function_input(w3.eth.get_transaction(receipt["transactionHash"])["input"])[1]
+    packed = handle_ops["ops"][0]
+    limits = int.from_bytes(packed["accountGasLimits"], "big")
+    outer_cost = receipt["gasUsed"] * receipt["effectiveGasPrice"]
+
+    def usd(wei: int) -> float:
+        return sh.functions.getUsdValue(ETH_SENTINEL, wei).call() / 10**18 if wei else 0.0
+
+    return {
+        "tx_hash": "0x" + bytes(receipt["transactionHash"]).hex(),
+        "op_gas_used": op["actualGasUsed"],
+        "verification_gas_limit": limits >> 128,
+        "call_gas_limit": limits & ((1 << 128) - 1),
+        "pre_verification_gas": packed["preVerificationGas"],
+        "gas_price_gwei": receipt["effectiveGasPrice"] / 1e9,
+        "network_fee_wei": op["actualGasCost"],
+        "network_fee_usd": usd(op["actualGasCost"]),
+        "protocol_fee_wei": fee,
+        "protocol_fee_usd": usd(fee),
+        "total_fee_usd": usd(op["actualGasCost"] + fee),
+        "eth_usd": usd(10**18),
+        "bundler_gas_used": receipt["gasUsed"],
+        "bundler_paid_wei": outer_cost,
+        "bundler_net_wei": op["actualGasCost"] - outer_cost,
+    }
+
+
+def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    The self-bundler end to end: real ERC20 transfers through the agent's own tool, what each one
+    cost, and the failure modes a live chain adds.
+
+    The transfers go through tools.transfer_erc20 -- the exact function the agent calls, minus the
+    model -- so the path is the production one: langchain-erc20's plan, the signature-free gas
+    estimate, the session-key signature, handleOps from the API's bundler key. One transfer moves a
+    token the cap does not watch (no price read), one a token it does (one), so the cost of the
+    oracle shows up in the numbers.
+    """
+    print("\n[7] self-bundling: ERC20 transfers, their real cost, and the live-chain failure modes")
+    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    sh = w3.eth.contract(address=wallet, abi=abi)
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
+
+    # A tool runtime for the NEXT conversation turn. Every quote and every confirm gets its own,
+    # because confirm_transaction refuses a quote raised in the turn that is confirming it -- the
+    # guarantee that the user actually saw the cost and replied. The agent supplies these ids in
+    # production (smart_wallet_agent._next_turn_id); here the test plays the part of the user.
+    turn = itertools.count(1)
+
+    def next_turn() -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
+
+    # One key per process, so the API and the Telegram bot never hand out the same nonce.
+    api_bundler = bundler.resolve_bundler(w3).address
+    bundler.use_bundler_key(bundler.TELEGRAM_BUNDLER_ENV)
+    try:
+        telegram_bundler = bundler.resolve_bundler(w3).address
+    finally:
+        bundler.use_bundler_key(bundler.API_BUNDLER_ENV)
+    check("the API and the Telegram bot bundle with different keys", api_bundler != telegram_bundler)
+    check("the API's key is the default", bundler.resolve_bundler(w3).address == api_bundler)
+    check("a fork never broadcasts privately", bundler._send_w3_for(NETWORK) is None)
+    check("live mainnet does", bundler._send_w3_for("mainnet") is not None)
+
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    token = w3.eth.contract(address=usdc, abi=ERC20_ABI)
+    unit = 10 ** token.functions.decimals().call()
+    deal_erc20(usdc, wallet, 1_000 * unit)
+    payee = Account.create().address
+    r = c.post("/api/contacts", headers=headers, json={"name": "payee", "address": payee})
+    check("the payee is saved as a contact", r.status_code == 201, f"{r.status_code} {r.text[:140]}")
+
+    def quote_transfer(amount: float) -> dict:
+        """The quote half: builds and prices the transfer. Sends nothing."""
+        return tools.transfer_erc20.func(
+            next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+            recipient="payee", amount=amount,
+        )
+
+    def confirm(quoted: dict):
+        """The send half, a turn later -- as it would be after the user replied."""
+        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
+
+    def transfer(amount: float) -> tuple[dict, int]:
+        before = token.functions.balanceOf(payee).call()
+        cost = user_op_cost(sh, confirm(quote_transfer(amount)))
+        return cost, token.functions.balanceOf(payee).call() - before
+
+    report = {"network": NETWORK, "native_asset": get_native_asset_ticker(CHAIN_ID), "transfers": []}
+
+    # The first transfer pays one-off costs a repeat does not -- this wallet's first UserOp (its
+    # EntryPoint nonce and deposit go from zero) and a payee who never held USDC -- so it is
+    # reported on its own, and the watched/unwatched comparison below is made between repeats.
+    cost_first, moved = transfer(10)
+    check("a first USDC transfer lands", moved == 10 * unit, str(moved))
+    report["transfers"].append({"label": "10 USDC, first transfer (new payee, wallet's first op)", **cost_first})
+
+    cost, moved = transfer(10)
+    check("an unwatched USDC transfer lands", moved == 10 * unit, str(moved))
+    report["transfers"].append({"label": "10 USDC, repeat, USDC not watched (no price read)", **cost})
+
+    owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "add"})
+    cost_watched, moved = transfer(10)
+    check("a watched USDC transfer lands", moved == 10 * unit, str(moved))
+    report["transfers"].append({"label": "10 USDC, repeat, USDC watched (one price read)", **cost_watched})
+    check("the price read shows up in the gas", cost_watched["op_gas_used"] > cost["op_gas_used"],
+          f'{cost_watched["op_gas_used"]} vs {cost["op_gas_used"]}')
+
+    # The quote/confirm split itself. A quote prices a transaction that is still unsigned and
+    # unsent; it cannot be confirmed in the turn that raised it, it belongs to one user, it works
+    # once, and what it quoted has to match what the chain then charges.
+    sent_before = w3.eth.get_transaction_count(api_bundler)
+    held_before = token.functions.balanceOf(payee).call()
+    same_turn = next_turn()
+    quoted = tools.transfer_erc20.func(
+        same_turn, session_key_ciphertext=key_ciphertext, token="usdc", recipient="payee", amount=7
+    )
+    check("a quote says plainly that nothing was sent", "NOT SENT" in quoted["status"], quoted["status"])
+    check("quoting broadcasts nothing", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    check("...and moves no tokens", token.functions.balanceOf(payee).call() == held_before)
+    check("the quote names the contract the value goes through", quoted["destinations"] == [usdc],
+          str(quoted["destinations"]))
+    check("the quote describes the transfer itself", "7" in quoted["action"] and payee[2:10].lower()
+          in quoted["action"].lower().replace("0x", ""), quoted["action"])
+    check("the quote prices it in USD", quoted["total_usd"] > 0, str(quoted.get("total_usd")))
+    check("the ceiling is at least the estimate", quoted["max_total_usd"] >= quoted["total_usd"],
+          f'{quoted["max_total_usd"]} vs {quoted["total_usd"]}')
+    check("the protocol fee is quoted separately", quoted["protocol_fee_usd"] > 0,
+          str(quoted.get("protocol_fee_usd")))
+
+    try:
+        tools.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
+        check("confirming in the quoting turn is refused", False, "it was sent")
+    except ToolException as e:
+        check("confirming in the quoting turn is refused", "has not seen the cost" in str(e), str(e)[:160])
+    check("...and still nothing was broadcast", w3.eth.get_transaction_count(api_bundler) == sent_before)
+
+    try:
+        quotes.take(user_id + 9_999, CHAIN_ID, quoted["quote_id"], next(turn))
+        check("another user cannot claim someone else's quote", False, "it was handed over")
+    except quotes.QuoteError:
+        check("another user cannot claim someone else's quote", True)
+
+    receipt = confirm(quoted)
+    actual = user_op_cost(sh, receipt)
+    check("confirming sends the quoted transfer, once",
+          token.functions.balanceOf(payee).call() - held_before == 7 * unit)
+    check("the real cost stayed under the quoted ceiling",
+          actual["total_fee_usd"] <= quoted["max_total_usd"], 
+          f'${actual["total_fee_usd"]:.4f} charged vs ${quoted["max_total_usd"]:.4f} quoted as the max')
+    # Tight on purpose. A quote that is merely an upper bound is not a price: it is the number the
+    # user decides on, so it has to track what the chain then charges, not the gas that was merely
+    # reserved. 10% leaves room for the base fee moving between the quote and the block.
+    check("the quoted cost was within 10% of the real one",
+          abs(actual["total_fee_usd"] - quoted["total_usd"]) <= 0.10 * actual["total_fee_usd"],
+          f'quoted ${quoted["total_usd"]:.4f}, charged ${actual["total_fee_usd"]:.4f}')
+    report["quote_vs_actual"] = {
+        "quoted_total_usd": quoted["total_usd"],
+        "quoted_max_usd": quoted["max_total_usd"],
+        "charged_total_usd": actual["total_fee_usd"],
+    }
+
+    try:
+        tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        check("a quote cannot be confirmed twice", False, "it was sent again")
+    except ToolException as e:
+        check("a quote cannot be confirmed twice", "no pending transaction" in str(e), str(e)[:160])
+
+    # Over the spending cap: only the chain can tell (the hook's postCheck), so this is the bundler's
+    # execution estimate refusing it -- by name, before anything is signed, sent or paid for.
+    deal_erc20(usdc, wallet, 5_000 * unit)
+    nonce_before = w3.eth.get_transaction_count(api_bundler)
+    native_before = w3.eth.get_balance(wallet)
+    try:
+        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+                                  recipient="payee", amount=2_000)
+        check("a transfer over the cap is refused", False, "it was sent")
+    except ToolException as e:
+        check("a transfer over the cap is refused by name, before sending",
+              "BudgetExceeded" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
+    check("...so the bundler sent nothing", w3.eth.get_transaction_count(api_bundler) == nonce_before)
+    check("...and the wallet paid no gas", w3.eth.get_balance(wallet) == native_before)
+    owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "remove"})
+
+    for t in report["transfers"]:
+        # The bundler fronts the outer transaction and is repaid by the EntryPoint out of the
+        # wallet's prefund. preVerificationGas is what covers the part the EntryPoint cannot
+        # measure; if it were short, the bundler would lose a little on every op.
+        check(f'the bundler was repaid in full ({t["label"]})', t["bundler_net_wei"] >= 0,
+              f'net {t["bundler_net_wei"]} wei')
+
+    # Someone else lands our op first. The signature does not cover the beneficiary, so a rival that
+    # saw it can submit it naming itself; ours then reverts on the used nonce. The user's transfer
+    # still happened, once -- and the app must say so, not report a failure the user might retry.
+    before = token.functions.balanceOf(payee).call()
+    amount = 5 * unit
+    session_handler, entry_point, calldata, nonce = prepare_execute_call(
+        user_id, usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:])
+    )
+    bundler_account = bundler.resolve_bundler(w3)
+    op_quote = bundler.quote_user_op(
+        user_id, session_handler, entry_point, calldata, nonce, bundler_account
+    )
+    prepared = bundler.prepare_user_op(
+        user_id, key_ciphertext, session_handler, entry_point, op_quote, bundler_account
+    )
+    rival = new_funded_account()
+    rival_tx = entry_point.functions.handleOps([prepared.op], rival.address).build_transaction({
+        "from": rival.address, "nonce": w3.eth.get_transaction_count(rival.address),
+        "gas": prepared.outer_gas, "chainId": CHAIN_ID, **prepared.fees,
+    })
+    rival_hash = w3.eth.send_raw_transaction(rival.sign_transaction(rival_tx).raw_transaction)
+    w3.eth.wait_for_transaction_receipt(rival_hash, timeout=60)
+    ours_nonce = w3.eth.get_transaction_count(api_bundler)
+    tx_hash, receipt = bundler.broadcast_user_op(user_id, prepared, bundler_account)
+    check("our own handleOps went out (and reverted on the used nonce)",
+          w3.eth.get_transaction_count(api_bundler) == ours_nonce + 1)
+    check("the app reports the rival's transaction instead of a failure",
+          bytes(tx_hash) == bytes(rival_hash), f"{bytes(tx_hash).hex()} vs {bytes(rival_hash).hex()}")
+    check("the payee was paid once, not twice", token.functions.balanceOf(payee).call() - before == amount)
+
+    # An unfunded bundler refuses up front, rather than failing in the mempool.
+    saved = w3.eth.get_balance(api_bundler)
+    w3.provider.make_request("anvil_setBalance", [api_bundler, hex(10**6)])
+    before = token.functions.balanceOf(payee).call()
+    try:
+        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+                                  recipient="payee", amount=1)
+        check("an unfunded bundler refuses", False, "it was sent")
+    except ToolException as e:
+        check("an unfunded bundler refuses, and says so", "top it up" in str(e), str(e)[:200])
+    finally:
+        w3.provider.make_request("anvil_setBalance", [api_bundler, hex(saved)])
+    check("...and nothing moved", token.functions.balanceOf(payee).call() == before)
+
+    with open(COST_REPORT_PATH, "w") as f:
+        json.dump(report, f, indent=2)
+    for t in report["transfers"]:
+        print(f'  COST  {t["label"]}: network ${t["network_fee_usd"]:.4f} + protocol ${t["protocol_fee_usd"]:.4f}'
+              f' = ${t["total_fee_usd"]:.4f}  ({t["op_gas_used"]:,} gas at {t["gas_price_gwei"]:.3f} gwei;'
+              f' bundler net {t["bundler_net_wei"]:+,} wei)')
+    print(f"  cost report written to {COST_REPORT_PATH}")
 
 
 def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
@@ -428,9 +724,9 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
     written directly. Both are put back exactly afterwards -- the original code and the original
     value of every slot written -- so the fork is left as it was found.
 
-    Last in the run on purpose: the agent-path check mines a (failing) UserOp.
+    Last in the run on purpose: it swaps a live feed's code, and restores it only at the end.
     """
-    print("\n[7] a sequencer outage: named for the agent, no lock-out for the owner")
+    print("\n[8] a sequencer outage: named for the agent, no lock-out for the owner")
     sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
     registry = w3.eth.contract(address=sh.functions.REGISTRY().call(),
                                abi=api.get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"])
@@ -485,12 +781,12 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
         check("the agent is told the error by name on a read", "PriceOracle_SequencerDown" in message, message[:200])
 
         # The agent, on a transaction: a real session-key UserOp through the self-bundling path.
-        # Its inner call fails in the hook's valuation, so the op is mined with success=false and
-        # the reason lives only in the EntryPoint's UserOperationRevertReason event.
+        # Its inner call fails in the hook's valuation, which the bundler's execution estimate hits
+        # first -- so the op is refused by name before it is signed, and nothing is mined or paid.
         user_id = c.get("/api/me", headers=headers).json()["user_id"]
         _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
         try:
-            anvil.send_user_op_as_session(user_id, key_ciphertext, sink, 10**15, b"")
+            bundler.send_user_op_as_session(user_id, key_ciphertext, sink, 10**15, b"")
             check("a UserOp fails during an outage", False, "it succeeded")
         except RuntimeError as e:
             check("the agent is told the error by name on a transaction",
@@ -526,6 +822,7 @@ if __name__ == "__main__":
     test_simulations_bite(client, owner, auth_headers, deployed)
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers)
+    test_self_bundling(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)
 
     finish(f"All fork e2e checks passed on {NETWORK}.")

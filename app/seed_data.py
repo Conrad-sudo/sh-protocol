@@ -78,7 +78,9 @@ CHAINS = {
 RPCS = {
     "anvil": "http://127.0.0.1:8545",
     "mainnet-fork": "http://127.0.0.1:8545",
-    "mainnet": "https://cloudflare-eth.com",
+    # Reads and estimates only. The bundler broadcasts live-mainnet transactions privately instead
+    # (bundler.PRIVATE_SEND_RPC_URLS), so the public mempool never sees them.
+    "mainnet": os.getenv("MAINNET_RPC_URL") or "https://cloudflare-eth.com",
     "goerli": "https://ethereum-goerli-rpc.publicnode.com",
     "sepolia-fork": "http://127.0.0.1:8545",
     "bsc-fork": "http://127.0.0.1:8545",

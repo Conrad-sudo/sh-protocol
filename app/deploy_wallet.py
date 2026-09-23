@@ -61,7 +61,8 @@ DEFAULT_WATCHED_TICKERS = {
 }
 
 # Maps a chain_name to the env var holding its deployer private key. Every fork of a real chain
-# (mainnet-fork, sepolia-fork, bsc-fork, celo-fork) shares SEPOLIA_PRIVATE_KEY rather than the
+# (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork) and live Sepolia share
+# API_BUNDLER -- the API process's bundler key, which is also this deployer -- rather than the
 # Anvil default burner key: forking inherits that chain's real on-chain state, and the well-known
 # Anvil/Hardhat accounts have been EIP-7702-delegated to drainer contracts on real
 # Sepolia/BSC/mainnet (see HelperConfig.s.sol's ANVIL_BURNER_WALLET comment for the same issue on
@@ -73,15 +74,15 @@ DEFAULT_WATCHED_TICKERS = {
 # Plain "anvil" (no fork) has no real-world state to inherit, so the burner key is fine there —
 # it's the only chain name allowed to fall through to the ANVIL_PRIVATE_KEY default below.
 LIVE_PRIVATE_KEY_ENV = {
-    "sepolia": "SEPOLIA_PRIVATE_KEY",
+    "sepolia": "API_BUNDLER",
     "bsc": "BSC_PRIVATE_KEY",
     "celo": "CELO_PRIVATE_KEY",
     "arbitrum": "ARBITRUM_PRIVATE_KEY",
-    "mainnet-fork": "SEPOLIA_PRIVATE_KEY",
-    "sepolia-fork": "SEPOLIA_PRIVATE_KEY",
-    "bsc-fork": "SEPOLIA_PRIVATE_KEY",
-    "celo-fork": "SEPOLIA_PRIVATE_KEY",
-    "arbitrum-fork": "SEPOLIA_PRIVATE_KEY",
+    "mainnet-fork": "API_BUNDLER",
+    "sepolia-fork": "API_BUNDLER",
+    "bsc-fork": "API_BUNDLER",
+    "celo-fork": "API_BUNDLER",
+    "arbitrum-fork": "API_BUNDLER",
 }
 
 
@@ -129,8 +130,9 @@ def deploy_wallet(user_id: int, chain_name: str):
     The deployer must already hold gas. On a fork it starts from the forked chain's real balance —
     zero, on mainnet-fork and bsc-fork — so `make fund` (anvil_setBalance) has to run first; the
     Makefile makes it a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every
-    target. The same address also bundles here (see anvil.resolve_bundler), so one top-up covers
-    deployment and every UserOp that follows.
+    target. On every network but plain Anvil the same address is also the API process's bundler
+    (see bundler.resolve_bundler), so one top-up covers deployment and the API's UserOps; the
+    Telegram bot bundles with its own key, which `make fund` tops up as well.
 
     @param user_id     The application user ID who will own the new wallet.
     @param chain_name  The network to deploy on (e.g. "anvil", "mainnet-fork", "sepolia-fork", "sepolia").
@@ -361,7 +363,7 @@ def deploy(user_id: int, network: str):
     Supported networks: "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork",
     "arbitrum-fork", "sepolia", "bsc", "celo". Each one must already have the shared protocol
     infrastructure deployed (see
-    deploy_wallet()). "sepolia" and "bsc" are live networks — SEPOLIA_PRIVATE_KEY /
+    deploy_wallet()). "sepolia" and "bsc" are live networks — API_BUNDLER /
     BSC_PRIVATE_KEY must be set and funded with real ETH/BNB before deploying (see
     LIVE_PRIVATE_KEY_ENV).
 

@@ -9,6 +9,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from smart_wallet_agent import chat, init_agent,open_checkpointer,close_checkpointer
+from bundler import TELEGRAM_BUNDLER_ENV, use_bundler_key
 from tools import _get_all_sessions
 from db import consume_telegram_link_nonce, get_user_id_by_telegram_chat_id, link_telegram
 from network_config import load_network_config
@@ -194,6 +195,9 @@ async def post_shutdown(application: Application) -> None:
 
 
 def main():
+    # This process bundles with its own key, never the API's: the two run side by side, and each
+    # keeps its own nonce counter, so sharing one key would have them hand out the same nonces.
+    use_bundler_key(TELEGRAM_BUNDLER_ENV)
     app = Application.builder().token(telegram_token).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))

@@ -9,16 +9,16 @@ Create a `.env` file in the project root:
 ```env
 # Signing keys
 ANVIL_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-SEPOLIA_PRIVATE_KEY=your_sepolia_deployer_private_key_here
+API_BUNDLER=your_api_bundler_private_key_here          # the API's bundler; also the fork + live-Sepolia deployer
+TELEGRAM_BUNDLER=your_telegram_bundler_private_key_here # the Telegram bot's bundler — must differ from API_BUNDLER
 BSC_PRIVATE_KEY=your_bsc_deployer_private_key_here
 CELO_PRIVATE_KEY=your_celo_deployer_private_key_here
 
-# Deployer wallet address (used by HelperConfig on live networks)
+# API_BUNDLER's address — the deployer account HelperConfig uses off plain Anvil
 SEPOLIA_ACCOUNT=your_deployer_wallet_address_here
 
-# Bundler key for plain "anvil" (signs the outer handleOps transaction locally).
-# Every other network — the four forks and live Sepolia — bundles with SEPOLIA_PRIVATE_KEY below.
-ANVIL_BUNDLER=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+# Optional: where live-mainnet transactions are broadcast. Defaults to Flashbots Protect.
+MAINNET_PRIVATE_RPC_URL=https://rpc.flashbots.net/fast
 
 # RPC endpoints
 MAINNET_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your_alchemy_key
@@ -49,19 +49,21 @@ VAULT_SECRET_ID_ACCESSOR=
 ETHERSCAN_API_KEY=your_etherscan_api_key_here
 ```
 
-> `SEPOLIA_ACCOUNT` is the public Ethereum address corresponding to `SEPOLIA_PRIVATE_KEY`. It is used by `HelperConfig.s.sol` as the deployer account on live Sepolia. Load it via `vm.envAddress("SEPOLIA_ACCOUNT")` — do not hardcode it. Mainnet/BSC use a separate placeholder key (`MAINNET_DEPLOYER_PK`) hardcoded in `HelperConfig.s.sol` — **replace it with a real funded key before broadcasting a live mainnet or BSC deployment.**
+> `SEPOLIA_ACCOUNT` is the public Ethereum address corresponding to `API_BUNDLER` (which was called `SEPOLIA_PRIVATE_KEY` until 2026-09-22). It is used by `HelperConfig.s.sol` as the deployer account on live Sepolia. Load it via `vm.envAddress("SEPOLIA_ACCOUNT")` — do not hardcode it. Mainnet/BSC use a separate placeholder key (`MAINNET_DEPLOYER_PK`) hardcoded in `HelperConfig.s.sol` — **replace it with a real funded key before broadcasting a live mainnet or BSC deployment.**
 >
-> `ANVIL_PRIVATE_KEY` and `ANVIL_BUNDLER` are Anvil's default account 0 and account 2 keys. They are public and safe to use locally only.
+> `ANVIL_PRIVATE_KEY` is Anvil's default account 0 key — public, and safe to use locally only. `ANVIL_BUNDLER` is no longer read: plain Anvil now bundles with `API_BUNDLER` / `TELEGRAM_BUNDLER` like every other network, and can be removed from `.env`.
 >
-> `SEPOLIA_PRIVATE_KEY` and `BSC_PRIVATE_KEY` must be funded with real Sepolia ETH / BSC BNB before deployment. `SEPOLIA_PRIVATE_KEY` carries three roles at once: the live-Sepolia deployer/owner, the deployer on `sepolia-fork`, and — since UserOps on live Sepolia are self-bundled rather than sent to Alchemy — the **bundler** key `anvil.py` signs `handleOps` with there. Nothing tops it up automatically on a live chain, so it must hold enough ETH to keep paying for bundling. Collapsing the deployer and bundler into one key is acceptable on a testnet; on mainnet they must be separate, since the deployer is the protocol's admin root (see [THREAT_MODEL.md](../THREAT_MODEL.md)) and the bundler is an always-online hot key.
+> **The two bundler keys.** The app is its own bundler on every network (`bundler.py`), and each *process* signs `handleOps` with its own key: the API with `API_BUNDLER`, the Telegram bot with `TELEGRAM_BUNDLER`. They must differ — `tx_sender`'s nonce lock covers one process, so two processes sharing a key would hand out the same nonces and replace each other's transactions. Both must be plain EOAs with no code, and on a live chain both must hold enough of the native asset to keep fronting gas (the EntryPoint repays them per op; nothing tops them up automatically).
 >
-> `FORK_DEPLOYER_PK` / `FORK_DEPLOYER_ADDRESS` are **no longer used** and can be removed from `.env`. Every fork network (mainnet-fork, sepolia-fork, bsc-fork, celo-fork) now uses `SEPOLIA_ACCOUNT` / `SEPOLIA_PRIVATE_KEY` for all three roles at once: the `--sender`/`--private-key` broadcasting `DeploySHProtocol.s.sol` (see the Makefile), the deployer/owner key `deploy_wallet.py` signs with, and the bundler key `anvil.py` signs the outer `handleOps` transaction with. `HelperConfig.s.sol` resolves `config.account` to the same address, so it also owns `SHTreasury`.
+> `API_BUNDLER` and `BSC_PRIVATE_KEY` must be funded with real Sepolia ETH / BSC BNB before deployment. `API_BUNDLER` carries three roles at once: the live-Sepolia deployer/owner, the deployer on every fork, and the API's bundler. Collapsing the deployer and bundler into one key is acceptable on a testnet; on mainnet they must be separate, since the deployer is the protocol's admin root (see [THREAT_MODEL.md](../THREAT_MODEL.md)) and a bundler is an always-online hot key.
 >
-> That address inherits the forked chain's **real** balance, which is zero on mainnet-fork and bsc-fork, so `make fund` sets it to 100 ETH via `anvil_setBalance`. It is a prerequisite of both `deploy` and `deploy-wallet`, and self-skips on any non-fork network — one top-up covers deployment, protocol ownership and bundling, so there is no separate bundler-funding step.
+> `FORK_DEPLOYER_PK` / `FORK_DEPLOYER_ADDRESS` are **no longer used** and can be removed from `.env`. Every fork network (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork) now uses `SEPOLIA_ACCOUNT` / `API_BUNDLER` for all three roles at once: the `--sender`/`--private-key` broadcasting `DeploySHProtocol.s.sol` (see the Makefile), the deployer/owner key `deploy_wallet.py` signs with, and the API's bundler key for the outer `handleOps` transaction. `HelperConfig.s.sol` resolves `config.account` to the same address, so it also owns `SHTreasury`.
 >
-> `CELO_PRIVATE_KEY` / `CELO_RPC_URL` are read by the Python app's network routing (`anvil.py`, `deploy_wallet.py`), but Celo has no Solidity deployment path yet (`HelperConfig.s.sol` has no Celo branch) — see [docs/app.md](app.md).
+> That address inherits the forked chain's **real** balance, which is zero on mainnet-fork and bsc-fork, so `make fund` sets it to 100 ETH via `anvil_setBalance` — and does the same for `TELEGRAM_BUNDLER`'s address, derived from the key. It is a prerequisite of both `deploy` and `deploy-wallet`, and self-skips on any network without a local node, so there is no separate bundler-funding step.
 >
-> On live Sepolia/BSC, the Alchemy bundler handles gas — no local bundler key is used by `live_network.py`.
+> `CELO_PRIVATE_KEY` / `CELO_RPC_URL` are read by the Python app's network routing (`deploy_wallet.py`), but Celo has no Solidity deployment path yet (`HelperConfig.s.sol` has no Celo branch) — see [docs/app.md](app.md).
+>
+> On live mainnet the bundler broadcasts through a private RPC (`MAINNET_PRIVATE_RPC_URL`, default Flashbots Protect) so its transactions never sit in the public mempool, where a bot could lift the UserOp out and land it first. Reads and estimates still go to `MAINNET_RPC_URL`, which the app now uses for live mainnet too.
 >
 > `ETHERSCAN_API_KEY` is optional. If not set, deployment skips contract verification and prints a notice.
 >
