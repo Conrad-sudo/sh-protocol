@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -68,10 +69,14 @@ async def run_turn(user_id: int, chain_id: int, thread: str, text: str) -> dict:
         config={"configurable": {"thread_id": thread}},
         context=AgentContext(user_id=user_id, turn_id=swa._next_turn_id()),
     )
+    # The checkpointer hands back the whole thread; this turn starts at its own HumanMessage.
+    # Counting from the top would repeat every earlier turn's calls, so a quote made in one turn
+    # would count again in the turn that confirms it.
     msgs = result["messages"]
+    start = max(i for i, m in enumerate(msgs) if isinstance(m, HumanMessage))
     return {
         "prompt": text,
-        "tools": tool_calls(msgs),
+        "tools": tool_calls(msgs[start:]),
         "reply": str(msgs[-1].content)[:1200],
     }
 
@@ -159,14 +164,16 @@ async def main():
     await swa.open_checkpointer()
     swa.init_agent()
 
+    run_id = int(time.time())
     traces = []
     try:
         for scenario in SCENARIOS:
             print(f"\n--- {scenario['id']} ---")
             # A distinct thread per scenario, so none of them inherits another's context. The
             # multi-turn scenarios deliberately share one -- a quote and its confirmation have to
-            # be in the same conversation, in that order.
-            thread = f"smoke-{scenario['id']}:{chain_id}"
+            # be in the same conversation, in that order. The run id keeps a rerun from inheriting
+            # the previous run's history, which the checkpointer keeps in wallet.db.
+            thread = f"smoke-{scenario['id']}-{run_id}:{chain_id}"
             turns = []
             for text in scenario["turns"]:
                 text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK"))
