@@ -1,14 +1,14 @@
 import { useTheme } from '../../theme/useTheme'
 
 // Intrinsic size of public/brand/mark-*.png, for the width/height the browser reserves.
-const MARK_RATIO = 348 / 384
+const MARK_RATIO = 116 / 128
 
 interface LogoProps {
   /** `mark` is the key alone; `lockup` adds the "mitfah" wordmark. */
   variant?: 'mark' | 'lockup'
   /** Mark height in px. */
   size?: number
-  /** `onDark` forces the white-key mark, for the navy sidebar in either theme. */
+  /** `onDark` forces the bright-steel mark, for a dark surface in either theme. */
   tone?: 'auto' | 'onDark'
   className?: string
 }
