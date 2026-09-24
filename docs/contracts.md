@@ -326,6 +326,7 @@ struct InitConfig {
     uint256 windowDuration;
     address[] watchedTokens;
     address sessionKey;        // address(0) = owner-only wallet (not an error, unlike addSession)
+    uint48 sessionKeyValidUntil; // the key's deadline; same rules as addSession (ignored for address(0))
     address[] trustedSpenders; // may be empty; granted AFTER the hook is installed
 }
 
@@ -383,7 +384,7 @@ function addAllowedTarget(address target) external onlyOwner;
 function addAllowedTargets(address[] calldata targets) external onlyOwner;
 function removeAllowedTarget(address target) external onlyOwner;
 
-event SessionAdded(address indexed sessionKey);
+event SessionAdded(address indexed sessionKey, uint48 validUntil);
 event SessionRemoved(address indexed sessionKey);
 event MaxOpGasCostUpdated(uint256 oldMax, uint256 newMax);
 event SessionAllowlistToggled(bool enabled);
@@ -393,7 +394,7 @@ event AllowedTargetRemoved(address indexed target);
 
 > **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) and `allowedTargetCount` (`uint32`) share one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of six (mapping lookups aside). `forge inspect SessionHandler storageLayout` shows the assignment.
 
-> The account currently has **no validator module**. Until a validator (an owner/ECDSA validator or Smart Sessions) is added, this self-validation path is what makes UserOps work — the bot's nonce-key scheme still validates fine because any extracted "validator" isn't installed and the account falls through to `_rawSignatureValidation`.
+> The account currently has **no validator module**, and `_validateUserOp` never consults one: the nonce key the app sends is irrelevant to who may sign. Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_validateUserOp` — this self-validation path is the only way UserOps are authenticated.
 
 ---
 

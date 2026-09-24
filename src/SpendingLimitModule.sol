@@ -112,8 +112,9 @@ import {SHRegistry} from "./SHRegistry.sol";
  *        or trust a malicious spender mid-transaction would make the cap meaningless. This module no
  *        longer merely *assumes* that — preCheck's step (0) refuses any execution that targets this
  *        module's own admin surface, so the setters cannot be driven through execute at all, on any
- *        host account. That guard cannot distinguish an owner from a session key (msg.sender is the
- *        account either way), so it blocks the owner's execute path too; the owner's supported route
+ *        host account. That guard cannot distinguish an owner from a session key (it is told the
+ *        immediate caller, the EntryPoint for every UserOp, but never which key signed it), so it
+ *        blocks the owner's execute path too; the owner's supported route
  *        is a DIRECT call in which the account itself is msg.sender (SessionHandler's owner-only
  *        passthroughs), which never passes through this hook. Scoping WHICH functions a key may call
  *        at all (Smart Sessions, roadmap §4) remains future work and stays the host's job.
