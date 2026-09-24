@@ -1,5 +1,12 @@
 # SessionHandler Protocol 🤖⛓️
 
+[![CI](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml)
+[![Tests](https://img.shields.io/badge/tests-255-brightgreen)](test/)
+[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.33-363636?logo=solidity)](https://soliditylang.org)
+[![Built with Foundry](https://img.shields.io/badge/built%20with-Foundry-FFDB1C)](https://getfoundry.sh)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org)
+
 **Agentic wallet infrastructure.**
 
 SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them across DeFi — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
