@@ -196,4 +196,6 @@ cd web && npm test && npm run e2e
 
 ## License
 
-See [LICENSE](LICENSE).
+[Business Source License 1.1](LICENSE) until **2029-06-12**, after which it becomes MIT. The
+interfaces in `src/interfaces/` and the test mocks in `src/mocks/` stay MIT (some are adapted from
+Chainlink and OpenZeppelin), as do the tests and deploy scripts.
