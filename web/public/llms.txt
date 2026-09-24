@@ -1,0 +1,29 @@
+# Mitfah
+
+> An AI assistant for your crypto wallet that can only spend what you allow. You own a smart contract wallet and set a daily dollar limit; the wallet itself refuses anything over it, whatever the assistant is told.
+
+## How it works
+
+- Sign up, connect a browser wallet you already use (such as MetaMask, Rabby or Coinbase Wallet) and create a Mitfah wallet. Your browser wallet owns it. Mitfah never has your owner key, so it can't take the funds or change your limits.
+- Choose how many dollars the assistant may spend each day and add funds. Save the people it may pay as contacts.
+- Ask the assistant, on the website or in Telegram, to check balances, send tokens to your contacts, swap tokens or answer questions about your wallet.
+
+## Rules written into the wallet
+
+- A payment over the daily limit is refused by the wallet.
+- The assistant pays only your saved contacts, and it can't add new ones.
+- Every payment is quoted first, with what it costs, and goes only when you say yes.
+- Only your browser wallet can change the limit or the rules.
+- The assistant loses its access after 30 days unless you renew it. You can turn it off sooner.
+- Pausing the wallet stops everything in one click. You can still withdraw while it's paused.
+
+## Costs
+
+Each action the assistant takes pays the network fee plus a small protocol fee of a few cents, both from the wallet's own balance. Neither counts toward your spending limit.
+
+## Pages
+
+- [Home](https://mitfah.com/): what Mitfah is, how it works, the safety rules and common questions
+- [Create an account](https://mitfah.com/signup)
+- [Terms of Service](https://mitfah.com/terms)
+- [Privacy Policy](https://mitfah.com/privacy)

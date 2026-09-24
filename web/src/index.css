@@ -13,15 +13,34 @@ body {
   min-height: 100dvh;
   color: var(--rs-text-primary);
   font-family: var(--rs-font-family-base);
+  font-size: 15px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
+/*
+ * Headings are the nameplate: Archivo stretched wide, set tight. The scale is the classic one
+ * (14 · 18 · 24 · 36 · 48 · 60), so sizes relate by ear rather than by increment.
+ */
 h1,
 h2,
 h3 {
   font-family: var(--mf-font-heading);
+  font-stretch: var(--mf-wide);
+  font-weight: 640;
   color: var(--rs-text-heading);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+h3 {
+  font-size: 18px;
+  font-weight: 620;
+}
+
+p {
+  text-wrap: pretty;
 }
 
 .mf-mono {

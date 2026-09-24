@@ -8,6 +8,7 @@ import { googleEnabled } from '../auth/google'
 import { useAuth } from '../auth/useAuth'
 import { GoogleButton } from '../components/GoogleButton'
 import { OrDivider } from '../components/OrDivider'
+import { PageMeta } from '../components/PageMeta'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 
 const { StringType } = Schema.Types
@@ -39,7 +40,11 @@ export function LoginPage() {
 
   return (
     <>
-      <title>Sign in · Mitfah</title>
+      <PageMeta
+        title="Sign in · Mitfah"
+        description="Sign in to Mitfah to manage your wallet, change its limits and talk to your assistant."
+        path="/login"
+      />
       <h1 className="mf-auth-title">Welcome back</h1>
       <Text muted>Sign in to manage your wallet and talk to your assistant.</Text>
 

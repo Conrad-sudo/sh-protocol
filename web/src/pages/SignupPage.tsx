@@ -8,6 +8,7 @@ import { googleEnabled } from '../auth/google'
 import { useAuth } from '../auth/useAuth'
 import { GoogleButton } from '../components/GoogleButton'
 import { OrDivider } from '../components/OrDivider'
+import { PageMeta } from '../components/PageMeta'
 import { useGoogleSignIn } from '../hooks/useGoogleSignIn'
 import { passwordStrength, STRENGTH_LABELS } from '../lib/passwordStrength'
 
@@ -43,7 +44,11 @@ export function SignupPage() {
 
   return (
     <>
-      <title>Create account · Mitfah</title>
+      <PageMeta
+        title="Create account · Mitfah"
+        description="Create a Mitfah account and set up a crypto wallet whose AI assistant can only spend what you allow."
+        path="/signup"
+      />
       <h1 className="mf-auth-title">Create your account</h1>
       <Text muted>Then deploy a wallet you own and set how much the assistant may spend.</Text>
 

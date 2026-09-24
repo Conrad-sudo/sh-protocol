@@ -1,8 +1,36 @@
 import { fileURLToPath } from 'node:url'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
-import { loadEnv } from 'vite'
+import { loadEnv, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
+
+/**
+ * Preloads the Latin cut of Archivo, the headline font, so a prerendered page's first paint is
+ * already in it. Found late, the font swaps in after that paint and the headline reflows.
+ */
+function preloadHeadlineFont(): Plugin {
+  return {
+    name: 'mitfah:preload-headline-font',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(_html, ctx) {
+        const font = Object.keys(ctx.bundle ?? {}).find(file => /archivo-latin-wdth-normal-.*\.woff2$/.test(file))
+        if (!font) {
+          this.warn('No Archivo Latin font in the bundle, so none is preloaded. Update preloadHeadlineFont().')
+          return []
+        }
+        return [
+          {
+            tag: 'link',
+            attrs: { rel: 'preload', href: `/${font}`, as: 'font', type: 'font/woff2', crossorigin: '' },
+            injectTo: 'head',
+          },
+        ]
+      },
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -16,7 +44,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       react(),
-      babel({ presets: [reactCompilerPreset()] })
+      babel({ presets: [reactCompilerPreset()] }),
+      preloadHeadlineFont(),
     ],
     define: {
       'import.meta.env.VITE_GOOGLE_CLIENT_ID': JSON.stringify(googleClientId),

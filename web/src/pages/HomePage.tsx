@@ -3,11 +3,14 @@ import KeyIcon from '@rsuite/icons/Key'
 import PauseRoundIcon from '@rsuite/icons/PauseRound'
 import PeoplesIcon from '@rsuite/icons/Peoples'
 import ShieldIcon from '@rsuite/icons/Shield'
+import TimeIcon from '@rsuite/icons/Time'
+import DetailIcon from '@rsuite/icons/Detail'
 import { Link } from 'react-router'
-import { Text } from 'rsuite'
 import { useAuth } from '../auth/useAuth'
 import { Wallpaper } from '../components/brand/Wallpaper'
+import { LimitDemo } from '../components/landing/LimitDemo'
 import { LinkButton } from '../components/LinkButton'
+import { PageMeta, SITE_URL } from '../components/PageMeta'
 import { StatusTag } from '../components/StatusTag'
 import { useChains } from '../hooks/useChains'
 import { chainName } from '../wallet/chains'
@@ -27,26 +30,37 @@ const STEPS = [
   },
 ]
 
-const SAFETY: { icon: ReactNode; title: string; body: string }[] = [
-  {
-    icon: <KeyIcon />,
-    title: 'You own it',
-    body: 'Your browser wallet is the owner. Only you can change the rules or withdraw everything.',
-  },
+/** What the assistant might try, and what the wallet does about it. */
+const RULES: { icon: ReactNode; tries: string; wallet: string }[] = [
   {
     icon: <ShieldIcon />,
-    title: 'A daily dollar limit',
-    body: 'The wallet itself refuses any payment that would go over your limit, whatever the assistant is told.',
-  },
-  {
-    icon: <PauseRoundIcon />,
-    title: 'Pause any time',
-    body: 'One click stops every payment. You can still withdraw your money while the wallet is paused.',
+    tries: 'Spend more than your daily limit',
+    wallet: 'Refuses the payment. The limit is part of the wallet itself, whatever the assistant is told.',
   },
   {
     icon: <PeoplesIcon />,
-    title: 'Pays only your contacts',
-    body: 'The assistant can send money only to people you saved as contacts, and it can’t add new ones.',
+    tries: 'Pay someone you haven’t saved',
+    wallet: 'Won’t send it. The assistant pays only your contacts, and it can’t add new ones.',
+  },
+  {
+    icon: <DetailIcon />,
+    tries: 'Send money without asking',
+    wallet: 'Waits for you. Every payment is quoted first, with what it costs, and goes only when you say yes.',
+  },
+  {
+    icon: <KeyIcon />,
+    tries: 'Change your limit or rules',
+    wallet: 'Can’t. Only your browser wallet can, because it owns the Mitfah wallet.',
+  },
+  {
+    icon: <TimeIcon />,
+    tries: 'Keep its access for good',
+    wallet: 'Loses it after 30 days unless you renew it. You can turn it off sooner.',
+  },
+  {
+    icon: <PauseRoundIcon />,
+    tries: 'Keep going when you want it to stop',
+    wallet: 'Stops everything in one click when you pause it. You can still withdraw while it’s paused.',
   },
 ]
 
@@ -77,6 +91,40 @@ const FAQ = [
   },
 ]
 
+const DESCRIPTION =
+  'An AI assistant for your crypto wallet that can only spend what you allow. You own the smart contract wallet, set a daily dollar limit and can pause it any time.'
+
+/** What the site is and who publishes it, for search engines (schema.org JSON-LD). */
+const STRUCTURED_DATA = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'Organization',
+      '@id': `${SITE_URL}/#organization`,
+      name: 'Mitfah',
+      url: `${SITE_URL}/`,
+      logo: `${SITE_URL}/icon-512.png`,
+    },
+    {
+      '@type': 'WebSite',
+      '@id': `${SITE_URL}/#website`,
+      name: 'Mitfah',
+      url: `${SITE_URL}/`,
+      publisher: { '@id': `${SITE_URL}/#organization` },
+    },
+    {
+      '@type': 'WebApplication',
+      name: 'Mitfah',
+      url: `${SITE_URL}/`,
+      description: DESCRIPTION,
+      applicationCategory: 'FinanceApplication',
+      operatingSystem: 'Any',
+      browserRequirements: 'A browser wallet such as MetaMask, Rabby or Coinbase Wallet',
+      publisher: { '@id': `${SITE_URL}/#organization` },
+    },
+  ],
+})
+
 export function HomePage() {
   const { status } = useAuth()
   const signedIn = status === 'signedIn'
@@ -93,14 +141,16 @@ export function HomePage() {
 
   return (
     <>
-      <title>Mitfah — an AI assistant for your crypto wallet</title>
+      <PageMeta title="Mitfah — an AI assistant for your crypto wallet" description={DESCRIPTION} path="/" />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: STRUCTURED_DATA }} />
       <Wallpaper place="hero" />
 
       <section className="mf-hero">
         <h1>An AI assistant for your crypto wallet that can only spend what you allow.</h1>
-        <Text muted size="lg">
-          You own the wallet. You set a daily dollar limit. You can pause it any time.
-        </Text>
+        <p className="mf-hero-lede">
+          You own the wallet and set a daily dollar limit. The wallet itself refuses anything over it, whatever the
+          assistant is told.
+        </p>
         <div className="mf-hero-actions">
           {cta}
           {!signedIn && (
@@ -111,16 +161,18 @@ export function HomePage() {
         </div>
       </section>
 
+      <LimitDemo />
+
       <section className="mf-landing-section" aria-labelledby="how-heading">
         <h2 id="how-heading">How it works</h2>
-        <ol className="mf-steps-list">
+        <ol className="mf-trace">
           {STEPS.map((step, i) => (
-            <li key={step.title} className="mf-landing-card">
-              <span className="mf-step-number" aria-hidden>
+            <li key={step.title}>
+              <span className="mf-trace-pad" aria-hidden>
                 {i + 1}
               </span>
               <h3>{step.title}</h3>
-              <Text muted>{step.body}</Text>
+              <p>{step.body}</p>
             </li>
           ))}
         </ol>
@@ -128,26 +180,38 @@ export function HomePage() {
 
       <section className="mf-landing-section" aria-labelledby="safety-heading">
         <h2 id="safety-heading">Built to keep your money safe</h2>
-        <ul className="mf-safety-list">
-          {SAFETY.map(item => (
-            <li key={item.title} className="mf-landing-card">
-              <span className="mf-safety-icon" aria-hidden>
-                {item.icon}
-              </span>
-              <h3>{item.title}</h3>
-              <Text muted>{item.body}</Text>
-            </li>
-          ))}
-        </ul>
+        <p className="mf-section-lede">
+          These rules are written into your wallet on the blockchain. Neither the assistant nor Mitfah can switch them
+          off.
+        </p>
+        <table className="mf-rules">
+          <thead>
+            <tr>
+              <th scope="col">If the assistant tries to</th>
+              <th scope="col">Your wallet</th>
+            </tr>
+          </thead>
+          <tbody>
+            {RULES.map(rule => (
+              <tr key={rule.tries}>
+                <th scope="row">
+                  <span className="mf-rule-icon" aria-hidden>
+                    {rule.icon}
+                  </span>
+                  {rule.tries}
+                </th>
+                <td>{rule.wallet}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </section>
 
       <Networks signedIn={signedIn} />
 
       <section className="mf-landing-section mf-telegram-band" aria-labelledby="telegram-heading">
         <h2 id="telegram-heading">Also in Telegram</h2>
-        <Text muted>
-          Link your account in Settings and ask the assistant from any chat. Same wallet, same limits, same history.
-        </Text>
+        <p>Link your account in Settings and ask the assistant from any chat. Same wallet, same limits, same history.</p>
       </section>
 
       <section className="mf-landing-section mf-faq" aria-labelledby="faq-heading">
@@ -155,7 +219,7 @@ export function HomePage() {
         {FAQ.map(item => (
           <details key={item.q} className="mf-faq-item" name="faq">
             <summary>{item.q}</summary>
-            <Text muted>{item.a}</Text>
+            <p>{item.a}</p>
           </details>
         ))}
       </section>
@@ -184,9 +248,10 @@ function Networks({ signedIn }: { signedIn: boolean }) {
           </li>
         ))}
       </ul>
-      <Text muted>
-        You get a separate wallet on each network. <Link to={signedIn ? '/wallets/new' : '/signup'}>Add one</Link> whenever you like.
-      </Text>
+      <p className="mf-section-note">
+        You get a separate wallet on each network. <Link to={signedIn ? '/wallets/new' : '/signup'}>Add one</Link>{' '}
+        whenever you like.
+      </p>
     </section>
   )
 }

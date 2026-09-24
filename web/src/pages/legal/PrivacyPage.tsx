@@ -3,7 +3,12 @@ import { CONTACT_EMAIL, LegalPage } from './LegalPage'
 /** DRAFT privacy policy. Every item below matches what the app actually stores (app/db.py). */
 export function PrivacyPage() {
   return (
-    <LegalPage title="Privacy Policy" updated="17 September 2026">
+    <LegalPage
+      title="Privacy Policy"
+      description="What Mitfah stores about you and why, what stays in your browser, who else sees your data, how long it is kept and your choices."
+      path="/privacy"
+      updated="17 September 2026"
+    >
       <p>
         This policy explains what Mitfah stores about you, why, and who else sees it. Mitfah is an AI assistant that
         operates a smart contract wallet you own, within limits you set.

@@ -12,12 +12,19 @@
 
 .mf-logo img {
   display: block;
+  /* The mark is a lit metal object; a short shadow sets it on the page. */
+  filter: drop-shadow(0 1px 1.5px rgb(6 42 78 / 30%));
+}
+
+.rs-theme-dark .mf-logo img {
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 60%));
 }
 
 .mf-logo-word {
   font-family: var(--mf-font-heading);
+  font-stretch: var(--mf-wide);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
   color: var(--mf-navy);
 }
 
@@ -85,9 +92,7 @@
   outline-offset: 2px;
 }
 
-/* The sidebar is navy in both themes, so its ring is white rather than green. */
 .mf-sidebar :focus-visible {
-  outline: 2px solid #ffffff;
   outline-offset: -2px;
 }
 
@@ -109,9 +114,10 @@
 }
 
 .mf-page-title {
-  margin: 0 0 4px;
-  font-size: 28px;
-  line-height: 1.2;
+  margin: 0 0 6px;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 .mf-page-actions {
@@ -190,7 +196,8 @@
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--rs-sidenav-inverse-bg);
+  background: var(--mf-steel);
+  border-right: 1px solid var(--mf-rule);
   transition: width 0.2s ease;
 }
 
@@ -210,6 +217,54 @@
   flex: 1;
 }
 
+/*
+ * The current page's item is raised as a plate, with a green pad lit beside it like the pads on the
+ * wallpaper's circuit. Everything else stays flat.
+ */
+.mf-sidebar .mf-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+}
+
+.mf-sidebar[data-expanded='false'] .mf-nav-list {
+  padding-inline: 8px;
+}
+
+.mf-sidebar .rs-sidenav-item {
+  position: relative;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.mf-sidebar .rs-sidenav-item[data-active='true'] {
+  font-weight: 620;
+  box-shadow:
+    0 0 0 1px var(--mf-rule),
+    var(--mf-plate-shadow);
+}
+
+.mf-sidebar .rs-sidenav-item[data-active='true']::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--mf-green);
+  box-shadow: 0 0 0 3px var(--mf-green-glow);
+}
+
+/* On the icon rail it sits in the key's top corner. */
+.mf-sidebar[data-expanded='false'] .rs-sidenav-item[data-active='true']::before {
+  top: 9px;
+  right: 7px;
+  margin-top: 0;
+}
+
 .mf-sidebar-header {
   display: flex;
   align-items: center;
@@ -227,23 +282,23 @@
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border-top: 1px solid rgb(255 255 255 / 12%);
+  border-top: 1px solid var(--mf-rule);
 }
 
 .mf-sidebar-email {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: rgb(255 255 255 / 72%);
+  color: var(--rs-text-secondary);
 }
 
 .mf-sidebar-footer .rs-btn {
-  color: rgb(255 255 255 / 85%);
+  color: var(--rs-text-secondary);
 }
 
 .mf-sidebar-footer .rs-btn:hover {
-  color: #ffffff;
-  background: rgb(255 255 255 / 10%);
+  color: var(--rs-text-primary);
+  background: var(--rs-sidenav-inverse-hover-bg);
 }
 
 /* Top bar */
@@ -297,6 +352,7 @@
 }
 
 .mf-tab {
+  position: relative;
   min-height: 56px;
   display: flex;
   flex-direction: column;
@@ -321,7 +377,21 @@
 }
 
 .mf-tab[aria-current='page'] {
-  color: var(--rs-primary-600);
+  color: var(--rs-text-heading);
+  font-weight: 620;
+}
+
+/* The current tab's pad is lit, as a bar along its top edge. */
+.mf-tab[aria-current='page']::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 30%;
+  right: 30%;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--mf-green);
+  box-shadow: 0 0 8px var(--mf-green-glow);
 }
 
 /* ── Wallpaper ──────────────────────────────────────────────────────────── */
@@ -428,7 +498,7 @@ body:has(.mf-wallpaper) :is(.mf-public, .mf-auth, .mf-content) {
 
 body:has(.mf-wallpaper)
   :is(.mf-public, .mf-auth, .mf-content)
-  :is(.rs-btn:not([data-appearance='ghost'], [data-appearance='subtle'], [data-appearance='link']), .rs-panel, .rs-tag, .rs-input, .rs-picker, .mf-landing-card, .mf-auth-card, .mf-network-list li) {
+  :is(.rs-btn:not([data-appearance='ghost'], [data-appearance='subtle'], [data-appearance='link']), .rs-panel, .rs-tag, .rs-input, .rs-picker, .mf-landing-card, .mf-auth-card, .mf-network-list li, .mf-demo-plate, .mf-rules, .mf-trace-pad) {
   text-shadow: none;
 }
 
@@ -448,7 +518,7 @@ body:has(.mf-wallpaper)
 }
 
 /* A card is already a surface. */
-body:has(.mf-wallpaper) :is(.rs-panel, .mf-landing-card, .mf-auth-card) .rs-btn {
+body:has(.mf-wallpaper) :is(.rs-panel, .mf-landing-card, .mf-auth-card, .mf-demo-plate) .rs-btn {
   background-image: none;
   backdrop-filter: none;
 }
@@ -459,22 +529,14 @@ body:has(.mf-wallpaper) :is(.rs-panel, .mf-landing-card, .mf-auth-card) .rs-btn 
  * blur is enough over thin traces: 12px dropped 1 frame in 20 while scrolling, 6px about none.
  * Fully solid for anyone whose system asks for less transparency.
  */
-body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
-  background: color-mix(in srgb, var(--rs-bg-card) 85%, transparent);
+body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card, .mf-demo-plate, .mf-rules) {
+  background: color-mix(in srgb, var(--rs-bg-card) 86%, transparent);
   backdrop-filter: blur(6px) saturate(1.4);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 70%),
-    0 20px 44px -22px rgb(6 42 78 / 40%);
-}
-
-.rs-theme-dark:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 6%),
-    0 24px 48px -20px rgb(0 0 0 / 70%);
+  box-shadow: var(--mf-plate-shadow);
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card) {
+  body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card, .mf-demo-plate, .mf-rules) {
     background: var(--rs-bg-card);
     backdrop-filter: none;
   }
@@ -507,8 +569,8 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   padding: 32px;
   background: var(--rs-bg-card);
   border: 1px solid var(--rs-border-primary);
-  border-radius: 16px;
-  box-shadow: 0 12px 40px rgb(6 42 78 / 8%);
+  border-radius: 20px;
+  box-shadow: var(--mf-plate-shadow);
 }
 
 .mf-auth-logo {
@@ -517,8 +579,9 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
 }
 
 .mf-auth-title {
-  margin: 0 0 4px;
-  font-size: 24px;
+  margin: 0 0 6px;
+  font-size: 28px;
+  font-weight: 700;
 }
 
 .mf-auth-form {
@@ -553,7 +616,7 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   gap: 12px;
   max-width: 1200px;
   margin-inline: auto;
-  padding: 16px;
+  padding: 20px 24px;
 }
 
 .mf-public-nav {
@@ -561,18 +624,30 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   gap: 8px;
 }
 
+/* The headline sits inside the wallpaper's ring. Wide type needs fewer characters per line. */
 .mf-hero {
   box-sizing: border-box;
-  max-width: 760px;
+  max-width: 880px;
   margin-inline: auto;
-  padding: 72px 16px;
+  padding: 80px 24px 36px;
   text-align: center;
 }
 
 .mf-hero h1 {
-  margin: 0 0 16px;
-  font-size: clamp(32px, 6vw, 52px);
-  line-height: 1.1;
+  max-width: 18ch;
+  margin: 0 auto 20px;
+  font-size: clamp(34px, 5.2vw, 60px);
+  font-weight: 700;
+  line-height: 1.03;
+  letter-spacing: -0.03em;
+}
+
+.mf-hero-lede {
+  max-width: 50ch;
+  margin: 0 auto;
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--rs-text-secondary);
 }
 
 .mf-hero-actions {
@@ -587,13 +662,14 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   box-sizing: border-box;
   max-width: 1080px;
   margin-inline: auto;
-  padding: 40px 16px;
+  padding: 56px 24px;
 }
 
 .mf-landing-section h2 {
-  margin: 0 0 20px;
-  font-size: clamp(24px, 4vw, 32px);
-  line-height: 1.2;
+  margin: 0 0 24px;
+  font-size: clamp(26px, 3.4vw, 36px);
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 .mf-landing-section h3 {
@@ -601,66 +677,472 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   font-size: 18px;
 }
 
-.mf-steps-list,
-.mf-safety-list,
-.mf-network-list {
+.mf-section-lede {
+  max-width: 60ch;
+  margin: -8px 0 28px;
+  font-size: 17px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-section-note {
+  margin: 0;
+  color: var(--rs-text-secondary);
+}
+
+/* ── The day with a $100 limit ─────────────────────────────────────────── */
+
+.mf-demo {
+  box-sizing: border-box;
+  max-width: 900px;
+  margin-inline: auto;
+  padding: 12px 24px 40px;
+}
+
+/* The page's largest plate, so the largest radius. */
+.mf-demo-plate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 24px 48px;
+  padding: 36px 44px;
+  border: 1px solid var(--mf-rule);
+  border-radius: 28px;
+  background: var(--rs-bg-card);
+  box-shadow: var(--mf-plate-shadow);
+}
+
+.mf-demo-log h2 {
+  margin: 0 0 18px;
+  font-size: 22px;
+}
+
+.mf-demo-log ol {
+  display: grid;
+  gap: 16px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.mf-steps-list,
-.mf-safety-list {
+/* What the owner asked, as it looks in the chat. */
+.mf-demo-ask {
+  display: inline-block;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 12px 12px 12px 4px;
+  background: var(--mf-bubble-user);
+  font-weight: 560;
+}
+
+.mf-demo-answer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0 0 2px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-demo-answer svg {
+  flex: none;
+  margin-top: 4px;
+  color: var(--mf-green);
+}
+
+.mf-demo li[data-refused='true'] .mf-demo-answer {
+  color: var(--mf-danger);
+  font-weight: 600;
+}
+
+.mf-demo li[data-refused='true'] .mf-demo-answer svg {
+  color: var(--mf-danger);
+}
+
+.mf-demo-replay.rs-btn {
+  margin-top: 18px;
+  margin-left: -10px;
+}
+
+/* The dial's figure changes as the day goes: three figures stacked, one showing at a time. */
+.mf-demo-amounts {
   display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
 }
 
-.mf-landing-card {
-  padding: 24px;
-  background: var(--rs-bg-card);
-  border: 1px solid var(--rs-border-primary);
-  border-radius: var(--mf-radius-card);
+.mf-demo-amounts > * {
+  grid-area: 1 / 1;
 }
 
-.mf-step-number,
-.mf-safety-icon {
-  display: inline-grid;
+/*
+ * A prerendered copy of the page holds the day at its start: the app replaces that copy when it
+ * loads, which would restart a day already under way. main.tsx drops the attribute as it renders.
+ */
+#root[data-prerendered] :is(.mf-demo, .mf-demo *) {
+  animation-play-state: paused;
+}
+
+/*
+ * The day is played once, in 3.6 s. Without animation (reduced motion, tests) every line shows and
+ * the dial reads $30: the finished day, which is also each element's resting style below.
+ */
+.mf-demo-amounts [data-step='0'],
+.mf-demo-amounts [data-step='1'] {
+  opacity: 0;
+}
+
+.mf-demo li {
+  animation: mf-appear 0.45s ease-out both;
+}
+
+.mf-demo li .mf-demo-answer {
+  animation: mf-appear 0.4s ease-out both;
+}
+
+.mf-demo li[data-step='0'] {
+  animation-delay: 0.5s;
+}
+
+.mf-demo li[data-step='0'] .mf-demo-answer {
+  animation-delay: 1s;
+}
+
+.mf-demo li[data-step='1'] {
+  animation-delay: 1.7s;
+}
+
+.mf-demo li[data-step='1'] .mf-demo-answer {
+  animation-delay: 2.2s;
+}
+
+.mf-demo li[data-step='2'] {
+  animation-delay: 2.9s;
+}
+
+.mf-demo li[data-step='2'] .mf-demo-answer {
+  animation-delay: 3.4s;
+}
+
+.mf-demo-dial .mf-dial-value {
+  animation: mf-demo-arc 3.6s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+}
+
+.mf-demo-amounts [data-step='0'] {
+  animation: mf-demo-figure-0 3.6s linear both;
+}
+
+.mf-demo-amounts [data-step='1'] {
+  animation: mf-demo-figure-1 3.6s linear both;
+}
+
+.mf-demo-amounts [data-step='2'] {
+  animation: mf-demo-figure-2 3.6s linear both;
+}
+
+/* The refusal: the track flushes red and the dial gives a short shake of the head. */
+.mf-demo-dial .mf-dial-track {
+  animation: mf-demo-refuse-track 4.6s ease-out both;
+}
+
+.mf-demo-dial {
+  animation: mf-demo-shake 0.45s ease-in-out 3.4s both;
+}
+
+@keyframes mf-appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes mf-demo-arc {
+  0%,
+  28% {
+    stroke-dasharray: 100 100;
+  }
+  38%,
+  61% {
+    stroke-dasharray: 80 100;
+  }
+  71%,
+  100% {
+    stroke-dasharray: 30 100;
+  }
+}
+
+@keyframes mf-demo-figure-0 {
+  0%,
+  28% {
+    opacity: 1;
+  }
+  33%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes mf-demo-figure-1 {
+  0%,
+  28% {
+    opacity: 0;
+  }
+  33%,
+  61% {
+    opacity: 1;
+  }
+  66%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes mf-demo-figure-2 {
+  0%,
+  61% {
+    opacity: 0;
+  }
+  66%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes mf-demo-refuse-track {
+  0%,
+  73% {
+    stroke: var(--mf-dial-track);
+  }
+  76%,
+  88% {
+    stroke: color-mix(in srgb, var(--mf-danger) 55%, var(--mf-dial-track));
+  }
+  100% {
+    stroke: var(--mf-dial-track);
+  }
+}
+
+@keyframes mf-demo-shake {
+  0%,
+  100% {
+    transform: none;
+  }
+  20% {
+    transform: rotate(-3deg);
+  }
+  45% {
+    transform: rotate(2.5deg);
+  }
+  70% {
+    transform: rotate(-1.5deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-demo *,
+  .mf-demo-dial {
+    animation: none !important;
+  }
+
+  .mf-demo-replay.rs-btn {
+    display: none;
+  }
+}
+
+@media (max-width: 719px) {
+  .mf-demo-plate {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    padding: 28px 20px;
+    border-radius: 22px;
+  }
+
+  .mf-demo-log {
+    justify-self: stretch;
+  }
+}
+
+/* ── How it works: three pads on one trace ─────────────────────────────── */
+
+.mf-trace {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 40px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-trace li {
+  position: relative;
+}
+
+/* The trace runs from each pad to the next one. */
+.mf-trace li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 21px;
+  left: 52px;
+  right: -40px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--mf-rule-strong);
+}
+
+.mf-trace-pad {
+  display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  margin-bottom: 12px;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 18px;
+  box-sizing: border-box;
+  border: 2px solid var(--mf-green);
   border-radius: 50%;
-  background: var(--mf-tag-success-bg);
-  color: var(--mf-tag-success-text);
-  font-family: var(--mf-font-heading);
+  background: var(--rs-bg-card);
+  color: var(--mf-green);
+  font-stretch: var(--mf-wide);
   font-weight: 700;
+  box-shadow: 0 0 0 5px var(--mf-green-glow);
 }
 
-.mf-safety-icon {
-  font-size: 18px;
+.mf-trace p {
+  max-width: 34ch;
+  margin: 0;
+  color: var(--rs-text-secondary);
 }
+
+@media (max-width: 719px) {
+  .mf-trace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
+  }
+
+  .mf-trace li {
+    padding-left: 64px;
+  }
+
+  .mf-trace-pad {
+    position: absolute;
+    top: -8px;
+    left: 0;
+  }
+
+  .mf-trace li:not(:last-child)::after {
+    top: 44px;
+    bottom: -40px;
+    left: 21px;
+    right: auto;
+    width: 2px;
+    height: auto;
+  }
+}
+
+/* ── The rulebook ──────────────────────────────────────────────────────── */
+
+.mf-rules {
+  width: 100%;
+  border: 1px solid var(--mf-rule);
+  border-radius: var(--mf-radius-plate);
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  background: var(--rs-bg-card);
+  box-shadow: var(--mf-plate-shadow);
+}
+
+.mf-rules thead th {
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--mf-rule);
+  background: color-mix(in srgb, var(--mf-steel) 65%, transparent);
+  color: var(--rs-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.mf-rules tbody th,
+.mf-rules tbody td {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--mf-rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.mf-rules tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.mf-rules tbody th {
+  width: 38%;
+  color: var(--rs-text-heading);
+  font-weight: 600;
+}
+
+.mf-rule-icon {
+  display: inline-grid;
+  margin-right: 12px;
+  vertical-align: -3px;
+  color: var(--rs-primary-500);
+  font-size: 17px;
+}
+
+@media (max-width: 719px) {
+  .mf-rules thead {
+    display: none;
+  }
+
+  .mf-rules tbody,
+  .mf-rules tr,
+  .mf-rules tbody th,
+  .mf-rules tbody td {
+    display: block;
+    width: auto;
+  }
+
+  .mf-rules tbody th {
+    padding-bottom: 4px;
+    border-bottom: 0;
+  }
+
+  .mf-rules tbody td {
+    padding-top: 0;
+    padding-left: 53px;
+    color: var(--rs-text-secondary);
+  }
+}
+
+/* ── Networks, Telegram, questions ─────────────────────────────────────── */
 
 .mf-network-list {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 16px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
 }
 
 .mf-network-list li {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
+  padding: 8px 16px;
   background: var(--rs-bg-card);
   border: 1px solid var(--rs-border-primary);
   border-radius: 999px;
-  font-weight: 500;
+  font-weight: 560;
+  box-shadow: var(--mf-plate-shadow);
 }
 
 .mf-telegram-band {
   text-align: center;
+}
+
+.mf-telegram-band p {
+  max-width: 56ch;
+  margin: 0 auto;
+  font-size: 17px;
+  color: var(--rs-text-secondary);
 }
 
 .mf-faq {
@@ -676,7 +1158,8 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 0;
+  padding: 18px 0;
+  font-size: 16px;
   font-weight: 600;
   cursor: pointer;
   list-style: none;
@@ -698,13 +1181,15 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   content: '−';
 }
 
-.mf-faq-item > .rs-text {
-  padding-bottom: 16px;
+.mf-faq-item > p {
+  max-width: 64ch;
+  margin: 0 0 18px;
+  color: var(--rs-text-secondary);
 }
 
 .mf-final-cta {
   text-align: center;
-  padding-bottom: 72px;
+  padding-bottom: 80px;
 }
 
 .mf-final-cta .mf-hero-actions {
@@ -931,7 +1416,7 @@ main p a {
   color: var(--mf-tag-danger-text);
 }
 
-/* Tabular figures only where numbers line up: Inter's `tnum` also widens the hyphen. */
+/* Tabular figures only where numbers line up. */
 .mf-num {
   font-variant-numeric: tabular-nums;
 }
@@ -1118,7 +1603,7 @@ main p a {
 
 .mf-card h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
 }
 
 .mf-wallet-header {
@@ -1162,28 +1647,15 @@ main p a {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px 24px;
+  gap: 16px 36px;
   margin-bottom: 12px;
 }
 
-.mf-spending .rs-progress-circle {
-  flex: none;
-}
-
-.mf-spending-left {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  line-height: 1.2;
-}
-
-.mf-spending-left strong {
-  font-size: 16px;
-  color: var(--rs-text-primary);
-}
-
-.mf-spending-left small {
-  color: var(--rs-text-secondary);
+/* Once the facts wrap below it, the dial is the card's centrepiece. */
+@media (max-width: 599px) {
+  .mf-spending > .mf-dial {
+    margin-inline: auto;
+  }
 }
 
 .mf-facts {
@@ -1200,8 +1672,9 @@ main p a {
 
 .mf-facts dd {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 18px;
+  font-stretch: var(--mf-wide);
+  font-weight: 650;
 }
 
 .mf-table {
@@ -1884,9 +2357,14 @@ main p a {
   color: var(--mf-danger);
 }
 
+.mf-budget-dial {
+  margin: 4px auto 6px;
+}
+
 .mf-budget-reset {
   display: block;
   margin-top: 4px;
+  text-align: center;
 }
 
 .mf-budget-contacts {
@@ -1918,4 +2396,94 @@ main p a {
   display: inline-flex;
   align-items: center;
   min-height: 32px;
+}
+
+/* ── Limit dial ─────────────────────────────────────────────────────────── */
+
+/*
+ * components/LimitDial.tsx. Sized by its own inline width and height; the figures scale with it
+ * through container units, so one component serves the landing page, the dashboard and the chat.
+ */
+.mf-dial {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  container-type: size;
+}
+
+.mf-dial svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.mf-dial-face {
+  fill: var(--rs-bg-card);
+}
+
+.mf-dial-bezel {
+  fill: none;
+  stroke-width: 7;
+}
+
+.mf-dial-ticks {
+  stroke: var(--mf-tick);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.mf-dial-track,
+.mf-dial-value {
+  fill: none;
+  stroke-width: 13;
+  stroke-linecap: round;
+}
+
+.mf-dial-track {
+  stroke: var(--mf-dial-track);
+}
+
+/* The one lit thing on the dial, like a pad on the circuit. */
+.mf-dial-value {
+  stroke: var(--mf-green);
+  filter: drop-shadow(0 0 5px var(--mf-green-glow));
+  transition: stroke-dasharray 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.mf-dial[data-tone='off'] .mf-dial-value {
+  stroke: var(--mf-tick);
+  filter: none;
+}
+
+.mf-dial-center {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 4cqh;
+  text-align: center;
+  line-height: 1.05;
+}
+
+.mf-dial-amount {
+  font-size: clamp(17px, 11.5cqi, 36px);
+  font-stretch: var(--mf-wide);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--rs-text-heading);
+}
+
+.mf-dial-center small {
+  margin-top: 4px;
+  font-size: clamp(11px, 5.4cqi, 14px);
+  color: var(--rs-text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-dial-value {
+    transition: none;
+  }
 }

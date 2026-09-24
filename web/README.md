@@ -24,7 +24,8 @@ the API, so the page and the API share an origin.
 | Command | What it does |
 |---|---|
 | `npm run dev` | Dev server with hot reload |
-| `npm run build` | Type-check and build to `dist/` |
+| `npm run build` | Type-check, build to `dist/` and prerender the public pages (needs Playwright's Chromium) |
+| `npm run prerender` | Prerender only, after `vite build`: writes `/`, `/terms` and `/privacy` into `dist/` as finished HTML |
 | `npm run preview` | Serve the built `dist/` |
 | `npm test` | Unit tests (Vitest) |
 | `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
@@ -68,6 +69,17 @@ hidden. Setup steps are in [docs/setup.md](../docs/setup.md).
 | `TELEGRAM_BOT_USERNAME` | API | Needed to mint Telegram deep links. |
 | `VITE_WALLETCONNECT_PROJECT_ID` | build | A Reown project id. Empty means WalletConnect is dropped from the bundle entirely; with one, it is loaded on demand. |
 
+**Hosting.** `dist/` is static. Serve `/terms` from `terms.html` and `/privacy` from
+`privacy.html` (most static hosts do this for "clean URLs"), and answer every other address that
+isn't a file with `index.html`, so links into the app work. Those three pages are prerendered by
+`scripts/prerender/render.ts`, so search engines, AI crawlers and link previews read the page
+without running JavaScript; the app replaces the copy when it loads. Also set at the host: HTTPS
+with HSTS, a redirect from `www.mitfah.com` to `mitfah.com` (the host every canonical link names)
+and the usual security headers.
+
+`public/llms.txt` summarises the landing page for AI assistants. Change it when the landing page's
+claims change.
+
 Before launch, replace the `[contact email]` placeholder in `src/pages/legal/LegalPage.tsx` and have
 a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the page.
 
@@ -101,22 +113,34 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   the wallet just dropped.
 
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
-  written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. For status labels
-  use `StatusTag`, not RSuite's coloured `Tag` (its white-on-colour text fails contrast). Use the
-  `.mf-num` class for numbers that should line up (tabular figures are off by default, because
-  Inter's version also widens hyphens).
+  written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. Colour carries
+  meaning: navy (light) or steel (dark) is the owner's own action, green only ever means the wallet
+  is live (active, assistant on, what's left to spend), amber loosens a limit, red is a brake. The
+  type is one family, Archivo: stretched to 125% (`--mf-wide`) for headings and figures, normal
+  width for text; JetBrains Mono is only for addresses and hashes. For status labels use
+  `StatusTag`, not RSuite's coloured `Tag` (its white-on-colour text fails contrast). Use the
+  `.mf-num` class for numbers that should line up.
+- `src/components/LimitDial.tsx` — the spending limit as a gauge (a `progressbar`), echoing the
+  wallpaper's ring. It is the one bold element wherever it appears: the landing page's demo
+  (`components/landing/LimitDemo.tsx`, a day played once in CSS and shown finished under reduced
+  motion), the dashboard and the chat's side panel.
 - `src/theme/` — light/dark handling. `index.html` repeats the same rule in a small script so dark
   mode applies before the first paint.
-- `scripts/brand/` — `Key-logo.png` is the logo as drawn; `npm run marks` crops it, knocks the
-  white paper out to alpha and writes `public/brand/mark-light.png` plus a `mark-dark.png`
-  recoloured for a navy background (pale-blue ring, green traces, white key). To change the logo,
-  replace `Key-logo.png`, run the script, and set `MARK_RATIO` in `src/components/brand/Logo.tsx`
-  to the size it prints. The same run writes the icons — `public/favicon.svg`, `favicon-32.png`,
-  `apple-touch-icon.png` and `icon-*.png` — from the key's handle alone: the ring and its circuit,
-  cut from the artwork with the key's shaft left out, so their circuitry is the logo's own. The app
-  icons put it on navy; `favicon.svg` holds a light and a dark copy and shows whichever suits the
-  browser's colour scheme. At 16px the circuit is only a texture inside the ring; that is accepted
-  so every icon matches the logo.
+- `scripts/brand/` — `Key-logo.png` is the logo as drawn, flat on white paper; `npm run marks`
+  renders it as the objects it shows, lit from the upper left, keeping its exact shapes: the ring as
+  an anodized blue bezel, the circuit as vivid green traces on a dark board set inside the ring, the
+  key as brushed steel casting a short shadow. Each part's bevel comes from its own outline (the
+  mask blurred into a height map, then lit). It writes `public/brand/mark-light.png` (gunmetal key)
+  and `mark-dark.png` (the same with brighter steel, which would otherwise sink into a dark page).
+  To change the logo, replace `Key-logo.png`, run the script, and set `MARK_RATIO` in
+  `src/components/brand/Logo.tsx` to the size it prints; `LOGO_PREVIEW=<dir>` also writes large
+  copies there for checking. The same run writes the icons — `public/favicon.svg`,
+  `favicon-32.png`, `apple-touch-icon.png` and `icon-*.png` — from the key's handle alone: the lit
+  ring and board with the key's shaft left out, so their circuitry is the logo's own. The app icons
+  put it on a lit navy tile; the dark board reads on light and dark tab strips alike, so
+  `favicon.svg` holds one copy. At 16px the circuit is only a texture inside the ring; that is
+  accepted so every icon matches the logo. `npm run og` re-renders the share image, which embeds the
+  dark mark.
 - `scripts/wallpaper/` — `npm run wallpaper` draws the wallpaper behind the landing page, the
   sign-in and sign-up card and the dashboard: the logo's ring as a polished metal band (with its
   crescent, and a gap where the key's shaft would cross), and circuit traces running from it to

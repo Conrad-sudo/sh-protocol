@@ -1,10 +1,11 @@
 import { Link } from 'react-router'
-import { Panel, Progress, Text } from 'rsuite'
+import { Panel, Text } from 'rsuite'
 import type { Contact, WalletState } from '../../api/types'
 import { useContacts } from '../../hooks/useContacts'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd } from '../../lib/format'
 import { summarizeSpending } from '../../lib/spending'
+import { LimitDial } from '../LimitDial'
 import { LinkButton } from '../LinkButton'
 
 /** Names shown before "and N more". */
@@ -28,18 +29,15 @@ export function BudgetPanel({ wallet }: { wallet: WalletState }) {
       <Panel bordered header={<h2>Left to spend</h2>} className="mf-card">
         {wallet.spending.hook_installed ? (
           <>
-            <p className="mf-budget-left">
-              <strong className="mf-num">{formatUsd(left)}</strong>{' '}
-              <Text as="span" muted>
-                of {formatUsd(limit)}
-              </Text>
-            </p>
-            <Progress
+            <LimitDial
               percent={percentLeft}
-              showInfo={false}
-              strokeColor="var(--mf-green)"
-              aria-label={`${percentLeft}% of the limit left`}
-            />
+              label={`${percentLeft}% of the limit left`}
+              size={172}
+              className="mf-budget-dial"
+            >
+              <strong className="mf-dial-amount mf-num">{formatUsd(left)}</strong>
+              <small>of {formatUsd(limit)}</small>
+            </LimitDial>
             <Text size="sm" muted className="mf-budget-reset">
               {resetText(wallet.spending, now)}
             </Text>

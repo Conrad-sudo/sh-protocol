@@ -12,7 +12,9 @@ export function RouteError() {
   return (
     <div className="mf-fullpage">
       <title>Something went wrong · Mitfah</title>
+      <meta name="robots" content="noindex" />
       <EmptyState
+        level={1}
         title="Something went wrong"
         action={
           <Button appearance="primary" onClick={() => window.location.reload()}>

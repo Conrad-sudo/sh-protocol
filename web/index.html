@@ -3,21 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Mitfah</title>
-    <meta name="description" content="An AI assistant for your crypto wallet that can only spend what you allow." />
+    <!--
+      Site-wide tags only. Each page renders its own title, description, canonical link and share
+      title (components/PageMeta.tsx); `npm run build` writes the public pages' copies into their
+      files. data-static marks a tag the app removes once React has rendered the live one.
+    -->
+    <title data-static>Mitfah</title>
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Mitfah" />
-    <meta property="og:url" content="https://mitfah.com/" />
-    <meta property="og:title" content="Mitfah — an AI assistant for your crypto wallet" />
-    <meta property="og:description" content="You own the wallet. You set a daily dollar limit. You can pause it any time." />
     <meta property="og:image" content="https://mitfah.com/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Mitfah: an AI assistant for your crypto wallet that can only spend what you allow." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Mitfah — an AI assistant for your crypto wallet" />
-    <meta name="twitter:description" content="You own the wallet. You set a daily dollar limit. You can pause it any time." />
-    <meta name="twitter:image" content="https://mitfah.com/og.png" />
     <meta name="theme-color" content="#F6F8FB" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#07111F" media="(prefers-color-scheme: dark)" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -37,6 +35,16 @@
       } catch (e) {}
     </script>
     <div id="root"></div>
+    <script>
+      // The prerendered home page (scripts/prerender) is also what the host serves for an address
+      // with no file of its own, such as /dashboard. Anywhere but its own address, drop the copy
+      // before it is painted and let the app draw the page.
+      ;(function () {
+        var root = document.getElementById('root')
+        var page = root.getAttribute('data-prerendered')
+        if (page && page !== (location.pathname.replace(/\/+$/, '') || '/')) root.textContent = ''
+      })()
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

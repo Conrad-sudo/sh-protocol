@@ -4,7 +4,12 @@ import { CONTACT_EMAIL, LegalPage } from './LegalPage'
 /** DRAFT terms of service. */
 export function TermsPage() {
   return (
-    <LegalPage title="Terms of Service" updated="17 September 2026">
+    <LegalPage
+      title="Terms of Service"
+      description="The terms for using Mitfah: your account, your wallet and its limits, the AI assistant, fees, risks and liability."
+      path="/terms"
+      updated="17 September 2026"
+    >
       <p>
         These terms cover your use of Mitfah (the website, the app and the Telegram bot). By creating an account you
         agree to them. If you don't agree, please don't use Mitfah.

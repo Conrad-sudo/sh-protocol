@@ -13,7 +13,7 @@ interface SidebarProps {
   onToggle: (expanded: boolean) => void
 }
 
-/** The navy side navigation: full width on desktop, an icon rail on tablets. */
+/** The side navigation: full width on desktop, an icon rail on tablets. */
 export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
   const { pathname } = useLocation()
   const { data: me } = useMe()
@@ -25,7 +25,7 @@ export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
       <Sidenav appearance="inverse" expanded={expanded} aria-label="Main">
         <Sidenav.Header className="mf-sidebar-header">
           <Link to="/dashboard" aria-label="Mitfah dashboard">
-            <Logo variant={expanded ? 'lockup' : 'mark'} size={28} tone="onDark" />
+            <Logo variant={expanded ? 'lockup' : 'mark'} size={28} />
           </Link>
         </Sidenav.Header>
         <Sidenav.Body>

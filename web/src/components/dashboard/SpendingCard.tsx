@@ -1,10 +1,10 @@
-import { Panel, ProgressCircle, Text } from 'rsuite'
+import { Panel, Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
 import { summarizeSpending } from '../../lib/spending'
+import { LimitDial } from '../LimitDial'
 
-const RING = 128
 const endsAtFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
 
 /** How much the assistant may still spend, and when the period resets (see summarizeSpending). */
@@ -20,22 +20,10 @@ export function SpendingCard({ spending }: { spending: WalletState['spending'] }
   return (
     <Panel bordered header={<h2>Spending limit</h2>} className="mf-card">
       <div className="mf-spending">
-        <ProgressCircle
-          percent={percentLeft}
-          // `width` sizes only the ring; the wrapper must match or the label centres on the whole row.
-          width={RING}
-          style={{ width: RING }}
-          strokeWidth={8}
-          trailWidth={8}
-          strokeColor="var(--mf-green)"
-          aria-label={`${percentLeft}% of the limit left`}
-          renderInfo={() => (
-            <span className="mf-spending-left">
-              <strong className="mf-num">{formatUsd(left)}</strong>
-              <small>left</small>
-            </span>
-          )}
-        />
+        <LimitDial percent={percentLeft} label={`${percentLeft}% of the limit left`} size={200}>
+          <strong className="mf-dial-amount mf-num">{formatUsd(left)}</strong>
+          <small>left</small>
+        </LimitDial>
         <dl className="mf-facts">
           <div>
             <dt>Spent this period</dt>

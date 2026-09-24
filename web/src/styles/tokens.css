@@ -5,51 +5,84 @@
  * .rs-theme-dark (a class CustomProvider puts on <body>), and these use the same selectors so the
  * later declaration wins.
  *
- * Colours are sampled from the logo: navy ring, green circuit. RSuite's primary scale runs light
- * (50) to dark (900) in both themes; primary buttons use 500 in light and 700 in dark.
+ * The palette is the wallpaper's: brushed aluminium, the logo's navy ring, the circuit's green.
+ * Colour carries meaning, so it stays out of decoration:
+ *   navy (light) / steel (dark)  your own actions — primary buttons, links, focus
+ *   green                        the wallet is live: active, assistant on, what's left to spend
+ *   amber                        a change that loosens a limit
+ *   red                          the brakes: pause, turn off, remove
  */
 
 :root {
   /* Brand */
   --mf-navy: #062a4e;
   --mf-green: #0a8a5a;
+  --mf-green-glow: rgb(10 138 90 / 22%);
   --mf-warning: #9a6412;
-  --mf-danger: #c93a3a;
-  --mf-muted: #5b6b80;
-  --mf-font-heading: 'Manrope Variable', 'Inter Variable', system-ui, sans-serif;
-  --mf-radius-card: 12px;
+  --mf-danger: #c2362f;
+  --mf-muted: #45546a;
 
-  /* RSuite primary scale: green */
-  --rs-primary-50: #e7f5ef;
-  --rs-primary-100: #c4e7d8;
-  --rs-primary-200: #9dd8bf;
-  --rs-primary-300: #6fc6a2;
-  --rs-primary-400: #3faf82;
-  --rs-primary-500: #0a8a5a;
-  --rs-primary-600: #087a50;
-  --rs-primary-700: #066644;
-  --rs-primary-800: #055236;
-  --rs-primary-900: #033826;
+  /* Metal: the page is aluminium, surfaces are plates screwed onto it. */
+  --mf-steel: #edf0f4;
+  --mf-plate: #fafbfc;
+  --mf-rule: #d5dce5;
+  --mf-rule-strong: #b9c4d2;
+  --mf-bezel-light: #ffffff;
+  --mf-bezel-dark: #8d9db1;
+  --mf-dial-track: #dfe5ec;
+  --mf-tick: #9aa8b9;
 
   /*
-   * RSuite's focus ring is the primary colour at 25% opacity, which all but disappears on a card
-   * and entirely on the navy sidebar. A keyboard user has to see where they are, so it is solid.
+   * One family at two widths: Archivo stretched to 125% is the engraved nameplate (headings, the
+   * dial's figures), at 100% it is the text. The monospace face is only for addresses and hashes.
    */
-  --rs-focus-ring-color: var(--rs-primary-600);
+  --mf-font: 'Archivo Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mf-font-heading: var(--mf-font);
+  --mf-wide: 125%;
+  --mf-radius-plate: 14px;
+  --mf-radius-control: 8px;
+  --mf-radius-card: var(--mf-radius-plate);
 
-  /* 500 with white text is 4.4:1, just under AA; 600 is 5.4:1. */
-  --rs-btn-primary-bg: var(--rs-primary-600);
-  --rs-btn-primary-hover-bg: var(--rs-primary-700);
-  --rs-btn-primary-active-bg: var(--rs-primary-800);
+  /* RSuite primary scale: the ring's navy. */
+  --rs-primary-50: #e8eef5;
+  --rs-primary-100: #c9d6e5;
+  --rs-primary-200: #a3b9d2;
+  --rs-primary-300: #7898bb;
+  --rs-primary-400: #4c77a3;
+  --rs-primary-500: #1f4f80;
+  --rs-primary-600: #123f6d;
+  --rs-primary-700: #0b335d;
+  --rs-primary-800: #062a4e;
+  --rs-primary-900: #041d37;
+
+  /*
+   * RSuite's focus ring is the primary colour at 25% opacity, which all but disappears on a plate.
+   * A keyboard user has to see where they are, so it is solid.
+   */
+  --rs-focus-ring-color: var(--rs-primary-500);
+
+  --rs-btn-primary-bg: var(--rs-primary-700);
+  --rs-btn-primary-hover-bg: var(--rs-primary-800);
+  --rs-btn-primary-active-bg: var(--rs-primary-900);
+  --rs-btn-primary-text: #ffffff;
+
+  /* Secondary buttons are plates: the page's surface with a hairline edge. */
+  --rs-btn-default-bg: var(--mf-plate);
+  --rs-btn-default-hover-bg: #ffffff;
+  --rs-btn-default-active-bg: #e6ebf1;
+  --rs-btn-default-text: var(--mf-navy);
+  --rs-btn-default-hover-text: var(--mf-navy);
+  --rs-btn-default-active-text: var(--mf-navy);
+  --rs-btn-default-border-color: var(--mf-rule);
 
   /* Surfaces and text */
-  --rs-body: #f6f8fb;
-  --rs-bg-card: #ffffff;
-  --rs-border-primary: #e3e8ef;
-  --rs-text-primary: #0e1726;
-  --rs-text-heading: #0e1726;
+  --rs-body: var(--mf-steel);
+  --rs-bg-card: var(--mf-plate);
+  --rs-border-primary: var(--mf-rule);
+  --rs-text-primary: #0b1a2c;
+  --rs-text-heading: var(--mf-navy);
   --rs-text-secondary: var(--mf-muted);
-  --rs-text-link: #1b4677;
+  --rs-text-link: var(--rs-primary-500);
   --rs-text-link-hover: var(--mf-navy);
 
   /* States */
@@ -58,10 +91,10 @@
   --rs-state-error: var(--mf-danger);
 
   /* Red buttons (color="red") fill with red-500. RSuite's #F44336 is 3.7:1 against white text. */
-  --rs-red-500: #c93a3a;
-  --rs-red-600: #b83232;
-  --rs-red-700: #a52b2b;
-  --rs-red-800: #8a2323;
+  --rs-red-500: #c2362f;
+  --rs-red-600: #b0302a;
+  --rs-red-700: #9c2a25;
+  --rs-red-800: #82231f;
 
   /* Amber buttons (color="orange") mark a change that loosens a limit. #9a6412 is 5:1 against white. */
   --rs-orange-500: #9a6412;
@@ -70,62 +103,94 @@
   --rs-orange-800: #6b450c;
 
   /* Type */
-  --rs-font-family-base: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --rs-font-family-base: var(--mf-font);
   --rs-font-family-monospace: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Shape and structure */
-  --rs-panel-border-radius: var(--mf-radius-card);
-  --rs-sidenav-inverse-bg: var(--mf-navy);
+  --rs-panel-border-radius: var(--mf-radius-plate);
+  --rs-radius-md: var(--mf-radius-control);
+
+  /* The side rail is a strip of the same aluminium, not a painted slab. */
+  --rs-sidenav-inverse-bg: transparent;
+  --rs-sidenav-inverse-text: var(--mf-muted);
+  --rs-sidenav-inverse-hover-bg: rgb(6 42 78 / 6%);
+  --rs-sidenav-inverse-selected-bg: var(--mf-plate);
+  --rs-sidenav-inverse-selected-text: var(--mf-navy);
+  --rs-sidenav-inverse-footer-border: var(--mf-rule);
 
   /* Status tags (StatusTag): soft fill, dark text, AA in both themes. */
-  --mf-tag-success-bg: #e7f5ef;
+  --mf-tag-success-bg: #e3f3ec;
   --mf-tag-success-text: #066644;
-  --mf-tag-neutral-bg: #eef1f5;
-  --mf-tag-neutral-text: #3d4a5c;
-  --mf-tag-warning-bg: #fbf1e1;
+  --mf-tag-neutral-bg: #e6ebf1;
+  --mf-tag-neutral-text: #34445a;
+  --mf-tag-warning-bg: #f8eedc;
   --mf-tag-warning-text: #7a4f0e;
-  --mf-tag-danger-bg: #fbeaea;
-  --mf-tag-danger-text: #a52b2b;
+  --mf-tag-danger-bg: #f8e6e4;
+  --mf-tag-danger-text: #9c2a25;
 
-  /* The user's own chat messages. */
-  --mf-bubble-user: #e7f5ef;
+  /* The user's own chat messages: a navy plate, as their own actions are navy. */
+  --mf-bubble-user: #e3eaf3;
+
+  /* A plate's edge catches the light on top and casts a short shadow below. */
+  --mf-plate-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 1px 0 rgb(6 42 78 / 6%),
+    0 18px 36px -24px rgb(6 42 78 / 35%);
 }
 
 .rs-theme-dark {
   color-scheme: dark;
 
-  --mf-navy: #1b4677;
-  --mf-green: #2bb77e;
+  --mf-navy: #cfe0f3;
+  --mf-green: #34d399;
+  --mf-green-glow: rgb(52 211 153 / 28%);
   --mf-warning: #e0a340;
-  --mf-danger: #e5635f;
+  --mf-danger: #ef6b64;
   --mf-muted: #93a3b8;
 
-  --rs-primary-50: #e6f7f0;
-  --rs-primary-100: #bfebd9;
-  --rs-primary-200: #95ddbf;
-  --rs-primary-300: #69cfa5;
-  --rs-primary-400: #45c290;
-  --rs-primary-500: #2bb77e;
-  --rs-primary-600: #22a06d;
-  --rs-primary-700: #1a8659;
-  --rs-primary-800: #136b47;
-  --rs-primary-900: #0b4a31;
+  --mf-steel: #07111f;
+  --mf-plate: #0d1a2b;
+  --mf-rule: #1d2d43;
+  --mf-rule-strong: #2c4060;
+  --mf-bezel-light: #53687f;
+  --mf-bezel-dark: #0a1420;
+  --mf-dial-track: #1a2a40;
+  --mf-tick: #3f5470;
 
-  --rs-focus-ring-color: var(--rs-primary-400);
+  /* Steel-blue for the non-button uses of "primary": toggles, checks, focus, links. */
+  --rs-primary-50: #eaf2fb;
+  --rs-primary-100: #cfe0f3;
+  --rs-primary-200: #aecaea;
+  --rs-primary-300: #8cb3e0;
+  --rs-primary-400: #6f9fd7;
+  --rs-primary-500: #5a8fcf;
+  --rs-primary-600: #4679b8;
+  --rs-primary-700: #3a67a0;
+  --rs-primary-800: #2e5382;
+  --rs-primary-900: #213d61;
 
-  /* 700 with white text is 4.6:1. */
-  --rs-btn-primary-bg: var(--rs-primary-700);
-  --rs-btn-primary-hover-bg: var(--rs-primary-600);
-  --rs-btn-primary-active-bg: var(--rs-primary-800);
+  --rs-focus-ring-color: var(--rs-primary-300);
 
-  --rs-body: #07111f;
-  --rs-bg-card: #0e1b2c;
-  --rs-border-primary: #1c2b40;
+  /* Primary buttons are brushed steel with navy lettering: the machined key on a dark case. */
+  --rs-btn-primary-bg: #d3dfec;
+  --rs-btn-primary-hover-bg: #e6edf6;
+  --rs-btn-primary-active-bg: #bccbdd;
+  --rs-btn-primary-text: #062a4e;
+
+  --rs-btn-default-bg: #122237;
+  --rs-btn-default-hover-bg: #1a2e48;
+  --rs-btn-default-active-bg: #0f1d2f;
+  --rs-btn-default-text: #e6edf5;
+  --rs-btn-default-hover-text: #f2f6fb;
+  --rs-btn-default-active-text: #e6edf5;
+  --rs-btn-default-border-color: var(--mf-rule-strong);
+
+  --rs-body: var(--mf-steel);
+  --rs-bg-card: var(--mf-plate);
+  --rs-border-primary: var(--mf-rule);
   --rs-text-primary: #e6edf5;
-  --rs-text-heading: #e6edf5;
+  --rs-text-heading: #f2f6fb;
   --rs-text-secondary: var(--mf-muted);
-  --rs-text-link: #7fb0e6;
-  --rs-text-link-hover: #a9cbf0;
+  --rs-text-link: #8cb3e0;
+  --rs-text-link-hover: #cfe0f3;
 
   /*
    * Re-declared here, not inherited from :root: a var() is resolved where it is declared, so the
@@ -135,6 +200,9 @@
   --rs-state-success: var(--mf-green);
   --rs-state-warning: var(--mf-warning);
   --rs-state-error: var(--mf-danger);
+  --rs-font-family-base: var(--mf-font);
+  --rs-panel-border-radius: var(--mf-radius-plate);
+  --rs-radius-md: var(--mf-radius-control);
 
   /* 5.7:1 against white text. --mf-danger stays the lighter red, for text on the dark page. */
   --rs-red-500: #b83a36;
@@ -148,40 +216,44 @@
   --rs-orange-700: #7a4f0e;
   --rs-orange-800: #6b450c;
 
-  --rs-sidenav-inverse-bg: #0a1a2e;
-  /* RSuite's dark default (primary-600) is 3.3:1 against the white item text. */
-  --rs-sidenav-inverse-selected-bg: var(--rs-primary-700);
-  --rs-sidenav-inverse-hover-bg: var(--rs-primary-800);
+  --rs-sidenav-inverse-bg: transparent;
+  --rs-sidenav-inverse-text: var(--mf-muted);
+  --rs-sidenav-inverse-hover-bg: rgb(207 224 243 / 6%);
+  --rs-sidenav-inverse-selected-bg: var(--mf-plate);
+  --rs-sidenav-inverse-selected-text: #f2f6fb;
+  --rs-sidenav-inverse-footer-border: var(--mf-rule);
 
   /*
    * Messages. RSuite's dark default is a solid fill with white text — loud on a calm dark page, and
    * white on its blue is under AA. A tint of the state colour with ordinary text reads better.
    */
-  --rs-message-info-bg: rgb(127 176 230 / 12%);
-  --rs-message-info-border: rgb(127 176 230 / 35%);
+  --rs-message-info-bg: rgb(140 179 224 / 12%);
+  --rs-message-info-border: rgb(140 179 224 / 35%);
   --rs-message-info-text: var(--rs-text-primary);
-  --rs-message-info-icon: #7fb0e6;
-  --rs-message-success-bg: rgb(43 183 126 / 12%);
-  --rs-message-success-border: rgb(43 183 126 / 35%);
+  --rs-message-info-icon: #8cb3e0;
+  --rs-message-success-bg: rgb(52 211 153 / 12%);
+  --rs-message-success-border: rgb(52 211 153 / 35%);
   --rs-message-success-text: var(--rs-text-primary);
-  --rs-message-success-icon: #2bb77e;
+  --rs-message-success-icon: #34d399;
   --rs-message-warning-bg: rgb(224 163 64 / 12%);
   --rs-message-warning-border: rgb(224 163 64 / 35%);
   --rs-message-warning-text: var(--rs-text-primary);
   --rs-message-warning-icon: #e0a340;
-  --rs-message-error-bg: rgb(229 99 95 / 12%);
-  --rs-message-error-border: rgb(229 99 95 / 35%);
+  --rs-message-error-bg: rgb(239 107 100 / 12%);
+  --rs-message-error-border: rgb(239 107 100 / 35%);
   --rs-message-error-text: var(--rs-text-primary);
-  --rs-message-error-icon: #e5635f;
+  --rs-message-error-icon: #ef6b64;
 
-  --mf-tag-success-bg: rgb(43 183 126 / 16%);
-  --mf-tag-success-text: #6fd4a8;
+  --mf-tag-success-bg: rgb(52 211 153 / 14%);
+  --mf-tag-success-text: #6ee7b7;
   --mf-tag-neutral-bg: rgb(147 163 184 / 16%);
   --mf-tag-neutral-text: #c3cedb;
   --mf-tag-warning-bg: rgb(224 163 64 / 16%);
   --mf-tag-warning-text: #e9bd72;
-  --mf-tag-danger-bg: rgb(229 99 95 / 16%);
-  --mf-tag-danger-text: #f09896;
+  --mf-tag-danger-bg: rgb(239 107 100 / 16%);
+  --mf-tag-danger-text: #f5a19c;
 
-  --mf-bubble-user: rgb(43 183 126 / 16%);
+  --mf-bubble-user: rgb(140 179 224 / 14%);
+
+  --mf-plate-shadow: inset 0 1px 0 rgb(255 255 255 / 6%), 0 24px 48px -24px rgb(0 0 0 / 75%);
 }

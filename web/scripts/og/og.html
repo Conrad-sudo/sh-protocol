@@ -1,60 +1,114 @@
 <!doctype html>
 <!-- The 1200×630 social share image. Render it with `npm run og` (scripts/og/render.ts). -->
+<!-- The dark wallpaper with the limit dial mounted in its ring, as on the site. -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <style>
       @font-face {
-        font-family: 'Manrope';
-        src: url('../../node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2') format('woff2');
-        font-weight: 200 800;
-      }
-      @font-face {
-        font-family: 'Inter';
-        src: url('../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2');
+        font-family: 'Archivo';
+        src: url('../../node_modules/@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2') format('woff2');
         font-weight: 100 900;
+        font-stretch: 62% 125%;
       }
       html, body { margin: 0; }
       .card {
+        position: relative;
         box-sizing: border-box;
         width: 1200px;
         height: 630px;
-        padding: 72px 80px;
+        overflow: hidden;
+        color: #f2f6fb;
+        font-family: 'Archivo', sans-serif;
+        background: #07111f;
+      }
+      /* The ring sits round the dial at (900, 315); the circuit runs off to the edges. */
+      .wallpaper {
+        position: absolute;
+        left: calc(900px - 750px);
+        top: calc(315px - 750px);
+        width: 1500px;
+        height: 1500px;
+        background: url('../../public/brand/wallpaper-dark.svg') center / contain no-repeat;
+      }
+      /* The words sit on plain dark, the circuit fading in behind the dial. */
+      .shade {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, #07111f 40%, rgb(7 17 31 / 70%) 58%, transparent 74%);
+      }
+      .words {
+        position: absolute;
+        top: 64px;
+        left: 72px;
+        width: 600px;
         display: flex;
         flex-direction: column;
-        justify-content: space-between;
-        color: #ffffff;
-        font-family: 'Inter', sans-serif;
-        background:
-          radial-gradient(circle at 88% 18%, rgb(43 183 126 / 28%), transparent 42%),
-          linear-gradient(135deg, #062a4e 0%, #07111f 100%);
+        gap: 40px;
       }
-      .brand { display: flex; align-items: center; gap: 18px; }
-      .brand img { height: 64px; }
-      .brand span { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 48px; letter-spacing: -0.02em; }
+      .brand { display: flex; align-items: center; gap: 16px; }
+      .brand img { height: 56px; }
+      .brand span { font-stretch: 125%; font-weight: 700; font-size: 44px; letter-spacing: -0.03em; }
       h1 {
         margin: 0;
-        max-width: 960px;
-        font-family: 'Manrope', sans-serif;
-        font-weight: 800;
-        font-size: 60px;
-        line-height: 1.1;
-        letter-spacing: -0.02em;
+        font-stretch: 125%;
+        font-weight: 700;
+        font-size: 50px;
+        line-height: 1.06;
+        letter-spacing: -0.03em;
       }
-      h1 em { font-style: normal; color: #2bb77e; }
-      ul { display: flex; gap: 36px; margin: 0; padding: 0; list-style: none; font-size: 26px; color: #c3cedb; }
-      li::before { content: '✓'; margin-right: 10px; color: #2bb77e; font-weight: 700; }
+      p { margin: 0; font-size: 25px; line-height: 1.4; color: #93a3b8; }
+      .dial { position: absolute; left: calc(900px - 150px); top: calc(315px - 150px); width: 300px; height: 300px; }
+      .dial svg { position: absolute; inset: 0; }
+      .dial-center {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding-top: 12px;
+      }
+      .dial-center strong { font-stretch: 125%; font-weight: 700; font-size: 46px; letter-spacing: -0.02em; }
+      .dial-center small { margin-top: 6px; font-size: 18px; color: #93a3b8; }
     </style>
   </head>
   <body>
     <div class="card">
-      <div class="brand"><img src="../../public/brand/mark-dark.png" alt="" /><span>mitfah</span></div>
-      <h1>An AI assistant for your crypto wallet that can <em>only spend what you allow.</em></h1>
-      <ul>
-        <li>You own it</li>
-        <li>Daily dollar limit</li>
-        <li>Pause any time</li>
-      </ul>
+      <div class="wallpaper"></div>
+      <div class="shade"></div>
+      <div class="words">
+        <div class="brand"><img src="../../public/brand/mark-dark.png" alt="" /><span>mitfah</span></div>
+        <h1>An AI assistant for your crypto wallet that can only spend what you allow.</h1>
+        <p>You own the wallet. The limit is part of it.</p>
+      </div>
+      <div class="dial">
+        <svg id="dial" viewBox="0 0 240 240" width="300" height="300"></svg>
+        <div class="dial-center"><strong>$60</strong><small>left of $100</small></div>
+      </div>
     </div>
+    <script>
+      // The same geometry as src/components/LimitDial.tsx: a 270° gauge, 60% left.
+      const C = 120, START = 135, SWEEP = 270
+      const pt = (r, deg) => [C + r * Math.cos((deg * Math.PI) / 180), C + r * Math.sin((deg * Math.PI) / 180)]
+      const arc = r => {
+        const [x1, y1] = pt(r, START), [x2, y2] = pt(r, START + SWEEP)
+        return `M ${x1} ${y1} A ${r} ${r} 0 1 1 ${x2} ${y2}`
+      }
+      const ticks = Array.from({ length: 41 }, (_, i) => {
+        const a = START + (SWEEP * i) / 40
+        const [x1, y1] = pt(i % 10 === 0 ? 90 : 94, a), [x2, y2] = pt(100, a)
+        return `M ${x1} ${y1} L ${x2} ${y2}`
+      }).join(' ')
+      document.getElementById('dial').innerHTML = `
+        <defs><linearGradient id="b" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#53687f"/><stop offset="1" stop-color="#0a1420"/></linearGradient></defs>
+        <circle cx="120" cy="120" r="108" fill="#0d1a2b"/>
+        <circle cx="120" cy="120" r="112" fill="none" stroke="url(#b)" stroke-width="7"/>
+        <path d="${ticks}" stroke="#3f5470" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="${arc(78)}" fill="none" stroke="#1a2a40" stroke-width="13" stroke-linecap="round"/>
+        <path d="${arc(78)}" pathLength="100" stroke-dasharray="60 100" fill="none" stroke="#34d399"
+              stroke-width="13" stroke-linecap="round" style="filter: drop-shadow(0 0 6px rgb(52 211 153 / 45%))"/>`
+    </script>
   </body>
 </html>
