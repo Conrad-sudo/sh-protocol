@@ -35,6 +35,13 @@ import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
  *      pinned forks without distorting any valuation.
  */
 abstract contract SHForkTestBase is Test {
+    /// @dev A deadline every {SessionHandler-addSession} call in this file can use: comfortably in
+    ///      the future, comfortably inside MAX_SESSION_TTL. Recomputed per call so a test that warps
+    ///      time still grants a live key.
+    function _sessionDeadline() internal view returns (uint48) {
+        return uint48(block.timestamp + 30 days);
+    }
+
     SHOracle oracle;
     SHRegistry feeRegistry;
     SHTreasury treasury;
@@ -119,7 +126,7 @@ abstract contract SHForkTestBase is Test {
 
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, trustedSpenders)));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, _sessionDeadline(), trustedSpenders)));
 
         sendPackedUserOp = new SendPackedUserOp();
 
@@ -494,7 +501,7 @@ abstract contract SHForkTestBase is Test {
     /// @notice A revoked session key fails validation (AA24) on the real EntryPoint.
     function test_revokedSessionKey_failsValidation() public {
         vm.prank(owner);
-        wallet.removeSession(sessionKey);
+        wallet.removeSession();
 
         (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet),

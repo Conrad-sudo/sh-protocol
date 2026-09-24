@@ -27,19 +27,41 @@ from vault_signer import encrypt_key, decrypt_key
 load_dotenv()
 
 
-def get_or_create_session_key(user_id: int, chain_id: int, target_address: str) -> tuple[str, str]:
+def get_session_key_or_none(user_id: int, chain_id: int, target_address: str) -> tuple[str, str] | None:
     """
-    Returns the session key address and Vault ciphertext for a given user, chain and target.
+    Returns the session key address and Vault ciphertext this app holds for a wallet, or None.
 
-    On first call for a (user_id, chain_id, target_address) triple, generates a cryptographically
-    random 32-byte private key, encrypts it via Vault Transit, stores the ciphertext in
-    the DB, and wipes the raw key from memory. On subsequent calls, returns the stored
-    (address, ciphertext) directly without touching Vault.
+    READ ONLY, deliberately. It used to mint a key when the row was missing, which is fine at deploy
+    time and actively dangerous everywhere else: once a revocation deletes the row, the next agent
+    action would silently create a brand-new key, store it, sign with it, and have every UserOp
+    rejected by a wallet that never authorized it -- while the database looked perfectly healthy.
+    Minting is now an explicit step (see {create_pending_session_key}) that only the grant flows
+    take.
 
     `chain_id` is explicit rather than resolved from `user_id` on purpose. deploy_wallet needs a key
     for the chain it is deploying TO, which is not necessarily the chain the user is currently
-    pointed at, and resolving it here would silently mint the key against the wrong one. It is also
-    what keeps a user's per-chain wallets on separate keys when they share an address across chains.
+    pointed at, and resolving it here would silently look up the wrong one. It is also what keeps a
+    user's per-chain wallets on separate keys when they share an address across chains.
+
+    @param user_id         The application user ID.
+    @param chain_id        The chain the key is authorized on.
+    @param target_address  The wallet address the session key is held for.
+    @return                A tuple of (session_key_address, vault_ciphertext), or None.
+    """
+    return db.get_session_key(user_id, chain_id, target_address)
+
+
+def create_pending_session_key(user_id: int, chain_id: int, target_address: str) -> tuple[str, str]:
+    """
+    Mints a FRESH session key for a grant the owner has not signed yet.
+
+    Always a new key, never the one already held: a key is revoked precisely when it might be
+    compromised, so handing the same address back on the next grant would undo the revocation. The
+    old key is not touched here either -- it stays live until the new grant mines, which is what
+    keeps the assistant working in between and what makes an abandoned, unsigned grant harmless.
+
+    Stored in `pending_session_keys`; {promote_pending_session_key} moves it across once the chain
+    confirms the wallet actually authorized it.
 
     Nothing here touches the network. Deriving an address from a private key is pure secp256k1
     arithmetic, so `eth_account` does it without an RPC -- which matters beyond tidiness: this used
@@ -50,19 +72,69 @@ def get_or_create_session_key(user_id: int, chain_id: int, target_address: str) 
 
     @param user_id         The application user ID.
     @param chain_id        The chain the key will be authorized on.
-    @param target_address  The contract address the session key is scoped to.
+    @param target_address  The wallet address the key is being minted for.
     @return                A tuple of (session_key_address, vault_ciphertext).
     """
-    row = db.get_session_key(user_id, chain_id, target_address)
-    if row:
-        return row
-
     raw_key = secrets.token_bytes(32)
     account = Account.from_key(raw_key)
     ciphertext = encrypt_key(raw_key)
     raw_key = b"\x00" * 32
-    db.save_session_key(user_id, chain_id, target_address, account.address, ciphertext)
+    db.save_pending_session_key(user_id, chain_id, target_address, account.address, ciphertext)
     return account.address, ciphertext
+
+
+def promote_pending_session_key(user_id: int, chain_id: int, target_address: str) -> tuple[str, str] | None:
+    """
+    Makes the outstanding grant's key the wallet's live key, now that the chain has confirmed it.
+
+    Callers MUST have read `currentSession` off the wallet first and found it equal to the pending
+    address; this function does no chain check of its own.
+
+    @return  The promoted (address, ciphertext), or None if no grant was outstanding.
+    """
+    row = db.get_pending_session_key(user_id, chain_id, target_address)
+    if not row:
+        return None
+    db.save_session_key(user_id, chain_id, target_address, row[0], row[1])
+    db.delete_pending_session_key(user_id, chain_id, target_address)
+    return row
+
+
+def reconcile_session_key(
+    user_id: int, chain_id: int, target_address: str, on_chain_key: str | None
+) -> tuple[str, str] | None:
+    """
+    Makes the app's key records agree with the key the wallet actually authorizes.
+
+    The one place those records change once a grant or revocation has mined. The confirm endpoint
+    calls it straight after the owner's transaction; every wallet read calls it too, as the safety
+    net for a confirm that never came -- a closed tab, a dropped connection. Without that, the
+    assistant would keep signing with a key the wallet had already evicted until the owner happened
+    to toggle it again. Idempotent, so running it from both places is harmless.
+
+      - zero             -> revoked: forget the live key, ciphertext and all
+      - the live key     -> already in step
+      - the pending key  -> the grant landed: promote it
+      - anything else    -> a key this app never minted: touch nothing
+
+    A revocation leaves any PENDING key alone on purpose. A read can land between "Turn on" minting
+    a key and the owner's signature, while the wallet still reads zero; deleting the pending row
+    then would throw away the only copy of a key the owner is about to authorize.
+
+    @param on_chain_key  The wallet's `currentSession`, or None when it is zero.
+    @return              The live (address, ciphertext) afterwards, or None when the app holds none.
+    """
+    live = db.get_session_key(user_id, chain_id, target_address)
+    if on_chain_key is None:
+        if live:
+            db.delete_session_key(user_id, chain_id, target_address)
+        return None
+    if live and live[0].lower() == on_chain_key.lower():
+        return live
+    pending = db.get_pending_session_key(user_id, chain_id, target_address)
+    if pending and pending[0].lower() == on_chain_key.lower():
+        return promote_pending_session_key(user_id, chain_id, target_address)
+    return live
 
 
 def current_session_nonce(user_id: int, session_handler: Contract, entry_point: Contract) -> int:

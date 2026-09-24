@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from web3.logs import DISCARD
 from constants import get_router
 from network_config import load_network_config_by_name, load_network_config
@@ -8,11 +9,12 @@ from db import (
     save_user_network,
     save_contact,
     save_session_key,
+    delete_pending_session_key,
     get_wallet_address,
     get_wallet_chains,
     get_user_id_by_telegram_chat_id,
 )
-from userop import get_or_create_session_key
+from userop import create_pending_session_key, promote_pending_session_key
 from tx_sender import send_and_confirm
 from contracts import (
     invalidate_cache,
@@ -29,6 +31,12 @@ nonce: int
 DEFAULT_DAILY_LIMIT_USD = 50_000 * 10**18
 # Spending-window length in seconds (24h — the cap refills each window).
 DEFAULT_WINDOW_SECS = 86_400
+
+# How long a freshly granted session key stays valid, in seconds (30 days). The contract caps any
+# grant at SessionHandler.MAX_SESSION_TTL (90 days); this is the shorter default the app actually
+# asks for, so a key that quietly stops being used dies on its own rather than outliving its
+# purpose. Renewal is one owner-signed addSession, so the cost of a short life is friction only.
+DEFAULT_SESSION_TTL_SECS = 30 * 86_400
 
 # ETH transferred into a freshly deployed wallet as deployWallet's msg.value so it can pay its own ERC-4337
 # prefund (maxFeePerGas * total gas limit, drawn from balance since the wallet holds no EntryPoint
@@ -176,7 +184,10 @@ def deploy_wallet(user_id: int, chain_name: str):
             print(f"user {user_id} has wallets on chains {others}; adding {chain_name} ({chain_id}).")
 
     predicted = factory.functions.predictWalletAddress(deployer.address).call()
-    session_key, session_key_ct = get_or_create_session_key(user_id, chain_id, predicted)
+    # A brand-new key, held aside until the deploy mines. Nothing is authorized yet, so there is no
+    # live key to overwrite and an abandoned deploy leaves only an unused row behind.
+    session_key, session_key_ct = create_pending_session_key(user_id, chain_id, predicted)
+    session_key_valid_until = int(time.time()) + DEFAULT_SESSION_TTL_SECS
 
     # The router is a wallet-level choice, not protocol config, so it is granted by the caller here
     # rather than auto-trusted in initialize(). Sourced from constants.get_router so the router the
@@ -193,6 +204,7 @@ def deploy_wallet(user_id: int, chain_name: str):
         DEFAULT_WINDOW_SECS,
         watched_tokens,
         session_key,
+        session_key_valid_until,
         trusted_spenders,
     ).build_transaction(
         {   "value": w3.to_wei(WALLET_PREFUND_ETH_LIVE if "fork" not in chain_name and chain_name != "anvil"
@@ -230,7 +242,11 @@ def deploy_wallet(user_id: int, chain_name: str):
             f"{wallet_address}) — another deploy from this key landed first. Re-filing the session "
             f"key under the deployed address; the on-chain grant is already correct."
         )
-        save_session_key(user_id, chain_id, wallet_address, session_key, session_key_ct)
+
+    # The deploy mined and initialize() authorized this key, so the grant it was minted for is real:
+    # promote it out of pending_session_keys and file it under the address the wallet actually got.
+    save_session_key(user_id, chain_id, wallet_address, session_key, session_key_ct)
+    delete_pending_session_key(user_id, chain_id, predicted)
 
     save_wallet_address(user_id, chain_id, wallet_address)
     invalidate_cache(user_id)
@@ -256,19 +272,20 @@ def add_default_session(user_id: int):
     for re-granting a key on a wallet deployed without one (sessionKey == address(0)) or after
     removeSession. Costs one owner-signed transaction; deploying seeds the key for free.
 
-    The wallet authorizes ONE bare session key for the whole account (an allowedSession
-    allowlist entry) rather than per-target scoped keys: the key may sign UserOps for any
-    external call, bounded on-chain by two guardrails that replace the old per-target
-    scoping entirely:
+    The wallet authorizes ONE bare session key at a time (SessionHandler.currentSession) rather
+    than per-target scoped keys: the key may sign UserOps for any external call, bounded on-chain
+    by three guardrails that replace the old per-target scoping entirely:
       1. the wallet-wide USD spending cap (net-value metering per window) configured at
          deployWallet time, and
       2. the account's execution guard, which blocks session-key calls to the wallet itself
          or its SpendingLimitModule (so a key can never raise its own cap), and its
-         no-standing-approval rule (approvals must be consumed in the same transaction).
+         no-standing-approval rule (approvals must be consumed in the same transaction), and
+      3. the key's own deadline — addSession takes a validUntil, and the EntryPoint refuses the
+         op with AA22 once it passes.
 
-    Called automatically after deploy_wallet(). The key is generated (or fetched) via
-    get_or_create_session_key keyed to the wallet address, encrypted in Vault, and
-    registered on-chain with SessionHandler.addSession() as the owner.
+    A FRESH key every time, never the one already held: a key is revoked exactly when it might be
+    compromised, so re-granting the same address would undo the revocation. Granting also evicts
+    whatever key the wallet held, so calling this while the assistant is working replaces its key.
 
     @param user_id  The application user ID.
     """
@@ -279,9 +296,12 @@ def add_default_session(user_id: int):
 
     # One key per wallet per chain: keyed to (user_id, chain_id, wallet address), which is exactly
     # how tools.get_session_keys resolves it, so every tool signs with this key on this chain.
-    session_key, _ = get_or_create_session_key(user_id, chain_id, session_handler.address)
+    # Held in pending until the grant mines below, so a failed transaction cannot strand the app
+    # holding a key the wallet never authorized.
+    session_key, session_key_ct = create_pending_session_key(user_id, chain_id, session_handler.address)
+    valid_until = int(time.time()) + DEFAULT_SESSION_TTL_SECS
 
-    tx = session_handler.functions.addSession(session_key).build_transaction(
+    tx = session_handler.functions.addSession(session_key, valid_until).build_transaction(
         {
             "from": owner.address,
             "nonce": w3.eth.get_transaction_count(owner.address),
@@ -294,10 +314,15 @@ def add_default_session(user_id: int):
     if receipt["status"] != 1:
         raise RuntimeError(f"addSession reverted (tx: {tx_hash.hex()})")
 
+    # Only now is the key real: the wallet authorized it, so it becomes the key this app signs with
+    # and the pending row goes away.
+    save_session_key(user_id, chain_id, session_handler.address, session_key, session_key_ct)
+    delete_pending_session_key(user_id, chain_id, session_handler.address)
+
     logs = session_handler.events.SessionAdded().process_receipt(receipt, errors=DISCARD)
     print(f"Session added! tx: {tx_hash.hex()}, status: {receipt['status']}")
     if logs:
-        print("Session Key:", logs[0]["args"]["sessionKey"])
+        print("Session Key:", logs[0]["args"]["sessionKey"], "valid until:", logs[0]["args"]["validUntil"])
     else:
         print("Warning: SessionAdded event could not be decoded (stale ABI — run forge build)")
 

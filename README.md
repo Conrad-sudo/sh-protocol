@@ -51,7 +51,7 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 ### Core — the smart account and its spending-limit hook
 
-**`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or an approved session key. Session keys can move value but can never touch the account's own settings, so an agent can't loosen its own rules.
+**`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or the account's one approved session key. A session key can move value but can never touch the account's own settings, so an agent can't loosen its own rules — and it **expires**, so a key nobody renews stops working on its own rather than living forever.
 
 Every transaction the account executes is wrapped by **`SpendingLimitModule`**, an ERC-7579 hook. It measures how much US-dollar value left the wallet (native coin plus the watched tokens, before vs. after) and refuses anything that would go past the owner's limit for the current window. Because it measures the result rather than reading calldata, it works the same for a transfer, a swap on any venue, or a liquidity move: a fair swap costs almost nothing against the limit, a bad-rate or draining swap costs what was actually lost. It also forbids standing token approvals — an approval must be used up within the same transaction, unless it goes to a spender the owner trusts (like the DEX router).
 

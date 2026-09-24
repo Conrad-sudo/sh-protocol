@@ -101,8 +101,8 @@ def load_spending_limit_module(user_id: int) -> Contract:
 
     The module is the ERC-7579 HOOK that enforces the wallet's global USD spending cap
     (net-value metering + no-standing-approvals). It is NOT a validator and holds no session-key
-    state — session keys are an allowlist on the SessionHandler account itself
-    (allowedSession/addSession), and SessionAdded/SessionRemoved are emitted there. This loader
+    state — the session key lives on the SessionHandler account itself
+    (currentSession/addSession), and SessionAdded/SessionRemoved are emitted there. This loader
     is used mainly to read the module's cap config/events.
 
     @param user_id  The application user ID.
@@ -177,10 +177,11 @@ def session_key_nonce_key(module_address: str) -> int:
 
     SessionHandler (via OZ's AccountERC7579) reads the top 20 bytes of the nonce's 192-bit key
     as a validator-module address. SpendingLimitModule is now a HOOK only — it is never
-    installed as a validator — so whatever address the key encodes, the account falls through to
-    its own _rawSignatureValidation (owner OR allowedSession signer). Keeping the module-derived
-    key preserves nonce continuity for wallets that already submitted ops under it; any key
-    value (including 0) validates identically.
+    installed as a validator — and SessionHandler authenticates ops in its own _validateUserOp
+    without consulting the nonce key at all (owner OR currentSession, the latter carrying the
+    key's deadline as the op's validity window). Keeping the module-derived key preserves nonce
+    continuity for wallets that already submitted ops under it; any key value (including 0)
+    validates identically.
 
     @param module_address  Checksummed hex address of the installed SpendingLimitModule.
     @return                The nonce key to pass as EntryPoint.getNonce's second argument.

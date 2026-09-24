@@ -43,6 +43,8 @@ from db import (
     get_all_contacts,
     delete_contact,
     save_session_key,
+    get_pending_session_key,
+    delete_pending_session_key,
     get_wallet_address,
     get_wallet_chains,
     create_user,
@@ -56,7 +58,7 @@ from db import (
     save_telegram_link_nonce,
     set_password_hash,
 )
-from userop import get_or_create_session_key
+from userop import create_pending_session_key, reconcile_session_key
 from contracts import invalidate_cache, read_spending_config
 from contract_errors import name_revert
 import auth
@@ -132,6 +134,13 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "1").lower() in ("1", "true", "yes")
 
 # Spending-window length used when the client sends none (24h — the cap refills each window).
 DEFAULT_WINDOW_SECS = 86_400
+# How long a granted session key lasts when the client sends no ttl (30 days). SessionHandler caps
+# any grant at its own MAX_SESSION_TTL; this is the shorter figure the app actually asks for, so a
+# key nobody renews dies on its own. Renewal is one owner-signed transaction.
+DEFAULT_SESSION_TTL_SECS = 30 * 86_400
+# How long before expiry the wallet read starts flagging a key as needing renewal, so a UI can
+# prompt while there is still time rather than after the assistant has stopped working.
+SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
 # SpendingLimitModule's cap is an 18-decimal USD value. The API takes whole dollars and scales here,
 # so the front end never has to hold a 10**18-sized integer (see _to_json_tx for why that matters).
 USD_DECIMALS = 10**18
@@ -203,6 +212,9 @@ class DeployRequest(BaseModel):
     # ETH sent as deployWallet's msg.value so the new wallet can pay its own ERC-4337 prefund.
     # Decimal, not float: "0.15" has to convert to wei exactly.
     prefund_eth: Decimal = Field(default=Decimal("0"), ge=0)
+    # How long the seeded session key stays valid, in seconds. Optional so the deploy screen need
+    # not ask; the contract enforces its own MAX_SESSION_TTL ceiling on top of this.
+    session_ttl_secs: int = Field(default=DEFAULT_SESSION_TTL_SECS, gt=0)
 
 
 class ConfirmRequest(BaseModel):
@@ -922,7 +934,10 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
             print(f"user {user_id} has wallets on chains {others}; adding {chain_id}.")
 
     predicted = factory.functions.predictWalletAddress(deployer).call()
-    session_key, _ = get_or_create_session_key(user_id, chain_id, predicted)
+    # Minted into pending: the user has not signed the deploy yet, and may never. Nothing is
+    # authorized on chain until /api/deploy/confirm sees the wallet, which is what promotes it.
+    session_key, _ = create_pending_session_key(user_id, chain_id, predicted)
+    session_key_valid_until = int(time.time()) + req.session_ttl_secs
 
     # The router is a wallet-level choice, not protocol config. Sourced from constants.get_router so
     # the router the wallet trusts is the one toolkits.py builds calldata for. Bare Anvil has none.
@@ -950,6 +965,7 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
             req.window_secs,
             watched_tokens,
             session_key,
+            session_key_valid_until,
             trusted_spenders,
         ).build_transaction(
             {
@@ -1038,7 +1054,7 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     # between /api/deploy and their signature moves the address. The key seeded into initialize() is
     # still the one minted against `predicted`, so MOVE the row rather than minting a new key — a
     # fresh key would not be authorized on chain and every tool would fail to sign.
-    row = get_session_key(user_id, chain_id, predicted)
+    row = get_pending_session_key(user_id, chain_id, predicted)
     if row is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -1047,14 +1063,18 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     session_key, ciphertext = row
     if wallet_address != predicted:
         print(f"Predicted {predicted} but the deploy landed at {wallet_address}; re-pointing session key.")
-        save_session_key(user_id, chain_id, wallet_address, session_key, ciphertext)
 
     # Verify on chain that the key we hold can actually sign for this wallet, rather than assuming
-    # initialize() seeded what was passed.
+    # initialize() seeded what was passed. isSessionActive covers both halves: the wallet's one key
+    # IS this one, and its deadline has not already gone by.
     handler_abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
-    authorized = w3.eth.contract(address=wallet_address, abi=handler_abi).functions.allowedSession(
-        session_key
-    ).call()
+    wallet_contract = w3.eth.contract(address=wallet_address, abi=handler_abi)
+    authorized = wallet_contract.functions.isSessionActive(session_key).call()
+
+    # Promote out of pending under the address the wallet ACTUALLY got, which is the prediction
+    # except when another deploy by this same user landed in between.
+    save_session_key(user_id, chain_id, wallet_address, session_key, ciphertext)
+    delete_pending_session_key(user_id, chain_id, predicted)
 
     # Saved even when the key is NOT authorized: the wallet exists and holds the prefund, so losing
     # the reference is worse than recording one the bot cannot sign for. The owner can still drive it
@@ -1075,6 +1095,7 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
         "wallet_address": wallet_address,
         "session_key": session_key,
         "session_key_authorized": authorized,
+        "session_key_expires_at": wallet_contract.functions.currentSessionValidUntil().call(),
     }
 
 
@@ -1327,12 +1348,12 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     wallet was created outside the browser flow. `is_owner` reports the binding instead, so a UI can
     decide whether to offer the owner controls.
 
-    **What `session.active` does not tell you.** `SessionHandler.allowedSession` is a mapping getter
-    with no enumeration, so there is no way to ask the wallet which keys it authorizes -- only whether
-    a given one is authorized. This reports on the key THIS APP holds. If the owner authorized a key
-    of their own directly, `session.key` is null and `session.active` is false while the wallet does
-    in fact have a live session key. A UI should read this as "the assistant can/cannot act", not as
-    "the wallet has no active session".
+    **Reading the session block.** The wallet authorizes ONE session key at a time, held in
+    `currentSession`, so `session.wallet_key` is the whole truth about what the wallet trusts -- no
+    enumeration problem and no caveat. `session.key` is the key THIS APP holds; `is_app_key` says
+    whether they are the same, which is what decides if the assistant can act. `active` additionally
+    accounts for expiry, and `needs_renewal` turns true while the key still works, so a UI can prompt
+    the owner before the assistant stops rather than after.
 
     @param chain_id  The chain to read. Must be one this deployment serves.
     @return          Wallet address, owner, paused state, the spending cap and window, session-key
@@ -1357,7 +1378,17 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     remaining = wallet.functions.getRemainingBudget().call()
     tickers = _ticker_map(chain_id)
 
-    app_key_row = get_session_key(user_id, chain_id, wallet.address)
+    # The wallet authorizes ONE key, so it can be read outright -- the old mapping getter could only
+    # answer "is THIS key allowed", which is why this endpoint used to have to caveat its own answer.
+    wallet_key = wallet.functions.currentSession().call()
+    wallet_key = wallet_key if int(wallet_key, 16) else None
+    session_expires_at = wallet.functions.currentSessionValidUntil().call()
+    # Reconciled BEFORE reporting: a grant or revocation whose confirm never arrived (the owner
+    # closed the tab while it mined) is picked up here, the next time anyone looks at the wallet.
+    before = get_session_key(user_id, chain_id, wallet.address)
+    app_key_row = reconcile_session_key(user_id, chain_id, wallet.address, wallet_key)
+    if app_key_row != before:
+        invalidate_cache(user_id)
     app_key = w3.to_checksum_address(app_key_row[0]) if app_key_row else None
 
     on_chain_owner = wallet.functions.owner().call()
@@ -1386,11 +1417,19 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
                 {"ticker": tickers.get(a.lower()), "address": w3.to_checksum_address(a)} for a in cfg["watchedTokens"]
             ],
         },
-        # `key` null means this app holds no session key for the wallet, so the assistant cannot
-        # sign for it. See the docstring for what `active` does NOT cover.
+        # `wallet_key` is whatever key the WALLET authorizes, read straight off currentSession --
+        # the wallet holds one at a time, so this is the whole truth, not a guess. `key` is the one
+        # this app holds; when they differ the assistant cannot sign and `is_app_key` says so.
         "session": {
             "key": app_key,
-            "active": wallet.functions.allowedSession(app_key).call() if app_key else False,
+            "wallet_key": wallet_key,
+            "is_app_key": bool(app_key) and wallet_key == app_key,
+            "active": wallet.functions.isSessionActive(app_key).call() if app_key else False,
+            "expires_at": session_expires_at or None,
+            "expires_in_secs": max(session_expires_at - int(time.time()), 0) if session_expires_at else 0,
+            # True once it is worth prompting the owner to renew, while the key still works.
+            "needs_renewal": bool(session_expires_at)
+            and session_expires_at - int(time.time()) < SESSION_RENEWAL_WARNING_SECS,
         },
         # The loosening knobs, grouped so a UI can present them as such.
         "limits": {
@@ -1569,9 +1608,14 @@ class SessionKeyRequest(BaseModel):
 
     chain_id: int
     action: str = Field(pattern="^(add|remove)$")
-    # Optional. Left out, it defaults to the key this app holds for the wallet on this chain, which
-    # is the case that matters: revoking the assistant, then granting it back.
-    session_key: str | None = None
+    # How long the new key should last, in seconds. Only read for `add`. The contract enforces its
+    # own MAX_SESSION_TTL ceiling on top of this, so an over-long value reverts rather than silently
+    # granting forever.
+    ttl_secs: int = Field(default=DEFAULT_SESSION_TTL_SECS, gt=0)
+    # NOTE: there is deliberately no `session_key` field. The owner cannot nominate an address:
+    # every grant mints a fresh key this app holds, so the wallet and the app can never disagree
+    # about who signs. Nominating an outside address only ever cost the user their assistant --
+    # the owner can already sign UserOps and call execute() directly, so it bought them nothing.
 
 
 class TrustedSpenderRequest(BaseModel):
@@ -1636,56 +1680,134 @@ def prepare_window_duration(req: WindowDurationRequest, user_id: int = Depends(g
 @app.post("/api/wallet/session/prepare")
 def prepare_session_key(req: SessionKeyRequest, user_id: int = Depends(get_current_user)):
     """
-    Builds the unsigned `addSession(key)` or `removeSession(key)` transaction.
+    Builds the unsigned `addSession(key, validUntil)` or `removeSession()` transaction.
 
     `remove` is the precise kill switch: it cuts off the agent while leaving the owner's own access
     untouched, unlike `pause`, which stops validation for everything including the owner's UserOps.
     Reach for this first if a session key looks compromised.
 
-    `add` re-authorizes. Note what a session key IS: a bare signer that can drive any execute() call,
-    bounded only by the USD cap and the admin guard — not scoped to particular targets or selectors,
-    and with no expiry. So granting one to an address this app does not hold is meaningful and
-    irreversible-ish; the response flags that case rather than silently allowing it to look normal.
+    `add` mints a BRAND-NEW key and grants it. Never the key already held: a key is revoked exactly
+    when it might be compromised, so handing the same address back would undo the revocation. The
+    new key is kept in `pending_session_keys` and is NOT used for anything until the transaction
+    mines and /api/wallet/session/confirm promotes it — so the assistant keeps working on the old
+    key right up to the moment the wallet switches, and a prepared-but-never-signed grant changes
+    nothing. The wallet authorizes one key at a time, so the grant also evicts whatever it held.
 
-    Defaults to the key this app holds for the wallet on this chain, which covers revoke-then-restore.
+    What a session key IS, unchanged by any of this: a bare signer that can drive any execute() call,
+    bounded by the USD cap, the admin guard, the per-op gas ceiling — and now its own deadline.
 
-    @return  {"tx", "session_key", "is_app_key"}.
+    @return  {"tx", "session_key", "valid_until", "replaces"} for `add`;
+             {"tx", "revokes"} for `remove`.
     """
     owner = _require_owner(user_id)
     w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
 
-    app_key_row = get_session_key(user_id, req.chain_id, wallet.address)
-    app_key = w3.to_checksum_address(app_key_row[0]) if app_key_row else None
+    current = wallet.functions.currentSession().call()
+    current = current if int(current, 16) else None
 
-    if req.session_key:
-        try:
-            session_key = w3.to_checksum_address(req.session_key)
-        except ValueError:
+    if req.action == "remove":
+        if current is None:
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, f"Not a valid address: {req.session_key}"
+                status.HTTP_400_BAD_REQUEST,
+                f"Your wallet on chain {req.chain_id} has no session key to revoke.",
             )
-    elif app_key:
-        session_key = app_key
-    else:
+        prepared = _prepare_owner_tx(w3, owner, wallet.functions.removeSession(), req.chain_id)
+        return {**prepared, "revokes": current}
+
+    max_ttl = wallet.functions.MAX_SESSION_TTL().call()
+    if req.ttl_secs > max_ttl:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"This app holds no session key for your wallet on chain {req.chain_id}. Pass "
-            f"session_key explicitly if you mean to authorize a key you manage yourself.",
+            f"A session key may last at most {max_ttl} seconds ({max_ttl // 86_400} days); "
+            f"{req.ttl_secs} was requested.",
         )
 
-    fn = (
-        wallet.functions.addSession(session_key)
-        if req.action == "add"
-        else wallet.functions.removeSession(session_key)
+    session_key, _ = create_pending_session_key(user_id, req.chain_id, wallet.address)
+    valid_until = int(time.time()) + req.ttl_secs
+
+    prepared = _prepare_owner_tx(
+        w3, owner, wallet.functions.addSession(session_key, valid_until), req.chain_id
     )
-    prepared = _prepare_owner_tx(w3, owner, fn, req.chain_id)
     return {
         **prepared,
         "session_key": session_key,
-        # False means the assistant cannot sign with this key -- it has no ciphertext for it. Worth
-        # surfacing in the UI, since an `add` of a foreign key looks identical to a normal one.
-        "is_app_key": session_key == app_key,
+        "valid_until": valid_until,
+        # What signing this will revoke. Null on a first grant; otherwise the UI should say so,
+        # because one key at a time means granting is also revoking.
+        "replaces": current,
+    }
+
+
+@app.post("/api/wallet/session/confirm")
+def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int = Depends(get_current_user)):
+    """
+    Waits for a session grant or revocation to mine, then makes wallet.db match the chain.
+
+    Separate from /api/wallet/tx/confirm — which exists for the actions that write NOTHING locally
+    — because this one has rows to move, and moving them before the transaction mines is exactly
+    how the app and the wallet drift apart.
+
+    The chain is the source of truth here, not the request: this reads `currentSession` back and
+    reconciles against it, so a client cannot talk the app into filing a key the wallet never
+    authorized.
+
+      - matches the pending key -> promote it; the assistant now signs with it
+      - zero                    -> the revocation landed; forget the key entirely, ciphertext and all
+      - anything else           -> leave the rows alone and report the drift
+
+    Answers 202 while the transaction is still pending; the front end polls until it gets a 200.
+
+    @return  {"status", "tx_hash", "session"} once mined.
+    """
+    _require_owner(user_id)
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
+    except (TimeExhausted, TransactionNotFound):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash}
+
+    # Same guard as /api/wallet/tx/confirm: only a transaction sent TO this user's wallet counts, so
+    # one user cannot report another's hash and drive state through this endpoint.
+    if receipt["to"] is None or w3.to_checksum_address(receipt["to"]) != wallet.address:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Transaction {req.tx_hash} was not sent to your wallet on chain {req.chain_id}.",
+        )
+    if receipt["status"] != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"That transaction reverted (tx: {req.tx_hash})")
+
+    on_chain = wallet.functions.currentSession().call()
+    on_chain = on_chain if int(on_chain, 16) else None
+    # Shared with the wallet read, which may have got here first: the outcome is therefore read off
+    # the state left behind, not off which branch ran. A revocation drops the ciphertext as well as
+    # the reference, so a key revoked because it leaked can never be granted again.
+    app_key_row = reconcile_session_key(user_id, req.chain_id, wallet.address, on_chain)
+    app_key = w3.to_checksum_address(app_key_row[0]) if app_key_row else None
+    if on_chain is None:
+        outcome = "revoked"
+    elif app_key == on_chain:
+        outcome = "granted"
+    else:
+        # The wallet authorizes a key this app did not mint -- an owner acting outside the app, or a
+        # grant confirmed against the wrong transaction. Nothing was touched; say so.
+        outcome = "unrecognized_key"
+
+    invalidate_cache(user_id)
+    expires_at = wallet.functions.currentSessionValidUntil().call()
+
+    return {
+        "status": outcome,
+        "tx_hash": req.tx_hash,
+        "session": {
+            "key": app_key,
+            "wallet_key": on_chain,
+            "is_app_key": bool(app_key) and app_key == on_chain,
+            "expires_at": expires_at or None,
+        },
     }
 
 

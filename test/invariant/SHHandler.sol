@@ -42,8 +42,10 @@ contract SHHandler is Test {
     int256 public ghostLimit;
     uint256 public ghostWindowDuration;
     /// @dev Session keys ever touched, with their expected allowlist state.
-    address[] public sessionKeys;
-    mapping(address => bool) public expectedAllowed;
+    /// @dev Ghost mirror of the wallet's ONE session key and its deadline. A list is no longer the
+    ///      right shape: the wallet holds a single key, and granting another evicts it.
+    address public expectedSession;
+    uint48 public expectedSessionValidUntil;
     mapping(address => bool) private _tracked;
 
     constructor(
@@ -164,25 +166,21 @@ contract SHHandler is Test {
         try module.setDailyLimit(newLimit) {} catch {}
     }
 
-    /// @dev Owner adds/removes session keys; ghosts record the expected allowlist.
-    function manageSession(address key, bool add) public {
+    /// @dev Owner grants or revokes THE session key; ghosts mirror the key and its deadline. An
+    ///      add always evicts whatever was authorized, which is the behaviour under test.
+    function manageSession(address key, bool add, uint48 ttl) public {
         key = address(uint160(bound(uint256(uint160(key)), 1, type(uint160).max)));
+        uint48 validUntil = uint48(block.timestamp) + uint48(bound(ttl, 1, wallet.MAX_SESSION_TTL()));
         vm.prank(owner);
         if (add) {
-            try wallet.addSession(key) {
-                expectedAllowed[key] = true;
-                if (!_tracked[key]) {
-                    _tracked[key] = true;
-                    sessionKeys.push(key);
-                }
+            try wallet.addSession(key, validUntil) {
+                expectedSession = key;
+                expectedSessionValidUntil = validUntil;
             } catch {}
         } else {
-            try wallet.removeSession(key) {
-                expectedAllowed[key] = false;
-                if (!_tracked[key]) {
-                    _tracked[key] = true;
-                    sessionKeys.push(key);
-                }
+            try wallet.removeSession() {
+                expectedSession = address(0);
+                expectedSessionValidUntil = 0;
             } catch {}
         }
     }
@@ -200,6 +198,6 @@ contract SHHandler is Test {
     //////////////////////////////////////////////////////////////*/
 
     function sessionKeyCount() external view returns (uint256) {
-        return sessionKeys.length;
+        return expectedSession == address(0) ? 0 : 1;
     }
 }

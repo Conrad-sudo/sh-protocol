@@ -8,6 +8,8 @@ from db import (
     get_contact as _get_contact,
     get_all_contacts as _get_all_contacts,
 )
+import time
+
 from network_config import load_network_config
 from bundler import (
     broadcast_user_op as _broadcast_user_op,
@@ -17,7 +19,7 @@ from bundler import (
     resolve_bundler as _resolve_bundler,
 )
 from userop import (
-    get_or_create_session_key,
+    get_session_key_or_none,
     prepare_execute_batch_call,
     prepare_execute_call,
 )
@@ -212,6 +214,12 @@ def _quote_plan(runtime, key_ciphertext: str, plan: dict, details: str = "") -> 
 # `int(base * (BPS - bps) / BPS)` here silently drifted at 18 decimals, in the wrong direction
 # for amountInMax and the addLiquidity desired amounts.
 DEFAULT_SLIPPAGE_BPS = 50  # 0.5%
+
+# How much life a session key must have left before preflight_check will green-light a new
+# transaction. The wallet's own comparison is exact (valid through the deadline second, matching
+# the EntryPoint), so this margin is purely client side: it stops the agent starting something that
+# would be quoted, confirmed by the user and then refused with AA22 while it was in flight.
+SESSION_EXPIRY_MARGIN_SECS = 60
 
 
 def _resolve(user_id: int, token: str) -> str:
@@ -482,7 +490,8 @@ def _get_all_sessions(user_id: int) -> dict:
 
     return {
         "paused": session_handler.functions.paused().call(),
-        "session_active": session_handler.functions.allowedSession(session_key).call(),
+        "session_active": session_handler.functions.isSessionActive(session_key).call(),
+        "session_expires_at": session_handler.functions.currentSessionValidUntil().call(),
         "daily_limit_usd": cfg["dailyLimitUsd"] / WEI_PER_ETH,
         "spent_usd": cfg["spentInWindow"] / WEI_PER_ETH,
         "remaining_usd": remaining / WEI_PER_ETH,
@@ -675,17 +684,29 @@ def _get_session_keys(user_id: int) -> tuple[str, str]:
     @param user_id  The application user ID.
     @return         (key_address, key_ciphertext).
     """
-    # The account now authorizes ONE bare session key for the whole wallet (allowedSession
-    # allowlist) rather than per-target scoped keys — every token/router/registry operation
-    # signs with the same key, bounded by the wallet's global USD spending cap. That is why this
-    # takes no token: the target never selected a different key.
+    # The account authorizes ONE bare session key at a time for the whole wallet
+    # (SessionHandler.currentSession) rather than per-target scoped keys — every token/router/
+    # registry operation signs with the same key, bounded by the wallet's global USD spending cap
+    # and by the key's own deadline. That is why this takes no token: the target never selected a
+    # different key.
     #
     # One key per wallet PER CHAIN, though: both the wallet lookup and the key lookup are scoped to
     # the chain the user is currently on, so a user with wallets on several chains gets a distinct
     # key for each rather than one key spanning all of them.
     _, chain_id, _ = load_network_config(user_id)
     wallet_address = load_session_handler(user_id).address
-    return get_or_create_session_key(user_id, chain_id, wallet_address)
+    row = get_session_key_or_none(user_id, chain_id, wallet_address)
+    if row is None:
+        # Read-only on purpose. Minting one here would hand back a key the WALLET has never
+        # authorized -- every UserOp signed with it fails AA24 while the database looks healthy.
+        # A missing row means the key was revoked (or never granted), and only an owner-signed
+        # addSession can fix that.
+        raise ToolException(
+            "This wallet has no session key for the assistant to sign with, so it cannot send "
+            "transactions. Tell the user to grant one from the web app (Settings -> Session key); "
+            "it takes one transaction signed from their own wallet."
+        )
+    return row
 
 
 @tool
@@ -707,7 +728,7 @@ def check_session_validity(runtime: ToolRuntime[AgentContext], token: str) -> bo
     print("Running check_session_validity")
     session_key, _ = _get_session_keys(user_id)
     session_handler = load_session_handler(user_id)
-    return session_handler.functions.allowedSession(session_key).call()
+    return session_handler.functions.isSessionActive(session_key).call()
 
 
 @tool
@@ -921,7 +942,12 @@ def preflight_check(
     session_handler = load_session_handler(user_id)
 
     is_paused = session_handler.functions.paused().call()
-    session_active = session_handler.functions.allowedSession(session_key).call()
+    session_active = session_handler.functions.isSessionActive(session_key).call()
+    # A key that is live NOW but expires while this transaction is being built, signed and mined
+    # would fail with AA22 after the user has already agreed to it. Refuse a little early instead,
+    # and say why -- the contract's own comparison stays exact, the margin lives here.
+    seconds_left = session_handler.functions.currentSessionValidUntil().call() - int(time.time())
+    expiring_imminently = session_active and seconds_left < SESSION_EXPIRY_MARGIN_SECS
 
     # Mirrors postCheck: the net USD decrease across metered tokens, and nothing for a net increase.
     # The sent token is priced even when unmetered, because usd_value is shown to the user either way.
@@ -938,7 +964,9 @@ def preflight_check(
 
     return {
         "is_paused": is_paused,
-        "session_active": session_active,
+        "session_active": session_active and not expiring_imminently,
+        "session_expires_in_secs": max(seconds_left, 0),
+        "expiring_imminently": expiring_imminently,
         "within_budget": charged <= remaining,
         "usd_value": sent_usd / WEI_PER_ETH,
         "charged_usd": charged / WEI_PER_ETH,

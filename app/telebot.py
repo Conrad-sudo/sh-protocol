@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 from telegram import Update
 from telegram.ext import (
@@ -18,6 +19,11 @@ telegram_token = os.getenv("TELEGRAM_TOKEN")
 
 # Warn when less than this fraction of the window spending cap remains.
 BUDGET_ALERT_THRESHOLD = 0.10
+
+# Warn this far ahead of the session key's deadline (3 days). A fixed lead time rather than a
+# fraction of the key's life: what the user needs is enough notice to sign a renewal in the web
+# app, and that does not scale with how long the key was granted for.
+SESSION_EXPIRY_WARN_SECS = 3 * 86_400
 
 # Shown whenever a chat that no account has claimed tries to use the bot.
 UNLINKED_MESSAGE = (
@@ -43,14 +49,14 @@ def _resolve_user(chat_id: int) -> int | None:
 
 async def budget_alert(context: ContextTypes.DEFAULT_TYPE):
     """
-    Job callback that checks the user's wallet spending-cap status and warns them when the
-    session key is inactive or the remaining USD budget for the current window has dropped
-    below BUDGET_ALERT_THRESHOLD of the cap.
+    Job callback that checks the user's wallet status and warns them when the session key is
+    inactive, when it is about to EXPIRE (within SESSION_EXPIRY_WARN_SECS), or when the remaining
+    USD budget for the current window has dropped below BUDGET_ALERT_THRESHOLD of the cap.
 
-    Replaces the old per-token session-expiry alert: session keys no longer expire, and spending
-    is bounded by a single wallet-wide USD cap per rolling window. Scheduled via JobQueue — not
-    triggered by a user message. The job carries the chat to message in context.job.chat_id and the
-    account to report on in context.job.data.
+    The expiry warning is the reason this job matters to a Telegram-only user: renewing a key is an
+    owner-signed transaction they can only make in the web app, so being told after it lapsed means
+    being told too late. Scheduled via JobQueue — not triggered by a user message. The job carries
+    the chat to message in context.job.chat_id and the account to report on in context.job.data.
     """
     chat_id = context.job.chat_id
     user_id = context.job.data
@@ -66,11 +72,25 @@ async def budget_alert(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "⚠️ Your wallet's session key is not currently authorized. "
-                "New transactions will be rejected until it is re-added."
+                "⚠️ Your wallet's session key is not currently authorized — it was revoked, "
+                "replaced, or has expired. New transactions will be rejected until you grant a new "
+                "one from the web app (Settings → Session key)."
             ),
         )
         return
+
+    expires_at = status.get("session_expires_at") or 0
+    seconds_left = expires_at - int(time.time())
+    if 0 < seconds_left < SESSION_EXPIRY_WARN_SECS:
+        days_left = max(seconds_left // 86_400, 0)
+        when = f"in {days_left} day{'s' if days_left != 1 else ''}" if days_left else "in under a day"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⏳ Your wallet's session key expires {when}. Renew it from the web app "
+                f"(Settings → Session key) to keep me able to send transactions for you."
+            ),
+        )
 
     limit = status.get("daily_limit_usd") or 0
     remaining = status.get("remaining_usd") or 0

@@ -33,6 +33,13 @@ import {DECIMALS, ETH_USD_PRICE} from "../../script/Constants.s.sol";
  *        built here always register address(0).
  */
 contract SHAdminTest is Test {
+    /// @dev A deadline every {SessionHandler-addSession} call in this file can use: comfortably in
+    ///      the future, comfortably inside MAX_SESSION_TTL. Recomputed per call so a test that warps
+    ///      time still grants a live key.
+    function _sessionDeadline() internal view returns (uint48) {
+        return uint48(block.timestamp + 30 days);
+    }
+
     SHFactory factory;
     SHTreasury treasury;
     SHRegistry registry;
@@ -71,7 +78,7 @@ contract SHAdminTest is Test {
         watched[0] = config.usdc;
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
     }
 
     /*//////////////////////////////////////////////////////////////

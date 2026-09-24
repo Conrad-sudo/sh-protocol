@@ -125,12 +125,15 @@ contract SHFactory is Ownable, Pausable {
     /// @param windowDuration  Spending-window length in seconds. Must be > 0.
     /// @param watchedTokens   Tokens to meter; each must already be priced by the oracle.
     /// @param sessionKey      Session key to authorize, or address(0) for an owner-only wallet.
+    /// @param sessionKeyValidUntil Unix timestamp the session key expires at. Must be in the future
+    ///        and within {SessionHandler-MAX_SESSION_TTL}; ignored when `sessionKey` is address(0).
     /// @param trustedSpenders Spenders trusted for unpriced-token approvals. May be empty.
     function deployWallet(
         int256 dailyLimitUsd,
         uint256 windowDuration,
         address[] calldata watchedTokens,
         address sessionKey,
+        uint48 sessionKeyValidUntil,
         address[] calldata trustedSpenders
     ) external payable whenNotPaused returns (address) {
         address module = REGISTRY.spendingLimitModule();
@@ -160,6 +163,7 @@ contract SHFactory is Ownable, Pausable {
                     windowDuration: windowDuration,
                     watchedTokens: watchedTokens,
                     sessionKey: sessionKey,
+                    sessionKeyValidUntil: sessionKeyValidUntil,
                     trustedSpenders: trustedSpenders
                 })
             );

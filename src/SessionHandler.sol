@@ -11,6 +11,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {ERC4337Utils} from "@openzeppelin/contracts/account/utils/draft-ERC4337Utils.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {SHOracle} from "./SHOracle.sol";
 import {SHRegistry} from "./SHRegistry.sol";
@@ -28,13 +29,17 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  *         a hook); this contract keeps only the account-level concerns that aren't cap-specific
  *         (ownership, ETH/ERC20 withdrawal, pausing, spending-cap configuration passthroughs, and
  *         the ERC-8004 identity/reputation lookups).
- * @dev Session-key auth is built into the account itself: it validates its own UserOps via
- *      {_rawSignatureValidation}, accepting a UserOp signed by the owner OR by any address on the
- *      `allowedSession` allowlist (managed with {addSession}/{removeSession}). No separate validator
- *      module is installed -- SpendingLimitModule is a hook (module type 4) ONLY, enforcing the USD
- *      spending cap on every execution. A session key is a BARE signer with no per-key selector
- *      scope or expiry; the spending cap is its main on-chain guardrail (see {addSession}), narrowed
- *      optionally by the owner-managed {sessionTargetAllowlist}.
+ * @dev Session-key auth is built into the account itself: {_validateUserOp} recovers the signer and
+ *      accepts a UserOp signed by the owner OR by {currentSession}, the ONE session key this wallet
+ *      authorizes at a time (managed with {addSession}/{removeSession}). No separate validator module
+ *      is installed -- SpendingLimitModule is a hook (module type 4) ONLY, enforcing the USD spending
+ *      cap on every execution. Raw-signature validation is left disabled at the base's default, so
+ *      {_validateUserOp} is the single authentication path; see its NatSpec for why it does not
+ *      delegate to {AccountERC7579-_validateUserOp}.
+ * @dev A session key EXPIRES: {currentSessionValidUntil} is returned as the op's ERC-4337 validity
+ *      window, so the EntryPoint refuses an expired key with `AA22 expired or not due`. It is still a
+ *      bare signer within that window -- no per-key selector scope -- bounded by the spending cap
+ *      (see {addSession}) and narrowed optionally by the owner-managed {sessionTargetAllowlist}.
  * @dev The USD cap cannot see ETH spent as GAS (the prefund leaves before the hook's preCheck,
  *      refunds land in the EntryPoint deposit after postCheck). {maxOpGasCost} bounds it instead,
  *      and the EntryPoint is a restricted target so a key cannot withdraw the deposit.
@@ -66,6 +71,14 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     error SessionHandler_ExecutionFailed();
     /// @dev Thrown when address(0) is passed as a session key to addSession.
     error SessionHandler_InvalidSessionKey();
+    /// @dev Thrown when the owner's own address is passed to addSession. The owner can already sign
+    ///      UserOps unconditionally, so the grant would buy nothing and would evict the live key.
+    error SessionHandler_SessionKeyIsOwner();
+    /// @dev Thrown when addSession is given a deadline that has already passed (or is zero, which the
+    ///      EntryPoint would read as "no expiry").
+    error SessionHandler_SessionExpiryInPast(uint48 validUntil);
+    /// @dev Thrown when addSession is given a deadline further out than {MAX_SESSION_TTL}.
+    error SessionHandler_SessionTtlTooLong(uint48 validUntil, uint48 maxTtl);
     /// @dev Thrown when a session-key (non-owner) execution targets the account's own admin surface
     ///      (address(this) or the spending-limit module), which would let a key escape the cap.
     error SessionHandler_SessionRestrictedTarget(address target);
@@ -92,9 +105,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /*//////////////////////////////////////////////////////////////
                                     EVENTS
     //////////////////////////////////////////////////////////////*/
-    /// @notice Emitted when the owner authorizes a session key.
-    event SessionAdded(address indexed sessionKey);
-    /// @notice Emitted when the owner revokes a session key.
+    /// @notice Emitted when the owner authorizes a session key, or extends the deadline of the one
+    ///         already authorized.
+    /// @param sessionKey The authorized signer.
+    /// @param validUntil Unix timestamp this key stops being accepted, inclusive of that second.
+    event SessionAdded(address indexed sessionKey, uint48 validUntil);
+    /// @notice Emitted when a session key stops being authorized -- revoked by the owner, or evicted
+    ///         by {addSession} granting a different key.
     event SessionRemoved(address indexed sessionKey);
 
     /// @notice Emitted when the owner changes the per-UserOp gas-cost ceiling.
@@ -121,6 +138,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev Deliberately generous — it clears a ~600k-gas swap at 2x a spiking base fee, so a fee
     ///      spike never rejects a legitimate op. A bound on abuse, not a gas budget.
     uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
+
+    /// @notice Longest a session key may be authorized for, from the moment it is granted.
+    /// @dev A hard ceiling rather than an owner setting: a settable one would be raised to "forever"
+    ///      by the first UI that defaults it, which is the behaviour this expiry exists to remove.
+    ///      Renewal is one owner transaction ({addSession} again), so the cost of a short life is
+    ///      friction, not lockout.
+    uint48 public constant MAX_SESSION_TTL = 90 days;
 
     /// @notice This deployment's ERC-4337 EntryPoint. Overrides Account's default (OZ's canonical v0.8
     ///         singleton), since this project uses a v0.7 EntryPoint (see HelperConfig.s.sol).
@@ -174,11 +198,21 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     ///      ABI knowledge of what it calls.
     mapping(address target => bool allowed) public sessionTargetAllowlist;
 
-    /// @notice Session keys authorized to sign UserOps for this account (the owner is always
-    ///         authorized separately, in {_rawSignatureValidation}). A bare allowlist: an allowed
-    ///         key may drive ANY execute() call, bounded only by the SpendingLimitModule spending
-    ///         cap. Managed via {addSession}/{removeSession}.
-    mapping(address sessionKey => bool allowed) public allowedSession;
+    /// @notice The ONE session key this wallet authorizes, or address(0) for none. The owner is
+    ///         always authorized separately, in {_validateUserOp}.
+    /// @dev One key at a time, not an allowlist: a wallet that can authorize several keys can drift
+    ///      out of step with whatever off-chain system holds them, and a mapping cannot be
+    ///      enumerated, so nothing on chain could answer "which keys does this wallet trust?".
+    ///      {addSession} evicts whatever was here before. Within its window the key is still a BARE
+    ///      signer -- it may drive ANY execute() call, bounded by the SpendingLimitModule spending
+    ///      cap, {_guardSessionExecution}, and {maxOpGasCost}.
+    /// @dev Packs with {currentSessionValidUntil} into one slot; the two are always written together
+    ///      so `currentSession != address(0)` iff `currentSessionValidUntil != 0`. {_validateUserOp}
+    ///      depends on that: the EntryPoint reads a zero deadline as "valid forever".
+    address public currentSession;
+    /// @notice Unix timestamp at which {currentSession} stops being accepted. Inclusive: an op is
+    ///         still valid in the second that equals it, matching the EntryPoint's own comparison.
+    uint48 public currentSessionValidUntil;
 
     /*//////////////////////////////////////////////////////////////
                                 Constructor
@@ -231,6 +265,9 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @param windowDuration      Spending-window length in seconds. Must be > 0.
      * @param watchedTokens       Tokens to meter. Each must already be priced by the oracle.
      * @param sessionKey          Session key to authorize, or address(0) for an owner-only wallet.
+     * @param sessionKeyValidUntil Unix timestamp the session key expires at. Subject to the same
+     *                            rules as {addSession}, so it must be in the future and no further
+     *                            out than {MAX_SESSION_TTL}. Ignored when `sessionKey` is address(0).
      * @param trustedSpenders     Spenders trusted for unpriced-token approvals (typically the DEX
      *                            router). May be empty.
      */
@@ -242,6 +279,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         uint256 windowDuration;
         address[] watchedTokens;
         address sessionKey;
+        uint48 sessionKeyValidUntil;
         address[] trustedSpenders;
     }
 
@@ -271,12 +309,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
             abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens)
         );
 
-        // Authorize the wallet's session key, if one was supplied. Equivalent to {addSession} but
-        // reachable at deploy time, so a wallet needs no second owner transaction to become usable.
-        // address(0) is not an error here (unlike in {addSession}): it means an owner-only wallet.
+        // Authorize the wallet's session key, if one was supplied. Routed through the SAME internal
+        // grant as {addSession} -- including the expiry rules -- so a deploy can never seed a key on
+        // terms an owner transaction would have refused. address(0) is not an error here (unlike in
+        // {addSession}): it means an owner-only wallet, and its deadline is ignored.
+        // Must come after __Ownable_init: _grantSession rejects the owner's own address.
         if (cfg.sessionKey != address(0)) {
-            allowedSession[cfg.sessionKey] = true;
-            emit SessionAdded(cfg.sessionKey);
+            _grantSession(cfg.sessionKey, cfg.sessionKeyValidUntil);
         }
 
         // Which venue a wallet trades on remains the OWNER'S choice, not protocol config -- this list
@@ -512,46 +551,77 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Authorizes `sessionKey` to sign UserOps for this account.
-     * @dev SECURITY: a session key is a BARE signer -- once authorized it can drive ANY execute()
+     * @notice Authorizes `sessionKey` until `validUntil`, replacing whatever key was authorized
+     *         before. Called again with the same key, it extends that key's deadline.
+     * @dev SECURITY: a session key is a BARE signer -- until it expires it can drive ANY execute()
      *      call to external targets, gated by the SpendingLimitModule USD spending cap and by
      *      {_guardSessionExecution} (which blocks it from the account's own admin surface). It is
-     *      NOT scoped to particular external targets or selectors, and has no expiry; grant keys
-     *      only to agents trusted to stay within the cap. Scoped keys (target/selector/expiry) are
-     *      a deliberate future step.
-     * @param sessionKey The signer address to authorize. Must not be address(0).
+     *      NOT scoped to particular external targets or selectors; scoped keys (Smart Sessions /
+     *      ERC-7715) remain a deliberate future step. Grant keys only to agents trusted to stay
+     *      within the cap, and prefer a short `validUntil`.
+     * @dev Granting a DIFFERENT key revokes the current one in the same transaction. That is the
+     *      point: one key at a time is what keeps the wallet and whoever holds the key in step.
+     * @param sessionKey The signer address to authorize. Must not be address(0) or the owner.
+     * @param validUntil Unix timestamp the key expires at. Must be in the future and no further out
+     *                   than {MAX_SESSION_TTL}.
      */
-    function addSession(address sessionKey) external onlyOwner {
+    function addSession(address sessionKey, uint48 validUntil) external onlyOwner {
+        _grantSession(sessionKey, validUntil);
+    }
+
+    /**
+     * @notice Revokes this wallet's session key. No-op when none is authorized.
+     * @dev Takes no argument because only one key can be authorized at a time -- an address
+     *      parameter would let a caller "revoke" a key that was never live and read the silent
+     *      no-op as success.
+     */
+    function removeSession() external onlyOwner {
+        address previous = currentSession;
+        if (previous == address(0)) return;
+        currentSession = address(0);
+        currentSessionValidUntil = 0;
+        emit SessionRemoved(previous);
+    }
+
+    /**
+     * @notice Whether `key` is this wallet's session key AND has not expired.
+     * @dev The comparison is `<=`, matching the EntryPoint's own: an op is still valid in the second
+     *      that equals the deadline (EntryPoint treats a UserOp as out of range only once
+     *      `block.timestamp > validUntil`). A view that disagreed with the chain, even by a second
+     *      and even conservatively, would be a debugging trap. Callers wanting a safety margin
+     *      before starting a transaction should compare {currentSessionValidUntil} themselves.
+     * @dev Reading block.timestamp is fine here: this is an ordinary view, never reached during
+     *      ERC-4337 validation.
+     */
+    function isSessionActive(address key) public view returns (bool) {
+        return key != address(0) && key == currentSession && block.timestamp <= currentSessionValidUntil;
+    }
+
+    /**
+     * @dev The single path that authorizes a session key, shared by {addSession} and {initialize} so
+     *      a deploy cannot seed a key on terms an owner transaction would refuse.
+     * @dev Rejects the owner's own address: the owner is already accepted unconditionally by
+     *      {_validateUserOp}, so granting it would authorize nothing new while evicting the key the
+     *      wallet actually relies on.
+     * @dev `validUntil == 0` is caught by the past-deadline check, which matters more than it looks:
+     *      the EntryPoint reads a zero deadline in validation data as "valid forever".
+     */
+    function _grantSession(address sessionKey, uint48 validUntil) internal {
         if (sessionKey == address(0)) revert SessionHandler_InvalidSessionKey();
-        allowedSession[sessionKey] = true;
-        emit SessionAdded(sessionKey);
-    }
+        if (sessionKey == owner()) revert SessionHandler_SessionKeyIsOwner();
+        if (validUntil <= block.timestamp) revert SessionHandler_SessionExpiryInPast(validUntil);
+        if (validUntil > block.timestamp + MAX_SESSION_TTL) {
+            revert SessionHandler_SessionTtlTooLong(validUntil, MAX_SESSION_TTL);
+        }
 
-    /**
-     * @notice Revokes a previously authorized session key. No-op if it was not authorized.
-     * @param sessionKey The signer address to revoke.
-     */
-    function removeSession(address sessionKey) external onlyOwner {
-        allowedSession[sessionKey] = false;
-        emit SessionRemoved(sessionKey);
-    }
+        address previous = currentSession;
+        // A renewal of the same key is an extension, not a revoke-and-regrant: emitting SessionRemoved
+        // for it would tell anything watching events that the wallet lost its key.
+        if (previous != address(0) && previous != sessionKey) emit SessionRemoved(previous);
 
-    /**
-     * @dev UserOp signature validation for this account. Reached via {Account-_validateUserOp}, the
-     *      fallback path AccountERC7579 takes whenever the nonce's validator module isn't installed
-     *      -- which is always here, since this account installs no validator module. Returns true iff
-     *      the op is signed by the owner or by an authorized session key.
-     *
-     *      `hash` is {Account-_signableUserOpHash} (the raw userOpHash by default). The bot and the
-     *      Foundry helper sign the EIP-191 envelope of it (toEthSignedMessageHash /
-     *      eth_account.encode_defunct), so it is re-wrapped here before recovery. Uses tryRecover so
-     *      a malformed signature returns SIG_VALIDATION_FAILED instead of reverting validation.
-     */
-    function _rawSignatureValidation(bytes32 hash, bytes calldata signature) internal view override returns (bool) {
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(hash);
-        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(digest, signature);
-        if (err != ECDSA.RecoverError.NoError) return false;
-        return signer == owner() || allowedSession[signer];
+        currentSession = sessionKey;
+        currentSessionValidUntil = validUntil;
+        emit SessionAdded(sessionKey, validUntil);
     }
 
     /**
@@ -580,6 +650,25 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @dev Packing per ERC-4337 v0.7+: `accountGasLimits` = verificationGasLimit | callGasLimit;
      *      `gasFees` = maxPriorityFeePerGas | maxFeePerGas (high | LOW 128 each). Paymaster limits are
      *      excluded — a sponsored op costs the account nothing.
+     * @dev Authenticates the op HERE rather than delegating to {AccountERC7579-_validateUserOp}. The
+     *      base routes to a validator module when the nonce key names one and otherwise falls back to
+     *      {AbstractSigner-_rawSignatureValidation}; this account installs no validator module
+     *      (SpendingLimitModule is a hook ONLY), so that branch is dead, and taking it would cost a
+     *      SECOND ecrecover to learn which key signed. Recovering once here is what lets an expired
+     *      session key be reported as `AA22 expired or not due` rather than the misleading
+     *      `AA24 signature error`.
+     *      DELIBERATE CONSEQUENCE: a validator module installed by the owner is ignored for UserOp
+     *      validation, though {AccountERC7579-isValidSignature} would still consult it. Installing one
+     *      is an owner-key action (THREAT_MODEL §3.9), and ignoring it here fails towards this
+     *      account's own auth rather than towards a module's.
+     * @dev The bot and the Foundry helper sign the EIP-191 envelope of {Account-_signableUserOpHash}
+     *      (toEthSignedMessageHash / eth_account.encode_defunct), so it is re-wrapped before recovery.
+     *      tryRecover keeps a malformed signature to SIG_VALIDATION_FAILED instead of reverting
+     *      validation, which the EntryPoint requires.
+     * @dev The session key's deadline is RETURNED as the op's validity window, not compared here: the
+     *      EntryPoint does that comparison inside handleOps. A zero deadline would read as "valid
+     *      forever" there, which is why {_grantSession} refuses one and why the key and its deadline
+     *      are always written together.
      */
     function _validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, bytes calldata signature)
         internal
@@ -594,7 +683,19 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         uint256 cost = (verificationGasLimit + callGasLimit + userOp.preVerificationGas) * maxFeePerGas;
         if (cost > maxOpGasCost) revert SessionHandler_OpGasCostTooHigh(cost, maxOpGasCost);
 
-        return super._validateUserOp(userOp, userOpHash, signature);
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(
+            MessageHashUtils.toEthSignedMessageHash(_signableUserOpHash(userOp, userOpHash)), signature
+        );
+        if (err != ECDSA.RecoverError.NoError) return ERC4337Utils.SIG_VALIDATION_FAILED;
+
+        // The owner is authorized unconditionally and carries no validity window.
+        if (signer == owner()) return ERC4337Utils.SIG_VALIDATION_SUCCESS;
+
+        // Also covers "no session key at all": currentSession is then address(0), which no
+        // successfully recovered signer can equal.
+        if (signer != currentSession) return ERC4337Utils.SIG_VALIDATION_FAILED;
+
+        return ERC4337Utils.packValidationData(true, 0, currentSessionValidUntil);
     }
 
     /**

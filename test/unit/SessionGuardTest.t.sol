@@ -36,6 +36,13 @@ import {DECIMALS, ETH_USD_PRICE} from "../../script/Constants.s.sol";
  *      - Direct EntryPoint-pranked execute() calls: prove the exact custom error the guard raises.
  */
 contract SessionGuardTest is Test {
+    /// @dev A deadline every {SessionHandler-addSession} call in this file can use: comfortably in
+    ///      the future, comfortably inside MAX_SESSION_TTL. Recomputed per call so a test that warps
+    ///      time still grants a live key.
+    function _sessionDeadline() internal view returns (uint48) {
+        return uint48(block.timestamp + 30 days);
+    }
+
     SessionHandler wallet;
     SpendingLimitModule module;
     SHOracle oracle;
@@ -78,7 +85,7 @@ contract SessionGuardTest is Test {
         watched[1] = address(dai);
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
 
         sendPackedUserOp = new SendPackedUserOp();
 
@@ -87,7 +94,7 @@ contract SessionGuardTest is Test {
         dai.mint(address(wallet), 10_000e18);
 
         vm.prank(owner);
-        wallet.addSession(sessionKey);
+        wallet.addSession(sessionKey, _sessionDeadline());
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -105,10 +112,15 @@ contract SessionGuardTest is Test {
         watched[0] = address(usdc);
 
         vm.prank(kani);
-        SessionHandler w =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, new address[](0))));
+        SessionHandler w = SessionHandler(
+            payable(
+                factory.deployWallet(
+                    DAILY_LIMIT, WINDOW, watched, sessionKey, _sessionDeadline(), new address[](0)
+                )
+            )
+        );
 
-        assertTrue(w.allowedSession(sessionKey), "key should be authorized by deployWallet alone");
+        assertTrue(w.isSessionActive(sessionKey), "key should be authorized by deployWallet alone");
 
         vm.deal(address(w), 10 ether);
         usdc.mint(address(w), 1_000e6);
@@ -225,9 +237,10 @@ contract SessionGuardTest is Test {
 
     /// @notice A session key must not be able to authorize more session keys via a self-call.
     function test_sessionOp_cannotMintMoreSessionKeys() public {
-        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.addSession, (attacker)));
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())));
 
-        assertFalse(wallet.allowedSession(attacker), "session key minted another session key");
+        assertEq(wallet.currentSession(), sessionKey, "session key minted another session key");
+        assertFalse(wallet.isSessionActive(attacker), "attacker key became active");
     }
 
     /// @notice A batch hiding one restricted sub-call among legit ones must revert ATOMICALLY:
@@ -271,7 +284,7 @@ contract SessionGuardTest is Test {
     ///         targets the account itself.
     function test_guard_revertsOnSelfTarget() public {
         bytes memory executionCalldata =
-            _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker)));
+            _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())));
 
         vm.prank(config.entryPoint);
         vm.expectRevert(
@@ -340,11 +353,11 @@ contract SessionGuardTest is Test {
     function test_ownerPassthroughs_unaffected() public {
         vm.startPrank(owner);
         wallet.setDailyLimit(1234e18);
-        wallet.removeSession(sessionKey);
+        wallet.removeSession();
         vm.stopPrank();
 
         assertEq(wallet.getConfig().dailyLimitUsd, int256(1234e18));
-        assertFalse(wallet.allowedSession(sessionKey));
+        assertFalse(wallet.isSessionActive(sessionKey));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -365,10 +378,128 @@ contract SessionGuardTest is Test {
         IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
     }
 
+    /*//////////////////////////////////////////////////////////////
+                        SESSION-KEY EXPIRY (AA22)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Re-stamps every mock feed at its current answer. A warp far enough to expire a session
+    ///      key is also far past every heartbeat, and a stale feed reverts the op inside the hook's
+    ///      postCheck -- which would make these tests pass or fail for the wrong reason.
+    function _refreshFeeds() internal {
+        MockV3Aggregator(config.usdcUsdPriceFeed).updateAnswer(
+            MockV3Aggregator(config.usdcUsdPriceFeed).latestAnswer()
+        );
+        MockV3Aggregator(config.daiUsdPriceFeed).updateAnswer(
+            MockV3Aggregator(config.daiUsdPriceFeed).latestAnswer()
+        );
+        MockV3Aggregator(config.ethUsdPriceFeed).updateAnswer(
+            MockV3Aggregator(config.ethUsdPriceFeed).latestAnswer()
+        );
+    }
+
+    /// @dev Warps to `to` and re-stamps the feeds, so only the session key's deadline has moved.
+    function _warpTo(uint256 to) internal {
+        vm.warp(to);
+        _refreshFeeds();
+    }
+
+    /// @dev Builds a transfer op signed by `sessionKey` and expects handleOps to fail with `reason`.
+    function _expectSessionOpFailsWith(bytes memory reason) internal {
+        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet),
+            config,
+            address(usdc),
+            0,
+            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
+            sessionKey,
+            sessionKeyPk
+        );
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+        vm.prank(bundler, bundler);
+        vm.expectRevert(reason);
+        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+    }
+
+    /**
+     * @notice Once past its deadline a session key is refused by the EntryPoint with AA22, NOT AA24.
+     *         The distinction is the point of returning a validity window instead of checking the
+     *         clock inside validation: the signature was fine, the grant ran out, and the bot's
+     *         revert decoding can tell the user which it was.
+     */
+    function test_expiredSessionKey_failsWithAA22() public {
+        _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+
+        _warpTo(uint256(wallet.currentSessionValidUntil()) + 1);
+
+        _expectSessionOpFailsWith(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA22 expired or not due")
+        );
+    }
+
+    /// @notice The key is still accepted in the second that equals its deadline, matching the
+    ///         EntryPoint's own `block.timestamp > validUntil` comparison and {isSessionActive}.
+    function test_sessionKey_validInTheDeadlineSecond() public {
+        _warpTo(uint256(wallet.currentSessionValidUntil()));
+        assertTrue(wallet.isSessionActive(sessionKey), "view disagrees with the chain at the boundary");
+
+        uint256 before = usdc.balanceOf(kani);
+        _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        assertEq(usdc.balanceOf(kani), before + 1e6, "op rejected in the deadline second");
+    }
+
+    /// @notice Renewing the key after it lapsed brings it straight back -- no new key needed.
+    function test_expiredSessionKey_worksAgainAfterRenewal() public {
+        _warpTo(uint256(wallet.currentSessionValidUntil()) + 1);
+        _expectSessionOpFailsWith(
+            abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA22 expired or not due")
+        );
+
+        vm.prank(owner);
+        wallet.addSession(sessionKey, _sessionDeadline());
+
+        uint256 before = usdc.balanceOf(kani);
+        _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        assertEq(usdc.balanceOf(kani), before + 1e6, "renewed key still refused");
+    }
+
+    /// @notice Granting a DIFFERENT key evicts the live one, and the evicted key fails AA24 (it is
+    ///         no longer this wallet's key at all) rather than AA22.
+    function test_evictedSessionKey_failsWithAA24() public {
+        vm.prank(owner);
+        wallet.addSession(makeAddr("replacementKey"), _sessionDeadline());
+
+        _expectSessionOpFailsWith(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA24 signature error"));
+    }
+
+    /**
+     * @notice The owner carries NO validity window: an owner-signed UserOp still runs after the
+     *         session key has expired. The wallet must never become unusable to its owner because
+     *         a delegated key ran out.
+     */
+    function test_ownerOp_unaffectedByExpiry() public {
+        _warpTo(uint256(wallet.currentSessionValidUntil()) + 365 days);
+
+        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet),
+            config,
+            address(usdc),
+            0,
+            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
+            owner,
+            ANVIL_OWNER_KEY
+        );
+
+        uint256 before = usdc.balanceOf(kani);
+        _handleOps(userOp);
+        assertEq(usdc.balanceOf(kani), before + 1e6, "owner op blocked by the session key's expiry");
+    }
+
     /// @notice After removeSession, a previously working session key fails validation (AA24).
     function test_removedSessionKey_failsValidation() public {
         vm.prank(owner);
-        wallet.removeSession(sessionKey);
+        wallet.removeSession();
 
         (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet),
@@ -874,10 +1005,10 @@ contract SessionGuardTest is Test {
             abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(wallet))
         );
         executor.callExecute(
-            address(wallet), bytes32(0), _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker)))
+            address(wallet), bytes32(0), _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())))
         );
 
-        assertFalse(wallet.allowedSession(attacker), "attacker gained a session key");
+        assertEq(wallet.currentSession(), sessionKey, "attacker gained a session key");
     }
 
     /// @notice An executor cannot reach the module's cap setters, which key by msg.sender.

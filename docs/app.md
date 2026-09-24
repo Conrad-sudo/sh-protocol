@@ -129,6 +129,13 @@ CREATE TABLE session_keys (
     key_address TEXT NOT NULL, key_ciphertext TEXT NOT NULL,  -- 'vault:v1:...'
     PRIMARY KEY (user_id, chain_id, target)
 );
+-- A freshly minted key whose grant has not mined yet. Promoted into session_keys only once the
+-- wallet's currentSession is seen to equal it (userop.reconcile_session_key).
+CREATE TABLE pending_session_keys (
+    user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL, target TEXT NOT NULL,
+    key_address TEXT NOT NULL, key_ciphertext TEXT NOT NULL,
+    PRIMARY KEY (user_id, chain_id, target)
+);
 
 CREATE TABLE contacts (user_id INTEGER NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, PRIMARY KEY (user_id, name));
 CREATE TABLE session_handlers (user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL, address TEXT NOT NULL, PRIMARY KEY (user_id, chain_id));
@@ -271,7 +278,7 @@ back to back for the unattended path (tests, and anything with nobody to ask).
 1. Build `SessionHandler.execute(mode, executionCalldata)` — single-call (`pack_execution_calldata`) or batch (`encode_batch_execution_calldata`) — and fetch a nonce keyed via `session_key_nonce_key()`.
 2. **Estimate without the session key.** Execution gas: `execute()` estimated `from` the EntryPoint's address, exactly as `handleOps` will call it — no op, no signature. It walks the session-key path (admin guard, protocol fee, the spending-limit hook with every price read), so an op that would fail is refused here, *by name*, before anything is signed or paid. Validation gas: `validateUserOp()` estimated the same way, signed by a **throwaway key** the wallet never authorized — it fails the signature check without reverting, at the same cost as the real key. All estimates run against the `pending` block, whose timestamp is the next block's, so a price feed that goes stale before the op lands fails the estimate too.
 3. `preVerificationGas` = 21,000 + the handleOps calldata (4 gas per zero byte, 16 per non-zero) + a fixed 20,000 for handleOps' own bookkeeping, plus the Ethereum data fee on live Arbitrum (from NodeInterface). The fee cap is clamped under the wallet's `maxOpGasCost`.
-4. **Simulate the whole bundle, still without the session key.** The op is signed by the same throwaway key — over the op's *real* `userOpHash`, or validation fails on the signature — and `handleOps` is estimated with a **state override** writing `allowedSession[throwaway] = true` (slot `ALLOWED_SESSION_SLOT`). The override lives only inside that one call, so the op being simulated is executable by nobody. It catches everything a real submission would hit and measures what the transaction burns. The slot is verified against the live contract first (one `eth_call` of `allowedSession` under the override); if the node refuses overrides or the layout has moved, the outer gas falls back to the sum of the parts and the quote loses only precision.
+4. **Simulate the whole bundle, still without the session key.** The op is signed by the same throwaway key — over the op's *real* `userOpHash`, or validation fails on the signature — and `handleOps` is estimated with a **state override** writing the throwaway key *and a far-future deadline* into the wallet's packed `currentSession` slot (`CURRENT_SESSION_SLOT`). Both halves matter: the wallet returns the deadline as the op's ERC-4337 validity window, so a key written with a zero deadline would simulate as expired and the whole bundle would fail `AA22` instead of being priced. It is a plain slot, not a mapping base — the wallet authorizes one key at a time, so there is no key to hash in. The override lives only inside that one call, so the op being simulated is executable by nobody. It catches everything a real submission would hit and measures what the transaction burns. The slot is verified against the live contract first (one `eth_call` of `isSessionActive` under the override, which checks *both* halves); if the node refuses overrides or the layout has moved, the outer gas falls back to the sum of the parts and the quote loses only precision.
 
    This is where a quote stops. Two figures come out of it, and they are different on purpose:
    `expected_gas` (`preVerificationGas` + the *unbuffered* validation and execution estimates + the
@@ -348,15 +355,15 @@ DEFAULT_WATCHED_TICKERS = {                 # tokens metered against the cap, pe
 }
 ```
 
-**`deploy_wallet(user_id, chain_name)`** calls **`SHFactory.deployWallet(DEFAULT_DAILY_LIMIT_USD, DEFAULT_WINDOW_SECS, watched_tokens, session_key, trusted_spenders)`** — the first three seed the wallet's spending-cap config (`watched_tokens` is `DEFAULT_WATCHED_TICKERS` resolved to addresses); the next two make the wallet usable immediately, replacing what used to be two follow-up owner transactions. It decodes `WalletDeployed`, asserts the address matches the CREATE2 prediction, and persists it.
+**`deploy_wallet(user_id, chain_name)`** calls **`SHFactory.deployWallet(DEFAULT_DAILY_LIMIT_USD, DEFAULT_WINDOW_SECS, watched_tokens, session_key, session_key_valid_until, trusted_spenders)`** — the first three seed the wallet's spending-cap config (`watched_tokens` is `DEFAULT_WATCHED_TICKERS` resolved to addresses); the rest make the wallet usable immediately, replacing what used to be two follow-up owner transactions. The key's deadline is `DEFAULT_SESSION_TTL_SECS` (30 days) from now; the contract refuses anything past `MAX_SESSION_TTL` (90). It decodes `WalletDeployed`, asserts the address matches the CREATE2 prediction, and persists it.
 
-Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress(deployer)` returns the address this deploy will land on — the factory salts with its own per-owner `deployCount`, so the value advances after each of our deploys and is untouched by anyone else's — then `get_or_create_session_key(user_id, chain_id, predicted)` mints the key **under the address the wallet is about to have** — the same `(user_id, chain_id, wallet_address)` key `tools.get_session_keys` resolves. Without a predictable address the key could not exist before the deploy that takes it as an argument. The mismatch check after the receipt is deliberate: a wrong address would silently orphan the key. On a stale prediction it re-files the session key under the address that actually deployed rather than raising — the on-chain grant is already correct for it, and raising would strand a funded wallet with no `session_handlers` row.
+Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress(deployer)` returns the address this deploy will land on — the factory salts with its own per-owner `deployCount`, so the value advances after each of our deploys and is untouched by anyone else's — then `create_pending_session_key(user_id, chain_id, predicted)` mints a fresh key **under the address the wallet is about to have** — the same `(user_id, chain_id, wallet_address)` key `tools.get_session_keys` resolves — and holds it in `pending_session_keys` until the deploy has mined. Without a predictable address the key could not exist before the deploy that takes it as an argument. The mismatch check after the receipt is deliberate: a wrong address would silently orphan the key. On a stale prediction it re-files the session key under the address that actually deployed rather than raising — the on-chain grant is already correct for it, and raising would strand a funded wallet with no `session_handlers` row.
 
 ⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `[constants.get_router(chain_id)]`, or empty on bare Anvil, which has no Uniswap deployment. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
 
 The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. On a fork the deployer is also the API's bundler (`API_BUNDLER`, see `bundler.resolve_bundler`), and `make fund` tops up the Telegram bot's bundler (`TELEGRAM_BUNDLER`) at the same time, so there is no separate bundler-funding step.
 
-**`add_default_session(user_id)`** registers the wallet's **single** session key. It derives one key via `get_or_create_session_key(user_id, wallet_address)` (Vault-encrypted, keyed to the wallet address), then calls **`SessionHandler.addSession(key)`** as the owner. **No longer part of the deploy path** — `deploy_wallet` seeds the key inside `deployWallet` — it is kept for re-granting a key on a wallet deployed without one, or after `removeSession`. There are no per-target sessions, selectors, expiries, or budgets to configure — the wallet-wide cap and the admin guard replace all of that. (The old `add_session(targets, functions, ...)` and the `approve()` router-pre-approval helper were removed: standing approvals now revert on-chain, so approvals only ever happen atomically inside the swap/liquidity tools.)
+**`add_default_session(user_id)`** registers the wallet's **single** session key. It mints a **fresh** key via `create_pending_session_key` (Vault-encrypted, keyed to the wallet address), calls **`SessionHandler.addSession(key, validUntil)`** as the owner, and promotes the key out of pending once that mines. Granting evicts whatever key the wallet held. **No longer part of the deploy path** — `deploy_wallet` seeds the key inside `deployWallet` — it is kept for re-granting a key on a wallet deployed without one, or after `removeSession`. There are no per-target sessions, selectors or budgets to configure — the wallet-wide cap and the admin guard replace all of that; the one thing a key carries is its deadline. (The old `add_session(targets, functions, ...)` and the `approve()` router-pre-approval helper were removed: standing approvals now revert on-chain, so approvals only ever happen atomically inside the swap/liquidity tools.)
 
 **`deploy(user_id, network)`** is the top-level dispatcher (validates the network, then calls `deploy_wallet`) — invoked by `make deploy-wallet` via the `__main__` block, which also seeds a demo contact. `__main__` no longer calls `add_default_session` or `trust_router`: `deployWallet` does both.
 
@@ -380,12 +387,12 @@ The wrappers exist — rather than exposing the package tools directly — becau
 
 | Tool | Description |
 |---|---|
-| `get_all_sessions(user_id)` | On-chain wallet status: `{paused, session_active, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `paused`/`getConfig`/`getRemainingBudget`/`allowedSession`) |
+| `get_all_sessions(user_id)` | On-chain wallet status: `{paused, session_active, session_expires_at, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `paused`/`getConfig`/`getRemainingBudget`/`isSessionActive`/`currentSessionValidUntil`) |
 | `get_session_keys(user_id, token)` | Returns `(key_address, vault_ciphertext)` for the wallet's session key |
-| `check_session_validity(user_id, token)` | Whether the session key is on the `allowedSession` allowlist |
+| `check_session_validity(user_id, token)` | Whether the app's key is the wallet's `currentSession` **and** has not expired (`isSessionActive`) |
 | `check_remaining_budget(user_id)` | Remaining USD budget this window (no token arg — the cap is global) |
 | `check_spending_within_budget(user_id, token, amount)` | Prices `amount` via the oracle and compares to remaining budget |
-| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, within_budget, usd_value, charged_usd, remaining_usd`; the agent proceeds only if not paused, session active and within budget |
+| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, session_expires_in_secs, expiring_imminently, within_budget, usd_value, charged_usd, remaining_usd`; the agent proceeds only if not paused, session active and within budget. `session_active` is reported false once under `SESSION_EXPIRY_MARGIN_SECS` (60s) remain, so a transaction cannot be quoted, confirmed and then refused with `AA22` while in flight |
 | `get_price(user_id, token)` / `get_usd_value(user_id, token, amount)` | Unit price / USD value via `SHOracle.getPrice` |
 
 ### Read / quote / sufficiency tools
@@ -490,7 +497,7 @@ def init_agent():
 
 The `SYSTEM_PROMPT` teaches the agent the new model up front:
 
-- **One session key, one global USD budget** per rolling window — no per-token limits, no expiry. `get_all_sessions` reports cap/spent/remaining/watched tokens.
+- **One session key, one global USD budget** per rolling window — no per-token limits. The key **expires** (30 days by default, 90 at most) and only one is authorized at a time; `get_all_sessions` reports cap/spent/remaining/watched tokens and when the key runs out.
 - **Watched tokens and native value count against the cap;** only unwatched tokens move freely. A swap is charged its **net** value change, not the gross input.
 - **Approvals are automatic** — there is no approve step or tool; swap/liquidity tools batch them atomically. A "please approve X" request should be declined with an explanation.
 - **Removing liquidity is free** against the cap (it returns value — a net inflow); it checks the pause and the session via `get_all_sessions` instead of `preflight_check`.
@@ -515,7 +522,9 @@ The user's message goes to the model verbatim; the `user_id` travels beside it a
 
 ### Budget alerts
 
-A daily **`budget_alert`** job (registered per user on `/start`, replacing the old session-expiry alert since keys no longer expire) reads the wallet's on-chain status via `get_all_sessions` and warns the user when the session key is inactive, or when the remaining budget has dropped below **10%** (`BUDGET_ALERT_THRESHOLD`) of the window cap.
+A daily **`budget_alert`** job (registered per user on `/start`) reads the wallet's on-chain status via `get_all_sessions` and warns the user on three counts: the session key is inactive (revoked, replaced or already expired), the key expires within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or the remaining budget has dropped below **10%** (`BUDGET_ALERT_THRESHOLD`) of the window cap.
+
+The expiry warning is why this job matters to a Telegram-only user: renewing a key is an owner-signed transaction they can only make in the web app, so learning about it after the key lapsed is learning too late.
 
 `post_init` opens the checkpointer and calls `init_agent()` once before polling. `invoke()` is synchronous and offloaded via `asyncio.to_thread()`; SQLite thread safety is handled in `db.py` via `threading.local()`.
 
@@ -537,6 +546,13 @@ Two things it does that the bot cannot:
   `/api/wallet/<action>/prepare` endpoint and finished with `POST /api/wallet/tx/confirm`. The agent
   has no way to reach them: the module's guard blocks execute-routed admin calls even for the owner
   ([THREAT_MODEL.md](../THREAT_MODEL.md) §3.5).
+- **The assistant's key.** Controls turns the assistant off (`removeSession`), and turns it on or
+  renews it — the same transaction, since every grant mints a new key lasting 30 days. These finish
+  with `POST /api/wallet/session/confirm` instead, which files the new key or forgets the revoked
+  one once the wallet is seen to have changed. `GET /api/wallet/{chain_id}` runs the same
+  reconciliation, so a grant whose tab was closed before it confirmed is still picked up the next
+  time anyone looks at the wallet. The dashboard, the chat page and Controls all warn once fewer
+  than three days are left (`session.needs_renewal`), and say so once the key has run out.
 
 Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
 never write to it. The chat page is a front end over `chat(user_id, chain_id, …)` — the same agent,

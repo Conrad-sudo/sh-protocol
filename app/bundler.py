@@ -77,11 +77,19 @@ PENALTY_GAS_THRESHOLD = 40_000
 TX_BASE_GAS = 21_000
 ENTRY_POINT_OVERHEAD_GAS = 20_000
 
-# Storage slot of SessionHandler's `allowedSession` mapping, used to simulate a whole bundle
-# without the session key (see {_session_override}). Never trusted blind: the override is checked
+# Storage slot holding SessionHandler's `currentSession` (low 20 bytes) packed with
+# `currentSessionValidUntil` (the 6 bytes above it), used to simulate a whole bundle without the
+# session key (see {_session_override}). A PLAIN slot, not a mapping base: the wallet authorizes one
+# key at a time, so there is no key to hash in. Never trusted blind -- the override is checked
 # against the live contract before the simulation is believed, so a layout change costs the quote
-# its precision and nothing else.
-ALLOWED_SESSION_SLOT = 8
+# its precision and nothing else. Confirm with `forge inspect SessionHandler storageLayout`.
+CURRENT_SESSION_SLOT = 8
+
+# The deadline written into the override's packed slot. Any far-future timestamp works; it only has
+# to outlast the simulated op, and a uint48 cannot hold a value this side of the year 8 million.
+# Writing 1 here (as the old boolean override did) would simulate a key that expired in 1970 and
+# every quote would die on AA22.
+OVERRIDE_SESSION_VALID_UNTIL = 2**47 - 1
 
 # Arbitrum charges every transaction for posting its data to Ethereum, as extra gas units that the
 # EntryPoint never sees. Unless they go into preVerificationGas, the bundler pays that share of
@@ -320,7 +328,7 @@ def _estimate_verification_gas(
 
     The wallet treats a signature it does not recognise as a failed check, not a revert (tryRecover
     -> SIG_VALIDATION_FAILED), so a throwaway key walks the same path as the session key -- one
-    ecrecover, the owner read, one cold allowedSession read -- at the same cost, while the op it
+    ecrecover, the owner read, one cold currentSession read -- at the same cost, while the op it
     signs is worthless on chain: that key was never authorized.
 
     The probe's gas fields are zero so the wallet's maxOpGasCost check prices it at nothing, and it
@@ -358,22 +366,27 @@ def _unused_gas_penalty(gas_used: int, gas_limit: int) -> int:
 
 def _session_override(session_handler: Contract, key_address: str) -> dict:
     """
-    A state override that makes the wallet treat `key_address` as one of its session keys.
+    A state override that makes the wallet treat `key_address` as its session key, unexpired.
 
     Lets the WHOLE bundle be simulated -- EntryPoint.handleOps end to end, validation and execution
     together -- while it is still signed by a throwaway key. Without it the simulation stops at
     AA24, so the only way to measure the real cost would be to sign with the session key and hand
     an executable op to the node before the user has agreed to anything.
 
-    The override exists only inside that one eth_call: `allowedSession[key]` is not written, and the
-    key is authorized nowhere else, so the op being simulated cannot be executed on chain by
-    anybody. The slot number is checked against the live contract before it is trusted (see
+    Writes the key and a far-future deadline TOGETHER, because they share one slot and the wallet
+    returns the deadline as the op's ERC-4337 validity window: a key with a zero deadline simulates
+    as expired and the whole bundle fails AA22 instead of being priced.
+
+    The override exists only inside that one eth_call: nothing is written to the chain and the key
+    is authorized nowhere else, so the op being simulated cannot be executed on chain by anybody.
+    The slot number is checked against the live contract before it is trusted (see
     {_simulate_handle_ops}), so a storage-layout change degrades the quote rather than corrupting it.
     """
-    slot = keccak(abi_encode(["address", "uint256"], [key_address, ALLOWED_SESSION_SLOT]))
+    packed = int(key_address, 16) | (OVERRIDE_SESSION_VALID_UNTIL << 160)
+    slot = CURRENT_SESSION_SLOT.to_bytes(32, "big")
     return {
         session_handler.address: {
-            "stateDiff": {"0x" + slot.hex(): "0x" + (1).to_bytes(32, "big").hex()}
+            "stateDiff": {"0x" + slot.hex(): "0x" + packed.to_bytes(32, "big").hex()}
         }
     }
 
@@ -396,11 +409,13 @@ def _simulate_handle_ops(
     """
     override = _session_override(session_handler, probe_key.address)
 
-    # Confirm the node honoured the override AND that ALLOWED_SESSION_SLOT still points at
-    # allowedSession. A node that silently ignores overrides would otherwise fail the simulation on
-    # the signature and have it reported to the user as "this transaction would fail".
+    # Confirm the node honoured the override AND that CURRENT_SESSION_SLOT still points at the
+    # packed (currentSession, currentSessionValidUntil) pair. A node that silently ignores overrides
+    # would otherwise fail the simulation on the signature and have it reported to the user as
+    # "this transaction would fail". isSessionActive checks BOTH halves of the slot, so a layout
+    # change that moved only the deadline is caught too.
     try:
-        if not session_handler.functions.allowedSession(probe_key.address).call(
+        if not session_handler.functions.isSessionActive(probe_key.address).call(
             state_override=override
         ):
             return None

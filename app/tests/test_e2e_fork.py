@@ -47,7 +47,7 @@ import tools                                          # noqa: E402
 from agent_context import AgentContext                # noqa: E402
 from constants import ETH_SENTINEL, get_native_asset_ticker  # noqa: E402
 from contracts import read_spending_config           # noqa: E402
-from db import get_session_key, get_token_address     # noqa: E402
+from db import get_pending_session_key, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
 import quotes                                         # noqa: E402
@@ -220,8 +220,10 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
     abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     on_chain = w3.eth.contract(address=wallet, abi=abi)
     check("the owner is the signer", on_chain.functions.owner().call() == acct.address)
-    check("allowedSession agrees on chain",
-          on_chain.functions.allowedSession(session_key).call() is True)
+    check("currentSession agrees on chain",
+          on_chain.functions.currentSession().call() == session_key)
+    check("the seeded key carries a live deadline",
+          on_chain.functions.isSessionActive(session_key).call() is True)
     return wallet
 
 
@@ -313,17 +315,73 @@ def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
     check("the trusted spender was added",
           spender in [Web3.to_checksum_address(a) for a in read_spending_config(sh)["trustedSpenders"]])
 
-    # The session key: revoke, then restore. Both default to the app's own key.
+    # The session key: revoke, then grant again. A grant mints a FRESH key, so the address after
+    # the round trip must differ from the one before it -- that is the revocation being real.
+    old_key = sh.functions.currentSession().call()
     r = c.post("/api/wallet/session/prepare", headers=headers,
                json={"chain_id": CHAIN_ID, "action": "remove"})
-    check("session/prepare defaults to the app's key", r.json().get("is_app_key") is True, r.text[:150])
-    app_key = r.json()["session_key"]
+    check("session/prepare names the key it will revoke", r.json().get("revokes") == old_key, r.text[:150])
     tx_hash = sign_and_send(acct, r.json()["tx"])
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    check("the agent's key is revoked on chain", sh.functions.allowedSession(app_key).call() is False)
+    r = c.post("/api/wallet/session/confirm", headers=headers,
+               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+    check("the revocation is confirmed", r.json().get("status") == "revoked", r.text[:200])
+    check("the agent's key is revoked on chain", int(sh.functions.currentSession().call(), 16) == 0)
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    check("the app forgot the revoked key", get_session_key(user_id, CHAIN_ID, wallet) is None)
 
-    owner_action(c, headers, acct, "/api/wallet/session/prepare", {"action": "add"})
-    check("the agent's key is restored", sh.functions.allowedSession(app_key).call() is True)
+    r = c.post("/api/wallet/session/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "action": "add"})
+    new_key = r.json()["session_key"]
+    check("a grant mints a fresh key", new_key != old_key, f"{new_key} == {old_key}")
+    tx_hash = sign_and_send(acct, r.json()["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    r = c.post("/api/wallet/session/confirm", headers=headers,
+               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+    check("the grant is confirmed", r.json().get("status") == "granted", r.text[:200])
+    check("the agent can sign again", sh.functions.isSessionActive(new_key).call() is True)
+
+    # A confirm that never arrives -- the owner closed the tab while the grant mined. The next
+    # wallet read has to pick the new key up, or the assistant keeps signing with the evicted one.
+    r = c.post("/api/wallet/session/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "action": "add"})
+    unconfirmed_key = r.json()["session_key"]
+    tx_hash = sign_and_send(acct, r.json()["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    session = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["session"]
+    check("a grant nobody confirmed is picked up by the next wallet read",
+          session["key"] == unconfirmed_key and session["is_app_key"] and session["active"], str(session))
+    check("nothing is left pending once it is picked up",
+          get_pending_session_key(user_id, CHAIN_ID, wallet) is None)
+    r = c.post("/api/wallet/session/confirm", headers=headers,
+               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+    check("a confirm arriving after the read still reports the grant",
+          r.json().get("status") == "granted", r.text[:200])
+
+    # The same for a revocation.
+    r = c.post("/api/wallet/session/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "action": "remove"})
+    tx_hash = sign_and_send(acct, r.json()["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    session = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["session"]
+    check("a revocation nobody confirmed is picked up by the next wallet read",
+          session["key"] is None and session["wallet_key"] is None, str(session))
+    check("the app forgot that revoked key too", get_session_key(user_id, CHAIN_ID, wallet) is None)
+
+    # A read landing between "Turn on" and the owner's signature sees a wallet with no key. It must
+    # not throw away the key the owner is about to authorize.
+    r = c.post("/api/wallet/session/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "action": "add"})
+    new_key = r.json()["session_key"]
+    c.get(f"/api/wallet/{CHAIN_ID}", headers=headers)
+    check("a wallet read keeps the key of a grant still waiting for its signature",
+          get_pending_session_key(user_id, CHAIN_ID, wallet) is not None)
+    tx_hash = sign_and_send(acct, r.json()["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    r = c.post("/api/wallet/session/confirm", headers=headers,
+               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+    check("so that grant still lands", r.json().get("status") == "granted", r.text[:200])
+    check("and the agent can sign with it", sh.functions.isSessionActive(new_key).call() is True)
 
     # Withdraw actually moves value.
     sink = Account.create().address

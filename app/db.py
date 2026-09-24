@@ -373,6 +373,20 @@ def init_db():
             PRIMARY KEY (user_id, chain_id, target)
         );
 
+        -- A key minted for a grant the owner has NOT signed yet. Same shape and key as session_keys,
+        -- deliberately a separate table: until SessionHandler.addSession actually mines, the wallet
+        -- still authorizes the OLD key, and writing the new one over it would leave the assistant
+        -- signing with a key the chain rejects -- with the old ciphertext already gone. The row is
+        -- promoted into session_keys only once the chain confirms it (see userop.reconcile_session_key).
+        CREATE TABLE IF NOT EXISTS pending_session_keys (
+            user_id         INTEGER NOT NULL,
+            chain_id        INTEGER NOT NULL,
+            target          TEXT NOT NULL,
+            key_address     TEXT NOT NULL,
+            key_ciphertext  TEXT NOT NULL,
+            PRIMARY KEY (user_id, chain_id, target)
+        );
+
                 
        
                      
@@ -596,6 +610,70 @@ def get_session_key(user_id: int, chain_id: int, target: str) -> tuple[str, str]
         .fetchone()
     )
     return (row["key_address"], row["key_ciphertext"]) if row else None
+
+
+def delete_session_key(user_id: int, chain_id: int, target: str) -> None:
+    """
+    Forgets the session key held for a user's wallet on a chain. No-op when there is none.
+
+    Called once a revocation has MINED, so the app stops holding a key the wallet no longer accepts.
+    Dropping the ciphertext is the point: a key revoked because it leaked must never come back, and
+    while the row existed the next grant could hand the same address straight back.
+
+    @param user_id   The application user ID.
+    @param chain_id  The chain the key was authorized on.
+    @param target    The wallet address the key was held for.
+    """
+    db = get_db()
+    db.execute(
+        "DELETE FROM session_keys WHERE user_id = ? AND chain_id = ? AND target = ?",
+        (user_id, chain_id, target),
+    )
+    db.commit()
+
+
+def get_pending_session_key(user_id: int, chain_id: int, target: str) -> tuple[str, str] | None:
+    """
+    Retrieves the session key minted for a grant that has not been confirmed on chain yet.
+
+    @return  A tuple of (key_address, key_ciphertext), or None if no grant is outstanding.
+    """
+    row = (
+        get_db()
+        .execute(
+            "SELECT key_address, key_ciphertext FROM pending_session_keys "
+            "WHERE user_id = ? AND chain_id = ? AND target = ?",
+            (user_id, chain_id, target),
+        )
+        .fetchone()
+    )
+    return (row["key_address"], row["key_ciphertext"]) if row else None
+
+
+def save_pending_session_key(user_id: int, chain_id: int, target: str, key_address: str, key_ciphertext: str):
+    """
+    Stores a freshly minted key against a grant the owner has yet to sign.
+
+    One outstanding grant per wallet: INSERT OR REPLACE, so preparing a second grant abandons the
+    first rather than leaving two candidates for the same wallet.
+    """
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO pending_session_keys (user_id, chain_id, target, key_address, key_ciphertext) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, chain_id, target, key_address, key_ciphertext),
+    )
+    db.commit()
+
+
+def delete_pending_session_key(user_id: int, chain_id: int, target: str) -> None:
+    """Drops an outstanding grant's key, once it is promoted or known to be dead."""
+    db = get_db()
+    db.execute(
+        "DELETE FROM pending_session_keys WHERE user_id = ? AND chain_id = ? AND target = ?",
+        (user_id, chain_id, target),
+    )
+    db.commit()
 
 
 def save_session_key(user_id: int, chain_id: int, target: str, key_address: str, key_ciphertext: str):

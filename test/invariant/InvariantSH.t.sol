@@ -51,7 +51,7 @@ contract InvariantSH is StdInvariant, Test {
         watched[1] = address(dai);
         vm.prank(config.account);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
 
         vm.deal(address(wallet), 100 ether);
         usdc.mint(address(wallet), 1_000_000e6);
@@ -124,13 +124,22 @@ contract InvariantSH is StdInvariant, Test {
         assertEq(wallet.getRemainingBudget(), expected, "remaining budget inconsistent with config");
     }
 
-    /// @notice The session allowlist matches the ghost bookkeeping of owner adds/removes.
-    function invariant_sessionAllowlistMatchesGhost() public view {
-        uint256 n = handler.sessionKeyCount();
-        for (uint256 i = 0; i < n; i++) {
-            address key = handler.sessionKeys(i);
-            assertEq(wallet.allowedSession(key), handler.expectedAllowed(key), "session allowlist diverged");
-        }
+    /// @notice The wallet's one session key and its deadline match the ghost bookkeeping.
+    function invariant_sessionKeyMatchesGhost() public view {
+        assertEq(wallet.currentSession(), handler.expectedSession(), "session key diverged");
+        assertEq(
+            wallet.currentSessionValidUntil(), handler.expectedSessionValidUntil(), "session deadline diverged"
+        );
+    }
+
+    /// @notice The key and its deadline are only ever set together, so a live key can never carry a
+    ///         zero deadline -- which the EntryPoint would read as "valid forever".
+    function invariant_sessionKeyAndDeadlineAgree() public view {
+        assertEq(
+            wallet.currentSession() == address(0),
+            wallet.currentSessionValidUntil() == 0,
+            "session key and deadline out of step"
+        );
     }
 
     /// @notice Window bookkeeping stays sane: a positive duration and a start not in the future.
