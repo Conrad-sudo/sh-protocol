@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { ChatMessage, Contact, WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeWalletState, SEPOLIA } from '../test/fixtures'
+import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 const CHAINS = [{ chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false }]
@@ -395,12 +395,29 @@ describe('AssistantPage', () => {
     expect(screen.getByRole('link', { name: 'Open Controls' })).toHaveAttribute('href', '/controls')
     cleanup()
 
-    stubServer({ wallet: makeWalletState({ session: { key: null, active: false }, is_owner: false }) })
+    stubServer({ wallet: makeWalletState({ session: makeSession('off'), is_owner: false }) })
     await renderRoutes(routes, '/assistant')
     expect(
       await screen.findByText('The assistant is turned off, so it can answer questions but can’t send anything.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Open Controls' })).not.toBeInTheDocument()
+  })
+
+  it("says when the assistant's access has run out, and warns before it does", async () => {
+    stubServer({ wallet: makeWalletState({ session: makeSession('expired') }) })
+    await renderRoutes(routes, '/assistant')
+    expect(
+      await screen.findByText(
+        'The assistant’s access has run out, so it can answer questions but can’t send anything. Renew it in Controls.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open Controls' })).toHaveAttribute('href', '/controls')
+    cleanup()
+
+    stubServer({ wallet: makeWalletState({ session: makeSession('expiring') }) })
+    await renderRoutes(routes, '/assistant')
+    const notice = (await screen.findByText(/The assistant’s access runs out in (1 d 23 h|2 d)\./)).closest('.rs-message')
+    expect(notice).toHaveClass('rs-message-warning')
   })
 
   it('warns in red when nothing caps what the assistant can spend', async () => {

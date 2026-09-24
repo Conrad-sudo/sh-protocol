@@ -6,6 +6,7 @@ import type {
   OwnerAction,
   OwnerTxConfirmResult,
   PreparedTx,
+  SessionTxConfirmResult,
   Token,
   WalletState,
 } from './types'
@@ -67,7 +68,9 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
     case 'window':
       return ['/api/wallet/window-duration/prepare', { chain_id, window_secs: action.windowSecs }]
     case 'session':
-      return ['/api/wallet/session/prepare', { chain_id, action: action.action }]
+      return action.action === 'add'
+        ? ['/api/wallet/session/prepare', { chain_id, action: 'add', ttl_secs: action.ttlSecs }]
+        : ['/api/wallet/session/prepare', { chain_id, action: 'remove' }]
     case 'trusted-spender':
       return ['/api/wallet/trusted-spenders/prepare', { chain_id, spender: action.spender, action: action.action }]
     case 'max-gas':
@@ -87,4 +90,13 @@ export function prepareOwnerAction(chainId: number, action: OwnerAction) {
 /** Waits for an owner transaction. Answers `pending` (HTTP 202) until it has mined. */
 export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }) {
   return apiFetch<OwnerTxConfirmResult>('/api/wallet/tx/confirm', { method: 'POST', body })
+}
+
+/**
+ * confirmOwnerTx for the assistant's key. Turning the assistant on mints a new key that the app
+ * starts using only once this sees the wallet trust it, so a grant confirmed anywhere else would
+ * leave the assistant signing with the key the wallet just dropped.
+ */
+export function confirmSessionTx(body: { chain_id: number; tx_hash: string }) {
+  return apiFetch<SessionTxConfirmResult>('/api/wallet/session/confirm', { method: 'POST', body })
 }

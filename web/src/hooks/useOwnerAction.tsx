@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Message, useToaster } from 'rsuite'
 import { useConnection, useSendTransaction, useSwitchChain } from 'wagmi'
 import { ApiError } from '../api/client'
-import { confirmOwnerTx, prepareOwnerAction } from '../api/wallet'
+import { confirmOwnerTx, confirmSessionTx, prepareOwnerAction } from '../api/wallet'
 import type { OwnerAction } from '../api/types'
 import { useAuth } from '../auth/useAuth'
 import { errorText, isUserRejection, sleep, toTxRequest } from '../lib/tx'
@@ -36,6 +36,8 @@ interface PendingOwnerTx {
   txHash: string
   key: string
   success: string
+  /** `session` for the assistant's key, which has its own confirm endpoint; absent for the rest. */
+  confirmWith?: 'session'
 }
 
 type PollOutcome = { kind: 'confirmed' } | { kind: 'failed'; error: unknown } | { kind: 'stale' }
@@ -47,6 +49,22 @@ const POLL_GAP_MS = 2_000
 const GIVE_UP_MS = 10 * 60_000
 
 const pendingKey = (userId: number | null) => `mitfah-pending-owner-tx:${userId ?? 'anon'}`
+
+/** The transaction went through, but the wallet ended up trusting a key Mitfah doesn't hold. */
+class ForeignKeyError extends Error {}
+
+/** Asks the API once whether the transaction has mined, through the endpoint that finishes it. */
+async function confirmOnce(pending: PendingOwnerTx): Promise<'pending' | 'confirmed'> {
+  const body = { chain_id: pending.chainId, tx_hash: pending.txHash }
+  if (pending.confirmWith !== 'session') return (await confirmOwnerTx(body)).status
+  const { status } = await confirmSessionTx(body)
+  if (status === 'unrecognized_key') {
+    throw new ForeignKeyError(
+      "That went through, but your wallet now trusts a key Mitfah doesn't hold, so the assistant still can't act. Turn it on again to replace that key.",
+    )
+  }
+  return status === 'pending' ? 'pending' : 'confirmed'
+}
 
 function readPending(storageKey: string): PendingOwnerTx | null {
   try {
@@ -116,9 +134,9 @@ export function useOwnerAction(chainId: number, owner: string) {
     const deadline = Date.now() + GIVE_UP_MS
     try {
       for (;;) {
-        const result = await confirmOwnerTx({ chain_id: pending.chainId, tx_hash: pending.txHash })
+        const status = await confirmOnce(pending)
         if (stale()) return { kind: 'stale' }
-        if (result.status === 'confirmed') {
+        if (status === 'confirmed') {
           writePending(storageKey, null)
           await queryClient.invalidateQueries({ queryKey: ['wallet', pending.chainId] })
           return { kind: 'confirmed' }
@@ -133,6 +151,12 @@ export function useOwnerAction(chainId: number, owner: string) {
       if (stale()) return { kind: 'stale' }
       // A 400 is final (it reverted, or wasn't sent to this wallet); anything else may be a blip.
       if (error instanceof ApiError && error.status === 400) writePending(storageKey, null)
+      if (error instanceof ForeignKeyError) {
+        // Final too: it mined. Re-read the wallet so the page shows which key it trusts now.
+        writePending(storageKey, null)
+        await queryClient.invalidateQueries({ queryKey: ['wallet', pending.chainId] })
+        if (stale()) return { kind: 'stale' }
+      }
       return { kind: 'failed', error }
     }
   }
@@ -204,6 +228,7 @@ export function useOwnerAction(chainId: number, owner: string) {
       setState({ phase: 'signing', key, chainId })
       const txHash = await sendTransactionAsync({ ...toTxRequest(tx), chainId })
       pending = { chainId, txHash, key, success }
+      if (action.kind === 'session') pending.confirmWith = 'session'
     } catch (error) {
       fail(error, key)
       return false

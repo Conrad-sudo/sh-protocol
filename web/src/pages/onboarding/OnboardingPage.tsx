@@ -33,6 +33,7 @@ import { useDeploy, type DeployPhase } from '../../hooks/useDeploy'
 import { useMe } from '../../hooks/useMe'
 import { useTokens } from '../../hooks/useTokens'
 import { useLayoutMode } from '../../layouts/useLayoutMode'
+import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS } from '../../lib/assistant'
 import { formatUsd, formatWindow, isValidAmount } from '../../lib/format'
 import { WINDOW_CHOICES } from '../../lib/spending'
 import { chainName, isSupportedChainId } from '../../wallet/chains'
@@ -135,6 +136,7 @@ export function OnboardingPage() {
       window_secs: draft.windowSecs,
       watched_tokens: tickers === null ? tokens : tokens.filter(t => tickers.includes(t.ticker)),
       prefund_eth: prefund,
+      session_ttl_secs: ASSISTANT_KEY_TTL_SECS,
     })
   }
 
@@ -461,6 +463,8 @@ function ReviewStep({
         <dd className="mf-num">
           {draft.prefund} {chain?.native_ticker}
         </dd>
+        <dt>Assistant's access</dt>
+        <dd>{ASSISTANT_KEY_DAYS} days, renewable any time in Controls</dd>
       </dl>
       {draft.chainId !== null && <NetworkBanner chainId={draft.chainId} fork={chain?.fork} />}
       {progress}

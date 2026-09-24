@@ -1,5 +1,8 @@
+import type { ReactNode } from 'react'
 import { Panel, Text } from 'rsuite'
-import { formatUsd, formatWindow } from '../../lib/format'
+import { useNow } from '../../hooks/useNow'
+import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS, assistantStatus, type AssistantStatus } from '../../lib/assistant'
+import { formatDate, formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
 import { StatusTag } from '../StatusTag'
@@ -10,9 +13,8 @@ import type { ControlPanelProps } from './types'
  * The two brakes. Pausing stops everything; turning the assistant off removes only its key. Both
  * tighten, so they happen in one click; undoing either asks first.
  */
-export function EmergencyPanel({ wallet, tx, locked, start, ask }: ControlPanelProps) {
-  const { daily_limit_usd: limit, window_hours: hours } = wallet.spending
-  const period = formatWindow(Math.round(hours * 3_600))
+export function EmergencyPanel(props: ControlPanelProps) {
+  const { wallet, tx, locked, start, ask } = props
 
   return (
     <Panel bordered header={<h2>Emergency</h2>} className="mf-card">
@@ -72,29 +74,84 @@ export function EmergencyPanel({ wallet, tx, locked, start, ask }: ControlPanelP
         <TxStatus tx={tx} txKey="unpause" />
       </ControlRow>
 
-      <ControlRow
-        title="Assistant"
-        status={
-          wallet.session.active ? <StatusTag tone="success">On</StatusTag> : <StatusTag tone="neutral">Off</StatusTag>
-        }
-        help={
-          wallet.session.key === null
-            ? "Mitfah holds no signing key for this wallet, so the assistant can't act for it."
-            : wallet.session.active
-              ? 'The assistant can spend within your limit. Turning it off removes its key from the wallet; your own access stays.'
-              : "The assistant can't act for this wallet until you turn it back on."
-        }
-        action={
-          wallet.session.key === null ? null : wallet.session.active ? (
+      <AssistantRow {...props} />
+    </Panel>
+  )
+}
+
+const ASSISTANT_TAGS: Record<AssistantStatus, ReactNode> = {
+  on: <StatusTag tone="success">On</StatusTag>,
+  expiring: <StatusTag tone="warning">Expires soon</StatusTag>,
+  expired: <StatusTag tone="neutral">Expired</StatusTag>,
+  off: <StatusTag tone="neutral">Off</StatusTag>,
+  foreign: <StatusTag tone="neutral">Off</StatusTag>,
+}
+
+/**
+ * The assistant's key. Each grant lasts ASSISTANT_KEY_DAYS and is a brand-new key, so turning the
+ * assistant on and renewing it are the same transaction, and both loosen, so both ask first.
+ */
+function AssistantRow({ wallet, tx, locked, start, ask }: ControlPanelProps) {
+  const now = useNow(60_000)
+  const status = assistantStatus(wallet.session)
+  const expiresAt = (wallet.session.expires_at ?? 0) * 1_000
+  const { daily_limit_usd: limit, window_hours: hours } = wallet.spending
+  const period = formatWindow(Math.round(hours * 3_600))
+  const renewing = status === 'on' || status === 'expiring' || status === 'expired'
+
+  const help = {
+    on: `The assistant can spend within your limit until ${formatDate(expiresAt)}. Turning it off removes its key from the wallet; your own access stays.`,
+    expiring: `The assistant's access runs out in ${formatTimeLeft(expiresAt - now)}. Renew it to keep the assistant working.`,
+    expired: `The assistant's access ran out on ${formatDate(expiresAt)}, so it can't act for this wallet. Renew it to switch it back on.`,
+    off: "The assistant can't act for this wallet until you turn it on.",
+    foreign: "Your wallet trusts a signing key Mitfah doesn't hold, so the assistant can't act. Turning it on replaces that key.",
+  }[status]
+
+  const grant = () => {
+    const until = formatDate(Date.now() + ASSISTANT_KEY_TTL_SECS * 1_000)
+    ask({
+      title: renewing ? "Renew the assistant's access?" : 'Turn the assistant on?',
+      body: (
+        <Text>
+          {renewing
+            ? `It keeps its access for another ${ASSISTANT_KEY_DAYS} days, until ${until}, and can move funds from this wallet`
+            : `For ${ASSISTANT_KEY_DAYS} days, until ${until}, it will be able to move funds from this wallet`}
+          , up to {formatUsd(limit)} every {period}.
+        </Text>
+      ),
+      confirmLabel: renewing ? 'Renew' : 'Turn on assistant',
+      request: {
+        key: 'session-on',
+        action: { kind: 'session', action: 'add', ttlSecs: ASSISTANT_KEY_TTL_SECS },
+        success: renewing ? `Assistant renewed until ${until}.` : `Assistant turned on until ${until}.`,
+      },
+    })
+  }
+
+  const grantButton = (
+    <TxButton tx={tx} txKey="session-on" appearance="ghost" color="orange" disabled={locked} onClick={grant}>
+      {renewing ? 'Renew' : 'Turn on assistant'}
+    </TxButton>
+  )
+
+  return (
+    <ControlRow
+      title="Assistant"
+      status={ASSISTANT_TAGS[status]}
+      help={help}
+      action={
+        status === 'on' || status === 'expiring' ? (
+          <div className="mf-control-buttons">
+            {grantButton}
             <TxButton
               tx={tx}
-              txKey="session"
+              txKey="session-off"
               appearance="primary"
               color="red"
               disabled={locked}
               onClick={() =>
                 start({
-                  key: 'session',
+                  key: 'session-off',
                   action: { kind: 'session', action: 'remove' },
                   success: 'Assistant turned off. It can no longer act for this wallet.',
                 })
@@ -102,37 +159,14 @@ export function EmergencyPanel({ wallet, tx, locked, start, ask }: ControlPanelP
             >
               Turn off assistant
             </TxButton>
-          ) : (
-            <TxButton
-              tx={tx}
-              txKey="session"
-              appearance="ghost"
-              color="orange"
-              disabled={locked}
-              onClick={() =>
-                ask({
-                  title: 'Turn the assistant on?',
-                  body: (
-                    <Text>
-                      It will be able to move funds from this wallet, up to {formatUsd(limit)} every {period}.
-                    </Text>
-                  ),
-                  confirmLabel: 'Turn on assistant',
-                  request: {
-                    key: 'session',
-                    action: { kind: 'session', action: 'add' },
-                    success: 'Assistant turned on.',
-                  },
-                })
-              }
-            >
-              Turn on assistant
-            </TxButton>
-          )
-        }
-      >
-        <TxStatus tx={tx} txKey="session" />
-      </ControlRow>
-    </Panel>
+          </div>
+        ) : (
+          grantButton
+        )
+      }
+    >
+      <TxStatus tx={tx} txKey="session-on" />
+      <TxStatus tx={tx} txKey="session-off" />
+    </ControlRow>
   )
 }

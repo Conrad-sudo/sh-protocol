@@ -103,7 +103,15 @@ test('a wallet that needs attention', async ({ page }, testInfo) => {
   const troubled = walletState(SEPOLIA, ADDRESS, {
     paused: true,
     is_owner: false,
-    session: { key: null, active: false },
+    session: {
+      key: null,
+      wallet_key: null,
+      is_app_key: false,
+      active: false,
+      expires_at: null,
+      expires_in_secs: 0,
+      needs_renewal: false,
+    },
     spending: { ...healthy.spending, hook_installed: false },
     balances: [healthy.balances[0], unreadableUsdc],
   })

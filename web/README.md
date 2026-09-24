@@ -92,6 +92,13 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
 - `src/components/QueryError.tsx` — one wording for a failed load, everywhere: "Couldn't load X" and
   a Try again. `SkipLink` and `RouteProgress` sit in every layout: the first link on the page jumps
   past the navigation, and the bar shows while the next page is being fetched.
+- `src/lib/assistant.ts` — where the assistant stands (`on`, `expiring`, `expired`, `off`, or
+  `foreign` for a key the wallet trusts that Mitfah doesn't hold), read from the wallet's `session`
+  block. The Controls row, the dashboard header and the chat notice all go by it. Turning the
+  assistant on and renewing it are the same transaction — a brand-new key lasting
+  `ASSISTANT_KEY_DAYS` — and `useOwnerAction` finishes it through `/api/wallet/session/confirm`,
+  **never** the generic `/api/wallet/tx/confirm`: that one would leave the API signing with the key
+  the wallet just dropped.
 
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
   written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. For status labels

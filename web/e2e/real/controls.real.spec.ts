@@ -1,11 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { parseAbi, parseEther, type Address } from 'viem'
+import { parseAbi, parseEther, zeroAddress, type Address } from 'viem'
 import { sepolia } from 'viem/chains'
 import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } from './realSetup.ts'
 
 /*
  * The owner's controls for real, on the local Sepolia fork: a fresh owner creates a wallet, then
- * pauses it, withdraws while paused, unpauses, raises the limit, turns the assistant off and stops
+ * pauses it, withdraws while paused, unpauses, raises the limit, turns the assistant off and on again, stops
  * counting a token — each signed by that owner in the page and checked on chain afterwards.
  * Run with: E2E_REAL=1 npx playwright test real
  */
@@ -13,7 +13,8 @@ import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } fro
 const abi = parseAbi([
   'function paused() view returns (bool)',
   'function getRemainingBudget() view returns (int256)',
-  'function allowedSession(address) view returns (bool)',
+  'function currentSession() view returns (address)',
+  'function isSessionActive(address) view returns (bool)',
   'function isWatched(address) view returns (bool)',
 ])
 
@@ -29,10 +30,11 @@ test('the owner changes the wallet from Controls on the local fork', async ({ pa
   const onChain = {
     paused: () => publicClient.readContract({ address, abi, functionName: 'paused' }),
     remaining: () => publicClient.readContract({ address, abi, functionName: 'getRemainingBudget' }),
-    allowed: (key: Address) => publicClient.readContract({ address, abi, functionName: 'allowedSession', args: [key] }),
+    sessionKey: () => publicClient.readContract({ address, abi, functionName: 'currentSession' }),
+    active: (key: Address) => publicClient.readContract({ address, abi, functionName: 'isSessionActive', args: [key] }),
     watched: (token: Address) => publicClient.readContract({ address, abi, functionName: 'isWatched', args: [token] }),
   }
-  const confirmed = (text: string) => expect(page.getByText(text)).toBeVisible({ timeout: 60_000 })
+  const confirmed = (text: string | RegExp) => expect(page.getByText(text)).toBeVisible({ timeout: 60_000 })
 
   // Through the app's own link, so the browser wallet stays connected.
   await page.getByRole('link', { name: 'Controls' }).click()
@@ -70,13 +72,24 @@ test('the owner changes the wallet from Controls on the local fork', async ({ pa
   await confirmed('Spending limit set to $250.00.')
   expect(await onChain.remaining()).toBe(parseEther('250'))
 
-  // Turn the assistant off: one click.
+  // Turn the assistant off: one click. The wallet drops the key, and Mitfah forgets it.
   const key = wallet.session.key!
-  expect(await onChain.allowed(key)).toBe(true)
+  expect(await onChain.sessionKey()).toBe(key)
+  expect(await onChain.active(key)).toBe(true)
   await page.getByRole('button', { name: 'Turn off assistant' }).click()
   await confirmed('Assistant turned off. It can no longer act for this wallet.')
-  expect(await onChain.allowed(key)).toBe(false)
-  await expect(page.getByRole('button', { name: 'Turn on assistant' })).toBeVisible()
+  expect(await onChain.sessionKey()).toBe(zeroAddress)
+  expect((await account.readWallet()).session.key).toBeNull()
+
+  // Turn it back on: asks first, and grants a brand-new key, never the one just revoked.
+  await page.getByRole('button', { name: 'Turn on assistant' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Turn on assistant' }).click()
+  await confirmed(/^Assistant turned on until /)
+  const newKey = await onChain.sessionKey()
+  expect(newKey).not.toBe(zeroAddress)
+  expect(newKey).not.toBe(key)
+  expect(await onChain.active(newKey)).toBe(true)
+  await expect(page.getByRole('button', { name: 'Renew' })).toBeVisible()
 
   // Stop counting a token: asks first.
   const token = wallet.spending.watched_tokens[0]
@@ -87,12 +100,12 @@ test('the owner changes the wallet from Controls on the local fork', async ({ pa
   await confirmed(`${name} no longer counts toward your limit.`)
   expect(await onChain.watched(token.address)).toBe(false)
 
-  // The API agrees, and every transaction went to Sepolia: the deploy plus six changes.
+  // The API agrees, and every transaction went to Sepolia: the deploy plus seven changes.
   expect(await account.readWallet()).toMatchObject({
     paused: false,
     spending: { daily_limit_usd: 250 },
-    session: { key, active: false },
+    session: { key: newKey, wallet_key: newKey, is_app_key: true, active: true },
   })
-  expect(owner.sentOn).toEqual(Array(7).fill(sepolia.id))
+  expect(owner.sentOn).toEqual(Array(8).fill(sepolia.id))
   await page.screenshot({ path: testInfo.outputPath('controls-after.png'), fullPage: true })
 })

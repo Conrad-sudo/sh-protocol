@@ -162,6 +162,7 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
       window_secs: 604_800,
       watched_tokens: [TOKENS[0]],
       prefund_eth: '1',
+      session_ttl_secs: 30 * 86_400,
     },
   ])
   expect(recorded.sent).toEqual([{ tx: { from: WALLET, ...PREPARED_TX }, chainId: SEPOLIA }])

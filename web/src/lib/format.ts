@@ -43,6 +43,13 @@ export function formatTokenAmount(raw: string, decimals: number, maxFraction = 6
   return shown ? `${grouped}.${shown}` : grouped
 }
 
+const date = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
+/** A calendar day, e.g. "Oct 24, 2026", from milliseconds. */
+export function formatDate(ms: number): string {
+  return date.format(ms)
+}
+
 /** Time until something happens, compactly: "2 d 3 h", "5 h 12 min", "40 min". */
 export function formatTimeLeft(ms: number): string {
   if (ms < 60_000) return 'less than a minute'

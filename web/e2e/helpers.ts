@@ -61,7 +61,15 @@ export function walletState(chainId: number, address: string, overrides: Record<
       window_start: Math.floor(Date.now() / 1000) - 3_600,
       watched_tokens: [{ ticker: 'usdc', address: USDC }],
     },
-    session: { key: '0x5555555555555555555555555555555555555555', active: true },
+    session: {
+      key: '0x5555555555555555555555555555555555555555',
+      wallet_key: '0x5555555555555555555555555555555555555555',
+      is_app_key: true,
+      active: true,
+      expires_at: Math.floor(Date.now() / 1000) + 20 * 86_400,
+      expires_in_secs: 20 * 86_400,
+      needs_renewal: false,
+    },
     limits: { max_op_gas_cost_wei: '10000000000000000', allowlist_enabled: false, trusted_spenders: [] },
     balances: [
       { ticker: 'eth', address: null, native: true, decimals: 18, raw: '1500000000000000000', amount: 1.5 },

@@ -55,6 +55,8 @@ export interface DeployRequest {
   watched_tokens: Token[]
   /** Native-token amount as a decimal string, e.g. "0.05". */
   prefund_eth: string
+  /** How long the assistant's first key lasts, in seconds. */
+  session_ttl_secs: number
 }
 
 export interface DeployPrepared {
@@ -74,6 +76,8 @@ export type DeployConfirmResult =
       wallet_address: string
       session_key: string
       session_key_authorized: boolean
+      /** Unix seconds: when that key stops working. */
+      session_key_expires_at: number
     }
 
 /** GET /api/chains */
@@ -126,8 +130,17 @@ export interface WalletState {
   session: {
     /** The assistant's key, or null when this app holds none for the wallet. */
     key: string | null
-    /** Whether the assistant may act for the wallet. */
+    /** The one key the wallet trusts, read off the chain, or null when it trusts none. */
+    wallet_key: string | null
+    /** True when the wallet trusts the key this app holds, so the assistant can sign at all. */
+    is_app_key: boolean
+    /** Whether the assistant may act for the wallet: its key is the wallet's, and hasn't run out. */
     active: boolean
+    /** Unix seconds: when the wallet's key stops working. Null when the wallet trusts no key. */
+    expires_at: number | null
+    expires_in_secs: number
+    /** True while the key still works but runs out soon enough to prompt a renewal. */
+    needs_renewal: boolean
   }
   limits: {
     max_op_gas_cost_wei: string
@@ -149,8 +162,12 @@ export type OwnerAction =
   | { kind: 'watched-token'; token: string; action: 'add' | 'remove' }
   | { kind: 'daily-limit'; dailyLimitUsd: number }
   | { kind: 'window'; windowSecs: number }
-  /** The assistant's own key; the API fills it in. */
-  | { kind: 'session'; action: 'add' | 'remove' }
+  /**
+   * The assistant's key. `add` makes the API mint a brand-new key lasting `ttlSecs`, replacing any
+   * key the wallet trusts now — so it both turns the assistant on and renews it.
+   */
+  | { kind: 'session'; action: 'add'; ttlSecs: number }
+  | { kind: 'session'; action: 'remove' }
   | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
   | { kind: 'max-gas'; maxCostEth: string }
 
@@ -158,6 +175,14 @@ export type OwnerAction =
 export type OwnerTxConfirmResult =
   | { status: 'pending'; tx_hash: string }
   | { status: 'confirmed'; tx_hash: string }
+
+/**
+ * POST /api/wallet/session/confirm: like /api/wallet/tx/confirm, but once mined it files the new key
+ * or forgets the revoked one. `unrecognized_key` means the wallet now trusts a key Mitfah doesn't hold.
+ */
+export type SessionTxConfirmResult =
+  | { status: 'pending'; tx_hash: string }
+  | { status: 'granted' | 'revoked' | 'unrecognized_key'; tx_hash: string }
 
 /**
  * A saved payee, from GET /api/contacts. The assistant can only send money to these. They belong to

@@ -25,6 +25,7 @@ async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
   let current = wallet
   const prepared: Prepared[] = []
   const sent: { tx: WalletTx; chainId: number }[] = []
+  const sessionConfirms: string[] = []
 
   await installFakeWallet(page, {
     address: OWNER,
@@ -49,6 +50,11 @@ async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
       if (afterConfirm) current = afterConfirm
       return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH } })
     }
+    if (path === '/api/wallet/session/confirm') {
+      sessionConfirms.push(path)
+      if (afterConfirm) current = afterConfirm
+      return route.fulfill({ json: { status: 'granted', tx_hash: TX_HASH } })
+    }
     if (path.startsWith('/api/wallet/')) return route.fulfill({ json: current })
     switch (path) {
       case '/api/auth/refresh':
@@ -72,7 +78,7 @@ async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
   })
-  return { prepared, sent }
+  return { prepared, sent, sessionConfirms }
 }
 
 /** Connects the fake wallet from the owner bar in `scope` (the page, a drawer or a modal). */
@@ -186,4 +192,42 @@ test('pausing from the dashboard', async ({ page }, testInfo) => {
   await expect(page.getByText('Paused', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Unpause' })).toBeVisible()
   expect(prepared).toEqual([{ path: '/api/wallet/pause/prepare', body: { chain_id: SEPOLIA } }])
+})
+
+test("renewing the assistant's access before it runs out", async ({ page }, testInfo) => {
+  const key = '0x5555555555555555555555555555555555555555'
+  const inTwoDays = Math.floor(Date.now() / 1000) + 2 * 86_400
+  const expiring = walletState(SEPOLIA, ADDRESS, {
+    session: {
+      key,
+      wallet_key: key,
+      is_app_key: true,
+      active: true,
+      expires_at: inTwoDays,
+      expires_in_secs: 2 * 86_400,
+      needs_renewal: true,
+    },
+  })
+  const { prepared, sessionConfirms } = await mockServer(page, expiring, walletState(SEPOLIA, ADDRESS))
+  await page.goto('/controls')
+  await connectOwner(page)
+
+  const row = page.locator('.mf-control-row').filter({ has: page.getByRole('heading', { name: 'Assistant' }) })
+  await expect(row.getByText('Expires soon')).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Renew' })).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Turn off assistant' })).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-assistant-expiring')
+
+  await row.getByRole('button', { name: 'Renew' }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('It keeps its access for another 30 days')
+  await confirm.getByRole('button', { name: 'Renew' }).click()
+  await expect(page.getByText(/^Assistant renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeVisible()
+  await expect(row.getByText('On', { exact: true })).toBeVisible()
+
+  expect(prepared).toEqual([
+    { path: '/api/wallet/session/prepare', body: { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 } },
+  ])
+  expect(sessionConfirms).toHaveLength(1)
 })

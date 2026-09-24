@@ -4,7 +4,7 @@ import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeWalletState, SEPOLIA, USDC, WETH } from '../test/fixtures'
+import { makeSession, makeWalletState, SEPOLIA, USDC, WETH } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, RpcError, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 // Polling waits 2 s between checks; the tests don't.
@@ -34,6 +34,8 @@ interface ServerOptions {
   rejectSend?: boolean
   /** Holds the wallet's answers until this settles, like a wallet prompt left open. */
   walletPrompt?: Promise<void>
+  /** What /api/wallet/session/confirm reports once mined. By default it matches the last prepare. */
+  sessionOutcome?: 'granted' | 'revoked' | 'unrecognized_key'
 }
 
 interface Prepared {
@@ -43,7 +45,7 @@ interface Prepared {
 
 /**
  * A signed-in owner whose wallet answers from `wallets`. Every prepare succeeds unless refused;
- * confirm answers "pending" once per transaction, then "confirmed".
+ * each confirm endpoint answers "pending" once per transaction, then its final status.
  */
 function stubServer({
   walletChains = [SEPOLIA],
@@ -51,9 +53,11 @@ function stubServer({
   refuse = {},
   rejectSend = false,
   walletPrompt = Promise.resolve(),
+  sessionOutcome,
 }: ServerOptions = {}) {
   const prepared: Prepared[] = []
   const confirms: Record<string, unknown>[] = []
+  const sessionConfirms: Record<string, unknown>[] = []
   const sent: Record<string, string>[] = []
   const sentTo: string[] = []
   let walletReads = 0
@@ -105,10 +109,20 @@ function stubServer({
             : json(200, { status: 'confirmed', tx_hash: body.tx_hash }),
         )
       }
+      if (url === '/api/wallet/session/confirm') {
+        sessionConfirms.push(body)
+        const last = prepared.findLast(p => p.path === '/api/wallet/session/prepare')
+        const outcome = sessionOutcome ?? (last?.body.action === 'remove' ? 'revoked' : 'granted')
+        return Promise.resolve(
+          sessionConfirms.length % 2 === 1
+            ? json(202, { status: 'pending', tx_hash: body.tx_hash })
+            : json(200, { status: outcome, tx_hash: body.tx_hash }),
+        )
+      }
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { prepared, confirms, sent, sentTo, walletReads: () => walletReads }
+  return { prepared, confirms, sessionConfirms, sent, sentTo, walletReads: () => walletReads }
 }
 
 /** Connects the mock wallet from the page's owner bar (the top bar has its own button too). */
@@ -183,9 +197,9 @@ describe('ControlsPage', () => {
     expect(server.prepared).toEqual([{ path: '/api/wallet/unpause/prepare', body: { chain_id: SEPOLIA } }])
   })
 
-  it('turns the assistant off in one click, and asks before turning it back on', async () => {
+  it('turns the assistant off in one click, and asks before turning it back on with a new key', async () => {
     const server = stubServer({
-      wallets: [makeWalletState(), makeWalletState({ session: { key: '0x5555555555555555555555555555555555555555', active: false } })],
+      wallets: [makeWalletState(), makeWalletState({ session: makeSession('off') })],
     })
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
@@ -195,23 +209,97 @@ describe('ControlsPage', () => {
     expect(await screen.findByText('Assistant turned off. It can no longer act for this wallet.')).toBeInTheDocument()
     expect(await within(row('Assistant')).findByText('Off')).toBeInTheDocument()
 
+    // Turning it off makes Mitfah forget the key, and turning it on mints a new one, so the switch
+    // is still offered with no key held.
     await user.click(screen.getByRole('button', { name: 'Turn on assistant' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent('It will be able to move funds from this wallet, up to $100.00 every 24 hours.')
+    expect(dialog).toHaveTextContent(
+      /For 30 days, until \w{3} \d{1,2}, \d{4}, it will be able to move funds from this wallet, up to \$100\.00 every 24 hours\./,
+    )
     await user.click(within(dialog).getByRole('button', { name: 'Turn on assistant' }))
-    expect(await screen.findByText('Assistant turned on.')).toBeInTheDocument()
+    expect(await screen.findByText(/^Assistant turned on until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
     expect(server.prepared.map(p => p.body)).toEqual([
       { chain_id: SEPOLIA, action: 'remove' },
-      { chain_id: SEPOLIA, action: 'add' },
+      { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 },
+    ])
+    // Both went through the endpoint that files or forgets the key, never the generic one.
+    expect(server.sessionConfirms).toHaveLength(4)
+    expect(server.confirms).toEqual([])
+  })
+
+  it("shows when the assistant's access ends, and renews it after asking", async () => {
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const assistant = within(row('Assistant'))
+    expect(assistant.getByText('On')).toBeInTheDocument()
+    expect(assistant.getByText(/can spend within your limit until \w{3} \d{1,2}, \d{4}\./)).toBeInTheDocument()
+    await user.click(assistant.getByRole('button', { name: 'Renew' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText("Renew the assistant's access?")).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(/It keeps its access for another 30 days, until \w{3} \d{1,2}, \d{4}, and can move funds/)
+    await user.click(within(dialog).getByRole('button', { name: 'Renew' }))
+
+    expect(await screen.findByText(/^Assistant renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/session/prepare', body: { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 } },
+    ])
+    expect(server.sessionConfirms).toEqual([
+      { chain_id: SEPOLIA, tx_hash: TX_HASH },
+      { chain_id: SEPOLIA, tx_hash: TX_HASH },
     ])
   })
 
-  it('offers no assistant switch when Mitfah holds no key for the wallet', async () => {
-    stubServer({ wallets: [makeWalletState({ session: { key: null, active: false } })] })
+  it('warns while the access is about to run out', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('expiring') })] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/Mitfah holds no signing key for this wallet/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /assistant$/ })).toBeNull()
+    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
+    expect(assistant.getByText('Expires soon')).toBeInTheDocument()
+    expect(assistant.getByText(/access runs out in 1 d 23 h|access runs out in 2 d/)).toBeInTheDocument()
+    expect(assistant.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
+    expect(assistant.getByRole('button', { name: 'Turn off assistant' })).toBeInTheDocument()
+  })
+
+  it('offers only a renewal once the access has run out', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('expired') })] })
+    await renderRoutes(routes, '/controls')
+
+    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
+    expect(assistant.getByText('Expired')).toBeInTheDocument()
+    expect(assistant.getByText(/access ran out on \w{3} \d{1,2}, \d{4}, so it can't act/)).toBeInTheDocument()
+    expect(assistant.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
+    // An expired key can do nothing, and a new grant replaces it anyway.
+    expect(assistant.queryByRole('button', { name: 'Turn off assistant' })).toBeNull()
+  })
+
+  it('offers to replace a key the wallet trusts that Mitfah does not hold', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('foreign') })] })
+    await renderRoutes(routes, '/controls')
+
+    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
+    expect(assistant.getByText('Off')).toBeInTheDocument()
+    expect(assistant.getByText(/trusts a signing key Mitfah doesn't hold/)).toBeInTheDocument()
+    expect(assistant.getByRole('button', { name: 'Turn on assistant' })).toBeInTheDocument()
+  })
+
+  it('says so when the wallet ends up trusting a key Mitfah does not hold', async () => {
+    const server = stubServer({ sessionOutcome: 'unrecognized_key' })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Renew' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Renew' }))
+
+    expect(await within(row('Assistant')).findByText(/now trusts a key Mitfah doesn't hold/)).toBeInTheDocument()
+    expect(screen.queryByText(/^Assistant renewed/)).toBeNull()
+    // It mined, so there's nothing to check again, and the wallet was read afresh.
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull()
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
+    expect(server.walletReads()).toBeGreaterThan(1)
   })
 
   it('asks before raising the limit', async () => {
@@ -506,6 +594,19 @@ describe('ControlsPage', () => {
       { chain_id: SEPOLIA, tx_hash: TX_HASH },
     ])
     expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
+  })
+
+  it("finishes the assistant's key through its own endpoint after a reload", async () => {
+    sessionStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ chainId: SEPOLIA, txHash: TX_HASH, key: 'session-on', success: 'Assistant renewed.', confirmWith: 'session' }),
+    )
+    const server = stubServer()
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText('Assistant renewed.')).toBeInTheDocument()
+    expect(server.sessionConfirms).toHaveLength(2)
+    expect(server.confirms).toEqual([])
   })
 
   it('finishes a change on the next page if this one is left while the wallet is open', async () => {

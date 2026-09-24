@@ -1,5 +1,8 @@
 import { Message, Panel, Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
+import { useNow } from '../../hooks/useNow'
+import { assistantStatus } from '../../lib/assistant'
+import { formatDate, formatTimeLeft } from '../../lib/format'
 import { chainName, explorerUrl } from '../../wallet/chains'
 import { AddressText } from '../AddressText'
 import { CopyButton } from '../CopyButton'
@@ -11,6 +14,9 @@ import { StatusTag } from '../StatusTag'
  */
 export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: boolean }) {
   const link = explorerUrl(wallet.chain_id, 'address', wallet.address, fork)
+  const now = useNow(60_000)
+  const assistant = assistantStatus(wallet.session)
+  const expiresAt = (wallet.session.expires_at ?? 0) * 1_000
 
   return (
     <Panel bordered className="mf-wallet-header">
@@ -31,8 +37,10 @@ export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: bool
         </div>
         <div className="mf-wallet-tags">
           {wallet.paused ? <StatusTag tone="danger">Paused</StatusTag> : <StatusTag tone="success">Active</StatusTag>}
-          {wallet.session.active ? (
+          {assistant === 'on' || assistant === 'expiring' ? (
             <StatusTag tone="success">Assistant on</StatusTag>
+          ) : assistant === 'expired' ? (
+            <StatusTag tone="neutral">Assistant expired</StatusTag>
           ) : (
             <StatusTag tone="neutral">Assistant off</StatusTag>
           )}
@@ -49,6 +57,18 @@ export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: bool
         <Message type="error" showIcon className="mf-settings-note">
           The spending limit isn't switched on for this wallet, so nothing caps what the assistant can
           spend. Pause the wallet or turn the assistant off in Controls until it's fixed.
+        </Message>
+      )}
+      {assistant === 'expiring' && (
+        <Message type="warning" showIcon className="mf-settings-note">
+          The assistant's access runs out in {formatTimeLeft(expiresAt - now)}. Renew it in Controls to keep it
+          working.
+        </Message>
+      )}
+      {assistant === 'expired' && (
+        <Message type="warning" showIcon className="mf-settings-note">
+          The assistant's access ran out on {formatDate(expiresAt)}, so it can't send anything. Renew it in Controls
+          to switch it back on.
         </Message>
       )}
       {!wallet.is_owner && (

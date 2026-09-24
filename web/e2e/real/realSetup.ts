@@ -98,7 +98,7 @@ export interface ApiWallet {
   is_owner: boolean
   paused: boolean
   spending: { daily_limit_usd: number; window_hours: number; watched_tokens: { ticker: string | null; address: Address }[] }
-  session: { key: Address | null; active: boolean }
+  session: { key: Address | null; wallet_key: Address | null; is_app_key: boolean; active: boolean; expires_at: number | null }
 }
 
 export interface Account {

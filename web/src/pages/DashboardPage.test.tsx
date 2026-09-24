@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeWalletState, SEPOLIA } from '../test/fixtures'
+import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 // Owner transactions poll with a 2 s gap; the tests don't wait.
@@ -143,7 +143,7 @@ describe('DashboardPage', () => {
           makeWalletState({
             paused: true,
             is_owner: false,
-            session: { key: null, active: false },
+            session: makeSession('off'),
             spending: { ...makeWalletState().spending, hook_installed: false },
             balances: [
               ...makeWalletState().balances.slice(0, 1),
@@ -165,6 +165,23 @@ describe('DashboardPage', () => {
     expect(unreadable).toHaveAttribute('title', 'no code at address')
     // The rest of the balances still show.
     expect(screen.getByRole('rowheader', { name: 'ETH' }).closest('tr')).toHaveTextContent('1.5')
+  })
+
+  it("warns before the assistant's access runs out, and says when it has", async () => {
+    stubServer({ wallets: { [SEPOLIA]: [makeWalletState({ session: makeSession('expiring') })] } })
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    expect(screen.getByText('Assistant on')).toBeInTheDocument()
+    expect(screen.getByText(/access runs out in (1 d 23 h|2 d)\. Renew it in Controls/)).toBeInTheDocument()
+    cleanup()
+
+    stubServer({ wallets: { [SEPOLIA]: [makeWalletState({ session: makeSession('expired') })] } })
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    expect(screen.getByText('Assistant expired')).toBeInTheDocument()
+    expect(screen.getByText(/access ran out on \w{3} \d{1,2}, \d{4}, so it can't send anything/)).toBeInTheDocument()
   })
 
   it('counts an ended period as a full limit, though the stored spend is stale', async () => {

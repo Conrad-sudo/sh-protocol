@@ -184,6 +184,7 @@ describe('OnboardingPage', () => {
     expect(summary('Spending limit')).toHaveTextContent('$250.00 every 7 days')
     expect(summary('Counts toward the limit')).toHaveTextContent('ETH, USDC')
     expect(summary('Gas funds')).toHaveTextContent('1 ETH')
+    expect(summary("Assistant's access")).toHaveTextContent('30 days, renewable any time in Controls')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
 
     expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
@@ -197,6 +198,7 @@ describe('OnboardingPage', () => {
         window_secs: 604_800,
         watched_tokens: [TOKENS[0]],
         prefund_eth: '1',
+        session_ttl_secs: 30 * 86_400,
       },
     ])
     expect(calls.sent).toHaveLength(1)

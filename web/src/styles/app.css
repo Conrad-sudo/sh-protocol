@@ -1361,6 +1361,13 @@ main p a {
   flex: none;
 }
 
+/* A row with two actions, e.g. the assistant's Renew beside Turn off. */
+.mf-control-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* Holds an editor or a transaction's progress; a row whose progress is idle adds no space. */
 .mf-control-body {
   margin-top: 8px;
