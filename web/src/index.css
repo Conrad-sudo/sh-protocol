@@ -16,22 +16,33 @@ body {
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  /*
+   * Bodoni Moda's display cut (optical size 96) has hairlines that break up on a 1x screen and on
+   * dark; the size-24 cut keeps them whole at every heading size. Only Bodoni has this axis, so the
+   * other faces ignore it.
+   */
+  font-variation-settings: 'opsz' 24;
 }
 
 /*
- * Headings are the nameplate: Archivo stretched wide, set tight. The scale is the classic one
+ * Titles are set in Bodoni Moda at a medium weight: its optical size thickens the hairlines as the
+ * size drops, so the same face holds from the 60px headline to an 18px card title. h3 is a label,
+ * not a title, so it stays in the text face. The scale is the classic one
  * (14 · 18 · 24 · 36 · 48 · 60), so sizes relate by ear rather than by increment.
  */
 h1,
 h2,
 h3 {
-  font-family: var(--mf-font-heading);
-  font-stretch: var(--mf-wide);
-  font-weight: 640;
   color: var(--rs-text-heading);
-  letter-spacing: -0.015em;
   line-height: 1.15;
   text-wrap: balance;
+}
+
+h1,
+h2 {
+  font-family: var(--mf-font-heading);
+  font-weight: 540;
+  letter-spacing: -0.005em;
 }
 
 h3 {

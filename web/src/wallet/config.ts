@@ -28,7 +28,7 @@ export const wagmiConfig = createConfig({
             showQrModal: true,
             metadata: {
               name: 'Mitfah',
-              description: 'An AI assistant for your crypto wallet that can only spend what you allow.',
+              description: 'Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them.',
               url: window.location.origin,
               icons: [`${window.location.origin}/icon-192.png`],
             },

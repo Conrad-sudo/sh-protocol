@@ -92,7 +92,7 @@ const FAQ = [
 ]
 
 const DESCRIPTION =
-  'An AI assistant for your crypto wallet that can only spend what you allow. You own the smart contract wallet, set a daily dollar limit and can pause it any time.'
+  'Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them. You own the smart contract wallet, set a daily dollar limit and can pause it any time.'
 
 /** What the site is and who publishes it, for search engines (schema.org JSON-LD). */
 const STRUCTURED_DATA = JSON.stringify({
@@ -146,7 +146,7 @@ export function HomePage() {
       <Wallpaper place="hero" />
 
       <section className="mf-hero">
-        <h1>An AI assistant for your crypto wallet that can only spend what you allow.</h1>
+        <h1>Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them.</h1>
         <p className="mf-hero-lede">
           You own the wallet and set a daily dollar limit. The wallet itself refuses anything over it, whatever the
           assistant is told.

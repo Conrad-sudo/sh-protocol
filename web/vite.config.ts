@@ -5,9 +5,12 @@ import { loadEnv, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 
 /**
- * Preloads the Latin cut of Archivo, the headline font, so a prerendered page's first paint is
- * already in it. Found late, the font swaps in after that paint and the headline reflows.
+ * Preloads the Latin cuts of the two faces on the first screen, Bodoni Moda (the headline) and
+ * Archivo (the text), so a prerendered page's first paint is already in them. Found late, a font
+ * swaps in after that paint and the headline reflows.
  */
+const FIRST_PAINT_FONTS = [/bodoni-moda-latin-opsz-normal-.*\.woff2$/, /archivo-latin-wght-normal-.*\.woff2$/]
+
 function preloadHeadlineFont(): Plugin {
   return {
     name: 'mitfah:preload-headline-font',
@@ -15,18 +18,21 @@ function preloadHeadlineFont(): Plugin {
     transformIndexHtml: {
       order: 'post',
       handler(_html, ctx) {
-        const font = Object.keys(ctx.bundle ?? {}).find(file => /archivo-latin-wdth-normal-.*\.woff2$/.test(file))
-        if (!font) {
-          this.warn('No Archivo Latin font in the bundle, so none is preloaded. Update preloadHeadlineFont().')
-          return []
-        }
-        return [
-          {
-            tag: 'link',
-            attrs: { rel: 'preload', href: `/${font}`, as: 'font', type: 'font/woff2', crossorigin: '' },
-            injectTo: 'head',
-          },
-        ]
+        const files = Object.keys(ctx.bundle ?? {})
+        return FIRST_PAINT_FONTS.flatMap(pattern => {
+          const font = files.find(file => pattern.test(file))
+          if (!font) {
+            this.warn(`No font matching ${pattern} in the bundle, so it isn't preloaded. Update FIRST_PAINT_FONTS.`)
+            return []
+          }
+          return [
+            {
+              tag: 'link',
+              attrs: { rel: 'preload', href: `/${font}`, as: 'font', type: 'font/woff2', crossorigin: '' },
+              injectTo: 'head' as const,
+            },
+          ]
+        })
       },
     },
   }

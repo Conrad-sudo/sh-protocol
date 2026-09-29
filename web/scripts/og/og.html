@@ -7,10 +7,16 @@
     <style>
       @font-face {
         font-family: 'Archivo';
-        src: url('../../node_modules/@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2') format('woff2');
+        src: url('../../node_modules/@fontsource-variable/archivo/files/archivo-latin-wght-normal.woff2') format('woff2');
         font-weight: 100 900;
-        font-stretch: 62% 125%;
       }
+      @font-face {
+        font-family: 'Bodoni Moda';
+        src: url('../../node_modules/@fontsource-variable/bodoni-moda/files/bodoni-moda-latin-opsz-normal.woff2') format('woff2');
+        font-weight: 400 900;
+      }
+      /* The site's two faces: Bodoni Moda (at its size-24 cut, as on the site) for the name, the headline and the dial. */
+      .brand span, h1, .dial-center strong { font-family: 'Bodoni Moda', serif; font-variation-settings: 'opsz' 24; }
       html, body { margin: 0; }
       .card {
         position: relative;
@@ -20,6 +26,7 @@
         overflow: hidden;
         color: #f2f6fb;
         font-family: 'Archivo', sans-serif;
+        -webkit-font-smoothing: antialiased;
         background: #07111f;
       }
       /* The ring sits round the dial at (900, 315); the circuit runs off to the edges. */
@@ -48,14 +55,14 @@
       }
       .brand { display: flex; align-items: center; gap: 16px; }
       .brand img { height: 56px; }
-      .brand span { font-stretch: 125%; font-weight: 700; font-size: 44px; letter-spacing: -0.03em; }
+      .brand span { font-weight: 600; font-size: 46px; letter-spacing: 0.01em; }
       h1 {
         margin: 0;
-        font-stretch: 125%;
-        font-weight: 700;
-        font-size: 50px;
-        line-height: 1.06;
-        letter-spacing: -0.03em;
+        font-weight: 500;
+        font-size: 48px;
+        line-height: 1.08;
+        text-wrap: balance;
+        letter-spacing: -0.02em;
       }
       p { margin: 0; font-size: 25px; line-height: 1.4; color: #93a3b8; }
       .dial { position: absolute; left: calc(900px - 150px); top: calc(315px - 150px); width: 300px; height: 300px; }
@@ -69,7 +76,7 @@
         justify-content: center;
         padding-top: 12px;
       }
-      .dial-center strong { font-stretch: 125%; font-weight: 700; font-size: 46px; letter-spacing: -0.02em; }
+      .dial-center strong { font-weight: 560; font-size: 50px; letter-spacing: -0.005em; }
       .dial-center small { margin-top: 6px; font-size: 18px; color: #93a3b8; }
     </style>
   </head>
@@ -78,8 +85,8 @@
       <div class="wallpaper"></div>
       <div class="shade"></div>
       <div class="words">
-        <div class="brand"><img src="../../public/brand/mark-dark.png" alt="" /><span>mitfah</span></div>
-        <h1>An AI assistant for your crypto wallet that can only spend what you allow.</h1>
+        <div class="brand"><img src="../../public/brand/mark-dark.png" alt="" /><span>Mitfah</span></div>
+        <h1>Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them.</h1>
         <p>You own the wallet. The limit is part of it.</p>
       </div>
       <div class="dial">

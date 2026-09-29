@@ -4,7 +4,7 @@ import { useTheme } from '../../theme/useTheme'
 const MARK_RATIO = 116 / 128
 
 interface LogoProps {
-  /** `mark` is the key alone; `lockup` adds the "mitfah" wordmark. */
+  /** `mark` is the key alone; `lockup` adds the "Mitfah" wordmark. */
   variant?: 'mark' | 'lockup'
   /** Mark height in px. */
   size?: number
@@ -35,7 +35,7 @@ export function Logo({ variant = 'lockup', size = 28, tone = 'auto', className }
       {mark}
       {variant === 'lockup' && (
         <span className="mf-logo-word" style={{ fontSize: Math.round(size * 0.82) }}>
-          mitfah
+          Mitfah
         </span>
       )}
     </span>

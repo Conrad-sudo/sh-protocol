@@ -33,12 +33,12 @@
   --mf-tick: #9aa8b9;
 
   /*
-   * One family at two widths: Archivo stretched to 125% is the engraved nameplate (headings, the
-   * dial's figures), at 100% it is the text. The monospace face is only for addresses and hashes.
+   * Two faces. Bodoni Moda is the dial's lettering, as on a watch face: the wordmark, titles and the
+   * figures on the dial. Archivo is the text and every small label. The monospace face is only for
+   * addresses and hashes.
    */
   --mf-font: 'Archivo Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --mf-font-heading: var(--mf-font);
-  --mf-wide: 125%;
+  --mf-font-heading: 'Bodoni Moda Variable', 'Bodoni 72', Didot, Georgia, serif;
   --mf-radius-plate: 14px;
   --mf-radius-control: 8px;
   --mf-radius-card: var(--mf-radius-plate);

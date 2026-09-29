@@ -1,7 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-// Archivo with its width axis: the same family is the text at 100% and the headings at 125%.
-import '@fontsource-variable/archivo/wdth.css'
+// Archivo is the text; Bodoni Moda, with its optical-size axis, is the titles and the dial's figures.
+import '@fontsource-variable/archivo'
+import '@fontsource-variable/bodoni-moda/opsz.css'
 import '@fontsource-variable/jetbrains-mono'
 // Order matters: tokens.css overrides RSuite's variables using the same selectors.
 import 'rsuite/dist/rsuite.min.css'

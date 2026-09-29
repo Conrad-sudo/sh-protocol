@@ -17,7 +17,7 @@ const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const CHAINS = [{ chain_id: SEPOLIA, name: 'sepolia-fork', native_ticker: 'ETH', fork: true }]
 
 const PAGES = [
-  { path: '/', heading: 'An AI assistant for your crypto wallet that can only spend what you allow.' },
+  { path: '/', heading: 'Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them.' },
   { path: '/dashboard', heading: 'Dashboard' },
   { path: '/assistant', heading: 'Assistant' },
   { path: '/contacts', heading: 'Contacts' },

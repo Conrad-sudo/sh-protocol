@@ -1,6 +1,6 @@
 # Mitfah
 
-> An AI assistant for your crypto wallet that can only spend what you allow. You own a smart contract wallet and set a daily dollar limit; the wallet itself refuses anything over it, whatever the assistant is told.
+> Send and swap crypto by chat. Your wallet enforces the rules, your AI assistant follows them. You own a smart contract wallet and set a daily dollar limit; the wallet itself refuses anything over it, whatever the assistant is told.
 
 ## How it works
 

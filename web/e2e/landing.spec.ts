@@ -27,7 +27,7 @@ async function mockApi(page: Page) {
 test('home page', async ({ page }, testInfo) => {
   await mockApi(page)
   await page.goto('/')
-  await expect(page.getByRole('heading', { level: 1 })).toContainText('only spend what you allow')
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Send and swap crypto by chat')
   await expect(page.getByRole('region', { name: 'Networks' }).getByRole('listitem')).toHaveCount(CHAINS.length)
   await expectTheme(page, testInfo)
 
