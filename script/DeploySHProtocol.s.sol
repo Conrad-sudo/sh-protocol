@@ -74,9 +74,12 @@ contract DeploySHProtocol is Script {
         // Build parallel token/feed arrays for SHOracle.
         // address(0) registers native ETH. Pairs with a zero feed are skipped inside the constructor,
         // so it is safe to pass address(0) feed entries for tokens unavailable on the current network.
-        address[] memory tokens = new address[](20);
-        address[] memory priceFeeds = new address[](20);
-        uint256[] memory heartbeats = new uint256[](20);
+        // One slot for native plus one per token in NetworkConfig: a token left out here is unpriced,
+        // and the spending-limit hook then refuses to watch it (SpendingLimitModule_TokenNotPriced)
+        // even though the app offers it. test_everyConfiguredTokenIsPriced holds the two together.
+        address[] memory tokens = new address[](23);
+        address[] memory priceFeeds = new address[](23);
+        uint256[] memory heartbeats = new uint256[](23);
         tokens[0] = address(0);
 
         if (block.chainid == BSC_CHAIN_ID) {
@@ -147,6 +150,15 @@ contract DeploySHProtocol is Script {
         tokens[19] = config.usdt;
         priceFeeds[19] = config.usdtUsdPriceFeed;
         heartbeats[19] = config.usdtHeartbeat;
+        tokens[20] = config.wavax;
+        priceFeeds[20] = config.wavaxUsdPriceFeed;
+        heartbeats[20] = config.wavaxHeartbeat;
+        tokens[21] = config.imx;
+        priceFeeds[21] = config.imxUsdPriceFeed;
+        heartbeats[21] = config.imxHeartbeat;
+        tokens[22] = config.cake;
+        priceFeeds[22] = config.cakeUsdPriceFeed;
+        heartbeats[22] = config.cakeHeartbeat;
 
         // The fee in wei, at this chain's current native price. priceFeeds[0] is the native feed.
         uint256 initialFee = _usdToNative(INITIAL_PROTOCOL_FEE_USD, priceFeeds[0]);

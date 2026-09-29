@@ -21,6 +21,7 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import "../../script/Constants.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
+import {configuredTokens} from "../utils/ConfiguredTokens.sol";
 
 /**
  * @title SHForkTestBase
@@ -207,6 +208,27 @@ abstract contract SHForkTestBase is Test {
         // Nothing is trusted at deploy; setUp grants the router explicitly as the owner would, so
         // unpriced-token approvals to it (LP tokens in removeLiquidity) are permitted.
         assertTrue(wallet.isTrustedSpender(address(router)), "router not trusted");
+    }
+
+    /// @dev Every token this chain's config names gets a live price. The unit suite proves each one
+    ///      reaches the oracle, but only against mocks; this is where a feed Chainlink has shut down
+    ///      shows up (a proxy whose aggregator is address(0) reverts on every read). A token with a
+    ///      dead feed must be zeroed in HelperConfig, feed and token together, and left out of the
+    ///      app's token list, as BSC's YFI was: registered, it deploys fine and then reverts every
+    ///      execution that has to value it.
+    ///      Unfreshened feeds are read as they are: at the latest block each is inside its heartbeat.
+    function test_everyConfiguredTokenPricesOnFork() public view {
+        address[22] memory configured = configuredTokens(config);
+        for (uint256 i = 0; i < configured.length; i++) {
+            address token = configured[i];
+            if (token == address(0)) continue;
+            uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
+            try oracle.getPrice(token, oneToken) returns (int256 usd) {
+                assertGt(usd, 0, vm.toString(token));
+            } catch {
+                revert(string.concat("no live price for configured token ", vm.toString(token)));
+            }
+        }
     }
 
     function test_agentIdentityViews_doNotRevert() public view {

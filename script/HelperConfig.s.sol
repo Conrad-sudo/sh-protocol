@@ -101,9 +101,6 @@ contract HelperConfig is Script {
      * @param imx                Immutable X (IMX) ERC-20 token address. address(0) on Sepolia.
      * @param imxUsdPriceFeed    Chainlink IMX/USD price feed address. address(0) on Sepolia.
      * @param imxHeartbeat       Chainlink IMX/USD feed heartbeat in seconds (mainnet: 86400)
-     * @param knc                Kyber Network Crystal (KNC) ERC-20 token address. address(0) on Sepolia.
-     * @param kncUsdPriceFeed    Chainlink KNC/USD price feed address. address(0) on Sepolia.
-     * @param kncHeartbeat       Chainlink KNC/USD feed heartbeat in seconds (mainnet: 86400)
      * @param cake               PancakeSwap Token (CAKE) ERC-20 address. address(0) on Sepolia.
      * @param cakeUsdPriceFeed   Chainlink CAKE/USD price feed. address(0) on mainnet (feed deprecated Nov 2022) and Sepolia.
      * @param cakeHeartbeat      Chainlink CAKE/USD feed heartbeat in seconds (BSC: 60)
@@ -157,7 +154,6 @@ contract HelperConfig is Script {
         address yfi;
         address wavax;
         address imx;
-        address knc;
         address cake;
         // Chainlink price feeds
         address ethUsdPriceFeed;
@@ -181,7 +177,6 @@ contract HelperConfig is Script {
         address yfiUsdPriceFeed;
         address wavaxUsdPriceFeed;
         address imxUsdPriceFeed;
-        address kncUsdPriceFeed;
         address cakeUsdPriceFeed;
         // Chainlink price feed heartbeats (maximum seconds between updates)
         uint256 ethHeartbeat;
@@ -205,7 +200,6 @@ contract HelperConfig is Script {
         uint256 yfiHeartbeat;
         uint256 wavaxHeartbeat;
         uint256 imxHeartbeat;
-        uint256 kncHeartbeat;
         uint256 cakeHeartbeat;
     }
 
@@ -316,7 +310,6 @@ contract HelperConfig is Script {
             yfi: address(0), // No official Sepolia deployment
             wavax: address(0), // No official Sepolia deployment
             imx: address(0), // No official Sepolia deployment
-            knc: address(0), // No official Sepolia deployment
             cake: address(0), // No official Sepolia deployment
             // Chainlink price feeds — only ETH, USDC, DAI, LINK, BTC have feeds on Sepolia
             ethUsdPriceFeed: SPO_ETH_USD_PRICE_FEED,
@@ -340,7 +333,6 @@ contract HelperConfig is Script {
             yfiUsdPriceFeed: address(0),
             wavaxUsdPriceFeed: address(0),
             imxUsdPriceFeed: address(0),
-            kncUsdPriceFeed: address(0),
             cakeUsdPriceFeed: address(0),
             // Heartbeats — Sepolia's Chainlink nodes update noticeably less often than mainnet's
             // (observed gaps of ~16-17h on USDC/DAI in practice, vs ETH/LINK/BTC which typically
@@ -368,7 +360,6 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_72H,
             wavaxHeartbeat: HEARTBEAT_72H,
             imxHeartbeat: HEARTBEAT_72H,
-            kncHeartbeat: HEARTBEAT_72H,
             cakeHeartbeat: HEARTBEAT_72H
         });
     }
@@ -410,7 +401,6 @@ contract HelperConfig is Script {
             yfi: MNT_YFI,
             wavax: MNT_WAVAX,
             imx: MNT_IMX,
-            knc: MNT_KNC,
             cake: address(0),
             // Chainlink price feeds
             ethUsdPriceFeed: MNT_ETH_USD_PRICE_FEED,
@@ -434,7 +424,6 @@ contract HelperConfig is Script {
             yfiUsdPriceFeed: MNT_YFI_USD_PRICE_FEED,
             wavaxUsdPriceFeed: MNT_WAVAX_USD_PRICE_FEED,
             imxUsdPriceFeed: MNT_IMX_USD_PRICE_FEED,
-            kncUsdPriceFeed: MNT_KNC_USD_PRICE_FEED,
             cakeUsdPriceFeed: address(0), // Chainlink CAKE/USD feed deprecated Nov 2022
             // Heartbeats sourced from Chainlink reference data (feeds-mainnet.json)
             ethHeartbeat: HEARTBEAT_1H,
@@ -458,7 +447,6 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            kncHeartbeat: HEARTBEAT_24H,
             cakeHeartbeat: HEARTBEAT_24H
         });
     }
@@ -496,10 +484,9 @@ contract HelperConfig is Script {
             sushi: BSC_SUSHI,
             wtao: address(0), // No BSC deployment
             uni: BSC_UNI,
-            yfi: BSC_YFI,
+            yfi: address(0), // Chainlink shut the BSC YFI/USD feed down (its aggregator is address(0))
             wavax: BSC_WAVAX,
             imx: address(0), // No BSC deployment
-            knc: BSC_KNC,
             cake: BSC_CAKE,
             // Chainlink price feeds
             ethUsdPriceFeed: BSC_ETH_USD_PRICE_FEED,
@@ -520,10 +507,9 @@ contract HelperConfig is Script {
             sushiUsdPriceFeed: BSC_SUSHI_USD_PRICE_FEED,
             wtaoUsdPriceFeed: address(0),
             uniUsdPriceFeed: BSC_UNI_USD_PRICE_FEED,
-            yfiUsdPriceFeed: BSC_YFI_USD_PRICE_FEED,
+            yfiUsdPriceFeed: address(0), // Zeroed with yfi: a dead feed reverts every read
             wavaxUsdPriceFeed: BSC_AVAX_USD_PRICE_FEED,
             imxUsdPriceFeed: address(0),
-            kncUsdPriceFeed: BSC_KNC_USD_PRICE_FEED,
             cakeUsdPriceFeed: BSC_CAKE_USD_PRICE_FEED,
             // Heartbeats — sourced from Chainlink BSC feed data
             ethHeartbeat: HEARTBEAT_1H,
@@ -547,7 +533,6 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            kncHeartbeat: HEARTBEAT_24H,
             cakeHeartbeat: HEARTBEAT_1H // BSC CAKE/USD feed heartbeat is 1 min; 1h gives a safety buffer
         });
     }
@@ -562,8 +547,8 @@ contract HelperConfig is Script {
      *      SHOracle treats a zero token as the native-ETH sentinel — so a zero token left next to a
      *      live feed would silently repoint native ETH at that feed. Keeping the pairs symmetric is
      *      what makes the omissions safe:
-     *        - No Chainlink USD feed on Arbitrum: ENS, SAND, IMX, KNC (KNC and IMX are deployed on
-     *          Arbitrum, but an unpriced token is unusable to the spending-limit hook).
+     *        - No Chainlink USD feed on Arbitrum: ENS, SAND, IMX (IMX is deployed on Arbitrum, but
+     *          an unpriced token is unusable to the spending-limit hook).
      *        - No credible token deployment on Arbitrum: BNB, AVAX, wTAO. Feeds for all three exist,
      *          but no deployment appears on Arbitrum's canonical bridge list or CoinGecko's Arbitrum
      *          list, and the closest on-chain matches carry dust supply (~3.8 BNB), so there is
@@ -600,7 +585,6 @@ contract HelperConfig is Script {
             yfi: ARB_YFI,
             wavax: address(0), // No credible WAVAX deployment on Arbitrum
             imx: address(0), // Deployed on Arbitrum, but no IMX/USD feed
-            knc: address(0), // Deployed on Arbitrum, but no KNC/USD feed
             cake: ARB_CAKE,
             // Chainlink price feeds
             ethUsdPriceFeed: ARB_ETH_USD_PRICE_FEED,
@@ -624,7 +608,6 @@ contract HelperConfig is Script {
             yfiUsdPriceFeed: ARB_YFI_USD_PRICE_FEED,
             wavaxUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wavax token
             imxUsdPriceFeed: address(0),
-            kncUsdPriceFeed: address(0),
             cakeUsdPriceFeed: ARB_CAKE_USD_PRICE_FEED,
             // Heartbeats — each rounded UP to the nearest bucket from the feed's published heartbeat
             // in Chainlink's Arbitrum reference data. ETH/BTC/LINK publish 1755s, USDC/USDT/CAKE
@@ -650,7 +633,6 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            kncHeartbeat: HEARTBEAT_24H,
             cakeHeartbeat: HEARTBEAT_1H
         });
     }
@@ -698,7 +680,6 @@ contract HelperConfig is Script {
             ERC20Mock yfi = new ERC20Mock("yearn.finance", "YFI", 18);
             ERC20Mock wavax = new ERC20Mock("Wrapped AVAX", "WAVAX", 18);
             ERC20Mock imx = new ERC20Mock("Immutable X", "IMX", 18);
-            ERC20Mock knc = new ERC20Mock("Kyber Network Crystal", "KNC", 18);
             ERC20Mock cake = new ERC20Mock("PancakeSwap Token", "Cake", 18);
 
             // Stablecoin price feed mocks
@@ -725,7 +706,6 @@ contract HelperConfig is Script {
             MockV3Aggregator yfiUsdPriceFeed = new MockV3Aggregator(DECIMALS, YFI_USD_PRICE);
             MockV3Aggregator wavaxUsdPriceFeed = new MockV3Aggregator(DECIMALS, WAVAX_USD_PRICE);
             MockV3Aggregator imxUsdPriceFeed = new MockV3Aggregator(DECIMALS, IMX_USD_PRICE);
-            MockV3Aggregator kncUsdPriceFeed = new MockV3Aggregator(DECIMALS, KNC_USD_PRICE);
             MockV3Aggregator cakeUsdPriceFeed = new MockV3Aggregator(DECIMALS, CAKE_USD_PRICE);
 
             MockIdentityRegistry identityRegistry = new MockIdentityRegistry();
@@ -765,7 +745,6 @@ contract HelperConfig is Script {
                 yfi: address(yfi),
                 wavax: address(wavax),
                 imx: address(imx),
-                knc: address(knc),
                 cake: address(cake),
                 // Price feeds
                 ethUsdPriceFeed: address(ethUsdPriceFeed),
@@ -789,7 +768,6 @@ contract HelperConfig is Script {
                 yfiUsdPriceFeed: address(yfiUsdPriceFeed),
                 wavaxUsdPriceFeed: address(wavaxUsdPriceFeed),
                 imxUsdPriceFeed: address(imxUsdPriceFeed),
-                kncUsdPriceFeed: address(kncUsdPriceFeed),
                 cakeUsdPriceFeed: address(cakeUsdPriceFeed),
                 // Heartbeats — use 1 hour for all Anvil mock feeds
                 ethHeartbeat: HEARTBEAT_1H,
@@ -813,7 +791,6 @@ contract HelperConfig is Script {
                 yfiHeartbeat: HEARTBEAT_1H,
                 wavaxHeartbeat: HEARTBEAT_1H,
                 imxHeartbeat: HEARTBEAT_1H,
-                kncHeartbeat: HEARTBEAT_1H,
                 cakeHeartbeat: HEARTBEAT_1H
             });
             return sLocalNetworkConfig;

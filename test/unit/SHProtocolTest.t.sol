@@ -22,6 +22,7 @@ import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
+import {configuredTokens} from "../utils/ConfiguredTokens.sol";
 import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
 import {MockWeth} from "../../src/mocks/MockWeth.sol";
 import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
@@ -179,6 +180,25 @@ contract SHProtocolTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced))
         );
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
+    }
+
+    /// @dev Every token NetworkConfig names must reach the oracle. DeploySHProtocol lists them by
+    ///      hand, and one it forgets is unpriced: the app still offers it, and a wallet picking it
+    ///      fails to deploy with TokenNotPriced (CAKE, AVAX and IMX were missed once). The
+    ///      local config sets every token, so the script is checked against the full list here.
+    ///      Whether each real chain's feeds answer is test_everyConfiguredTokenPricesOnFork's job.
+    function test_everyConfiguredTokenIsPriced() public {
+        address[22] memory configured = configuredTokens(config);
+        address[] memory watched = new address[](configured.length);
+        for (uint256 i = 0; i < configured.length; i++) {
+            assertTrue(configured[i] != address(0), "the local config sets every token");
+            assertTrue(oracle.isPriced(configured[i]), vm.toString(configured[i]));
+            watched[i] = configured[i];
+        }
+
+        // The failure users actually saw: a wallet watching all of them deploys.
+        vm.prank(owner);
         factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
     }
 

@@ -79,7 +79,6 @@ address constant MNT_UNI = 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984;
 address constant MNT_YFI = 0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e;
 address constant MNT_WAVAX = 0x85f138bfEE4ef8e540890CFb48F620571d67Eda3;
 address constant MNT_IMX = 0xF57e7e7C23978C3cAEC3C3548E3D615c346e79fF;
-address constant MNT_KNC = 0xdeFA4e8a7bcBA345F687a2f1456F5Edd9CE97202;
 
 // ─── Mainnet Price Feeds ──────────────────────────────────────────────────────
 address constant MNT_ETH_USD_PRICE_FEED = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
@@ -103,7 +102,6 @@ address constant MNT_UNI_USD_PRICE_FEED = 0x553303d460EE0afB37EdFf9bE42922D8FF63
 address constant MNT_YFI_USD_PRICE_FEED = 0xA027702dbb89fbd58938e4324ac03B58d812b0E1;
 address constant MNT_WAVAX_USD_PRICE_FEED = 0xFF3EEb22B5E3dE6e705b44749C2559d704923FD7;
 address constant MNT_IMX_USD_PRICE_FEED = 0xBAEbEFc1D023c0feCcc047Bff42E75F15Ff213E6;
-address constant MNT_KNC_USD_PRICE_FEED = 0xf8fF43E991A81e6eC886a3D281A2C6cC19aE70Fc;
 
 /*//////////////////////////////////////////////////////////////
                       SEPOLIA TESTNET
@@ -141,9 +139,7 @@ address constant BSC_COMP = 0x52CE071Bd9b1C4B00A0b92D298c512478CaD67e8;
 address constant BSC_CRV = 0x9996D0276612d23b35f90C51EE935520B3d7355B;
 address constant BSC_SUSHI = 0x947950BcC74888a40Ffa2593C5798F11Fc9124C4;
 address constant BSC_UNI = 0xBf5140A22578168FD562DCcF235E5D43A02ce9B1;
-address constant BSC_YFI = 0x88f1A5ae2A3BF98AEAF342D26B30a79438c9142e;
 address constant BSC_WAVAX = 0x1CE0c2827e2eF14D5C4f29a091d735A204794041;
-address constant BSC_KNC = 0xfe56d5892BDffC7BF58f2E84BE1b2C32D21C308b;
 address constant BSC_CAKE = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
 
 // ─── BSC Price Feeds (Chainlink) ──────────────────────────────────────────────
@@ -160,9 +156,7 @@ address constant BSC_COMP_USD_PRICE_FEED = 0x0Db8945f9aEf5651fa5bd52314C5aAe78Df
 address constant BSC_CRV_USD_PRICE_FEED = 0x2e1C3b6Fcae47b20Dd343D9354F7B1140a1E6B27;
 address constant BSC_SUSHI_USD_PRICE_FEED = 0xa679C72a97B654CFfF58aB704de3BA15Cde89B07;
 address constant BSC_UNI_USD_PRICE_FEED = 0xb57f259E7C24e56a1dA00F66b55A5640d9f9E7e4;
-address constant BSC_YFI_USD_PRICE_FEED = 0xD7eAa5Bf3013A96e3d515c055Dbd98DbdC8c620D;
 address constant BSC_AVAX_USD_PRICE_FEED = 0x5974855ce31EE8E1fff2e76591CbF83D7110F151;
-address constant BSC_KNC_USD_PRICE_FEED = 0xF2f8273F6b9Fc22C90891DC802cAf60eeF805cDF;
 address constant BSC_CAKE_USD_PRICE_FEED = 0xB6064eD41d4f67e353768aA239cA86f4F73665a1; // heartbeat: 1 min
 
 
@@ -173,7 +167,7 @@ address constant BSC_CAKE_USD_PRICE_FEED = 0xB6064eD41d4f67e353768aA239cA86f4F73
 
 // Arbitrum One (chain id 42161). Every address below was read back on-chain: tokens answered
 // symbol()/name()/decimals() as expected and each feed answered description() with the pair named
-// in its constant. Tokens with no Chainlink USD feed on Arbitrum (ENS, SAND, IMX, KNC) and feeds
+// in its constant. Tokens with no Chainlink USD feed on Arbitrum (ENS, SAND, IMX) and feeds
 // with no credible token deployment (BNB, AVAX, TAO) are deliberately absent — see getArbConfig.
 
 // ─── Arbitrum Tokens ──────────────────────────────────────────────────────────
@@ -271,7 +265,6 @@ int256 constant WAVAX_USD_PRICE = 20e8;
 
 int256 constant IMX_USD_PRICE = 0.75e8;
 
-int256 constant KNC_USD_PRICE = 0.55e8;
 
 int256 constant CAKE_USD_PRICE = 2.5e8;
 
