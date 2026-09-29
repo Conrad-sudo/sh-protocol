@@ -1,7 +1,7 @@
 # SessionHandler Protocol 🤖⛓️
 
 [![CI](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml)
-[![Tests](https://img.shields.io/badge/tests-255-brightgreen)](test/)
+[![Tests](https://img.shields.io/badge/tests-269-brightgreen)](test/)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.33-363636?logo=solidity)](https://soliditylang.org)
 [![Built with Foundry](https://img.shields.io/badge/built%20with-Foundry-FFDB1C)](https://getfoundry.sh)
