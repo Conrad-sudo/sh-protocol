@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import hvac.exceptions
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -10,6 +12,7 @@ from slowapi.util import get_remote_address
 
 import os
 import secrets
+import sqlite3
 import time
 from decimal import Decimal
 
@@ -26,6 +29,7 @@ from constants import (
     CHAIN_ID_MAINNET,
     CHAIN_ID_SEPOLIA,
     ETH_SENTINEL,
+    get_always_counted_ticker,
     get_native_asset_ticker,
     get_router,
 )
@@ -33,9 +37,15 @@ from network_config import load_network_config_by_name
 from db import (
     get_json,
     get_factory_address,
+    get_rpc_url,
     get_session_key,
     get_supported_tokens_by_chain_id,
     get_token_address,
+    acting_network,
+    get_custom_tokens,
+    save_custom_token,
+    delete_custom_token,
+    resolve_token,
     save_wallet_address,
     save_user_network,
     save_contact,
@@ -61,6 +71,7 @@ from db import (
 from userop import create_pending_session_key, reconcile_session_key
 from contracts import invalidate_cache, read_spending_config
 from contract_errors import name_revert
+from custom_tokens import CustomTokenError, inspect_custom_token
 import auth
 from auth import get_current_user
 from smart_wallet_agent import (
@@ -102,6 +113,27 @@ app = FastAPI(lifespan=lifespan)
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(hvac.exceptions.VaultError)
+async def vault_unavailable(request: Request, exc: hvac.exceptions.VaultError):
+    """
+    Names Vault when it refuses a request, instead of a bare 500.
+
+    Every session key is encrypted and decrypted through Vault, so deploys, grants and wallet reads
+    all stop when it does. The everyday cause is the dev container restarting: it keeps everything
+    in memory, so it comes back without the AppRole and the transit key, and the login in .env is
+    refused. A bare 500 reached the web app only as "Something went wrong on our side", with
+    nothing pointing at Vault. The exception itself goes to the log, not the client.
+    """
+    print(f"Vault error on {request.url.path}: {exc!r}")
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "detail": "Key storage (Vault) refused the request, so no session key could be made or "
+            "read. If the Vault container was restarted, run `make vault`, then restart the API."
+        },
+    )
 
 # The refresh token travels as a cookie, so the browser must be allowed to send credentials --
 # which means the allowed origins have to be listed explicitly (a wildcard is rejected by the
@@ -282,6 +314,56 @@ def _load_factory_for_chain(w3: Web3, chain_id: int):
     return w3.eth.contract(address=address, abi=abi)
 
 
+def _failed_tx_detail(w3: Web3, tx_hash: str, receipt, what: str, hint: str = "") -> str:
+    """
+    The 400 detail for a mined transaction that failed: "<what> reverted (tx: …)", unless it ran out
+    of gas, which says so and gives the numbers.
+
+    Every transaction this API prepares carries its own gas estimate, but the user's wallet has the
+    last word on the limit and some wallets replace it. A deploy watching 20 tokens needs ~1.47M gas;
+    one went out with a 1,000,000 limit, died partway through seeding the tokens, and reached the
+    user as a bare "reverted" that pointed nowhere. Re-estimating the same call against the state it
+    ran on tells the two apart: if it needs more gas than it was given, the limit was the problem.
+
+    @param what  How the message names the transaction ("deployWallet", "That transaction").
+    @param hint  Appended to the out-of-gas message only.
+    """
+    reverted = f"{what} reverted (tx: {tx_hash})"
+    try:
+        tx = w3.eth.get_transaction(tx_hash)
+        needed = w3.eth.estimate_gas(
+            {"from": tx["from"], "to": tx["to"], "data": tx["input"], "value": tx["value"]},
+            block_identifier=receipt["blockNumber"] - 1,
+        )
+    except Exception:
+        # It reverts at any gas limit (a real revert), or the node no longer holds that state.
+        return reverted
+    if needed <= tx["gas"]:
+        return reverted
+    return (
+        f"{what} ran out of gas (tx: {tx_hash}). Your wallet sent it with a gas limit of "
+        f"{tx['gas']:,}, but it needs about {needed:,}. Try again and set the gas limit in your "
+        f"wallet to at least that{hint}."
+    )
+
+
+def _network_name(chain_id: int) -> str:
+    """
+    This server's network name for `chain_id` -- its `-fork` twin in fork mode -- or 400s. RPC-free.
+
+    See CHAIN_NAME_BY_ID for why the name is resolved here and never taken from the request.
+    """
+    chain_name = CHAIN_NAME_BY_ID.get(chain_id)
+    if chain_name is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Unsupported chain ID: {chain_id}. Supported: {sorted(CHAIN_NAME_BY_ID)}",
+        )
+    if FORK_MODE and chain_id in FORKABLE_CHAIN_IDS:
+        chain_name = f"{chain_name}-fork"
+    return chain_name
+
+
 def _resolve_chain(chain_id: int) -> tuple[Web3, str]:
     """
     Resolves a requested chain ID to (w3, chain_name), or 400s.
@@ -296,14 +378,7 @@ def _resolve_chain(chain_id: int) -> tuple[Web3, str]:
     @param chain_id  The chain ID the user's wallet reported.
     @return          (Web3 instance, the network name for that chain).
     """
-    chain_name = CHAIN_NAME_BY_ID.get(chain_id)
-    if chain_name is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unsupported chain ID: {chain_id}. Supported: {sorted(CHAIN_NAME_BY_ID)}",
-        )
-    if FORK_MODE and chain_id in FORKABLE_CHAIN_IDS:
-        chain_name = f"{chain_name}-fork"
+    chain_name = _network_name(chain_id)
 
     try:
         w3, _ = load_network_config_by_name(chain_name)
@@ -739,15 +814,15 @@ def post_chat(req: ChatRequest, user_id: int = Depends(get_current_user)):
     one slow turn does not stall the event loop for everybody else. Declared `async def` it would.
 
     The user id comes from the token and is handed to the agent as runtime context, so nothing the
-    message says can change whose wallet is acted on.
+    message says can change whose wallet is acted on. The chain is the one the page is on, and the
+    whole turn acts on it -- not on the user's saved network, which is just the chain they last
+    deployed on (see db.acting_network).
 
     @param req  The chain and the user's message.
     @return     {"reply": str}
     @raises HTTPException 400 for a chain this server does not serve, as chat_history does.
     """
-    if req.chain_id not in CHAIN_NAME_BY_ID:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {req.chain_id}")
-    return {"reply": chat(user_id, req.chain_id, req.message)}
+    return {"reply": chat(user_id, req.chain_id, req.message, _network_name(req.chain_id))}
 
 
 @app.get("/api/chat/history")
@@ -817,11 +892,14 @@ def list_chains():
     there (a `factory` row). The front end builds its network picker from this rather than from a
     list of its own that would drift from the server's.
 
-    Public and RPC-free, like /api/tokens: it reads two local tables and says nothing that is not
-    already public on chain.
+    Public and RPC-free, like /api/tokens: it reads local tables and says nothing that is not
+    already public on chain, apart from a fork's local node address.
 
-    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "router"}, ...]}, by chain ID.
+    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "rpc_url", "router"}, ...]},
+             by chain ID.
              `fork` is true when this server points that chain at a local fork (APP_FORK_MODE).
+             `rpc_url` is that fork's local node, for the user to set in their browser wallet — each
+             fork runs on its own port. None on a live chain: its RPC may carry an API key.
              `router` is the exchange router every wallet on that chain is deployed trusting (see
              /api/deploy), or None where there is none; the Controls page keeps it off the
              removable list.
@@ -836,11 +914,13 @@ def list_chains():
             native_ticker = get_native_asset_ticker(chain_id)
         except ValueError:
             native_ticker = None
+        fork = FORK_MODE and chain_id in FORKABLE_CHAIN_IDS
         chains.append({
             "chain_id": chain_id,
             "name": name,
             "native_ticker": native_ticker,
-            "fork": FORK_MODE and chain_id in FORKABLE_CHAIN_IDS,
+            "fork": fork,
+            "rpc_url": get_rpc_url(f"{name}-fork") if fork else None,
             "router": _router_or_none(chain_id),
         })
     return {"chains": chains}
@@ -856,11 +936,108 @@ def list_tokens(chain_id: int):
 
     Deliberately does NOT go through _resolve_chain: listing tokens needs no RPC, and a fork shares
     its parent's token table, so the fork/live distinction cannot change the answer.
+
+    `always_counted` marks the wrapped native token (WETH, WBNB): every new wallet counts it, like
+    the native asset it wraps, so the picker shows it ticked and locked (see /api/deploy).
+
+    @return  {"chain_id", "tokens": [{"ticker", "address", "always_counted"}, ...]}.
     """
     try:
-        return {"chain_id": chain_id, "tokens": get_supported_tokens_by_chain_id(chain_id)}
+        tokens = get_supported_tokens_by_chain_id(chain_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    always = get_always_counted_ticker(chain_id)
+    return {"chain_id": chain_id, "tokens": [{**t, "always_counted": t["ticker"] == always} for t in tokens]}
+
+
+# ── Custom tokens ─────────────────────────────────────────────────────────────
+#
+# Tokens a user adds by contract address, MetaMask-style. They are a list Mitfah keeps, not a
+# setting on the wallet: the wallet can already hold and move any ERC-20, and one without a price
+# feed sits outside the spending cap whether it is listed here or not. So adding or removing one
+# needs no signature and changes nothing on chain -- it decides what the dashboard shows and which
+# names the assistant resolves. Every check (a real ERC-20, a symbol safe to show the assistant, no
+# copy of a listed ticker) is in custom_tokens.py and runs against the chain, never the request.
+
+
+class CustomTokenRequest(BaseModel):
+    """Body of POST /api/tokens/custom/lookup and POST /api/tokens/custom."""
+
+    chain_id: int
+    address: str = Field(max_length=64)
+
+
+def _inspect_for_user(req: CustomTokenRequest, user_id: int) -> dict:
+    """
+    Runs the add-a-token checks for this user's wallet on `req.chain_id`, as 400s the UI can show.
+
+    The checks read the token through contracts.load_ierc20, which finds the chain through the
+    user's network -- so the request's chain is made the acting network for the duration, exactly
+    as a chat turn does (db.acting_network). The saved network, which the Telegram bot follows, is
+    left alone.
+    """
+    w3, chain_name = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    try:
+        with acting_network(user_id, chain_name, req.chain_id):
+            return inspect_custom_token(user_id, req.chain_id, req.address, wallet.address)
+    except CustomTokenError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@app.post("/api/tokens/custom/lookup")
+@limiter.limit("30/minute")
+def lookup_custom_token(request: Request, req: CustomTokenRequest, user_id: int = Depends(get_current_user)):
+    """
+    Reads a token off the chain so the user can see what they are about to add. Saves nothing.
+
+    @return  {"chain_id", "address", "ticker", "symbol", "name", "decimals", "balance_raw"}: the
+             symbol and decimals are what make it an ERC-20 -- an address that can't answer both is
+             refused with a message asking the user to check it again.
+    @raises HTTPException 400 with the reason the token can't be added; 404 with no wallet here.
+    """
+    return {"chain_id": req.chain_id, **_inspect_for_user(req, user_id)}
+
+
+@app.post("/api/tokens/custom", status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
+def add_custom_token(request: Request, req: CustomTokenRequest, user_id: int = Depends(get_current_user)):
+    """
+    Adds a token to the signed-in account's list for `chain_id`, after checking it again on chain.
+
+    The lookup's answer is not trusted: the checks run again here, so a request that skipped the
+    preview (or raced another tab) gets the same answer.
+
+    @return  The saved token: {"chain_id", "address", "ticker", "symbol", "name", "decimals", "balance_raw"}.
+    @raises HTTPException 400 if the token can't be added, 409 if another request just added it.
+    """
+    token = _inspect_for_user(req, user_id)
+    try:
+        save_custom_token(
+            user_id, req.chain_id, token["address"], token["ticker"], token["name"], token["decimals"]
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status.HTTP_409_CONFLICT, "That token was just added. Reload to see it.")
+    # No cache to drop, here or in the bot's process: the tools resolve names from the table on
+    # every call (db.resolve_token), and nothing caches by ticker.
+    return {"chain_id": req.chain_id, **token}
+
+
+@app.delete("/api/tokens/custom/{chain_id}/{address}")
+def remove_custom_token(chain_id: int, address: str, user_id: int = Depends(get_current_user)):
+    """
+    Removes a token from the signed-in account's list. The tokens themselves stay in the wallet --
+    the owner can still withdraw them, and adding the token again brings them back into view.
+
+    @raises HTTPException 404 if the token is not on this account's list for `chain_id`.
+    """
+    try:
+        address = Web3.to_checksum_address(address)
+    except (ValueError, TypeError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"'{address}' is not on your token list")
+    if not delete_custom_token(user_id, chain_id, address):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{address} is not on your token list")
+    return {"status": "deleted", "chain_id": chain_id, "address": address}
 
 
 @app.post("/api/deploy")
@@ -911,6 +1088,17 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
                 "reload the token list.",
             )
         watched_tokens.append(address)
+    # The wrapped native token is always counted, like the native asset it wraps -- whatever the
+    # picker sent. Added here rather than trusted to the client, so no wallet this API deploys can
+    # leave WETH/WBNB outside the limit (the owner could still remove it on chain themselves).
+    always = get_always_counted_ticker(chain_id)
+    if always is not None:
+        try:
+            always_address = w3.to_checksum_address(get_token_address(chain_id, always))
+        except ValueError:
+            always_address = None   # not in this chain's table (an unseeded anvil): nothing to add
+        if always_address is not None and always_address not in watched_tokens:
+            watched_tokens.insert(0, always_address)
 
     try:
         factory = _load_factory_for_chain(w3, chain_id)
@@ -1033,7 +1221,10 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
         return {"status": "pending", "tx_hash": req.tx_hash}
 
     if receipt["status"] != 1:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"deployWallet reverted (tx: {req.tx_hash})")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            _failed_tx_detail(w3, req.tx_hash, receipt, "deployWallet", ", or watch fewer tokens"),
+        )
 
     factory = _load_factory_for_chain(w3, chain_id)
     # process_receipt already drops logs from other contracts; filtering on owner too means a hash
@@ -1129,7 +1320,8 @@ class WithdrawRequest(BaseModel):
     """Body of POST /api/wallet/withdraw/prepare."""
 
     chain_id: int
-    # Ticker, or "eth"/the chain's native ticker to withdraw native value.
+    # A listed ticker, a ticker the user added, a token's contract address, or "eth"/the chain's
+    # native ticker to withdraw native value.
     token: str
     # Whole units (e.g. "1.5"), scaled to base units server-side. Decimal, not float, so a value
     # like "0.1" converts exactly.
@@ -1257,15 +1449,20 @@ def _revert_reason(e: Exception) -> str:
     return name_revert(message) or message
 
 
-def _resolve_withdraw_token(w3: Web3, chain_id: int, token: str) -> tuple[str, int]:
+def _resolve_withdraw_token(w3: Web3, user_id: int, chain_id: int, token: str) -> tuple[str, int]:
     """
-    Resolves a withdraw ticker to (token address, decimals).
+    Resolves a withdraw token -- a listed ticker, one the user added, or a contract address -- to
+    (token address, decimals).
 
     Native value is `address(0)` with 18 decimals — the same sentinel SessionHandler.withdraw,
     SHOracle and the agent's tools all use for the chain's gas asset.
 
+    Any address is accepted, not only listed or added ones: withdraw is the owner's escape hatch and
+    the contract takes any token, so a token the owner never added must still be recoverable. The
+    simulation in _prepare_owner_tx catches an address that isn't a token.
+
     @return  (address, decimals).
-    @raises HTTPException 400 if the ticker is not listed on this chain.
+    @raises HTTPException 400 if the ticker is unknown or the address doesn't answer decimals().
     """
     # "eth" is this codebase's generic label for the native gas asset on every chain (see
     # ETH_SENTINEL, get_eth_balance, send_eth), so it is accepted everywhere; the chain's real
@@ -1273,10 +1470,13 @@ def _resolve_withdraw_token(w3: Web3, chain_id: int, token: str) -> tuple[str, i
     if token.lower() in ("eth", get_native_asset_ticker(chain_id).lower()):
         return ETH_SENTINEL, 18
     try:
-        address = w3.to_checksum_address(get_token_address(chain_id, token))
+        address = w3.to_checksum_address(resolve_token(user_id, chain_id, token))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    decimals = w3.eth.contract(address=address, abi=ERC20_ABI).functions.decimals().call()
+    try:
+        decimals = w3.eth.contract(address=address, abi=ERC20_ABI).functions.decimals().call()
+    except Exception:  # noqa: BLE001 -- no code, or not an ERC-20
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{address} doesn't answer like an ERC-20 token.")
     return address, decimals
 
 
@@ -1294,16 +1494,17 @@ def _ticker_map(chain_id: int) -> dict[str, str]:
         return {}
 
 
-def _token_balances(w3: Web3, chain_id: int, account: str) -> list[dict]:
+def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[dict]:
     """
-    Native + listed-ERC20 balances for `account`.
+    Native, listed-ERC20 and user-added-ERC20 balances for `account`.
 
     Each token is fetched independently and a failure is reported per-token rather than raised: one
     token with no code (a stale row, a chain that moved a deployment) must not blank out the whole
     dashboard. Raw amounts are strings -- a uint256 of wei does not survive JSON's float64.
 
-    Two eth_calls per token (decimals + balanceOf), which is fine for the handful of tickers seeded
-    per chain; if that list ever grows to hundreds, batch it or cache decimals.
+    Two eth_calls per listed token (decimals + balanceOf), which is fine for the handful of tickers
+    seeded per chain. Tokens the user added cost one: their decimals were read and stored when they
+    were added. `custom` marks those -- they have no price and never count toward the cap.
     """
     native_raw = w3.eth.get_balance(account)
     balances: list[dict] = [
@@ -1317,7 +1518,7 @@ def _token_balances(w3: Web3, chain_id: int, account: str) -> list[dict]:
         }
     ]
     for address, ticker in _ticker_map(chain_id).items():
-        entry = {"ticker": ticker, "address": w3.to_checksum_address(address), "native": False}
+        entry = {"ticker": ticker, "address": w3.to_checksum_address(address), "native": False, "custom": False}
         try:
             erc20 = w3.eth.contract(address=entry["address"], abi=ERC20_ABI)
             decimals = erc20.functions.decimals().call()
@@ -1326,6 +1527,24 @@ def _token_balances(w3: Web3, chain_id: int, account: str) -> list[dict]:
                 "decimals": decimals,
                 "raw": str(raw),
                 "amount": float(Decimal(raw) / Decimal(10**decimals)),
+            }
+        except Exception as e:  # noqa: BLE001 -- reported per token, never fatal
+            entry |= {"decimals": None, "raw": None, "amount": None, "error": _revert_reason(e)}
+        balances.append(entry)
+    for token in get_custom_tokens(user_id, chain_id):
+        entry = {
+            "ticker": token["ticker"],
+            "address": token["address"],
+            "native": False,
+            "custom": True,
+            "name": token["name"],
+        }
+        try:
+            raw = w3.eth.contract(address=token["address"], abi=ERC20_ABI).functions.balanceOf(account).call()
+            entry |= {
+                "decimals": token["decimals"],
+                "raw": str(raw),
+                "amount": float(Decimal(raw) / Decimal(10 ** token["decimals"])),
             }
         except Exception as e:  # noqa: BLE001 -- reported per token, never fatal
             entry |= {"decimals": None, "raw": None, "amount": None, "error": _revert_reason(e)}
@@ -1437,7 +1656,7 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
             "allowlist_enabled": wallet.functions.sessionAllowlistEnabled().call(),
             "trusted_spenders": [w3.to_checksum_address(s) for s in cfg["trustedSpenders"]],
         },
-        "balances": _token_balances(w3, chain_id, wallet.address),
+        "balances": _token_balances(w3, user_id, chain_id, wallet.address),
     }
 
 
@@ -1490,7 +1709,7 @@ def prepare_withdraw(req: WithdrawRequest, user_id: int = Depends(get_current_us
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Not a valid address: {req.to}")
 
-    token_address, decimals = _resolve_withdraw_token(w3, req.chain_id, req.token)
+    token_address, decimals = _resolve_withdraw_token(w3, user_id, req.chain_id, req.token)
     amount, _truncated = to_base_units(str(req.amount), decimals)
     if amount == 0:
         raise HTTPException(
@@ -1518,9 +1737,22 @@ def prepare_watched_token(req: WatchedTokenRequest, user_id: int = Depends(get_c
     32, both caught by the simulation. Adding a token that is already watched is a no-op on chain,
     not an error.
 
+    Removing the wrapped native token (WETH, WBNB) is refused: Mitfah always counts it, like the
+    native asset it wraps. As with the exchange router, the owner can still call removeWatchedToken
+    on the wallet directly -- this stops an accidental removal from the app, not a deliberate one.
+
     @return  {"tx", "token_address"}.
     """
     owner = _require_owner(user_id)
+    always = get_always_counted_ticker(req.chain_id)
+    # Before _resolve_chain, like the router check: a request that can only be refused should not
+    # cost an RPC round trip.
+    if req.action == "remove" and always is not None and req.token.lower() == always:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{always.upper()} always counts toward your limit, like {get_native_asset_ticker(req.chain_id)}, "
+            "so it can't be removed.",
+        )
     w3, _ = _resolve_chain(req.chain_id)
 
     try:
@@ -1570,7 +1802,8 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
 
     if receipt["status"] != 1:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, f"That transaction reverted (tx: {req.tx_hash})"
+            status.HTTP_400_BAD_REQUEST,
+            _failed_tx_detail(w3, req.tx_hash, receipt, "That transaction"),
         )
 
     config = read_spending_config(wallet)
@@ -1778,7 +2011,10 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
             f"Transaction {req.tx_hash} was not sent to your wallet on chain {req.chain_id}.",
         )
     if receipt["status"] != 1:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"That transaction reverted (tx: {req.tx_hash})")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            _failed_tx_detail(w3, req.tx_hash, receipt, "That transaction"),
+        )
 
     on_chain = wallet.functions.currentSession().call()
     on_chain = on_chain if int(on_chain, 16) else None

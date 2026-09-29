@@ -10,12 +10,20 @@ import { StatusTag } from '../StatusTag'
 import type { ControlPanelProps } from './types'
 
 /**
- * Which tokens count toward the limit. The native token always does. An ERC-20 that isn't counted
- * can be moved by the assistant without limit, so removing one asks first; adding one doesn't.
+ * Which tokens count toward the limit. The native token always does, and so does its wrapped form
+ * (WETH, WBNB): new wallets are created counting it and it can't be removed here. A wallet made
+ * before that rule may not count it yet, so it gets a one-click way to. Any other ERC-20 that isn't
+ * counted can be moved by the assistant without limit, so removing one asks first; adding one doesn't.
  */
 export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefined }) {
-  const { wallet, tx, locked, ask, chain } = props
-  const watched = wallet.spending.watched_tokens
+  const { wallet, tx, locked, ask, start, chain } = props
+  const tokens = useTokens(wallet.chain_id)
+  const alwaysAddresses = new Set(
+    (tokens.data ?? []).filter(t => t.always_counted).map(t => t.address.toLowerCase()),
+  )
+  const watchedAddresses = new Set(wallet.spending.watched_tokens.map(t => t.address.toLowerCase()))
+  const always = (tokens.data ?? []).filter(t => t.always_counted)
+  const watched = wallet.spending.watched_tokens.filter(t => !alwaysAddresses.has(t.address.toLowerCase()))
 
   return (
     <Panel bordered header={<h2>Tokens that count toward the limit</h2>} className="mf-card">
@@ -26,6 +34,44 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
             <StatusTag tone="success">Always counts</StatusTag>
           </div>
         </li>
+        {always.map(token => {
+          const name = token.ticker.toUpperCase()
+          const key = `watched:${token.ticker}`
+          return (
+            <li key={token.address}>
+              <div className="mf-token-row">
+                <span className="mf-token">{name}</span>
+                {watchedAddresses.has(token.address.toLowerCase()) ? (
+                  <StatusTag tone="success">Always counts</StatusTag>
+                ) : (
+                  // A wallet made before WETH/WBNB always counted. Adding tightens the limit, so no
+                  // second look is needed.
+                  <span className="mf-token">
+                    <StatusTag tone="warning">Not counted yet</StatusTag>
+                    <TxButton
+                      tx={tx}
+                      txKey={key}
+                      size="sm"
+                      appearance="primary"
+                      disabled={locked}
+                      aria-label={`Count ${name} toward the limit`}
+                      onClick={() =>
+                        start({
+                          key,
+                          action: { kind: 'watched-token', token: token.ticker, action: 'add' },
+                          success: `${name} now counts toward your limit.`,
+                        })
+                      }
+                    >
+                      Count it
+                    </TxButton>
+                  </span>
+                )}
+              </div>
+              <TxStatus tx={tx} txKey={key} />
+            </li>
+          )
+        })}
         {watched.map(token => {
           const key = `watched:${token.ticker ?? token.address}`
           const name = token.ticker?.toUpperCase()
@@ -73,6 +119,9 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
         })}
       </ul>
       <AddToken key={watched.length} {...props} />
+      <Text size="sm" muted className="mf-settings-note">
+        Tokens you add yourself on the Dashboard have no price in Mitfah, so they can't count toward the limit.
+      </Text>
     </Panel>
   )
 }
@@ -81,7 +130,9 @@ function AddToken({ wallet, tx, locked, start }: ControlPanelProps) {
   const tokens = useTokens(wallet.chain_id)
   const [ticker, setTicker] = useState<string | null>(null)
   const watched = new Set(wallet.spending.watched_tokens.map(t => t.address.toLowerCase()))
-  const addable = tokens.data?.filter(t => !watched.has(t.address.toLowerCase())) ?? []
+  // The always-counted token has its own row above, with its own button.
+  const addable = tokens.data?.filter(t => !t.always_counted && !watched.has(t.address.toLowerCase())) ?? []
+  const alwaysPending = tokens.data?.some(t => t.always_counted && !watched.has(t.address.toLowerCase())) ?? false
 
   if (tokens.isPending) return <Placeholder.Paragraph rows={1} active />
   if (tokens.isError) {
@@ -90,6 +141,8 @@ function AddToken({ wallet, tx, locked, start }: ControlPanelProps) {
     )
   }
   if (addable.length === 0) {
+    // While WETH/WBNB waits on its own "Count it" button, "everything counts" would be untrue.
+    if (alwaysPending) return null
     return (
       <Text size="sm" muted className="mf-settings-note">
         Every token Mitfah lists on this network already counts.

@@ -7,7 +7,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from db import DB_PATH
+from db import DB_PATH, acting_network
 from contract_errors import name_revert
 import asyncio
 import logging
@@ -31,6 +31,20 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
   move freely and are NOT metered. A transfer of a watched token or a native send is charged its
   full USD value; a swap is charged only its NET value change (value that left the wallet minus
   value that came back), so a fair swap — including an ETH-funded one — costs almost nothing.
+
+- **Tokens the user added themselves have no price and never count against the cap.**
+  `get_supported_tokens()` returns two lists: `listed` (tokens Mitfah lists, which have a price)
+  and `custom` (tokens the user added by address in the web app). Use a custom token's ticker
+  exactly like a listed one — balances, transfers and swaps all accept it. But Mitfah has NO price
+  for it: never state, estimate or imply a dollar value for one (`preflight_check` returns
+  `usd_value: null` for it, and `get_price` refuses it). How the cap treats them:
+  - sending or selling one costs nothing against the limit;
+  - buying one with the native asset or a counted token (USDC, USDT, WETH, WBNB, …) counts the FULL
+    amount paid toward the limit, because what comes back has no price.
+  Every quote that moves a custom token carries a sentence in `details` saying exactly this —
+  always pass it on to the user. If the user names a token that is in neither list, tell them they
+  can add it by its contract address in the web app (Dashboard → Balances → Add token); you cannot
+  add one yourself.
 
 - **Approvals are automatic — there is no approve tool.** The wallet's spending-limit module
   rejects any transaction that leaves an ERC20 allowance standing, so a standalone approval is
@@ -96,9 +110,9 @@ nothing has been sent.
 `confirm_transaction(quote_id)` is the ONLY tool that sends. The sequence is always:
 
 1. Call the transaction tool. You get a quote back.
-2. Tell the user, in your own message: what `action` says, what `total_usd` costs, and that
-   nothing has been sent yet. Use the quote's own `action` text — do not paraphrase the
-   recipient or the amount into something different from what it says.
+2. Tell the user, in your own message: what `action` says, the `network` it runs on, what
+   `total_usd` costs, and that nothing has been sent yet. Use the quote's own `action` text — do
+   not paraphrase the recipient or the amount into something different from what it says.
 3. STOP. End your turn there and wait for the user's reply.
 4. If they agree, call `confirm_transaction` with that `quote_id`. If they don't, or they change
    any detail, call `cancel_transaction(quote_id)` and start again from step 1 with the new
@@ -128,7 +142,8 @@ call covers the pause state, the session, the budget and the USD value. It retur
 transaction will count toward the spending limit) and `remaining_usd`. **The checks pass only if
 `is_paused` is False and `session_active` and `within_budget` are both True** — otherwise abort
 and tell the user which one failed. If they pass, show `usd_value` and `charged_usd` in your
-confirmation.
+confirmation — except that `usd_value` is null for a token the user added: say it has no price in
+Mitfah instead of showing a figure.
 
 - `token`/`amount` is what LEAVES the wallet: the token being sold for a swap, `"eth"` for a
   native send, an ETH-funded swap or a wrap.
@@ -299,7 +314,8 @@ invent an agent id: if the user names an agent you have no id for, ask, or check
 
 - **Validate the token before any on-chain action.** Before `get_erc20_balance`, `get_session_keys`,
   `transfer_erc20`, `transferFrom_erc20`, or `wrap_eth`, call `get_supported_tokens()` and
-  check the requested token is in the list. If not supported, tell the user and do not proceed.
+  check the requested token is in its `listed` or `custom` list. If it is in neither, tell the user
+  and do not proceed.
 - **Always confirm before any on-chain action.** Transfers, liquidity operations and registry
   writes are irreversible. Those tools now quote rather than send, so the explicit yes goes
   between the quote and `confirm_transaction` — see "Nothing sends until the user confirms it".
@@ -461,7 +477,7 @@ async def main():
       await close_checkpointer()
 
 
-def chat(user_id: int, chain_id: int, user_input: str) -> str:
+def chat(user_id: int, chain_id: int, user_input: str, network: str) -> str:
     """
     Runs one turn of the agent for a user on a chain.
 
@@ -473,23 +489,30 @@ def chat(user_id: int, chain_id: int, user_input: str) -> str:
 
     @param user_id     The application user ID, from the caller's own authentication -- never from
                        anything the user typed.
-    @param chain_id    The chain this conversation is about; scopes the history.
+    @param chain_id    The chain this conversation is about: picks the history.
     @param user_input  The user's message, passed through unmodified.
+    @param network     That chain's network name ("bsc-fork", "sepolia", ...): every tool of the
+                       turn acts on it (db.acting_network). Named by the caller, because only the
+                       caller knows whether this server runs forks, and because the user's SAVED
+                       network is just the chain they last deployed on.
     @return            The agent's reply as plain text, or an apology if the turn raised. The
                        apology never carries the exception: its text can hold RPC URLs (with API
                        keys) or raw calldata, so it goes to the log instead.
+    @raises ValueError  If `network` is not `chain_id` -- a caller bug, so it is not swallowed.
     """
-    try:
-      response = agent.invoke(
-          {"messages": [HumanMessage(content=user_input)]},
-          config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
-          context=AgentContext(user_id=user_id, turn_id=_next_turn_id()),
-      )
-      # The model can answer in content blocks rather than a string; callers want the text.
-      return _message_text(response["messages"][-1].content).strip()
-    except Exception:
-         logging.getLogger(__name__).exception("Agent turn failed (user %s, chain %s)", user_id, chain_id)
-         return "Sorry, something went wrong while handling that. Please try again."
+    # Entered outside the try, so a mismatched network raises instead of becoming the apology.
+    with acting_network(user_id, network, chain_id):
+      try:
+        response = agent.invoke(
+            {"messages": [HumanMessage(content=user_input)]},
+            config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
+            context=AgentContext(user_id=user_id, turn_id=_next_turn_id()),
+        )
+        # The model can answer in content blocks rather than a string; callers want the text.
+        return _message_text(response["messages"][-1].content).strip()
+      except Exception:
+           logging.getLogger(__name__).exception("Agent turn failed (user %s, chain %s)", user_id, chain_id)
+           return "Sorry, something went wrong while handling that. Please try again."
 
 
 def _message_text(content) -> str:

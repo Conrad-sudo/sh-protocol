@@ -14,7 +14,8 @@
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
-| `make py-test` | Both offline Python suites: `identity-test` + `auth-test` |
+| `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, and how the tools price and name them, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
+| `make py-test` | All three offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork` etc.; on Arbitrum it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |
@@ -22,12 +23,12 @@
 | `make install` | Install Forge dependencies |
 | `make update` | Update Forge dependencies |
 | `make anvil` | Start a local Anvil node |
-| `make mainnet-fork` | Start an Ethereum mainnet fork at the latest block |
-| `make sepolia-fork` | Start a Sepolia fork at the latest block |
-| `make bsc-fork` | Start a BSC fork at the latest block |
-| `make celo-fork` | Start a Celo fork at the latest block (no Solidity deployment path yet — see [docs/app.md](app.md)) |
-| `make arb-fork` | Start an Arbitrum One fork at the latest block (the app calls this network `arbitrum-fork`) |
-| `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` (the `API_BUNDLER` address) and on the `TELEGRAM_BUNDLER` address via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. A prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
+| `make mainnet-fork` | Start an Ethereum mainnet fork at the latest block, on port 8547, and fund both bundlers (see `make fund`) |
+| `make sepolia-fork` | Start a Sepolia fork at the latest block, on port 8545, and fund both bundlers |
+| `make bsc-fork` | Start a BSC fork at the latest block, on port 8546, and fund both bundlers |
+| `make celo-fork` | Start a Celo fork at the latest block, on port 8545, and fund both bundlers (no Solidity deployment path yet — see [docs/app.md](app.md)) |
+| `make arb-fork` | Start an Arbitrum One fork at the latest block, on port 8548, and fund both bundlers (the app calls this network `arbitrum-fork`) |
+| `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` (the `API_BUNDLER` address) and on the `TELEGRAM_BUNDLER` address via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. Every fork target runs it as soon as the fork starts, and it is a prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
 | `make vault` | Configure Vault and refresh `.env` credentials |
 | `make db` | Initialise SQLite database and run migrations |

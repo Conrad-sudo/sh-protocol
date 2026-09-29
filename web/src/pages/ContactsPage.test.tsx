@@ -111,7 +111,7 @@ describe('ContactsPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Your contacts (2)' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Contacts', level: 1 })).toBeInTheDocument()
-    expect(screen.getByText('Your assistant can only send money to people on this list.')).toBeInTheDocument()
+    expect(screen.getByText('Your assistant can only send money to accounts on this list.')).toBeInTheDocument()
     expect(rows()).toEqual(['alex', 'sam'])
     const sam = document.querySelector<HTMLElement>('[data-contact="sam"]')!
     expect(within(sam).getByText(SAM)).toBeInTheDocument()

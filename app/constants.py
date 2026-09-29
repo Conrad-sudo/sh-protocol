@@ -75,6 +75,24 @@ def get_native_wrapped_ticker(chain_id: int) -> str:
     return ticker
 
 
+def get_always_counted_ticker(chain_id: int) -> str | None:
+    """
+    The ERC-20 Mitfah always counts toward the spending limit on chain_id: the wrapped native token
+    (WETH, WBNB), so it is treated like the native asset it wraps -- which the wallet contract always
+    meters. New wallets are always deployed watching it, and the API won't build its removal.
+
+    This is app policy, not a contract rule: the owner could still call removeWatchedToken on the
+    wallet directly, and a wallet deployed before this rule may not watch it (the Controls page
+    offers to add it).
+
+    None on Celo, where "celo" is the native asset itself exposed as an ERC-20: watching it would
+    count every CELO movement twice.
+    """
+    if chain_id == CHAIN_ID_CELO:
+        return None
+    return NATIVE_WRAPPED_TICKER.get(chain_id)
+
+
 # Display name of the chain's native gas asset — the thing "eth" as a session/ticker
 # argument actually refers to everywhere in this codebase (ETH_SENTINEL, get_eth_balance,
 # send_eth, the swap_*_ETH tools, etc). Purely cosmetic: lets user-facing text say "BNB"
@@ -100,4 +118,21 @@ def get_native_asset_ticker(chain_id: int) -> str:
     if ticker is None:
         raise ValueError(f"No native-asset ticker configured for chain_id {chain_id}")
     return ticker
+
+
+# The chain's name as the web app shows it (viem's chain names, web/src/wallet/chains.ts), so a
+# quote names the same network the user picked on the page.
+CHAIN_DISPLAY_NAME = {
+    CHAIN_ID_MAINNET: "Ethereum",
+    CHAIN_ID_SEPOLIA: "Sepolia",
+    CHAIN_ID_ANVIL: "Anvil",
+    CHAIN_ID_BSC: "BNB Smart Chain",
+    CHAIN_ID_CELO: "Celo",
+    CHAIN_ID_ARBITRUM: "Arbitrum One",
+}
+
+
+def get_chain_display_name(chain_id: int) -> str:
+    """The chain's user-facing name (e.g. "BNB Smart Chain"), or "chain <id>" for an unlisted one."""
+    return CHAIN_DISPLAY_NAME.get(chain_id, f"chain {chain_id}")
 

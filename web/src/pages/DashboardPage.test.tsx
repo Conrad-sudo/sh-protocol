@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
+import { makeSession, makeWalletState, SEPOLIA, USDC } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 // Owner transactions poll with a 2 s gap; the tests don't wait.
@@ -27,13 +27,16 @@ interface ServerOptions {
   walletChains?: number[]
   /** Answers for GET /api/wallet/{chain_id}, in order; the last one repeats. */
   wallets?: Partial<Record<number, WalletAnswer[]>>
+  /** Answers for other API routes, keyed by "METHOD /path"; each gets the parsed request body. */
+  extra?: Record<string, (body: unknown) => Response>
 }
 
 /** A signed-in account whose wallets answer from `wallets`. Also answers the mock wallet's RPC. */
-function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = {}) {
+function stubServer({ walletChains = [SEPOLIA], wallets = {}, extra = {} }: ServerOptions = {}) {
   const walletCalls: number[] = []
   const sent: Record<string, string>[] = []
   const prepared: { path: string; body: unknown }[] = []
+  const requests: { route: string; body: unknown }[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
@@ -53,6 +56,12 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = 
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
       if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
+      const route = `${(init?.method ?? 'GET').toUpperCase()} ${url}`
+      if (extra[route]) {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined
+        requests.push({ route, body })
+        return Promise.resolve(extra[route](body))
+      }
       if (url.endsWith('/prepare')) {
         prepared.push({ path: url, body: JSON.parse(String(init?.body)) })
         return Promise.resolve(json(200, { tx: { to: '0x2222222222222222222222222222222222222222', data: '0x1234' } }))
@@ -71,7 +80,7 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {} }: ServerOptions = 
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { walletCalls, sent, prepared }
+  return { walletCalls, sent, prepared, requests }
 }
 
 function receipt() {
@@ -347,8 +356,122 @@ describe('DashboardPage', () => {
     await user.click(within(confirm).getByRole('button', { name: 'Withdraw' }))
     expect(await screen.findByText('Withdrew 10 USDC.')).toBeInTheDocument()
     expect(prepared).toEqual([
-      { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: 'usdc', amount: '10', to: other } },
+      // An ERC-20 goes by its address, so a token the user added withdraws the same way.
+      { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: USDC, amount: '10', to: other } },
     ])
+  })
+
+  it('adds a token by its address after showing what it is, and marks it as never limited', async () => {
+    const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+    const FAKE_USDC = '0x9999999999999999999999999999999999999999'
+    const NOT_A_TOKEN = '0x8888888888888888888888888888888888888888'
+    const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
+    const checkAgain =
+      "Mitfah couldn't read a symbol and decimals from this contract, so this doesn't look like an ERC-20 token on Sepolia. Check the token address again, and that it's the token's address on Sepolia."
+
+    const withPepe = makeWalletState({
+      balances: [
+        ...makeWalletState().balances,
+        { ticker: 'pepe', address: PEPE, native: false, custom: true, name: 'Pepe', decimals: 18, raw: pepe.balance_raw, amount: 5 },
+      ],
+    })
+    const { requests } = stubServer({
+      wallets: { [SEPOLIA]: [makeWalletState(), withPepe] },
+      extra: {
+        'POST /api/tokens/custom/lookup': body => {
+          const { address } = body as { address: string }
+          if (address === NOT_A_TOKEN) return json(400, { detail: checkAgain })
+          if (address === FAKE_USDC) {
+            return json(400, { detail: 'This token calls itself USDC, the same as a token Mitfah already lists on Sepolia.' })
+          }
+          return json(200, pepe)
+        },
+        'POST /api/tokens/custom': () => json(201, pepe),
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add token' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a token' })
+    const field = within(dialog).getByLabelText('Token contract address')
+    const next = within(dialog).getByRole('button', { name: 'Continue' })
+    expect(next).toBeDisabled()
+
+    await user.type(field, '0x1234')
+    expect(within(dialog).getByText('An address is 0x and 40 more characters. This one has 4.')).toBeInTheDocument()
+    // An address that doesn't answer with a symbol and decimals: a warning to check it again.
+    await user.clear(field)
+    await user.type(field, NOT_A_TOKEN)
+    await user.click(next)
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Check the token address again')
+    expect(screen.queryByRole('dialog', { name: /^Add .+\?$/ })).toBeNull()
+
+    await user.clear(field)
+    // Editing the address clears the warning.
+    expect(within(dialog).queryByRole('alert')).toBeNull()
+    await user.type(field, FAKE_USDC)
+    await user.click(next)
+    // The server's reason, shown as a warning; nothing was added.
+    expect(await within(dialog).findByText(/calls itself USDC/)).toBeInTheDocument()
+
+    await user.clear(field)
+    await user.type(field, PEPE.toLowerCase())
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    const preview = await screen.findByRole('dialog', { name: 'Add PEPE?' })
+    // What makes it an ERC-20, shown before anything is added.
+    expect(within(preview).getByText('ERC-20 token')).toBeInTheDocument()
+    expect(within(preview).getByText('Symbol').nextElementSibling).toHaveTextContent('PEPE')
+    expect(within(preview).getByText('Decimals').nextElementSibling).toHaveTextContent('18')
+    expect(preview).toHaveTextContent('Pepe')
+    expect(preview).toHaveTextContent('5 PEPE')
+    expect(preview).toHaveTextContent("Your spending limit can't cover PEPE.")
+    expect(preview).toHaveTextContent('Buying it counts the full amount you pay.')
+    await user.click(within(preview).getByRole('button', { name: 'Add token' }))
+
+    expect(await screen.findByText('PEPE added. It now shows in your balances.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const row = (await screen.findByRole('rowheader', { name: /^PEPE/ })).closest('tr')!
+    expect(row).toHaveTextContent('Added by you')
+    expect(row).toHaveTextContent('Not limited')
+    expect(row).toHaveTextContent('5')
+    expect(screen.getByText('Tokens you added have no price in Mitfah, so they never count toward your limit.')).toBeInTheDocument()
+    // Looked up by its checksummed address; added once.
+    expect(requests).toEqual([
+      { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: NOT_A_TOKEN } },
+      { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: FAKE_USDC } },
+      { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: PEPE } },
+      { route: 'POST /api/tokens/custom', body: { chain_id: SEPOLIA, address: PEPE } },
+    ])
+  })
+
+  it('removes a token the user added, after saying the tokens stay in the wallet', async () => {
+    const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+    const withPepe = makeWalletState({
+      balances: [
+        ...makeWalletState().balances,
+        { ticker: 'pepe', address: PEPE, native: false, custom: true, name: 'Pepe', decimals: 18, raw: '0', amount: 0 },
+      ],
+    })
+    const { requests } = stubServer({
+      wallets: { [SEPOLIA]: [withPepe, makeWalletState()] },
+      extra: { [`DELETE /api/tokens/custom/${SEPOLIA}/${PEPE}`]: () => json(200, { status: 'deleted' }) },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    // Listed tokens can't be removed from the list; only the user's own can.
+    expect(screen.getAllByRole('button', { name: /from your list$/ })).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Remove PEPE from your list' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Remove PEPE?' })
+    expect(confirm).toHaveTextContent('Any PEPE in the wallet stays there')
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
+
+    expect(await screen.findByText('PEPE removed from your list.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('rowheader', { name: /^PEPE/ })).toBeNull())
+    expect(requests).toEqual([{ route: `DELETE /api/tokens/custom/${SEPOLIA}/${PEPE}`, body: undefined }])
   })
 
   it('pauses from the dashboard', async () => {

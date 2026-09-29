@@ -3,12 +3,14 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from web3 import Web3
 from constants import (
     CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
     CHAIN_ID_SEPOLIA,
 )
-from seed_data import SEEDS
+from seed_data import CHAINS, SEEDS
 
 CHAIN_IDs=[
     CHAIN_ID_ANVIL, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_BSC, CHAIN_ID_CELO,
@@ -306,6 +308,24 @@ def init_db():
             name    TEXT NOT NULL,
             address TEXT NOT NULL,
             PRIMARY KEY (user_id, name)
+        );
+
+        -- Tokens a user added by address in the web app, MetaMask-style, per chain. Unlike the
+        -- listed <network>_tokens tables these have no price feed, so they can never count toward
+        -- the spending cap; the list only decides what is shown and what the assistant can name.
+        -- Keyed per chain, not per wallet, so it survives a redeploy. `ticker` is the token's own
+        -- symbol(), lowercased and validated when it was added (custom_tokens.py) -- unique per
+        -- user and chain so a name always resolves to one address.
+        CREATE TABLE IF NOT EXISTS custom_tokens (
+            user_id  INTEGER NOT NULL,
+            chain_id INTEGER NOT NULL,
+            address  TEXT NOT NULL,
+            ticker   TEXT NOT NULL,
+            name     TEXT,
+            decimals INTEGER NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, chain_id, address),
+            UNIQUE (user_id, chain_id, ticker)
         );
 
         CREATE TABLE IF NOT EXISTS chains (
@@ -805,6 +825,120 @@ def get_supported_tokens_by_chain_id(chain_id: int) -> list[dict]:
     return [{"ticker": row["ticker"], "address": row["address"]} for row in rows]
 
 
+# ── Custom tokens ─────────────────────────────────────────────────────────────
+
+
+def save_custom_token(user_id: int, chain_id: int, address: str, ticker: str, name: str | None, decimals: int):
+    """
+    Adds a token to the user's own list for `chain_id`.
+
+    Stores what it is given: every check (a real ERC-20, a safe symbol, no clash with a listed
+    ticker, the per-chain cap) lives in custom_tokens.inspect_custom_token, which the API runs first.
+
+    @param address   The token contract, checksummed.
+    @param ticker    The token's symbol, lowercased.
+    @raises sqlite3.IntegrityError  If this user already has that address or ticker on the chain.
+    """
+    db = get_db()
+    db.execute(
+        "INSERT INTO custom_tokens (user_id, chain_id, address, ticker, name, decimals, added_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, chain_id, address, ticker.lower(), name, decimals, int(time.time())),
+    )
+    db.commit()
+
+
+def delete_custom_token(user_id: int, chain_id: int, address: str) -> bool:
+    """
+    Removes a token from the user's list. The tokens themselves stay in the wallet.
+
+    @param address  The token contract, checksummed.
+    @return         True if a row was removed, False if there was none.
+    """
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM custom_tokens WHERE user_id = ? AND chain_id = ? AND address = ?",
+        (user_id, chain_id, address),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def get_custom_tokens(user_id: int, chain_id: int) -> list[dict]:
+    """
+    The user's own tokens on `chain_id`, sorted by ticker.
+
+    @return  [{"ticker", "address", "name", "decimals"}, ...], empty if none were added.
+    """
+    rows = (
+        get_db()
+        .execute(
+            "SELECT ticker, address, name, decimals FROM custom_tokens "
+            "WHERE user_id = ? AND chain_id = ? ORDER BY ticker ASC",
+            (user_id, chain_id),
+        )
+        .fetchall()
+    )
+    return [dict(row) for row in rows]
+
+
+def get_custom_token(user_id: int, chain_id: int, ref: str) -> dict | None:
+    """
+    One of the user's own tokens on `chain_id`, looked up by ticker or by address.
+
+    @param ref  A ticker (case-insensitive) or a 0x address (any case).
+    @return     {"ticker", "address", "name", "decimals"}, or None if the user never added it.
+    """
+    if _looks_like_address(ref):
+        column, value = "address", Web3.to_checksum_address(ref)
+    else:
+        column, value = "ticker", ref.lower()
+    row = (
+        get_db()
+        .execute(
+            f"SELECT ticker, address, name, decimals FROM custom_tokens "
+            f"WHERE user_id = ? AND chain_id = ? AND {column} = ?",
+            (user_id, chain_id, value),
+        )
+        .fetchone()
+    )
+    return dict(row) if row else None
+
+
+def _looks_like_address(ref: str) -> bool:
+    return ref.startswith(("0x", "0X")) and len(ref) == 42
+
+
+def resolve_token(user_id: int, chain_id: int, ref: str) -> str:
+    """
+    A token reference -> its checksummed address, for this user on `chain_id`.
+
+    The one lookup every agent tool, the withdraw endpoint and the balance read share, so a token
+    the user added in the web app works everywhere a listed one does. Read from the database on
+    every call rather than from a snapshot: the Telegram bot is a separate process, and a cached
+    map there would miss a token added (or removed and re-added under the same name) on the web.
+
+    Listed tokens win: a custom token can never take a listed ticker (custom_tokens.py refuses it),
+    so the order only matters for a database edited by hand.
+
+    @param ref  A listed ticker, a ticker the user added, or a raw 0x address (passed through
+                checksummed -- LP/pair tokens and the like).
+    @raises ValueError  If the chain is unsupported, or the ticker is neither listed nor added.
+    """
+    if _looks_like_address(ref):
+        return Web3.to_checksum_address(ref)
+    try:
+        return get_token_address(chain_id, ref)
+    except ValueError:
+        custom = get_custom_token(user_id, chain_id, ref)
+        if custom is None:
+            raise ValueError(
+                f"No token '{ref}' on chain {chain_id}: it is neither a token Mitfah lists nor one "
+                "this user added."
+            )
+        return custom["address"]
+
+
 # ── Contacts ──────────────────────────────────────────────────────────────────
 
 
@@ -895,7 +1029,49 @@ def save_user_network(user_id: int, chain_name: str):
     print(f"User network saved: {chain_name}")
 
 
+# The network one agent turn acts on, as (user_id, chain_name), while acting_network() holds it.
+#
+# A user has a wallet on several chains but user_network holds ONE name -- whichever chain they last
+# deployed on. Every tool finds its chain through get_user_network, so before this the web chat
+# answered on that chain whatever network the page was showing: asked "how much BNB do I have?" on
+# the BNB Smart Chain page, the agent read the Arbitrum wallet and said the network's coin was ETH,
+# and a payment asked for there would have been quoted and sent on Arbitrum.
+#
+# A ContextVar rather than a user_network write: writing would repoint the Telegram bot too, and two
+# tabs chatting on different chains would flip each other's network mid-turn. The value is set by
+# the server around one turn and never by the model. LangGraph runs tools in threads that copy the
+# caller's context, so every tool of the turn sees it (test_auth checks this through a real graph).
+_acting_network: ContextVar[tuple[int, str] | None] = ContextVar("acting_network", default=None)
+
+
+@contextmanager
+def acting_network(user_id: int, chain_name: str, chain_id: int):
+    """
+    Makes `chain_name` the network get_user_network answers for `user_id` inside the block.
+
+    @param chain_id  The chain the caller believes `chain_name` is, checked against the static
+                     chains list so a mismatched pair -- history on one chain, tools on another,
+                     the very bug this exists to stop -- fails loudly instead.
+    @raises ValueError  If `chain_name` is not a known network for `chain_id`.
+    """
+    if CHAINS.get(chain_name) != chain_id:
+        raise ValueError(f"Network '{chain_name}' is not chain {chain_id}")
+    token = _acting_network.set((user_id, chain_name))
+    try:
+        yield
+    finally:
+        _acting_network.reset(token)
+
+
 def get_user_network(user_id: int):
+    """
+    The network the user's requests act on: the one the current agent turn was started for (see
+    acting_network), else the one saved at their last deploy -- which is what the Telegram bot and
+    the CLI harness, neither of which names a network per message, keep using.
+    """
+    acting = _acting_network.get()
+    if acting is not None and acting[0] == user_id:
+        return acting[1]
 
     row = (
         get_db()

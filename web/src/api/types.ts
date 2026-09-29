@@ -31,6 +31,11 @@ export interface TelegramLink {
 export interface Token {
   ticker: string
   address: string
+  /**
+   * The wrapped native token (WETH, WBNB): it always counts toward the limit, like the native asset
+   * it wraps. The API adds it to every new wallet and won't remove it.
+   */
+  always_counted?: boolean
 }
 
 /**
@@ -87,6 +92,8 @@ export interface Chain {
   native_ticker: string | null
   /** True when this server points the chain at a local fork. */
   fork: boolean
+  /** That fork's local node, for the user's wallet (each fork has its own port); null on a live chain. */
+  rpc_url: string | null
   /** The exchange router every wallet here is deployed trusting, or null where there is none. */
   router: string | null
 }
@@ -97,6 +104,13 @@ export interface TokenBalance {
   /** null for the native asset. */
   address: string | null
   native: boolean
+  /**
+   * True for a token the user added by address. It has no price in Mitfah, so it never counts
+   * toward the spending limit. Absent (false) for the native asset and listed tokens.
+   */
+  custom?: boolean
+  /** A custom token's own name(), when it has a readable one. */
+  name?: string | null
   decimals: number | null
   /** Integer string in the token's smallest unit. Display from this, never from `amount`. */
   raw: string | null
@@ -183,6 +197,24 @@ export type OwnerTxConfirmResult =
 export type SessionTxConfirmResult =
   | { status: 'pending'; tx_hash: string }
   | { status: 'granted' | 'revoked' | 'unrecognized_key'; tx_hash: string }
+
+/**
+ * A token as the server read it off the chain: POST /api/tokens/custom/lookup (a preview, nothing
+ * saved) and POST /api/tokens/custom (saved).
+ */
+export interface CustomToken {
+  chain_id: number
+  /** Checksummed. */
+  address: string
+  /** The token's own symbol, lowercased: the name the assistant uses. */
+  ticker: string
+  /** symbol() as the contract answered it. With `decimals`, what shows it is an ERC-20. */
+  symbol: string
+  name: string | null
+  decimals: number
+  /** The wallet's balance, as an integer string in the token's smallest unit. */
+  balance_raw: string
+}
 
 /**
  * A saved payee, from GET /api/contacts. The assistant can only send money to these. They belong to

@@ -19,6 +19,7 @@ app/
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
+├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
@@ -31,6 +32,7 @@ app/
     ├── checks.py          ← Shared check()/finish() helpers; importing it puts app/ on sys.path
     ├── test_identity.py   ← No tool lets the model choose the account (make identity-test)
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
+    ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
@@ -83,6 +85,8 @@ ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 
 `NATIVE_WRAPPED_TICKER` maps each chain ID to its wrapped-native ticker — `"weth"` on Ethereum/Sepolia/Anvil/Arbitrum (Arbitrum's gas asset is ETH too), `"wbnb"` on BSC, `"celo"` on Celo. `get_native_wrapped_ticker(chain_id)` and `get_native_asset_ticker(chain_id)` resolve these, raising `ValueError` for unconfigured chains.
 
+**The wrapped native token always counts.** `get_always_counted_ticker(chain_id)` names it (WETH, WBNB; `None` on Celo, where `celo` *is* the native asset and watching it would count every movement twice). Mitfah treats it like the native asset it wraps, which the contract always meters: `GET /api/tokens` flags it `always_counted: true` (the web picker shows it ticked and locked), `POST /api/deploy` adds it to `watched_tokens` whatever the request picked, and `POST /api/wallet/watched-tokens/prepare` refuses to remove it (400). This is app policy, not a contract rule — the owner can still call `removeWatchedToken` on the wallet directly, and a wallet deployed before the rule may not watch it (Controls offers a one-click "Count it").
+
 > The old per-feed `HEARTBEAT_*` constants were removed — heartbeats are a Solidity-side (`Constants.s.sol` / `HelperConfig`) concern; the Python app no longer registers feeds.
 
 ---
@@ -97,7 +101,7 @@ The data persistence layer. All SQLite reads and writes go through this module. 
 
 > Before 2026-09-10 the key was `chat_id` and *was* the Telegram chat id. `db._migrate_chat_id_to_user_id` mints a `users` row per legacy chat id, remaps every table, and rewrites the LangGraph `thread_id`s. It runs from `init_db`, after `_migrate_add_chain_id` — that order matters, since the older migration still reads `chat_id` columns.
 
-**One wallet per chain, per user.** The protocol is deployed on several chains and a user runs a `SessionHandler` on each, reached by a Telegram bot per chain. So `session_handlers` and `session_keys` are both keyed by `(user_id, chain_id, …)`, and `user_network` holds which chain that user is currently pointed at. Deploying on one chain never disturbs another. Two consequences worth knowing:
+**One wallet per chain, per user.** The protocol is deployed on several chains and a user runs a `SessionHandler` on each, reached by a Telegram bot per chain. So `session_handlers` and `session_keys` are both keyed by `(user_id, chain_id, …)`, and `user_network` holds the chain the user last deployed on — the chain the Telegram bot and the CLI harness act on, since neither names a network per message. A web chat turn does name one (the network picked on the page), and `db.acting_network` makes every tool of that turn act on it instead; before 2026-09-28 the web chat followed `user_network` too, so on the BNB Smart Chain page the agent answered from whichever wallet was deployed last. Deploying on one chain never disturbs another. Two consequences worth knowing:
 
 - **Every contract cache in `contracts.py` is keyed `(user_id, chain_id)`.** Keyed by `user_id` alone, switching a user's network would hand back the previous chain's wallet, EntryPoint and module bound to the new chain's RPC.
 - **Each chain gets its own session key**, even when a user's wallet has the *same address* on two chains — which is possible, since an identical protocol deploy can land `SHFactory` at the same address on each and the CREATE2 salt is the same too. Without `chain_id` in the key those wallets would share one row and one key, so a single key compromise would reach every chain.
@@ -138,6 +142,9 @@ CREATE TABLE pending_session_keys (
 );
 
 CREATE TABLE contacts (user_id INTEGER NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, PRIMARY KEY (user_id, name));
+CREATE TABLE custom_tokens (user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL, address TEXT NOT NULL,
+    ticker TEXT NOT NULL, name TEXT, decimals INTEGER NOT NULL, added_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, chain_id, address), UNIQUE (user_id, chain_id, ticker));  -- tokens a user added by address
 CREATE TABLE session_handlers (user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL, address TEXT NOT NULL, PRIMARY KEY (user_id, chain_id));
 CREATE TABLE factory (chain_id INTEGER PRIMARY KEY, address TEXT NOT NULL);  -- SHFactory address, from the Forge broadcast
 CREATE TABLE chains (name TEXT NOT NULL, chain_id INTEGER NOT NULL, PRIMARY KEY (name, chain_id));
@@ -155,6 +162,8 @@ CREATE TABLE arbitrum_tokens (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
 > **Removed with the design overhaul:** the `sessions`, `erc20_selectors`, `uniswapv2_selectors`, and `reputation_registry_selectors` tables. `init_db()` issues `DROP TABLE IF EXISTS` on all four so `make db` migrates an existing `wallet.db`. Per-target session metadata and on-chain selector allowlists no longer exist — there's one global USD cap and one bare session key, both read on-chain.
 
 **Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum token addresses are static (`seed_data.py`). The Arbitrum set is exactly the tokens `HelperConfig.getArbConfig` prices, and every address matches the corresponding `ARB_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of `anvil_tokens`.
+
+**Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through. It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bot's process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
 
 **Initialisation:** run `make db` once to create tables and seed. Re-running is safe (`INSERT OR REPLACE`, plus the drops above). The `sepolia` RPC row comes from `SEPOLIA_RPC_URL` in `.env`, keeping API-keyed URLs out of source control.
 
@@ -337,6 +346,28 @@ an unknown quote and the user asks again.
 
 ---
 
+## `custom_tokens.py`
+
+The checks run on a token a user wants to add, all read from the chain (nothing the browser says about the token is trusted):
+
+```python
+def inspect_custom_token(w3, user_id, chain_id, address, wallet_address) -> dict  # or raises CustomTokenError
+```
+
+The token is read through `contracts.load_ierc20` — the same ERC-20 binding the agent's tools use — so the API runs the checks inside `db.acting_network` for the request's chain. It counts as an ERC-20 only if **both `symbol()` and `decimals()` answer**; an address with no code, or a contract that can't answer both, is refused with a message asking the user to **check the token address again**. A token is accepted only if the address is valid, not zero, not the wallet itself and has code; `decimals()` answers 0–36 and `balanceOf` works; `symbol()` is readable (string, or old `bytes32` via a raw-call fallback) and is 1–12 characters of `A–Z a–z 0–9 . _ - $`; it is not a listed token, its symbol is not a listed ticker, `eth` or the native/wrapped ticker, and the user has not already added it (or another token under the same symbol). At most `MAX_CUSTOM_TOKENS_PER_CHAIN` (25) per user per chain. The symbol rule is strict because the symbol reaches the agent: langchain-erc20 reads `symbol()` on chain for every quote's `action` line, so a token calling itself `USDC`, or carrying a sentence, is refused rather than relabelled. The name is kept for the web app only (control characters stripped, 64 characters) and never handed to the model.
+
+Routes (all need a signed-in account and a wallet on the chain; none needs a signature — nothing changes on chain):
+
+| Route | |
+|---|---|
+| `POST /api/tokens/custom/lookup` `{chain_id, address}` | Preview: `{address, ticker, symbol, name, decimals, balance_raw}` — the symbol and decimals are what show it's an ERC-20 — or 400 with the reason it can't be added. Saves nothing |
+| `POST /api/tokens/custom` `{chain_id, address}` | Runs the checks again, then saves. 201; 409 if a parallel request just added it |
+| `DELETE /api/tokens/custom/{chain_id}/{address}` | Takes it off the list (404 if it isn't on it). The tokens stay in the wallet |
+
+`GET /api/wallet/{chain_id}` lists added tokens in `balances` with `custom: true` and their `name` (one `balanceOf` each; decimals are stored). `POST /api/wallet/withdraw/prepare` accepts a token **address** as well as a ticker, so the owner can recover any token — added or not.
+
+---
+
 ## `deploy_wallet.py`
 
 Per-user wallet deployment and single session-key registration. It does **not** deploy the shared infrastructure (the Forge script does, via `make deploy` + `make db`).
@@ -391,13 +422,15 @@ The wrappers exist — rather than exposing the package tools directly — becau
 | `get_session_keys(user_id, token)` | Returns `(key_address, vault_ciphertext)` for the wallet's session key |
 | `check_session_validity(user_id, token)` | Whether the app's key is the wallet's `currentSession` **and** has not expired (`isSessionActive`) |
 | `check_remaining_budget(user_id)` | Remaining USD budget this window (no token arg — the cap is global) |
-| `check_spending_within_budget(user_id, token, amount)` | Prices `amount` via the oracle and compares to remaining budget |
-| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, session_expires_in_secs, expiring_imminently, within_budget, usd_value, charged_usd, remaining_usd`; the agent proceeds only if not paused, session active and within budget. `session_active` is reported false once under `SESSION_EXPIRY_MARGIN_SECS` (60s) remain, so a transaction cannot be quoted, confirmed and then refused with `AA22` while in flight |
-| `get_price(user_id, token)` / `get_usd_value(user_id, token, amount)` | Unit price / USD value via `SHOracle.getPrice` |
+| `check_spending_within_budget(user_id, token, amount)` | Prices `amount` via the oracle and compares to remaining budget. A token the user added is always within budget (it can't count) and is never priced |
+| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, session_expires_in_secs, expiring_imminently, within_budget, usd_value, charged_usd, remaining_usd` (`usd_value` is `null` for a token the user added: it has no price); the agent proceeds only if not paused, session active and within budget. `session_active` is reported false once under `SESSION_EXPIRY_MARGIN_SECS` (60s) remain, so a transaction cannot be quoted, confirmed and then refused with `AA22` while in flight |
+| `get_price(user_id, token)` / `get_usd_value(user_id, token, amount)` | Unit price / USD value via `SHOracle.getPrice`. Refuse a token the user added by name ("no price") rather than letting the oracle revert |
 
 ### Read / quote / sufficiency tools
 
-`get_eth_balance`, `get_erc20_balance`, `get_contact_erc20_balance`, `get_erc20_allowance` (≈always 0 by design), `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance`, `is_derived_input_sufficient`, `is_exact_input_sufficient`, `is_liquidity_sufficient`, `is_liquidity_removal_sufficient`, plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens`, `get_native_asset`.
+`get_eth_balance`, `get_erc20_balance`, `get_contact_erc20_balance`, `get_erc20_allowance` (≈always 0 by design), `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance`, `is_derived_input_sufficient`, `is_exact_input_sufficient`, `is_liquidity_sufficient`, `is_liquidity_removal_sufficient`, plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens` (returns `{"listed": [...], "custom": [...]}` — the second list is the tokens the user added), `get_native_asset`.
+
+Every token argument accepts a listed ticker, a ticker the user added, or a `0x` address; `_token_address` resolves it through `db.resolve_token` and the packages are always handed an address. A quote that moves a token Mitfah doesn't list carries a `details` sentence from `_limit_note` saying how the cap treats it: sending or selling one costs nothing; buying one with the native asset or a watched token counts the **full** amount paid, because what comes back has no price.
 
 > **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
 
@@ -555,8 +588,9 @@ Two things it does that the bot cannot:
   than three days are left (`session.needs_renewal`), and say so once the key has run out.
 
 Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
-never write to it. The chat page is a front end over `chat(user_id, chain_id, …)` — the same agent,
-the same history, shared with Telegram through the checkpointer's `thread_id`.
+never write to it. The chat page is a front end over `chat(user_id, chain_id, …, network)` — the same agent,
+the same history, shared with Telegram through the checkpointer's `thread_id`. The turn acts on
+the page's network, and every quote names the network it would run on (`network`).
 
 Setup, scripts, the production settings and the front end's own layout are in
 [web/README.md](../web/README.md).

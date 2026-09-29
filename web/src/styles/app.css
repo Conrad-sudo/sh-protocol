@@ -22,9 +22,8 @@
 
 .mf-logo-word {
   font-family: var(--mf-font-heading);
-  font-stretch: var(--mf-wide);
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   color: var(--mf-navy);
 }
 
@@ -116,7 +115,6 @@
 .mf-page-title {
   margin: 0 0 6px;
   font-size: 30px;
-  font-weight: 700;
   line-height: 1.1;
 }
 
@@ -581,7 +579,6 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
 .mf-auth-title {
   margin: 0 0 6px;
   font-size: 28px;
-  font-weight: 700;
 }
 
 .mf-auth-form {
@@ -634,12 +631,13 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
 }
 
 .mf-hero h1 {
-  max-width: 18ch;
+  max-width: 20ch;
   margin: 0 auto 20px;
-  font-size: clamp(34px, 5.2vw, 60px);
-  font-weight: 700;
-  line-height: 1.03;
-  letter-spacing: -0.03em;
+  font-size: clamp(30px, 5.4vw, 62px);
+  font-weight: 500;
+  line-height: 1.06;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 }
 
 .mf-hero-lede {
@@ -668,7 +666,7 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
 .mf-landing-section h2 {
   margin: 0 0 24px;
   font-size: clamp(26px, 3.4vw, 36px);
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1.1;
 }
 
@@ -1000,8 +998,9 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   border-radius: 50%;
   background: var(--rs-bg-card);
   color: var(--mf-green);
-  font-stretch: var(--mf-wide);
-  font-weight: 700;
+  font-family: var(--mf-font-heading);
+  font-size: 18px;
+  font-weight: 600;
   box-shadow: 0 0 0 5px var(--mf-green-glow);
 }
 
@@ -1526,6 +1525,7 @@ main p a {
 .mf-step-title {
   margin: 0 0 8px;
   font-size: 20px;
+  font-weight: 600;
 }
 
 .mf-step-action {
@@ -1601,9 +1601,11 @@ main p a {
   background: var(--rs-bg-card);
 }
 
+/* A plate's title. At this size Bodoni needs the extra weight to sit above the text face's labels. */
 .mf-card h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
+  font-weight: 600;
 }
 
 .mf-wallet-header {
@@ -1672,9 +1674,9 @@ main p a {
 
 .mf-facts dd {
   margin: 0;
-  font-size: 18px;
-  font-stretch: var(--mf-wide);
-  font-weight: 650;
+  font-family: var(--mf-font-heading);
+  font-size: 19px;
+  font-weight: 560;
 }
 
 .mf-table {
@@ -1716,6 +1718,47 @@ main p a {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
+}
+
+/* "Remove" beside a token the user added: a quiet link, not a button that competes with the balance. */
+.mf-token-remove {
+  padding: 0;
+  font-weight: 400;
+}
+
+/* A card title with an action beside it (Balances → Add token). The panel header already spaces it. */
+.mf-card-head {
+  margin-bottom: 0;
+}
+
+/* "This address is an ERC-20 token", above what the chain said about it. */
+.mf-token-found {
+  margin-bottom: 12px;
+}
+
+/* What the chain says a token is, before it is added: labels in one column, values in the other. */
+.mf-token-preview {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0 0 12px;
+}
+
+.mf-token-preview dt {
+  color: var(--rs-text-secondary);
+  font-size: 13px;
+}
+
+.mf-token-preview dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mf-token-preview .mf-token-contract {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
 }
 
 /* Fund drawer */
@@ -1927,6 +1970,20 @@ main p a {
   min-height: 32px;
 }
 
+/* The onboarding token picker. RSuite's inline CheckboxGroup is a flex row that never wraps, so a
+   network with twenty tokens ran off the edge and the overflow was clipped. Equal columns wrap and
+   line the tickers up: three on a phone, five at the step's full width. */
+.mf-token-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 4px 12px;
+}
+
+.mf-token-grid > .rs-checkbox {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* ── Contacts ───────────────────────────────────────────────────────────── */
 
 .mf-section-head {
@@ -1940,7 +1997,8 @@ main p a {
 
 .mf-section-head h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
+  font-weight: 600;
 }
 
 /* Focused only by script, after the row that had focus is removed. */
@@ -2116,7 +2174,10 @@ main p a {
 
 .mf-md :is(h1, h2, h3, h4, h5, h6) {
   margin: 0.8em 0 0.4em;
+  font-family: inherit;
   font-size: 1.05em;
+  font-weight: 650;
+  letter-spacing: normal;
 }
 
 .mf-md blockquote {
@@ -2246,7 +2307,8 @@ main p a {
 
 .mf-chat-start-title {
   margin: 0 0 4px;
-  font-size: 18px;
+  font-size: 20px;
+  font-weight: 600;
 }
 
 .mf-prompts {
@@ -2350,7 +2412,8 @@ main p a {
 
 .mf-budget-left strong {
   font-family: var(--mf-font-heading);
-  font-size: 26px;
+  font-size: 27px;
+  font-weight: 560;
 }
 
 .mf-budget-unlimited {
@@ -2469,10 +2532,10 @@ main p a {
 }
 
 .mf-dial-amount {
-  font-size: clamp(17px, 11.5cqi, 36px);
-  font-stretch: var(--mf-wide);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-family: var(--mf-font-heading);
+  font-size: clamp(18px, 12.5cqi, 40px);
+  font-weight: 560;
+  letter-spacing: -0.005em;
   color: var(--rs-text-heading);
 }
 

@@ -452,6 +452,32 @@ def test_router_removal_is_refused():
     check("the refusal says why", "remove liquidity" in r.json().get("detail", ""), r.text[:160])
 
 
+def test_wrapped_native_always_counts():
+    print("\n[7c] WETH/WBNB always count: flagged in the token list, never removable through the app")
+    db.get_db().execute(
+        "INSERT OR REPLACE INTO sepolia_tokens (ticker, address) VALUES (?, ?), (?, ?)",
+        ("weth", "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "usdc", "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
+    )
+    db.get_db().commit()
+    c = make_client()
+    tokens = {t["ticker"]: t["always_counted"] for t in c.get("/api/tokens?chain_id=11155111").json()["tokens"]}
+    check("WETH is flagged as always counted", tokens.get("weth") is True, str(tokens))
+    check("other tokens are not", tokens.get("usdc") is False, str(tokens))
+
+    headers = new_signed_in(c, "wrapped@example.com")
+    acct = Account.create()
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111), nonce)
+    # Upper case on purpose: the ticker comparison must not depend on how it is written.
+    r = c.post(
+        "/api/wallet/watched-tokens/prepare",
+        headers=headers,
+        json={"chain_id": 11155111, "token": "WETH", "action": "remove"},
+    )
+    check("removing WETH -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("the refusal says why", "always counts" in r.json().get("detail", ""), r.text[:160])
+
+
 def test_wallet_state_read_is_guarded():
     """
     GET /api/wallet/{chain_id} needs a token, and only ever reads the CALLER's wallet.
@@ -693,6 +719,85 @@ def test_chat_turn_returns_text_and_hides_failures():
         smart_wallet_agent.agent = original
 
 
+def test_chat_acts_on_the_pages_network():
+    """
+    A chat turn acts on the network the page is on, not the user's saved one -- which is only the
+    chain they last deployed on. Asked "how much BNB do I have?" on the BNB Smart Chain page, the
+    agent used to read the Arbitrum wallet.
+
+    Driven through a real LangGraph agent with a scripted model, because the thing to prove is that
+    the TOOLS see the turn's network: LangGraph runs a message's tool calls in worker threads.
+    """
+    print("\n[10d] a chat turn acts on the page's network, not the saved one")
+    from langchain.agents import create_agent
+    from langchain.tools import ToolRuntime, tool
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    import smart_wallet_agent
+    from agent_context import AgentContext
+
+    seen = []
+
+    @tool
+    def which_network(runtime: ToolRuntime[AgentContext]) -> str:
+        """Reports the network this tool acts on."""
+        seen.append(db.get_user_network(runtime.context.user_id))
+        return seen[-1]
+
+    class ScriptedModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    # Two calls in one message, so LangGraph runs them in parallel threads.
+    calls = [{"name": "which_network", "args": {}, "id": f"call-{i}", "type": "tool_call"} for i in (1, 2)]
+    model = ScriptedModel(messages=iter([AIMessage(content="", tool_calls=calls), AIMessage(content="done")]))
+
+    original = smart_wallet_agent.agent
+    smart_wallet_agent.agent = create_agent(model, tools=[which_network], context_schema=AgentContext)
+    try:
+        c = make_client()
+        body = c.post("/api/auth/signup", json={"email": "network@example.com", "password": "hunter2hunter2"}).json()
+        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        db.save_user_network(body["user_id"], "arbitrum-fork")   # the chain they last deployed on
+
+        r = c.post("/api/chat", json={"chain_id": 56, "message": "how much BNB do I have?"}, headers=headers)
+        page = api._network_name(56)
+        check("the turn ran", r.status_code == 200 and r.json() == {"reply": "done"}, f"{r.status_code} {r.text[:160]}")
+        check("every tool call acted on the page's network, not the saved one", seen == [page, page], str(seen))
+        check("the saved network is left alone", db.get_user_network(body["user_id"]) == "arbitrum-fork",
+              str(db.get_user_network(body["user_id"])))
+
+        try:
+            smart_wallet_agent.chat(body["user_id"], 56, "hi", "arbitrum-fork")
+            refused = False
+        except ValueError:
+            refused = True
+        check("a network that is not the turn's chain is refused, not answered", refused)
+    finally:
+        smart_wallet_agent.agent = original
+
+
+def test_vault_failure_is_named():
+    """
+    A Vault error answers 503 naming Vault, not a bare 500 — which the web app can only show as
+    "Something went wrong on our side". The usual cause is the dev container restarting and losing
+    its AppRole, so the login in .env is refused.
+    """
+    print("\n[10c] a Vault failure is named, not a bare 500")
+    import hvac.exceptions
+
+    @api.app.get("/__test/vault-down")
+    def _vault_down():
+        raise hvac.exceptions.Forbidden("permission denied, on post http://127.0.0.1:8200/v1/auth/approle/login")
+
+    r = make_client().get("/__test/vault-down")
+    check("a Vault error -> 503", r.status_code == 503, f"{r.status_code} {r.text[:160]}")
+    detail = r.json().get("detail", "")
+    check("the detail names Vault and the fix", "Vault" in detail and "make vault" in detail, r.text[:200])
+    check("the exception itself stays in the log", "8200" not in detail, r.text[:200])
+
+
 def test_chains_lists_only_deployed_served_chains():
     print("\n[11] /api/chains lists chains that are served AND deployed")
     conn = db.get_db()
@@ -700,6 +805,11 @@ def test_chains_lists_only_deployed_served_chains():
     conn.executemany(
         "INSERT INTO factory (chain_id, address) VALUES (?, ?)",
         [(11155111, ADDR), (56, ADDR), (999999, ADDR)],   # 999999: deployed, but not served
+    )
+    fork_rpcs = {11155111: "http://127.0.0.1:8545", 56: "http://127.0.0.1:8546"}
+    conn.executemany(
+        "INSERT OR REPLACE INTO rpcs (name, rpc_url) VALUES (?, ?)",
+        [("sepolia-fork", fork_rpcs[11155111]), ("bsc-fork", fork_rpcs[56])],
     )
     conn.commit()
 
@@ -717,6 +827,9 @@ def test_chains_lists_only_deployed_served_chains():
           by_id[11155111]["name"] == "sepolia" and by_id[11155111]["native_ticker"] == "ETH"
           and by_id[56]["native_ticker"] == "BNB", str(chains))
     check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == api.FORK_MODE, str(chains))
+    check("a fork carries its own local node, a live chain none",
+          {cid: by_id[cid]["rpc_url"] for cid in fork_rpcs}
+          == (fork_rpcs if api.FORK_MODE else dict.fromkeys(fork_rpcs)), str(chains))
     check("each carries the router its wallets trust",
           by_id[11155111]["router"] == Web3.to_checksum_address(get_router(11155111)), str(chains))
 
@@ -804,10 +917,13 @@ if __name__ == "__main__":
         test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
         test_router_removal_is_refused()
+        test_wrapped_native_always_counts()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
         test_chat_history_shows_only_the_conversation()
         test_chat_turn_returns_text_and_hides_failures()
+        test_chat_acts_on_the_pages_network()
+        test_vault_failure_is_named()
         test_chains_lists_only_deployed_served_chains()
         test_google_sign_in_and_linking()
         test_rate_limit()

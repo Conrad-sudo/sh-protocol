@@ -22,7 +22,8 @@ const PREDICTED = '0x2222222222222222222222222222222222222222'
 const PENDING_KEY = 'mitfah-pending-deploy:7'
 const TOKENS = [
   { ticker: 'usdc', address: '0x3333333333333333333333333333333333333333' },
-  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444' },
+  // The API flags the wrapped native token: it always counts, like ETH.
+  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', always_counted: true },
 ]
 const PREPARED = {
   chain_id: SEPOLIA,
@@ -165,13 +166,18 @@ describe('OnboardingPage', () => {
     expect(within(network).getByRole('radio', { name: /Sepolia/ })).toBeChecked()
     await user.click(within(network).getByRole('button', { name: 'Continue' }))
 
-    // Limits: $250 a week, counting USDC only.
+    // Limits: $250 a week. USDC unticked; WETH can't be, it always counts like ETH.
     const limits = await step('How much may the assistant spend?')
     const limit = within(limits).getByLabelText('Spending limit')
     await user.clear(limit)
     await user.type(limit, '250')
     await user.click(within(limits).getByText('7 days'))
-    await user.click(await within(limits).findByRole('checkbox', { name: 'WETH' }))
+    const weth = await within(limits).findByRole('checkbox', { name: 'WETH' })
+    expect(weth).toBeChecked()
+    expect(weth).toBeDisabled()
+    expect(within(limits).getByText(/ETH and WETH always count\./)).toBeInTheDocument()
+    await user.click(within(limits).getByRole('checkbox', { name: 'USDC' }))
+    expect(within(limits).getByRole('checkbox', { name: 'WETH' })).toBeChecked()
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
 
     // Gas funds: 1 ETH by default on a local test network.
@@ -182,7 +188,7 @@ describe('OnboardingPage', () => {
     const review = await step('Check the details')
     const summary = (term: string) => within(review).getByText(term).nextElementSibling
     expect(summary('Spending limit')).toHaveTextContent('$250.00 every 7 days')
-    expect(summary('Counts toward the limit')).toHaveTextContent('ETH, USDC')
+    expect(summary('Counts toward the limit')).toHaveTextContent('ETH, WETH')
     expect(summary('Gas funds')).toHaveTextContent('1 ETH')
     expect(summary("Assistant's access")).toHaveTextContent('30 days, renewable any time in Controls')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
@@ -196,7 +202,7 @@ describe('OnboardingPage', () => {
         deployer: WALLET,
         daily_limit_usd: 250,
         window_secs: 604_800,
-        watched_tokens: [TOKENS[0]],
+        watched_tokens: [TOKENS[1]],
         prefund_eth: '1',
         session_ttl_secs: 30 * 86_400,
       },

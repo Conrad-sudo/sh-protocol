@@ -78,7 +78,9 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
     if (!balance) return
     void tx.run({
       key: KEY,
-      action: { kind: 'withdraw', token: balance.ticker, amount, to: getAddress(to) },
+      // An ERC-20 goes by its address, which also covers a token the user added (the server knows
+      // those by ticker only for this account); the native asset has none, so it goes by ticker.
+      action: { kind: 'withdraw', token: balance.address ?? balance.ticker, amount, to: getAddress(to) },
       success: `Withdrew ${amount} ${balance.ticker.toUpperCase()}.`,
     })
   }

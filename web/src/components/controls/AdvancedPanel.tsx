@@ -2,6 +2,7 @@ import { useState } from 'react'
 import ArrowDownLineIcon from '@rsuite/icons/ArrowDownLine'
 import { formatEther, getAddress, isAddress, parseEther } from 'viem'
 import { Form, Input, Panel, Text } from 'rsuite'
+import { bsc } from 'viem/chains'
 import type { Chain } from '../../api/types'
 import { isValidAmount } from '../../lib/format'
 import { AddressText } from '../AddressText'
@@ -88,8 +89,8 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
           ) : null}
           {routerTrusted ? (
             <Text size="sm" muted>
-              Your exchange's router is trusted too. It isn't listed here because the assistant needs it to remove
-              liquidity.
+              {chain?.chain_id === bsc.id ? "PancakeSwap V2's" : "Uniswap V2's"} router is trusted by default as the
+              assistant uses it to remove liquidity.
             </Text>
           ) : null}
           <AddSpender key={spenders.length} {...props} />

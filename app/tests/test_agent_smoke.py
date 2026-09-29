@@ -38,6 +38,7 @@ from agent_context import AgentContext             # noqa: E402
 from constants import CHAIN_ID_ARBITRUM            # noqa: E402
 from deploy_wallet import resolve_harness_user     # noqa: E402
 from network_config import load_network_config     # noqa: E402
+from db import acting_network                       # noqa: E402
 
 TRACE_PATH = os.getenv("AGENT_TRACE_PATH", "/tmp/agent_smoke_traces.json")
 
@@ -55,20 +56,22 @@ def tool_calls(messages) -> list[dict]:
     return calls
 
 
-async def run_turn(user_id: int, chain_id: int, thread: str, text: str) -> dict:
+async def run_turn(user_id: int, chain_id: int, network: str, thread: str, text: str) -> dict:
     """
     Runs one conversation turn and returns its trace.
 
     Invokes the agent directly rather than through chat() because chat() returns only the final
     string, and the tool sequence is the thing under test. Everything else -- the context, the
-    thread key -- mirrors chat() exactly, including the turn id: confirm_transaction refuses a
-    quote raised in the turn that is confirming it, so a fixed id here would make every send fail.
+    thread key, the network the turn acts on -- mirrors chat() exactly, including the turn id:
+    confirm_transaction refuses a quote raised in the turn that is confirming it, so a fixed id here
+    would make every send fail.
     """
-    result = await swa.agent.ainvoke(
-        {"messages": [HumanMessage(content=text)]},
-        config={"configurable": {"thread_id": thread}},
-        context=AgentContext(user_id=user_id, turn_id=swa._next_turn_id()),
-    )
+    with acting_network(user_id, network, chain_id):
+        result = await swa.agent.ainvoke(
+            {"messages": [HumanMessage(content=text)]},
+            config={"configurable": {"thread_id": thread}},
+            context=AgentContext(user_id=user_id, turn_id=swa._next_turn_id()),
+        )
     # The checkpointer hands back the whole thread; this turn starts at its own HumanMessage.
     # Counting from the top would repeat every earlier turn's calls, so a quote made in one turn
     # would count again in the turn that confirms it.
@@ -178,7 +181,7 @@ async def main():
             for text in scenario["turns"]:
                 text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK"))
                 print(f"  > {text[:70]}")
-                turn = await run_turn(user_id, chain_id, thread, text)
+                turn = await run_turn(user_id, chain_id, chain_name, thread, text)
                 names = [t["name"] for t in turn["tools"]]
                 print(f"    tools: {names or '(none)'}")
                 print(f"    reply: {turn['reply'][:160]}")

@@ -76,14 +76,16 @@ CHAINS = {
 
 # Keyed RPC endpoints belong in .env, not here — this file is committed.
 RPCS = {
+    # Local nodes. Each *-fork row is on its own port so several forks can run at once; keep them in
+    # step with the Makefile's FORK_PORT_* values.
     "anvil": "http://127.0.0.1:8545",
-    "mainnet-fork": "http://127.0.0.1:8545",
+    "mainnet-fork": "http://127.0.0.1:8547",
     # Reads and estimates only. The bundler broadcasts live-mainnet transactions privately instead
     # (bundler.PRIVATE_SEND_RPC_URLS), so the public mempool never sees them.
     "mainnet": os.getenv("MAINNET_RPC_URL") or "https://cloudflare-eth.com",
     "goerli": "https://ethereum-goerli-rpc.publicnode.com",
     "sepolia-fork": "http://127.0.0.1:8545",
-    "bsc-fork": "http://127.0.0.1:8545",
+    "bsc-fork": "http://127.0.0.1:8546",
     "celo-fork": "http://127.0.0.1:8545",
     "sepolia": os.getenv("SEPOLIA_RPC_URL")
     or "https://ethereum-sepolia-rpc.publicnode.com",
@@ -92,7 +94,7 @@ RPCS = {
     "optimism": "https://mainnet.optimism.io",
     "optimism-goerli": "https://goerli.optimism.io",
     "arbitrum": "https://arb1.arbitrum.io/rpc",
-    "arbitrum-fork": "http://127.0.0.1:8545",  # `make arb-fork`
+    "arbitrum-fork": "http://127.0.0.1:8548",  # `make arb-fork`
     "arbitrum-goerli": "https://goerli-rollup.arbitrum.io/rpc",
     "avalanche": "https://api.avax.network/ext/bc/C/rpc",
     "fuji": "https://api.avax-test.network/ext/bc/C/rpc",

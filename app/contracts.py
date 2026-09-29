@@ -3,8 +3,8 @@ from network_config import load_network_config
 from db import (
     get_json,
     get_wallet_address,
-    get_token_address,
     get_factory_address,
+    resolve_token,
 )
 from abi import ientry_point
 # The ERC-20 ABI comes from langchain-erc20 rather than a local copy: the package already
@@ -205,20 +205,24 @@ def encode_batch_execution_calldata(executions: list[tuple[str, int, bytes]]) ->
 
 def load_ierc20(user_id: int, token: str) -> Contract:
     """
-    Loads an IERC20 Contract instance for the given ticker symbol.
+    Loads an IERC20 Contract instance for a listed ticker, a ticker the user added, or an address.
 
     Only used now for address lookups and decimals() by the oracle-pricing tools; all ERC20
     reads and calldata construction moved to langchain-erc20 (see app/toolkits.py). The
     wrapped-native token needs no special ABI here either -- deposit()/withdraw() are the
     package's wrap_native/unwrap_native.
 
-    @param token  The token ticker symbol to look up (e.g. "usdc", "dai").
+    The name is resolved on every call and only the Contract is cached, keyed by ADDRESS: a user
+    can remove a token they added and add a different one under the same name, and a cache keyed
+    by the name would keep answering with the old contract.
+
+    @param token  The token ticker symbol (e.g. "usdc", "pepe") or a 0x address.
     @return       A web3.py Contract instance for the matching token.
     """
     w3, chain_id, _ = load_network_config(user_id)
-    key = (user_id, chain_id, token)
+    address = resolve_token(user_id, chain_id, token)
+    key = (user_id, chain_id, address)
     if key not in _erc20_cache:
-        address = get_token_address(chain_id, token)
         _erc20_cache[key] = w3.eth.contract(address=address, abi=ERC20_ABI)
     return _erc20_cache[key]
 

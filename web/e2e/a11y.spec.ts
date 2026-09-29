@@ -6,7 +6,9 @@ import { isApiUrl, ME, TOKEN, walletState } from './helpers.ts'
 /*
  * An axe scan of every page a person actually uses, at each screen size and in both themes
  * (the projects in playwright.config.ts). Only serious problems are asserted on — axe's
- * "moderate" findings are mostly advice — and each page is scanned as it first appears.
+ * "moderate" findings are mostly advice — and each page is scanned as it first appears, once any
+ * one-off entrance has finished: the landing demo fades its lines in, and a line caught halfway is
+ * faint, not low-contrast.
  */
 
 const SEPOLIA = 11155111
@@ -18,6 +20,9 @@ const CONTACTS = [
   { name: 'alex', address: OWNER },
   { name: 'sam', address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' },
 ]
+// A token the user added by address, so the dashboard scan covers its row (tags and Remove).
+const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+const PEPE_PREVIEW = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
 const HISTORY = [
   { role: 'user', text: 'how much can I still spend today?' },
   { role: 'assistant', text: 'You can still spend **$60** of your $100 limit.' },
@@ -38,9 +43,13 @@ async function mockServer(page: Page) {
   await page.route(isApiUrl, route => {
     const path = new URL(route.request().url()).pathname
     if (path.startsWith('/api/wallet/')) {
-      return route.fulfill({ json: walletState(SEPOLIA, ADDRESS) })
+      const wallet = walletState(SEPOLIA, ADDRESS)
+      const pepe = { ticker: 'pepe', address: PEPE, native: false, custom: true, name: 'Pepe', decimals: 18, raw: '5000000000000000000', amount: 5 }
+      return route.fulfill({ json: { ...wallet, balances: [...wallet.balances, pepe] } })
     }
     switch (path) {
+      case '/api/tokens/custom/lookup':
+        return route.fulfill({ json: PEPE_PREVIEW })
       case '/api/auth/refresh':
         return route.fulfill({ json: TOKEN })
       case '/api/me':
@@ -67,6 +76,12 @@ async function mockSignedOut(page: Page) {
 }
 
 async function scan(page: Page) {
+  // Endless animations (spinners) never settle, so only the ones with an end are waited for.
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .every(animation => animation.playState !== 'running' || animation.effect?.getComputedTiming().endTime === Infinity),
+  )
   const { violations } = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     .analyze()
@@ -95,6 +110,20 @@ for (const path of SIGNED_IN) {
     expect(await scan(page)).toEqual([])
   })
 }
+
+test('no serious accessibility problems in the add-token dialog', async ({ page }) => {
+  await mockServer(page)
+  await page.goto('/dashboard')
+  await page.getByRole('button', { name: 'Add token' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByLabel('Token contract address')).toBeVisible()
+  expect(await scan(page)).toEqual([])
+
+  await dialog.getByLabel('Token contract address').fill(PEPE)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(dialog.getByText("Your spending limit can't cover PEPE.")).toBeVisible()
+  expect(await scan(page)).toEqual([])
+})
 
 test('the keyboard reaches the content without walking through the navigation', async ({ page }) => {
   await mockServer(page)

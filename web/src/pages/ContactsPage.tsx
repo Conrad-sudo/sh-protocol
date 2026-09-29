@@ -17,7 +17,7 @@ import { CONTACTS_KEY, useContacts } from '../hooks/useContacts'
 import { errorText } from '../lib/tx'
 
 const TITLE = 'Contacts'
-const DESCRIPTION = 'The people your assistant may pay. Ask it to “send 10 USDC to sam” using a name from this list.'
+const DESCRIPTION = 'The accounts your assistant may pay. Ask it to “send 10 USDC to sam” using a name from this list.'
 const REMOVE_KEY = ['contacts', 'remove'] as const
 
 /**
@@ -97,7 +97,7 @@ export function ContactsPage() {
         </div>
         {list.length === 0 ? (
           <EmptyState icon={<PeoplesIcon />} title="No contacts yet">
-            Add the first person you want your assistant to be able to pay.
+            Add the first account you want your assistant to be able to pay.
           </EmptyState>
         ) : (
           <ul className="mf-contact-list">
@@ -146,8 +146,8 @@ export function ContactsPage() {
       <PageHeader title={TITLE} description={DESCRIPTION} />
       <div className="mf-dashboard">
         <Message type="info" showIcon>
-          <strong>Your assistant can only send money to people on this list.</strong>{' '}
-          <Text as="span">Only you can add someone, and only here: the assistant can't change the list.</Text>
+          <strong>Your assistant can only send money to accounts on this list.</strong>{' '}
+          <Text as="span">Only you can add an account, and only here: the assistant can't change the list.</Text>
         </Message>
         {body}
       </div>

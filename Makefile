@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test py-test e2e-test agent-smoke api
 
 
 
@@ -47,8 +47,13 @@ identity-test:
 auth-test:
 	.venv/bin/python3 app/tests/test_auth.py
 
+# Tokens a user adds by address: the add rules, the routes, and how the tools price and name them.
+# Against a fake chain, so also offline.
+custom-tokens-test:
+	.venv/bin/python3 app/tests/test_custom_tokens.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test
+py-test: identity-test auth-test custom-tokens-test
 
 # The real journey against a running fork: signup -> SIWE -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia
@@ -93,18 +98,69 @@ anvil:
 
 # ── Forking ────────────────────────────────────────────────────────────────────
 
+# Each fork listens on its own port, so several can run at once. Their chain IDs differ, so one API
+# process serves them side by side. Keep these in step with the *-fork rows of RPCS in
+# app/seed_data.py, which is where the app looks them up. Celo shares Sepolia's port: it has no
+# deployment path yet, so it never runs beside another fork.
+FORK_PORT_sepolia-fork  := 8545
+FORK_PORT_bsc-fork      := 8546
+FORK_PORT_mainnet-fork  := 8547
+FORK_PORT_arbitrum-fork := 8548
+FORK_PORT_celo-fork     := 8545
+# The target's short name, so ARGS=arb-fork can never fall through to 8545 (the Sepolia fork's port).
+FORK_PORT_arb-fork      := $(FORK_PORT_arbitrum-fork)
+
+# fund and deploy talk to the node the fork in ARGS runs on, not to .env's LOCAL_RPC_URL (which
+# stays the address for plain anvil). A LOCAL_RPC_URL given on the command line still wins.
+ifneq ($(FORK_PORT_$(ARGS)),)
+LOCAL_RPC_URL := http://127.0.0.1:$(FORK_PORT_$(ARGS))
+endif
+
+# $(call start_fork,<upstream RPC>,<network name>): forks the upstream at its latest block on that
+# network's port, then gives API_BUNDLER and TELEGRAM_BUNDLER 100 of the native coin each (`fund`)
+# as soon as the node answers, so a fresh fork is ready to deploy to.
+#
+# Anvil runs in the background only so the funding can happen after it starts; the recipe then
+# waits on it, so it stays in the foreground as before. The trap is what makes Ctrl+C stop it: a
+# background job in a non-interactive shell ignores SIGINT itself. If funding fails the fork keeps
+# running, and `make fund ARGS=<network>` can be re-run by hand.
+#
+# It refuses to start when a node already answers on the port: Anvil would fail to bind, but the
+# readiness loop would see the OTHER node and fund that instead.
+#
+# `make -n` on these targets really starts the fork: the line calls $(MAKE), which -n still runs.
+define start_fork
+@if cast chain-id --rpc-url http://127.0.0.1:$(FORK_PORT_$(2)) >/dev/null 2>&1; then \
+	echo "Port $(FORK_PORT_$(2)) is already in use. Is $(2) already running?"; \
+	exit 1; \
+fi; \
+anvil --fork-url $(1) --fork-block-number $$(cast block-number --rpc-url $(1)) --port $(FORK_PORT_$(2)) & \
+pid=$$!; \
+trap 'kill $$pid 2>/dev/null' INT TERM EXIT; \
+until cast chain-id --rpc-url http://127.0.0.1:$(FORK_PORT_$(2)) >/dev/null 2>&1; do \
+	kill -0 $$pid 2>/dev/null || exit 1; \
+	sleep 1; \
+done; \
+kill -0 $$pid 2>/dev/null || exit 1; \
+if $(MAKE) --no-print-directory fund ARGS=$(2) >/dev/null; then \
+	echo "Funded API_BUNDLER and TELEGRAM_BUNDLER with 100 native coin each on $(2)."; \
+else \
+	echo "Funding the bundlers on $(2) failed; the fork is still running. Retry: make fund ARGS=$(2)"; \
+fi; \
+wait $$pid
+endef
 
 mainnet-fork:
-	anvil --fork-url $(MAINNET_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(MAINNET_RPC_URL))
+	$(call start_fork,$(MAINNET_RPC_URL),mainnet-fork)
 
 sepolia-fork:
-	anvil --fork-url $(SEPOLIA_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(SEPOLIA_RPC_URL))
+	$(call start_fork,$(SEPOLIA_RPC_URL),sepolia-fork)
 
 bsc-fork:
-	anvil --fork-url $(BSC_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(BSC_RPC_URL))
+	$(call start_fork,$(BSC_RPC_URL),bsc-fork)
 
 arb-fork:
-	anvil --fork-url $(ARB_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(ARB_RPC_URL))
+	$(call start_fork,$(ARB_RPC_URL),arbitrum-fork)
 
 # Alias so the target name matches the network name every later step takes as ARGS
 # ("arbitrum-fork" in the chains/rpcs tables and deploy_wallet.LIVE_PRIVATE_KEY_ENV). Every other
@@ -112,13 +168,13 @@ arb-fork:
 arbitrum-fork: arb-fork
 
 celo-fork:
-	anvil --fork-url $(CELO_RPC_URL) --fork-block-number $$(cast block-number --rpc-url $(CELO_RPC_URL))
+	$(call start_fork,$(CELO_RPC_URL),celo-fork)
 
 
 # ── Funding Wallets────────────────────────────────────────────────────────────────────
 
-# anvil_setBalance is a local-fork-only cheat RPC, so this always targets LOCAL_RPC_URL
-# regardless of which network ARGS names. Two addresses need gas on a local node:
+# anvil_setBalance is a local-fork-only cheat RPC, so this always targets LOCAL_RPC_URL — the port
+# of the fork ARGS names (see FORK_PORT_* above). Two addresses need gas on a local node:
 #   SEPOLIA_ACCOUNT  API_BUNDLER's address: the deployer and protocol owner on every fork, and the
 #                    API process's bundler everywhere (deploy_wallet.LIVE_PRIVATE_KEY_ENV, bundler.py)
 #   the Telegram bot's bundler, TELEGRAM_BUNDLER -- a separate key, so the two processes never
@@ -152,7 +208,8 @@ fund:
 # Assembled from the three pieces that actually vary, rather than spelled out per network —
 # every branch below used to repeat the same --rpc-url/--broadcast boilerplate to change one of:
 #
-#   DEPLOY_RPC     the local Anvil node for anvil and every fork; the real endpoint live
+#   DEPLOY_RPC     the local Anvil node for anvil and every fork (each fork on its own port, see
+#                  FORK_PORT_*); the real endpoint live
 #   DEPLOY_SIGNER  Anvil's burner on plain anvil, SEPOLIA_ACCOUNT (API_BUNDLER's address)
 #                  everywhere else — see deploy_wallet.LIVE_PRIVATE_KEY_ENV; one address deploys,
 #                  owns, and bundles for the API
@@ -164,8 +221,13 @@ DEPLOY_EXTRA  :=
 
 # Forks inherit real chain state, so they must not sign with the Anvil burner: it is
 # EIP-7702-delegated on real mainnet/Sepolia/BSC and a fork inherits that code.
+# --offline: a fork reports a real chain ID, so after simulating, Forge looks up every outside
+# contract on Etherscan/Sourcify and every unknown function selector online, one by one, only to
+# label its traces. That took a fork deploy from ~1s to many minutes, and stalls it outright while
+# Sourcify is erroring. A local deploy needs nothing from the network but the fork itself.
 ifneq ($(findstring fork,$(ARGS)),)
 	DEPLOY_SIGNER := --sender $(SEPOLIA_ACCOUNT) --private-key $(API_BUNDLER)
+	DEPLOY_EXTRA  := --offline
 endif
 
 # --legacy: BSC's EIP-1559 fee-history data confuses Forge's fee estimator into deriving a bogus
@@ -178,7 +240,7 @@ endif
 # works fine; the deployer's real balance is enough. Applied to celo-fork as a precaution, since
 # its fork snapshots can report baseFeePerGas=0 the same way.
 ifneq ($(or $(findstring bsc-fork,$(ARGS)),$(findstring celo-fork,$(ARGS))),)
-	DEPLOY_EXTRA := --legacy --skip-simulation
+	DEPLOY_EXTRA += --legacy --skip-simulation
 endif
 
 # Live Sepolia is the only target that leaves the local node: real endpoint, Etherscan
@@ -197,7 +259,7 @@ NETWORK_ARGS := $(strip --rpc-url $(DEPLOY_RPC) $(DEPLOY_SIGNER) --broadcast $(D
 # real balance — zero on mainnet-fork/bsc-fork. Without the top-up first, the very first broadcast
 # fails for lack of gas. `fund` self-skips on live networks, and Make runs it once per invocation,
 # so the setup chains below are unaffected.
-deploy: fund
+deploy: 
 	forge script script/DeploySHProtocol.s.sol $(NETWORK_ARGS)
 
 

@@ -45,16 +45,16 @@ import bundler                                        # noqa: E402
 import smart_wallet_agent                             # noqa: E402
 import tools                                          # noqa: E402
 from agent_context import AgentContext                # noqa: E402
-from constants import ETH_SENTINEL, get_native_asset_ticker  # noqa: E402
+from constants import ETH_SENTINEL, get_chain_display_name, get_native_asset_ticker, get_router  # noqa: E402
 from contracts import read_spending_config           # noqa: E402
-from db import get_pending_session_key, get_session_key, get_token_address  # noqa: E402
+from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
+from langchain_uniswap_v2.abis import router_abi      # noqa: E402
 import quotes                                         # noqa: E402
 from userop import prepare_execute_call               # noqa: E402
 from web3.logs import DISCARD                         # noqa: E402
 
-RPC = "http://127.0.0.1:8545"
 # Where test_self_bundling writes the measured cost of each transfer, for reporting.
 COST_REPORT_PATH = os.getenv("E2E_COST_REPORT_PATH", "/tmp/e2e_cost_report.json")
 # The fork under test, named as `make setup-test ARGS=...` names it. Requests speak its chain ID,
@@ -64,6 +64,11 @@ NETWORK = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "sepolia-fork"
 if NETWORK not in FORK_CHAIN_IDS:
     raise SystemExit(f"Unknown fork '{NETWORK}'. One of: {sorted(FORK_CHAIN_IDS)}")
 CHAIN_ID = FORK_CHAIN_IDS[NETWORK]
+# The same rpcs row the API reads, so the test and the API always talk to the same node: each fork
+# runs on its own port (the Makefile's FORK_PORT_*).
+RPC = get_rpc_url(NETWORK)
+if RPC is None:
+    raise SystemExit(f"No rpcs row for '{NETWORK}'. Run: make db")
 w3 = Web3(Web3.HTTPProvider(RPC))
 
 
@@ -176,23 +181,41 @@ def owner_action(c: TestClient, headers: dict, acct, path: str, body: dict) -> d
 def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
     """The real onboarding path: prepare the deploy, sign it, confirm it, verify it on chain."""
     print("\n[1] deploy: prepare -> sign -> confirm")
+    body = {
+        "chain_id": CHAIN_ID,
+        "deployer": acct.address,
+        "daily_limit_usd": 50_000,
+        # Nothing picked on purpose: the API adds WETH regardless, since it always counts like ETH.
+        "watched_tokens": [],
+        "prefund_eth": "1",
+    }
 
+    # A browser wallet may replace the API's gas estimate with a lower limit of its own. The deploy
+    # is then mined but runs out of gas, and confirm must say that rather than a bare "reverted".
+    # It leaves deployCount alone, so the real deploy below still lands at its prediction.
+    r = c.post("/api/deploy", headers=headers, json=body)
+    starved = {**r.json()["tx"], "gas": hex(int(r.json()["tx"]["gas"], 16) * 2 // 3)}
+    tx_hash = sign_and_send(acct, starved)
+    check("a deploy sent with too little gas is mined and fails",
+          w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)["status"] == 0)
     r = c.post(
-        "/api/deploy",
+        "/api/deploy/confirm",
         headers=headers,
-        json={
-            "chain_id": CHAIN_ID,
-            "deployer": acct.address,
-            "daily_limit_usd": 50_000,
-            "watched_tokens": [{"ticker": "weth", "address": get_token_address(CHAIN_ID, "weth")}],
-            "prefund_eth": "1",
-        },
+        json={**{k: body[k] for k in ("chain_id", "deployer")}, "tx_hash": tx_hash,
+              "predicted_address": r.json()["predicted_address"]},
     )
+    check("confirm reports it as out of gas, with the limit it needed",
+          r.status_code == 400 and "ran out of gas" in r.json()["detail"], f"{r.status_code} {r.text[:250]}")
+
+    r = c.post("/api/deploy", headers=headers, json=body)
     check("deploy prepares", r.status_code == 200, f"{r.status_code} {r.text[:250]}")
     if r.status_code != 200:
         raise SystemExit("cannot continue without a wallet")
     prepared = r.json()
     predicted, session_key = prepared["predicted_address"], prepared["session_key"]
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
+    check("WETH is watched though the request picked nothing", prepared["watched_tokens"] == [weth],
+          str(prepared["watched_tokens"]))
 
     tx_hash = sign_and_send(acct, prepared["tx"])
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
@@ -426,6 +449,11 @@ def test_simulations_bite(c: TestClient, acct, headers: dict, wallet: str):
         # DAI is priced on this deployment, so the simulation correctly allows it.
         check("watching a priced token is allowed", r.status_code == 200, f"{r.status_code} {r.text[:150]}")
 
+    r = c.post("/api/wallet/watched-tokens/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "token": "weth", "action": "remove"})
+    check("removing WETH -> 400: it always counts", r.status_code == 400 and "always counts" in r.text,
+          f"{r.status_code} {r.text[:150]}")
+
     # Pause twice: the second must be refused by the simulation, not by a failed transaction.
     owner_action(c, headers, acct, "/api/wallet/pause/prepare", {})
     r = c.post("/api/wallet/pause/prepare", headers=headers, json={"chain_id": CHAIN_ID})
@@ -645,6 +673,8 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     check("...and moves no tokens", token.functions.balanceOf(payee).call() == held_before)
     check("the quote names the contract the value goes through", quoted["destinations"] == [usdc],
           str(quoted["destinations"]))
+    check("the quote names the network it runs on", quoted["network"] == get_chain_display_name(CHAIN_ID),
+          str(quoted.get("network")))
     check("the quote describes the transfer itself", "7" in quoted["action"] and payee[2:10].lower()
           in quoted["action"].lower().replace("0x", ""), quoted["action"])
     check("the quote prices it in USD", quoted["total_usd"] > 0, str(quoted.get("total_usd")))
@@ -767,6 +797,170 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     print(f"  cost report written to {COST_REPORT_PATH}")
 
 
+def eoa_call(acct, fn, value: int = 0):
+    """Sends a contract call (or deployment) from a plain EOA on the fork and returns its receipt."""
+    tx = fn.build_transaction({
+        "from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address),
+        "chainId": CHAIN_ID, "value": value,
+    })
+    receipt = w3.eth.wait_for_transaction_receipt(
+        w3.eth.send_raw_transaction(acct.sign_transaction(tx).raw_transaction), timeout=60
+    )
+    assert receipt["status"] == 1, f"EOA call reverted: {receipt['transactionHash'].hex()}"
+    return receipt
+
+
+def spend_metered(sh, receipt) -> list[int]:
+    """The netOutflowUsd of every SpendMetered the wallet's hook emitted in `receipt` (none = nothing charged)."""
+    module = w3.eth.contract(
+        address=sh.functions.SH_MODULE().call(),
+        abi=api.get_json("./out/SpendingLimitModule.sol/SpendingLimitModule.json")["abi"],
+    )
+    return [
+        e["args"]["netOutflowUsd"]
+        for e in module.events.SpendMetered().process_receipt(receipt, errors=DISCARD)
+        if e["args"]["account"] == sh.address
+    ]
+
+
+def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    A token the user adds by address, on a real chain: a brand-new ERC-20 with no price feed and one
+    TOKEN/WETH pool, the usual shape. Buying it with ETH goes straight through that pool; paying in
+    USDC hops through WETH (the Uniswap package's own routing).
+
+    Covers the add rules against real contracts, the wallet read, the assistant sending it (not
+    charged), buying it with ETH (the FULL amount charged, exactly), selling it back (not charged,
+    and its unpriced approval clears because the router is a trusted spender), the owner withdrawing
+    it by address, and removing it from the list.
+    """
+    print("\n[7b] tokens the user adds: added by address, sent, bought with ETH, sold, withdrawn")
+    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
+    turn = itertools.count(1_000)
+
+    def next_turn() -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
+
+    def confirm(quoted: dict):
+        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
+
+    # A fresh token nobody prices, and a fake one calling itself USDC.
+    deployer = new_funded_account()
+    mock = api.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
+    factory = w3.eth.contract(abi=mock["abi"], bytecode=mock["bytecode"]["object"])
+    symbol = f"MF{int(time.time()) % 100_000}"
+    token_address = eoa_call(deployer, factory.constructor("Mitfah Test Token", symbol, 18))["contractAddress"]
+    fake_usdc = eoa_call(deployer, factory.constructor("USD Coin", "USDC", 6))["contractAddress"]
+    token = w3.eth.contract(address=token_address, abi=mock["abi"])
+    unit = 10**18
+    eoa_call(deployer, token.functions.mint(wallet, 1_000 * unit))
+
+    ticker = symbol.lower()
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    for label, address, expected in (
+        ("a listed token is refused", usdc, "already on Mitfah's list"),
+        ("a token copying a listed symbol is refused", fake_usdc, "fake a token"),
+        ("an address with no contract asks to check it again", Account.create().address, "Check the token address again"),
+        # The exchange router: a contract, but with no symbol() or decimals().
+        ("a contract that isn't a token asks to check it again", get_router(CHAIN_ID), "Check the token address again"),
+    ):
+        r = c.post("/api/tokens/custom/lookup", headers=headers, json={"chain_id": CHAIN_ID, "address": address})
+        check(label, r.status_code == 400 and expected in r.json()["detail"], f"{r.status_code} {r.text[:160]}")
+
+    r = c.post("/api/tokens/custom/lookup", headers=headers, json={"chain_id": CHAIN_ID, "address": token_address.lower()})
+    check("lookup reads the new token off the chain", r.status_code == 200 and r.json()["ticker"] == ticker
+          and r.json()["balance_raw"] == str(1_000 * unit), f"{r.status_code} {r.text[:200]}")
+    check("...showing its symbol and decimals, which make it an ERC-20",
+          (r.json().get("symbol"), r.json().get("decimals")) == (symbol, 18), r.text[:200])
+    r = c.post("/api/tokens/custom", headers=headers, json={"chain_id": CHAIN_ID, "address": token_address})
+    check("the token is added", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
+
+    balances = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["balances"]
+    row = next((b for b in balances if b["address"] == token_address), None)
+    check("the wallet read shows it, marked custom, with its balance",
+          row is not None and row["custom"] and row["raw"] == str(1_000 * unit) and row["ticker"] == ticker, str(row))
+    check("listed tokens are marked not custom", all(b["custom"] is False for b in balances if not b["native"] and b is not row))
+    check("the assistant lists it as custom", ticker in tools.get_supported_tokens.func(next_turn())["custom"])
+
+    try:
+        tools.get_price.func(next_turn(), token=ticker)
+        check("get_price refuses it by name", False, "it answered a price")
+    except ToolException as e:
+        check("get_price refuses it by name", "no price" in str(e), str(e)[:160])
+    pre = tools.preflight_check.func(next_turn(), token=ticker, amount=10)
+    check("preflight: no USD value, nothing charged, passes",
+          pre["usd_value"] is None and pre["charged_usd"] == 0 and pre["within_budget"], str(pre))
+
+    # The assistant sends it to a contact: not charged.
+    payee = c.get("/api/contacts", headers=headers).json()["contacts"]
+    payee = next(p for p in payee if p["name"] == "payee")["address"]
+    quoted = tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token=ticker,
+                                       recipient="payee", amount=10)
+    check("the transfer quote says it isn't covered", "isn't covered by the spending limit" in quoted.get("details", ""),
+          str(quoted.get("details")))
+    receipt = confirm(quoted)
+    check("the contact received it", token.functions.balanceOf(payee).call() == 10 * unit)
+    check("and nothing was charged to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
+
+    # One TOKEN/WETH pool, seeded from the deployer.
+    router = w3.eth.contract(address=get_router(CHAIN_ID), abi=router_abi)
+    eoa_call(deployer, token.functions.mint(deployer.address, 1_000_000 * unit))
+    eoa_call(deployer, token.functions.approve(router.address, 1_000_000 * unit))
+    eoa_call(deployer, router.functions.addLiquidityETH(
+        token_address, 1_000_000 * unit, 0, 0, deployer.address,
+        w3.eth.get_block("latest")["timestamp"] + 600,
+    ), value=w3.to_wei(1, "ether"))
+
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
+    quote = tools.get_quote_out.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001)
+    check("buying it with ETH goes through its WETH pool",
+          [Web3.to_checksum_address(a) for a in quote["path"]] == [weth, token_address], str(quote.get("path")))
+    quote = tools.get_quote_out.func(next_turn(), token_in="usdc", token_out=ticker, amount_in=1)
+    check("paying in USDC hops through WETH",
+          [Web3.to_checksum_address(a) for a in quote["path"]] == [usdc, weth, token_address], str(quote.get("path")))
+
+    held = token.functions.balanceOf(wallet).call()
+    quoted = tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
+                                                  token_out=ticker, eth_amount_in=0.001, slippage_bps=500)
+    check("the buy quote says the full amount paid counts", "full amount" in quoted.get("details", ""),
+          str(quoted.get("details")))
+    receipt = confirm(quoted)
+    check("the wallet received the token", token.functions.balanceOf(wallet).call() > held)
+    charged = spend_metered(sh, receipt)
+    expected = sh.functions.getUsdValue(ETH_SENTINEL, w3.to_wei("0.001", "ether")).call()
+    check("the limit was charged exactly the ETH paid", charged == [expected], f"{charged} vs {expected}")
+
+    # Selling it back: the unpriced approval clears (the router is a trusted spender), nothing charged.
+    native_before = w3.eth.get_balance(wallet)
+    quoted = tools.swap_exact_tokens_for_ETH.func(next_turn(), session_key_ciphertext=key_ciphertext,
+                                                  token_in=ticker, amount_in=100, slippage_bps=500)
+    check("the sell quote says selling costs nothing", "selling it costs nothing" in quoted.get("details", ""),
+          str(quoted.get("details")))
+    receipt = confirm(quoted)
+    check("selling it lands", receipt["status"] == 1)
+    check("and charges nothing to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
+    check("the ETH came back to the wallet (less gas)", w3.eth.get_balance(wallet) > native_before - w3.to_wei("0.01", "ether"))
+
+    # The owner withdraws it by address.
+    sink = Account.create().address
+    owner_action(c, headers, acct, "/api/wallet/withdraw/prepare", {"token": token_address, "amount": "5", "to": sink})
+    check("the owner withdrew it by address", token.functions.balanceOf(sink).call() == 5 * unit)
+
+    r = c.delete(f"/api/tokens/custom/{CHAIN_ID}/{token_address}", headers=headers)
+    check("the token is removed from the list", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    balances = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["balances"]
+    check("the wallet read no longer shows it", all(b["address"] != token_address for b in balances))
+    try:
+        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token=ticker,
+                                  recipient="payee", amount=1)
+        check("the assistant no longer recognises it", False, "it quoted a transfer")
+    except ToolException as e:
+        check("the assistant no longer recognises it", "Add token" in str(e), str(e)[:160])
+
+
 def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
     """
     An L2 sequencer outage must reach the agent as a NAMED error, not 4 bytes of hex -- and must NOT
@@ -881,6 +1075,7 @@ if __name__ == "__main__":
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers)
     test_self_bundling(client, owner, auth_headers, deployed)
+    test_custom_tokens(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)
 
     finish(f"All fork e2e checks passed on {NETWORK}.")

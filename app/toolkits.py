@@ -50,8 +50,9 @@ _BLOCKED_TOOLS = frozenset({"approve", "approve_token", "revoke_approval"})
 def _token_map(user_id: int) -> dict[str, str]:
     """Ticker -> checksummed address for every token listed on the user's current chain.
 
-    Snapshotted into the toolkit at construction, so adding a token to the DB mid-session
-    requires invalidate_toolkits(user_id) before it resolves.
+    Listed tokens only. Tokens the user added are resolved per call by the tools (db.resolve_token)
+    and handed to the packages as addresses, so a token added on the web works in the Telegram
+    bot's process too, without either process invalidating the other's toolkit.
     """
     _, chain_id, _ = load_network_config(user_id)
     return {

@@ -112,12 +112,30 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   **never** the generic `/api/wallet/tx/confirm`: that one would leave the API signing with the key
   the wallet just dropped.
 
+- `src/components/dashboard/AddTokenModal.tsx` — adding a token by its contract address,
+  MetaMask-style: paste the address, then check what the chain says it is before adding it. The
+  preview confirms it's an ERC-20 token and shows its symbol and decimals (what the server read to
+  decide that), its name, the wallet's balance and the whole address, with a copy button. An address
+  that can't answer both symbol and decimals gets a warning to check it again; a token the server
+  can't show safely — an odd symbol, or one copying a listed token's — is refused with the reason.
+  Added tokens show in `BalancesCard` as "Added by you" and "Not limited" (Mitfah has no price for
+  them, so they never count toward the limit) with a Remove link; removing only takes the token off
+  the list. No wallet signature is involved either way. Withdraw sends an ERC-20's address, not its
+  ticker, so added tokens withdraw like any other.
+
+- **WETH/WBNB always count.** `/api/tokens` flags the wrapped native token `always_counted`. The
+  onboarding picker shows it ticked and locked ("ETH and WETH always count"); Controls lists it
+  under "Always counts" with no Remove, or — on a wallet made before the rule — "Not counted yet"
+  with a one-click "Count it". The picker for other tokens never offers it.
+
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
   written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. Colour carries
   meaning: navy (light) or steel (dark) is the owner's own action, green only ever means the wallet
   is live (active, assistant on, what's left to spend), amber loosens a limit, red is a brake. The
-  type is one family, Archivo: stretched to 125% (`--mf-wide`) for headings and figures, normal
-  width for text; JetBrains Mono is only for addresses and hashes. For status labels use
+  type is two faces: Bodoni Moda (`--mf-font-heading`) for the wordmark, h1/h2 titles and the
+  dial's figures, held at its size-24 optical cut (set once on `body`) so the hairlines survive a
+  1x screen; Archivo for text and small labels, h3 included. JetBrains Mono is only for addresses
+  and hashes. For status labels use
   `StatusTag`, not RSuite's coloured `Tag` (its white-on-colour text fails contrast). Use the
   `.mf-num` class for numbers that should line up.
 - `src/components/LimitDial.tsx` — the spending limit as a gauge (a `progressbar`), echoing the

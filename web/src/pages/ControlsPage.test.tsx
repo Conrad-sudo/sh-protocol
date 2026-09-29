@@ -16,9 +16,12 @@ vi.mock('../lib/tx', async importOriginal => ({
 const MAINNET = 1
 const TX_HASH = `0x${'78'.repeat(32)}`
 const PREPARED_TX = { to: '0x2222222222222222222222222222222222222222', data: '0x8456cb59', value: '0x0', gas: '0x7530' }
+const LINK = '0x779877A7B0D9E8603169DdbD7836e478b4624789'
 const TOKENS = [
+  { ticker: 'link', address: LINK },
   { ticker: 'usdc', address: USDC },
-  { ticker: 'weth', address: WETH },
+  // The API flags the wrapped native token: it always counts, like ETH.
+  { ticker: 'weth', address: WETH, always_counted: true },
 ]
 const PENDING_KEY = 'mitfah-pending-owner-tx:7'
 // Sepolia's exchange router, as /api/chains names it.
@@ -377,11 +380,17 @@ describe('ControlsPage', () => {
     expect(within(counted).getByText('Always counts')).toBeInTheDocument()
     expect(within(counted).getByText('USDC')).toBeInTheDocument()
 
-    // WETH isn't counted yet, so it's the one to add.
-    await user.click(await screen.findByRole('combobox', { name: 'Add a token' }))
-    await user.click(await screen.findByRole('option', { name: 'WETH' }))
-    await user.click(screen.getByRole('button', { name: 'Add' }))
+    // This wallet predates WETH always counting, so WETH has its own one-click fix.
+    expect(await within(counted).findByText('Not counted yet')).toBeInTheDocument()
+    await user.click(within(counted).getByRole('button', { name: 'Count WETH toward the limit' }))
     expect(await screen.findByText('WETH now counts toward your limit.')).toBeInTheDocument()
+
+    // Any other listed token is added from the picker, which never offers WETH.
+    await user.click(await screen.findByRole('combobox', { name: 'Add a token' }))
+    expect(screen.queryByRole('option', { name: 'WETH' })).toBeNull()
+    await user.click(await screen.findByRole('option', { name: 'LINK' }))
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(await screen.findByText('LINK now counts toward your limit.')).toBeInTheDocument()
 
     await user.click(within(counted).getByRole('button', { name: 'Stop counting USDC' }))
     const dialog = await screen.findByRole('alertdialog')
@@ -391,8 +400,35 @@ describe('ControlsPage', () => {
 
     expect(server.prepared).toEqual([
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'weth', action: 'add' } },
+      { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'link', action: 'add' } },
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdc', action: 'remove' } },
     ])
+  })
+
+  it('shows WETH as always counting, with no way to stop it', async () => {
+    stubServer({
+      wallets: [
+        makeWalletState({
+          spending: {
+            ...makeWalletState().spending,
+            watched_tokens: [
+              { ticker: 'usdc', address: USDC },
+              { ticker: 'weth', address: WETH },
+            ],
+          },
+        }),
+      ],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const counted = screen.getByRole('list', { name: 'Counted tokens' })
+    const wethRow = (await within(counted).findByText('WETH')).closest('li')!
+    expect(wethRow).toHaveTextContent('Always counts')
+    expect(within(counted).getAllByText('Always counts')).toHaveLength(2)
+    expect(within(counted).queryByRole('button', { name: 'Stop counting WETH' })).toBeNull()
+    expect(within(counted).getByRole('button', { name: 'Stop counting USDC' })).toBeInTheDocument()
   })
 
   it('says when every listed token already counts, and leaves an unlisted one alone', async () => {
@@ -403,6 +439,7 @@ describe('ControlsPage', () => {
           spending: {
             ...makeWalletState().spending,
             watched_tokens: [
+              { ticker: 'link', address: LINK },
               { ticker: 'usdc', address: USDC },
               { ticker: 'weth', address: WETH },
               { ticker: null, address: unlisted },
@@ -475,7 +512,7 @@ describe('ControlsPage', () => {
     expect(within(list).getAllByRole('listitem')).toHaveLength(1)
     expect(within(list).getByRole('button', { name: `Stop trusting ${other}` })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: new RegExp(`Stop trusting ${ROUTER}`, 'i') })).toBeNull()
-    expect(screen.getByText(/Your exchange's router is trusted too/)).toBeInTheDocument()
+    expect(screen.getByText(/Uniswap V2's router is trusted by default as the assistant uses it to remove liquidity/)).toBeInTheDocument()
     expect(screen.queryByText('None.')).toBeNull()
 
     // Still counted as trusted, so it can't be added a second time.

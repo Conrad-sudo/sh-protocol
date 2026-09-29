@@ -5,8 +5,12 @@
 # module never bound -- and test_identity asserts that neither function is reachable under any alias.
 from db import (
     get_supported_tokens as _get_supported_tokens,
+    get_supported_tokens_by_chain_id as _get_listed_tokens,
+    get_custom_token as _get_custom_token,
+    get_custom_tokens as _get_custom_tokens,
     get_contact as _get_contact,
     get_all_contacts as _get_all_contacts,
+    resolve_token as _resolve_token,
 )
 import time
 
@@ -25,7 +29,13 @@ from userop import (
 )
 import quotes
 
-from constants import ETH_SENTINEL, WEI_PER_ETH, get_native_wrapped_ticker, get_native_asset_ticker
+from constants import (
+    ETH_SENTINEL,
+    WEI_PER_ETH,
+    get_chain_display_name,
+    get_native_asset_ticker,
+    get_native_wrapped_ticker,
+)
 from langchain_erc20.amounts import to_base_units
 
 from contracts import (
@@ -36,7 +46,6 @@ from contracts import (
     read_spending_config,
 )
 from toolkits import get_erc20_tools, get_erc8004_tools, get_uniswap_tools
-from db import get_token_address
 from langchain.tools import tool, ToolRuntime
 from langchain_core.tools import ToolException
 from agent_context import AgentContext
@@ -177,13 +186,17 @@ def _quote_executions(runtime, key_ciphertext: str, executions: list, action: st
     return {
         "status": "NOT SENT — quoted only, waiting for the user to approve it",
         "quote_id": pending.quote_id,
+        # The user has a wallet on several chains, so the quote says which one it would move money
+        # on -- from the chain it was priced against, not from anything the model said.
+        "network": get_chain_display_name(chain_id),
         "action": pending.action,
         "destinations": [c["to"] for c in pending.calls],
         **pending.cost,
         "expires_in_seconds": quotes.QUOTE_TTL_SECONDS,
         "next_step": (
-            "Show the user `action` and what it costs (`total_usd`, or the native figures if USD "
-            "is unavailable), and say plainly that nothing has been sent yet. Then STOP and wait "
+            "Show the user `action`, the `network` it runs on, and what it costs (`total_usd`, or "
+            "the native figures if USD is unavailable), and say plainly that nothing has been sent "
+            "yet. Then STOP and wait "
             "for their reply. If they agree, call confirm_transaction with this quote_id in the "
             "turn that follows; if they decline or change anything, call cancel_transaction and "
             "start again. Never confirm in this same turn, and never confirm a quote_id the user "
@@ -222,6 +235,27 @@ DEFAULT_SLIPPAGE_BPS = 50  # 0.5%
 SESSION_EXPIRY_MARGIN_SECS = 60
 
 
+def _token_address(user_id: int, token: str) -> str:
+    """Ticker -> checksummed address for an ERC-20 tool: a listed ticker, one the user added in the
+    web app, or a raw 0x address.
+
+    Every ERC-20 and Uniswap tool resolves through here and hands the packages an ADDRESS, so a
+    token the user added works everywhere a listed one does -- the packages' own registries only
+    know the listed tickers, snapshotted when the toolkit was built.
+
+    @raises ToolException  If the ticker is neither listed nor one the user added.
+    """
+    _, chain_id, _ = load_network_config(user_id)
+    try:
+        return _resolve_token(user_id, chain_id, token)
+    except ValueError:
+        raise ToolException(
+            f"'{token}' is not a token this wallet knows on this network: it is neither on Mitfah's "
+            f"list nor one the user added. Call get_supported_tokens to see both lists. The user can "
+            f"add a token by its contract address from the web app (Dashboard -> Balances -> Add token)."
+        )
+
+
 def _resolve(user_id: int, token: str) -> str:
     """Ticker -> checksummed address, for the address-only langchain-uniswap-v2 tools.
 
@@ -229,14 +263,91 @@ def _resolve(user_id: int, token: str) -> str:
     routed as its wrapped form, and the *ETH-suffixed router functions wrap/unwrap around
     that same address. A raw 0x address passes through, so LP/pair tokens work too.
 
-    @param token  A ticker listed for the user's chain, "eth", or a raw 0x address.
+    @param token  A listed ticker, one the user added, "eth", or a raw 0x address.
     """
-    if token.startswith("0x") and len(token) == 42:
-        return Web3.to_checksum_address(token)
-    _, chain_id, _ = load_network_config(user_id)
     if token.lower() == "eth":
+        _, chain_id, _ = load_network_config(user_id)
         token = get_native_wrapped_ticker(chain_id)
-    return get_token_address(chain_id, token)
+    return _token_address(user_id, token)
+
+
+def _is_native(token: str) -> bool:
+    """Whether a tool's token argument names the chain's native asset ("eth" everywhere, "bnb" too)."""
+    return token.lower() in ("eth", "bnb")
+
+
+def _unlisted_label(user_id: int, token: str) -> str | None:
+    """
+    How to name `token` in a quote if Mitfah does NOT list it on this chain, else None.
+
+    An unlisted token -- one the user added, or a raw address -- has no price feed, so the spending
+    cap can never count it. The native asset and every listed token return None.
+    """
+    if _is_native(token):
+        return None
+    _, chain_id, _ = load_network_config(user_id)
+    address = _token_address(user_id, token)
+    if any(address.lower() == t["address"].lower() for t in _get_listed_tokens(chain_id)):
+        return None
+    custom = _get_custom_token(user_id, chain_id, address)
+    return custom["ticker"].upper() if custom else address
+
+
+def _limit_note(user_id: int, spent: str, received: str | None = None) -> str:
+    """
+    One sentence for a quote that moves a token Mitfah doesn't list, saying how the spending cap
+    treats it. Empty when every token involved is listed or native -- those quotes are unchanged.
+
+    The cap meters NET value across the native asset and the wallet's watched tokens, and an
+    unlisted token has no price, so:
+      - sending or selling one costs nothing against the cap;
+      - buying one with a counted token (the native asset, or a watched USDC/USDT/WETH/WBNB/...)
+        counts the FULL amount paid -- the cap sees what left the wallet and cannot value what
+        came back;
+      - buying one with a listed token the wallet doesn't count costs nothing either.
+
+    @param spent     The token leaving the wallet: a ticker, a 0x address, or "eth" for native.
+    @param received  For a swap, the token coming back; None for a transfer.
+    """
+    spent_label = _unlisted_label(user_id, spent)
+    received_label = _unlisted_label(user_id, received) if received is not None else None
+    if spent_label is None and received_label is None:
+        return ""
+    if received is None:
+        return (
+            f"{spent_label} isn't covered by the spending limit: Mitfah has no price for it, so "
+            f"sending it doesn't count toward the limit."
+        )
+    if spent_label is not None and received_label is not None:
+        return f"Neither {spent_label} nor {received_label} is covered by the spending limit."
+    if spent_label is not None:
+        return (
+            f"{spent_label} isn't covered by the spending limit, so selling it costs nothing "
+            f"against the limit."
+        )
+
+    _, chain_id, _ = load_network_config(user_id)
+    if _is_native(spent):
+        payer, counted = get_native_asset_ticker(chain_id), True
+    else:
+        payer = spent.upper()
+        counted = load_session_handler(user_id).functions.isWatched(_token_address(user_id, spent)).call()
+    if counted:
+        return (
+            f"The full amount of {payer} paid counts toward the spending limit: Mitfah can't put a "
+            f"price on {received_label}, so nothing is taken off for what comes back."
+        )
+    return (
+        f"Neither {payer} nor {received_label} counts toward the spending limit: {payer} isn't on "
+        f"this wallet's counted list and {received_label} has no price."
+    )
+
+
+def _with_note(details: str, note: str) -> str:
+    """Appends a _limit_note to a quote's details line."""
+    if not note:
+        return details
+    return f"{details}. {note}" if details else note
 
 
 def _resolve_contact(user_id: int, name: str, role: str = "recipient", hint: str = "") -> str:
@@ -388,22 +499,31 @@ def cancel_transaction(runtime: ToolRuntime[AgentContext], quote_id: str) -> str
 
 
 @tool
-def get_supported_tokens(runtime: ToolRuntime[AgentContext]) -> list:
+def get_supported_tokens(runtime: ToolRuntime[AgentContext]) -> dict:
     """
-    Retrieves a list of supported token tickers for the user's current network.
+    Retrieves the tokens this wallet can use on the user's current network, in two lists.
 
     Use this tool when you need to know which tokens the wallet is set up to handle,
     especially before any on-chain action or when the user asks about a specific token.
-    The returned list reflects the network the user is connected to (anvil or mainnet).
 
     Args:
 
     Returns:
-        A list of supported token ticker symbols (e.g. ["usdc", "dai"]).
+        A dict with:
+          - listed (list[str]): tickers Mitfah lists on this network (e.g. ["dai", "usdc", "weth"]).
+            These have a price, and the ones on the wallet's watched list count toward the
+            spending limit.
+          - custom (list[str]): tickers the USER added themselves in the web app. These have NO
+            price and NEVER count toward the spending limit. They can be sent, swapped and checked
+            like any other token. Never state or guess a dollar value for one.
     """
     user_id = runtime.context.user_id
     print("Running get_supported_tokens")
-    return _get_supported_tokens(user_id)
+    _, chain_id, _ = load_network_config(user_id)
+    return {
+        "listed": _get_supported_tokens(user_id),
+        "custom": [t["ticker"] for t in _get_custom_tokens(user_id, chain_id)],
+    }
 
 
 @tool
@@ -785,6 +905,10 @@ def check_spending_within_budget(runtime: ToolRuntime[AgentContext], token: str,
     else:
         erc20 = load_ierc20(user_id=user_id, token=token)
         token_address = erc20.address
+        # A token Mitfah doesn't list has no price feed, so the cap can never count it: spending it
+        # always fits. Asking the oracle would only revert PriceOracle_UnsupportedToken.
+        if _unlisted_label(user_id, token_address) is not None:
+            return True
         base_units = _to_base_units(amount, erc20.functions.decimals().call())
     usd_value = session_handler.functions.getUsdValue(token_address, base_units).call()
     remaining = session_handler.functions.getRemainingBudget().call()
@@ -828,6 +952,13 @@ def _get_price(user_id: int, token: str) -> float:
     else:
         erc20 = load_ierc20(user_id=user_id, token=token)
         token_address = erc20.address
+        label = _unlisted_label(user_id, token_address)
+        if label is not None:
+            raise ToolException(
+                f"Mitfah has no price for {label}: it isn't a token Mitfah lists (the user added it "
+                f"themselves), so there is no price feed for it. Tell the user its dollar value "
+                f"isn't available here, and never estimate one."
+            )
         decimals = erc20.functions.decimals().call()
     print(f"Getting price for token: {token}, address: {token_address}")
     session_handler = load_session_handler(user_id)
@@ -873,8 +1004,9 @@ def _metered_usd(
     @param amount           The amount in whole token units.
     @param price_unmetered  Whether to price the token even when the cap ignores it. False skips the
                             oracle call, which matters because an unwatched token may have no feed.
-    @return                 (usd, metered): the USD value with 18 decimals — None when skipped —
-                            and whether the cap counts this token.
+    @return                 (usd, metered): the USD value with 18 decimals — None when skipped or
+                            when the token has no price (one the user added) — and whether the cap
+                            counts this token.
     """
     if token.lower() in ("eth", "bnb"):
         address, decimals, metered = ETH_SENTINEL, 18, True
@@ -882,7 +1014,7 @@ def _metered_usd(
         erc20 = load_ierc20(user_id=user_id, token=token)
         address = erc20.address
         metered = session_handler.functions.isWatched(address).call()
-        if not metered and not price_unmetered:
+        if not metered and (not price_unmetered or _unlisted_label(user_id, address) is not None):
             return None, False
         decimals = erc20.functions.decimals().call()
     usd = session_handler.functions.getUsdValue(address, _to_base_units(amount, decimals)).call()
@@ -924,10 +1056,13 @@ def preflight_check(
             every transaction until the owner unpauses it in the web app.
           - "session_active" (bool): True if the wallet's session key is authorized.
           - "within_budget" (bool): True if `charged_usd` fits the remaining USD budget.
-          - "usd_value" (float): The USD value of `amount` of `token` at the current price.
+          - "usd_value" (float | None): The USD value of `amount` of `token` at the current price.
+            None for a token the user added themselves: Mitfah has no price for it, so never state
+            or estimate one.
           - "charged_usd" (float): What the transaction will count toward the spending limit. For a
             swap it is an estimate from the quote: the wallet is charged on what actually arrives,
-            which can be a little less if the price moves.
+            which can be a little less if the price moves. Buying a token the user added with a
+            counted token charges the full amount paid, since what comes back has no price.
           - "remaining_usd" (float): The budget left in the current window.
         If "is_paused" is True, abort and notify the user. If "session_active" is False, abort and
         notify the user. If "within_budget" is False, abort and notify the user. Only proceed if
@@ -950,7 +1085,8 @@ def preflight_check(
     expiring_imminently = session_active and seconds_left < SESSION_EXPIRY_MARGIN_SECS
 
     # Mirrors postCheck: the net USD decrease across metered tokens, and nothing for a net increase.
-    # The sent token is priced even when unmetered, because usd_value is shown to the user either way.
+    # The sent token is priced even when unmetered, because usd_value is shown to the user either way
+    # -- unless it is a token the user added, which has no price at all (sent_usd is None then).
     sent_usd, sent_metered = _metered_usd(user_id, session_handler, token, amount, price_unmetered=True)
     charged = sent_usd if sent_metered else 0
     if token_received is not None:
@@ -968,7 +1104,7 @@ def preflight_check(
         "session_expires_in_secs": max(seconds_left, 0),
         "expiring_imminently": expiring_imminently,
         "within_budget": charged <= remaining,
-        "usd_value": sent_usd / WEI_PER_ETH,
+        "usd_value": sent_usd / WEI_PER_ETH if sent_usd is not None else None,
         "charged_usd": charged / WEI_PER_ETH,
         "remaining_usd": remaining / WEI_PER_ETH,
     }
@@ -993,7 +1129,7 @@ def get_erc20_balance(runtime: ToolRuntime[AgentContext], token: str) -> float:
     print("Running get_erc20_balance")
     address = load_session_handler(user_id).address
     return get_erc20_tools(user_id)["get_balance"].invoke(
-        {"token": token, "owner": address}
+        {"token": _token_address(user_id, token), "owner": address}
     )["amount"]
 
 
@@ -1017,7 +1153,7 @@ def get_contact_erc20_balance(runtime: ToolRuntime[AgentContext], contact_name: 
     print("Running get_contact_erc20_balance")
     address = _resolve_contact(user_id, contact_name, role="account to check")
     return get_erc20_tools(user_id)["get_balance"].invoke(
-        {"token": token, "owner": address}
+        {"token": _token_address(user_id, token), "owner": address}
     )["amount"]
 
 
@@ -1044,7 +1180,7 @@ def get_erc20_allowance(runtime: ToolRuntime[AgentContext], token: str, spender:
     address = load_session_handler(user_id).address
     spender_addr = _resolve_contact(user_id, spender, role="spender")
     return get_erc20_tools(user_id)["get_allowance"].invoke(
-        {"token": token, "owner": address, "spender": spender_addr}
+        {"token": _token_address(user_id, token), "owner": address, "spender": spender_addr}
     )["amount"]
 
 
@@ -1121,13 +1257,13 @@ def transfer_erc20(
     recipient_addr = _resolve_contact(user_id, recipient)
     plan = get_erc20_tools(user_id)["transfer"].invoke(
         {
-            "token": token,
+            "token": _token_address(user_id, token),
             "to": recipient_addr,
             "from_address": load_session_handler(user_id).address,
             "amount": str(amount),
         }
     )
-    return _quote_plan(runtime, session_key_ciphertext, plan)
+    return _quote_plan(runtime, session_key_ciphertext, plan, details=_limit_note(user_id, token))
 
 
 @tool
@@ -1177,7 +1313,7 @@ def transferFrom_erc20(
 
     plan = get_erc20_tools(user_id)["transfer_from"].invoke(
         {
-            "token": token,
+            "token": _token_address(user_id, token),
             "owner": sender_addr,
             "to": recipient_addr,
             "from_address": wallet,
@@ -1601,10 +1737,11 @@ def swap_ETH_for_exact_tokens(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"Max {native_ticker} spent: {plan['summary']['amount_in_max']:.6f}, "
             f"{token_out.upper()} received: {amount_out}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, "eth", token_out),
         ),
     )
 
@@ -1666,10 +1803,11 @@ def swap_exact_tokens_for_tokens(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"{token_in.upper()} spent: {amount_in}, "
             f"Min {token_out.upper()} received: {plan['summary']['amount_out_min']:.6f}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, token_in, token_out),
         ),
     )
 
@@ -1731,10 +1869,11 @@ def swap_tokens_for_exact_tokens(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"Max {token_in.upper()} spent: {plan['summary']['amount_in_max']:.6f}, "
             f"{token_out.upper()} received: {amount_out}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, token_in, token_out),
         ),
     )
 
@@ -1801,10 +1940,11 @@ def swap_exact_tokens_for_ETH(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"{token_in.upper()} spent: {amount_in}, "
             f"Min {native_ticker} received: {plan['summary']['amount_out_min']:.6f}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, token_in, "eth"),
         ),
     )
 
@@ -1871,10 +2011,11 @@ def swap_tokens_for_exact_ETH(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"Max {token_in.upper()} spent: {plan['summary']['amount_in_max']:.6f}, "
             f"{native_ticker} received: {amount_out_eth}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, token_in, "eth"),
         ),
     )
 
@@ -1941,10 +2082,11 @@ def swap_exact_ETH_for_tokens(
         runtime,
         session_key_ciphertext,
         plan,
-        details=(
+        details=_with_note(
             f"{native_ticker} spent: {eth_amount_in}, "
             f"Min {token_out.upper()} received: {plan['summary']['amount_out_min']:.6f}"
-            f"{_destination_note(recipient)}"
+            f"{_destination_note(recipient)}",
+            _limit_note(user_id, "eth", token_out),
         ),
     )
 

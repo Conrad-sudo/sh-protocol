@@ -65,7 +65,7 @@ test('the contacts list, and adding someone after checking the address', async (
 
   await expect(page.getByRole('heading', { name: 'Contacts', level: 1 })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Your contacts (2)' })).toBeVisible()
-  await expect(page.getByText('Your assistant can only send money to people on this list.')).toBeVisible()
+  await expect(page.getByText('Your assistant can only send money to accounts on this list.')).toBeVisible()
   await expectTheme(page, testInfo)
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'contacts-list')

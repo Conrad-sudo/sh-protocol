@@ -70,7 +70,8 @@ async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
           json: {
             tokens: [
               { ticker: 'usdc', address: USDC },
-              { ticker: 'weth', address: WETH },
+              // As the API flags it: the wrapped native token always counts, like ETH.
+              { ticker: 'weth', address: WETH, always_counted: true },
             ],
           },
         })
@@ -127,10 +128,9 @@ test('changes that loosen a limit ask first', async ({ page }, testInfo) => {
   await confirm.getByRole('button', { name: 'Raise limit' }).click()
   await expect(page.getByText('Spending limit set to $500.00.')).toBeVisible()
 
-  // Adding a token tightens the limit, so it goes straight through.
-  await page.getByRole('combobox', { name: 'Add a token' }).click()
-  await page.getByRole('option', { name: 'WETH' }).click()
-  await page.getByRole('button', { name: 'Add', exact: true }).click()
+  // This wallet predates WETH always counting; counting it tightens the limit, so it goes straight through.
+  await expect(page.getByText('Not counted yet')).toBeVisible()
+  await page.getByRole('button', { name: 'Count WETH toward the limit' }).click()
   await expect(page.getByText('WETH now counts toward your limit.')).toBeVisible()
 
   await page.getByRole('button', { name: 'Advanced' }).click()

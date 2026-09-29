@@ -187,7 +187,7 @@ async def start_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        _, chain_id, _ = load_network_config(user_id)
+        _, chain_id, network = load_network_config(user_id)
     except ValueError:
         await update.message.reply_text(
             "You don't have a wallet yet. Deploy one from the web app to get started."
@@ -197,7 +197,7 @@ async def start_chat(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
 
     # chat() is synchronous/blocking — run it in a thread to avoid blocking the event loop
-    response = await asyncio.to_thread(chat, user_id, chain_id, query)
+    response = await asyncio.to_thread(chat, user_id, chain_id, query, network)
     await update.message.reply_text(response)
 
 

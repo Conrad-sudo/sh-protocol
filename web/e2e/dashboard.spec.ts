@@ -30,8 +30,15 @@ const RECEIPT = {
   type: '0x2',
 }
 
-/** A signed-in account with a wallet on each chain in `wallets`, in that order. */
-async function mockServer(page: Page, wallets: Map<number, object>) {
+/**
+ * A signed-in account with a wallet on each chain in `wallets`, in that order. `extra` answers other
+ * API routes, keyed by "METHOD /path".
+ */
+async function mockServer(
+  page: Page,
+  wallets: Map<number, object>,
+  extra: Record<string, (body: unknown) => object> = {},
+) {
   const walletChains = [...wallets.keys()]
   const reads: number[] = []
   const sent: { tx: WalletTx; chainId: number }[] = []
@@ -56,6 +63,8 @@ async function mockServer(page: Page, wallets: Map<number, object>) {
 
   await page.route(isApiUrl, route => {
     const path = new URL(route.request().url()).pathname
+    const handler = extra[`${route.request().method()} ${path}`]
+    if (handler) return route.fulfill(handler(route.request().postDataJSON()))
     if (path.startsWith('/api/wallet/')) {
       const chainId = Number(path.split('/').at(-1))
       reads.push(chainId)
@@ -180,4 +189,46 @@ test('switching networks', async ({ page }, testInfo) => {
   // The choice survives a reload.
   await page.reload()
   await expect(page.getByText('Your Mitfah wallet on BNB Smart Chain')).toBeVisible()
+})
+
+test('adding a token by its address', async ({ page }, testInfo) => {
+  const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
+  const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
+  const wallets = new Map<number, object>([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]])
+  await mockServer(page, wallets, {
+    'POST /api/tokens/custom/lookup': () => ({ json: pepe }),
+    'POST /api/tokens/custom': () => {
+      const before = walletState(SEPOLIA, ADDRESS)
+      wallets.set(
+        SEPOLIA,
+        walletState(SEPOLIA, ADDRESS, {
+          balances: [
+            ...before.balances,
+            { ticker: 'pepe', address: PEPE, native: false, custom: true, name: 'Pepe', decimals: 18, raw: pepe.balance_raw, amount: 5 },
+          ],
+        }),
+      )
+      return { status: 201, json: pepe }
+    },
+  })
+  await page.goto('/dashboard')
+
+  await page.getByRole('button', { name: 'Add token' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Token contract address').fill(PEPE)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(dialog.getByText("Your spending limit can't cover PEPE.")).toBeVisible()
+  await expect(dialog.getByText('5 PEPE')).toBeVisible()
+  await expect(dialog.getByText('This address is an ERC-20 token: it answered with its symbol and decimals.')).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await dialog.screenshot({ path: testInfo.outputPath('add-token-preview.png') })
+
+  await dialog.getByRole('button', { name: 'Add token' }).click()
+  await expect(page.getByText('PEPE added. It now shows in your balances.')).toBeVisible()
+  const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: /^PEPE/ }) })
+  await expect(row).toContainText('Added by you')
+  await expect(row).toContainText('Not limited')
+  await expect(page.getByRole('button', { name: 'Remove PEPE from your list' })).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'dashboard-custom-token')
 })

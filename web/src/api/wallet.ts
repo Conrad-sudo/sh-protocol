@@ -1,5 +1,6 @@
 import { ApiError, apiFetch } from './client'
 import type {
+  CustomToken,
   DeployConfirmResult,
   DeployPrepared,
   DeployRequest,
@@ -25,6 +26,27 @@ export function siweVerify(body: { message: string; signature: string; nonce: st
 export async function fetchTokens(chainId: number) {
   const { tokens } = await apiFetch<{ tokens: Token[] }>(`/api/tokens?chain_id=${chainId}`, { auth: false })
   return tokens
+}
+
+/**
+ * Reads a token off the chain so the user can check it before adding it. Saves nothing. A token that
+ * can't be added answers 400 with the reason, written for the user.
+ */
+export function lookupCustomToken(chainId: number, address: string) {
+  return apiFetch<CustomToken>('/api/tokens/custom/lookup', {
+    method: 'POST',
+    body: { chain_id: chainId, address },
+  })
+}
+
+/** Adds a token to the account's list for `chainId`. The server checks it again on chain. */
+export function addCustomToken(chainId: number, address: string) {
+  return apiFetch<CustomToken>('/api/tokens/custom', { method: 'POST', body: { chain_id: chainId, address } })
+}
+
+/** Takes a token off the account's list. The tokens stay in the wallet. A 404 means it was already gone. */
+export function removeCustomToken(chainId: number, address: string) {
+  return apiFetch<{ status: 'deleted' }>(`/api/tokens/custom/${chainId}/${address}`, { method: 'DELETE' })
 }
 
 /** Builds the unsigned deployWallet transaction for the user's own wallet to sign. */

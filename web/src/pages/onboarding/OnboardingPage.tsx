@@ -90,10 +90,10 @@ export function OnboardingPage() {
     toaster.push(
       <Message type={result.assistantReady ? 'success' : 'warning'} showIcon closable>
         {result.assistantReady
-          ? `Your wallet is ready on ${chainName(result.chainId)}.`
+          ? `Your wallet is ready on ${chainName(result.chainId)}. You can now disconnect your browser wallet: the assistant works without it. Reconnect it when you want to change your limits or withdraw.`
           : 'Your wallet was created, but the assistant is not switched on yet. You can turn it on in Controls.'}
       </Message>,
-      { placement: 'topCenter', duration: 5000 },
+      { placement: 'topCenter', duration: 8000 },
     )
     navigate('/dashboard', { replace: true })
   })
@@ -134,7 +134,8 @@ export function OnboardingPage() {
       deployer: address,
       daily_limit_usd: draft.limitUsd,
       window_secs: draft.windowSecs,
-      watched_tokens: tickers === null ? tokens : tokens.filter(t => tickers.includes(t.ticker)),
+      // The wrapped native token always counts; the API adds it anyway, but the request says so too.
+      watched_tokens: tickers === null ? tokens : tokens.filter(t => t.always_counted || tickers.includes(t.ticker)),
       prefund_eth: prefund,
       session_ttl_secs: ASSISTANT_KEY_TTL_SECS,
     })
@@ -357,7 +358,8 @@ function LimitsStep({
   onNext: () => void
 }) {
   const tokens = useTokens(chainId)
-  const selected = draft.tickers ?? tokens.data?.map(t => t.ticker) ?? []
+  const always = tokens.data?.filter(t => t.always_counted).map(t => t.ticker) ?? []
+  const selected = [...new Set([...always, ...(draft.tickers ?? tokens.data?.map(t => t.ticker) ?? [])])]
   const limitValid = draft.limitUsd !== null && Number.isInteger(draft.limitUsd) && draft.limitUsd >= 1
 
   return (
@@ -402,20 +404,22 @@ function LimitsStep({
           ) : (
             <CheckboxGroup
               name="tokens"
-              inline
+              className="mf-token-grid"
               value={selected}
-              onChange={value => onChange({ tickers: value.map(String) })}
+              onChange={value => onChange({ tickers: [...new Set([...always, ...value.map(String)])] })}
             >
               {tokens.data.map(token => (
-                <Checkbox key={token.ticker} value={token.ticker}>
+                // The wrapped native token is ticked for good: it counts like the native asset.
+                <Checkbox key={token.ticker} value={token.ticker} disabled={token.always_counted}>
                   {token.ticker.toUpperCase()}
                 </Checkbox>
               ))}
             </CheckboxGroup>
           )}
           <Form.Text>
-            {nativeTicker} always counts. Tokens you untick can be moved without limit — keep them ticked unless
-            you have a reason.
+            {[nativeTicker, ...always.map(t => t.toUpperCase())].join(' and ')} always{' '}
+            {always.length > 0 ? 'count' : 'counts'}. Tokens you untick can be moved without limit — keep them
+            ticked unless you have a reason.
           </Form.Text>
         </Form.Group>
       </Form>
@@ -443,7 +447,8 @@ function ReviewStep({
 }) {
   const { chainId: walletChainId } = useConnection()
   const tokens = useTokens(draft.chainId ?? 0)
-  const watched = draft.tickers ?? tokens.data?.map(t => t.ticker) ?? []
+  const always = tokens.data?.filter(t => t.always_counted).map(t => t.ticker) ?? []
+  const watched = [...new Set([...always, ...(draft.tickers ?? tokens.data?.map(t => t.ticker) ?? [])])]
   const onRightNetwork = walletChainId === draft.chainId
 
   return (
