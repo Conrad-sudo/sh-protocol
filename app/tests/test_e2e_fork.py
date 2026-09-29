@@ -830,9 +830,10 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     USDC hops through WETH (the Uniswap package's own routing).
 
     Covers the add rules against real contracts, the wallet read, the assistant sending it (not
-    charged), buying it with ETH (the FULL amount charged, exactly), selling it back (not charged,
-    and its unpriced approval clears because the router is a trusted spender), the owner withdrawing
-    it by address, and removing it from the list.
+    charged), buying it with ETH (the FULL amount charged, exactly), the assistant refusing a token
+    nobody added and a slippage over 12%, selling it back (not charged, and its unpriced approval
+    clears because the router is a trusted spender), the owner withdrawing it by address, and
+    removing it from the list.
     """
     print("\n[7b] tokens the user adds: added by address, sent, bought with ETH, sold, withdrawn")
     sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
@@ -932,6 +933,32 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     charged = spend_metered(sh, receipt)
     expected = sh.functions.getUsdValue(ETH_SENTINEL, w3.to_wei("0.001", "ether")).call()
     check("the limit was charged exactly the ETH paid", charged == [expected], f"{charged} vs {expected}")
+
+    # Only tokens the owner chose, within 12% slippage. Both refusals happen before anything is
+    # built or priced, so neither costs the wallet a thing.
+    api_bundler = bundler.resolve_bundler(w3).address
+    sent_before = w3.eth.get_transaction_count(api_bundler)
+    try:
+        tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
+                                             token_out=fake_usdc, eth_amount_in=0.001)
+        check("a token the user never added is refused by address", False, "it was quoted")
+    except ToolException as e:
+        check("a token the user never added is refused by address",
+              "not a token this wallet knows" in str(e), str(e)[:160])
+    quote = tools.get_quote_out.func(next_turn(), token_in="eth", token_out=token_address, amount_in=0.001)
+    check("the user's own token still works by address",
+          [Web3.to_checksum_address(a) for a in quote["path"]] == [weth, token_address], str(quote.get("path")))
+    try:
+        tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
+                                             token_out=ticker, eth_amount_in=0.001, slippage_bps=1201)
+        check("a slippage over 12% is refused", False, "it was quoted")
+    except ToolException as e:
+        check("a slippage over 12% is refused", "outside what this wallet allows" in str(e), str(e)[:160])
+    quoted = tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
+                                                  token_out=ticker, eth_amount_in=0.001, slippage_bps=1200)
+    check("exactly 12% is quoted", "NOT SENT" in quoted["status"], str(quoted.get("status")))
+    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
 
     # Selling it back: the unpriced approval clears (the router is a trusted spender), nothing charged.
     native_before = w3.eth.get_balance(wallet)

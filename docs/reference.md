@@ -14,7 +14,7 @@
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
-| `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, and how the tools price and name them, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
+| `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
 | `make py-test` | All three offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork` etc.; on Arbitrum it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |

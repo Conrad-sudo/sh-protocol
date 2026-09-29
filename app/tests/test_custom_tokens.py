@@ -1,6 +1,7 @@
 """
 Offline checks for tokens a user adds by address (custom tokens): the add-a-token rules, the API
-routes, and how the assistant's tools resolve and price them.
+routes, how the assistant's tools resolve and price them, and that those tools refuse any token
+that is neither listed nor added, and any slippage over 12%.
 
 Everything runs against a throwaway database and a FAKE chain -- a dict of contracts answering raw
 eth_calls -- so it is safe to run anywhere. The real on-chain journey (deploy a token, add it, have
@@ -394,6 +395,98 @@ def test_tools_price_and_note_custom_tokens():
     check("native sends get no note", tools._limit_note(uid, "eth") == "")
 
 
+class _Reached(Exception):
+    """Raised by the stand-in package: the call got past every check in tools.py."""
+
+
+class _StandInPackage:
+    """Replaces the ERC-20 and Uniswap toolkits: whichever package tool is asked for stops the call."""
+
+    def __getitem__(self, name):
+        def invoke(_args):
+            raise _Reached(name)
+        return SimpleNamespace(invoke=invoke)
+
+
+def _trading_calls(token: str) -> list[tuple[str, object, dict]]:
+    """Every tool that trades or sends through a token argument, with `token` in the slot under test."""
+    key = {"session_key_ciphertext": "ciphertext"}
+    return [
+        ("transfer_erc20", tools.transfer_erc20, {**key, "token": token, "recipient": "payee", "amount": 1}),
+        ("swap_exact_tokens_for_tokens", tools.swap_exact_tokens_for_tokens,
+         {**key, "token_in": "usdc", "token_out": token, "amount_in": 1}),
+        ("swap_tokens_for_exact_tokens", tools.swap_tokens_for_exact_tokens,
+         {**key, "token_in": token, "token_out": "usdc", "amount_out": 1}),
+        ("swap_exact_tokens_for_ETH", tools.swap_exact_tokens_for_ETH, {**key, "token_in": token, "amount_in": 1}),
+        ("swap_tokens_for_exact_ETH", tools.swap_tokens_for_exact_ETH, {**key, "token_in": token, "amount_out_eth": 1}),
+        ("swap_exact_ETH_for_tokens", tools.swap_exact_ETH_for_tokens, {**key, "token_out": token, "eth_amount_in": 1}),
+        ("swap_ETH_for_exact_tokens", tools.swap_ETH_for_exact_tokens, {**key, "token_out": token, "amount_out": 1}),
+        ("add_liquidity", tools.add_liquidity, {**key, "token_a": "usdc", "amount_a": 1, "token_b": token}),
+        ("add_liquidity_eth", tools.add_liquidity_eth, {**key, "token": token, "amount_token": 1}),
+        ("remove_liquidity", tools.remove_liquidity, {**key, "token_a": token, "lp_amount": 1}),
+        ("remove_liquidity_eth", tools.remove_liquidity_eth, {**key, "token": token, "lp_amount": 1}),
+        ("is_derived_input_sufficient", tools.is_derived_input_sufficient,
+         {"token_in": token, "token_out": "usdc", "amount_out": 1}),
+    ]
+
+
+def test_tools_only_reach_tokens_the_owner_chose():
+    print("\n[7] the assistant trades only tokens the owner chose, within a 12% slippage limit")
+    uid = db.create_user(email="guards@example.com")
+    db.save_user_network(uid, NETWORK)
+    db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+    db.save_contact(uid, "payee", _addr(0xFEE))
+    _with_tool_fakes(uid, watched={USDC, WETH})
+    runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
+    original = tools.get_erc20_tools, tools.get_uniswap_tools
+    tools.get_erc20_tools = tools.get_uniswap_tools = lambda _uid: _StandInPackage()
+
+    def attempt(call) -> str:
+        """"reached" if the call got through to the package, else the refusal's text."""
+        try:
+            call()
+        except _Reached:
+            return "reached"
+        except ToolException as e:
+            return str(e)
+        return "returned without reaching the package"
+
+    try:
+        # Still reachable: listed tokens and the user's own, by ticker or by address.
+        for token in ("usdt", USDT.lower(), "pepe", PEPE):
+            missed = [n for n, tool, kw in _trading_calls(token) if attempt(lambda: tool.func(runtime, **kw)) != "reached"]
+            check(f"every trading tool still takes {token}", missed == [], str(missed))
+
+        # SHIB is a real ERC-20 on the fake chain that this user never added.
+        for name, tool, kwargs in _trading_calls(SHIB):
+            outcome = attempt(lambda: tool.func(runtime, **kwargs))
+            check(f"{name}: a token nobody added is refused by address",
+                  "not a token this wallet knows" in outcome, outcome[:160])
+        for label, call in (
+            ("preflight, as the token sent", lambda: tools.preflight_check.func(runtime, SHIB, 1)),
+            ("preflight, as the token received", lambda: tools.preflight_check.func(runtime, "usdc", 1, SHIB, 1)),
+            ("get_price", lambda: tools.get_price.func(runtime, SHIB)),
+            ("check_spending_within_budget", lambda: tools.check_spending_within_budget.func(runtime, SHIB, 1)),
+        ):
+            outcome = attempt(call)
+            check(f"{label}: refuses it too", "not a token this wallet knows" in outcome, outcome[:160])
+
+        with_slippage = [(n, t, kw) for n, t, kw in _trading_calls("pepe") if "slippage_bps" in t.args]
+        check("every exported tool that takes a slippage is covered below",
+              {n for n, _, _ in with_slippage} == {t.name for t in tools.get_tools() if "slippage_bps" in t.args},
+              str(sorted(n for n, _, _ in with_slippage)))
+        for name, tool, kwargs in with_slippage:
+            outcomes = {
+                bps: attempt(lambda: tool.func(runtime, **kwargs, slippage_bps=bps))
+                for bps in (tools.MAX_SLIPPAGE_BPS + 1, -1, tools.MAX_SLIPPAGE_BPS)
+            }
+            check(f"{name}: refuses 1201 and -1 bps, takes 1200 (12%)",
+                  "outside what this wallet allows" in outcomes[1201] and "outside" in outcomes[-1]
+                  and outcomes[1200] == "reached", str(outcomes)[:200])
+    finally:
+        tools.get_erc20_tools, tools.get_uniswap_tools = original
+
+
 def test_ierc20_cache_follows_the_address():
     print("\n[6] a removed and re-added name never reaches the old contract")
     uid = db.create_user(email="cache@example.com")
@@ -418,6 +511,7 @@ if __name__ == "__main__":
         test_api_routes()
         test_tools_price_and_note_custom_tokens()
         test_ierc20_cache_follows_the_address()
+        test_tools_only_reach_tokens_the_owner_chose()
     finally:
         os.unlink(_tmp_db.name)
 

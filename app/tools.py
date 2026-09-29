@@ -227,6 +227,21 @@ def _quote_plan(runtime, key_ciphertext: str, plan: dict, details: str = "") -> 
 # `int(base * (BPS - bps) / BPS)` here silently drifted at 18 decimals, in the wrong direction
 # for amountInMax and the addLiquidity desired amounts.
 DEFAULT_SLIPPAGE_BPS = 50  # 0.5%
+# The widest tolerance any tool accepts. The packages take any value, and 10000 bps sets the
+# minimum out to zero -- a trade that accepts getting nothing back, which anyone who can move the
+# pool price around it can take almost all of. The cap only bounds that for tokens it counts.
+MAX_SLIPPAGE_BPS = 1200  # 12%
+
+
+def _check_slippage(slippage_bps: int) -> int:
+    """Returns `slippage_bps` if it is within 0..MAX_SLIPPAGE_BPS, else refuses it."""
+    if not 0 <= slippage_bps <= MAX_SLIPPAGE_BPS:
+        raise ToolException(
+            f"A slippage of {slippage_bps} bps is outside what this wallet allows: 0 to "
+            f"{MAX_SLIPPAGE_BPS} bps ({MAX_SLIPPAGE_BPS / 100:g}%). Nothing was quoted. Ask the user "
+            f"for a tolerance within that range."
+        )
+    return slippage_bps
 
 # How much life a session key must have left before preflight_check will green-light a new
 # transaction. The wallet's own comparison is exact (valid through the deadline second, matching
@@ -235,25 +250,42 @@ DEFAULT_SLIPPAGE_BPS = 50  # 0.5%
 SESSION_EXPIRY_MARGIN_SECS = 60
 
 
+def _is_listed(chain_id: int, address: str) -> bool:
+    """Whether `address` is a token Mitfah lists on `chain_id`."""
+    return any(address.lower() == t["address"].lower() for t in _get_listed_tokens(chain_id))
+
+
 def _token_address(user_id: int, token: str) -> str:
-    """Ticker -> checksummed address for an ERC-20 tool: a listed ticker, one the user added in the
-    web app, or a raw 0x address.
+    """Token reference -> checksummed address for an ERC-20 tool: a listed token or one the user
+    added in the web app, named by ticker or by address.
 
     Every ERC-20 and Uniswap tool resolves through here and hands the packages an ADDRESS, so a
     token the user added works everywhere a listed one does -- the packages' own registries only
     know the listed tickers, snapshotted when the toolkit was built.
 
-    @raises ToolException  If the ticker is neither listed nor one the user added.
+    An address is accepted only for a token on one of those two lists. Any other contract is
+    refused, because a swap or a deposit into a pool is a destination for value that no contact
+    check sees: the output comes back to the wallet, but the tokens paid in stay in a pool that
+    whoever made it can empty. Adding a token is a web-app action, like adding a contact, so the
+    chat can only reach tokens the owner chose. This also shuts out LP tokens by address -- they
+    have no price, so the cap would never count them leaving.
+
+    @raises ToolException  If the token is neither listed nor one the user added.
     """
     _, chain_id, _ = load_network_config(user_id)
     try:
-        return _resolve_token(user_id, chain_id, token)
+        address = _resolve_token(user_id, chain_id, token)
     except ValueError:
+        address = None
+    if address is None or not (
+        _is_listed(chain_id, address) or _get_custom_token(user_id, chain_id, address)
+    ):
         raise ToolException(
             f"'{token}' is not a token this wallet knows on this network: it is neither on Mitfah's "
             f"list nor one the user added. Call get_supported_tokens to see both lists. The user can "
             f"add a token by its contract address from the web app (Dashboard -> Balances -> Add token)."
         )
+    return address
 
 
 def _resolve(user_id: int, token: str) -> str:
@@ -261,9 +293,9 @@ def _resolve(user_id: int, token: str) -> str:
 
     "eth" maps to the chain's wrapped-native token: on a router, native ETH/BNB is always
     routed as its wrapped form, and the *ETH-suffixed router functions wrap/unwrap around
-    that same address. A raw 0x address passes through, so LP/pair tokens work too.
+    that same address.
 
-    @param token  A listed ticker, one the user added, "eth", or a raw 0x address.
+    @param token  A listed token or one the user added (ticker or address), or "eth".
     """
     if token.lower() == "eth":
         _, chain_id, _ = load_network_config(user_id)
@@ -280,17 +312,17 @@ def _unlisted_label(user_id: int, token: str) -> str | None:
     """
     How to name `token` in a quote if Mitfah does NOT list it on this chain, else None.
 
-    An unlisted token -- one the user added, or a raw address -- has no price feed, so the spending
-    cap can never count it. The native asset and every listed token return None.
+    An unlisted token -- one the user added -- has no price feed, so the spending cap can never
+    count it. The native asset and every listed token return None.
     """
     if _is_native(token):
         return None
     _, chain_id, _ = load_network_config(user_id)
     address = _token_address(user_id, token)
-    if any(address.lower() == t["address"].lower() for t in _get_listed_tokens(chain_id)):
+    if _is_listed(chain_id, address):
         return None
-    custom = _get_custom_token(user_id, chain_id, address)
-    return custom["ticker"].upper() if custom else address
+    # Never None: _token_address refuses anything neither listed nor added.
+    return _get_custom_token(user_id, chain_id, address)["ticker"].upper()
 
 
 def _limit_note(user_id: int, spent: str, received: str | None = None) -> str:
@@ -1011,6 +1043,9 @@ def _metered_usd(
     if token.lower() in ("eth", "bnb"):
         address, decimals, metered = ETH_SENTINEL, 18, True
     else:
+        # Refuses a token that is neither listed nor added, which the unmetered early return below
+        # would otherwise wave through as "costs nothing".
+        _token_address(user_id, token)
         erc20 = load_ierc20(user_id=user_id, token=token)
         address = erc20.address
         metered = session_handler.functions.isWatched(address).call()
@@ -1454,7 +1489,7 @@ def is_derived_input_sufficient(
         token_in: The ticker of the token being spent (e.g. "usdc").
         token_out: The ticker of the token being received (e.g. "dai").
         amount_out: The amount of token_out to receive, in whole units (e.g. 100 for 100 DAI).
-        slippage_bps: The acceptable slippage in basis points (e.g. 50 for 0.5% slippage).
+        slippage_bps: The acceptable slippage in basis points (e.g. 50 for 0.5% slippage), at most 1200 (12%).
     Returns:
         A dict with:
           - is_sufficient (bool): True if the user has sufficient funds to cover the swap including slippage, False otherwise.
@@ -1473,7 +1508,7 @@ def is_derived_input_sufficient(
                 "token_out": _resolve(user_id, token_out),
                 "amount_out": amount_out,
                 "owner_address": wallet,
-                "slippage_bps": slippage_bps,
+                "slippage_bps": _check_slippage(slippage_bps),
             }
         )
     else:
@@ -1483,7 +1518,7 @@ def is_derived_input_sufficient(
                 "token_out": _resolve(user_id, token_out),
                 "amount_out": amount_out,
                 "owner_address": wallet,
-                "slippage_bps": slippage_bps,
+                "slippage_bps": _check_slippage(slippage_bps),
             }
         )
 
@@ -1702,7 +1737,7 @@ def swap_ETH_for_exact_tokens(
         token_out: The ticker symbol of the ERC20 token to acquire (e.g. "usdc").
         amount_out: The exact amount of token_out to receive, in whole units (e.g. 100 for 100 USDC).
                     The tool converts this to base units internally.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied as an
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied as an
                       upward buffer on the native-asset value sent so the swap succeeds even if the
                       price moves slightly. Defaults to 50 bps. Use a higher value for volatile
                       tokens or low-liquidity pools.
@@ -1730,7 +1765,7 @@ def swap_ETH_for_exact_tokens(
             "amount_out": amount_out,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -1770,7 +1805,7 @@ def swap_exact_tokens_for_tokens(
         token_out: The ticker symbol of the ERC20 token to acquire (e.g. "dai").
         amount_in: The amount of token_in to swap, in whole units (e.g. 100 for 100 USDC).
                    The tool converts this to base units internally before sending the transaction.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). The tool
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). The tool
                       queries getAmountsOut to find the expected output and sets amountOutMin
                       accordingly. Defaults to 50 bps. Use a higher value (e.g. 100–300) for
                       volatile tokens or low-liquidity pools.
@@ -1796,7 +1831,7 @@ def swap_exact_tokens_for_tokens(
             "amount_in": amount_in,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -1836,7 +1871,7 @@ def swap_tokens_for_exact_tokens(
         token_out: The ticker symbol of the ERC20 token to acquire (e.g. "dai").
         amount_out: The exact amount of token_out to acquire, in whole units (e.g. 100 for 100 DAI).
                     The tool converts this to base units internally before sending the transaction.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). The tool
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). The tool
                       queries getAmountsIn to find the expected input cost and sets amountInMax
                       accordingly. Defaults to 50 bps. Use a higher value (e.g. 100–300) for
                       volatile tokens or low-liquidity pools.
@@ -1862,7 +1897,7 @@ def swap_tokens_for_exact_tokens(
             "amount_out": amount_out,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -1905,7 +1940,7 @@ def swap_exact_tokens_for_ETH(
         token_in: The ticker symbol of the ERC20 token to sell (e.g. "usdc", "dai").
         amount_in: The exact amount of token_in to sell, in whole units (e.g. 100 for 100 USDC).
                    The tool converts this to base units internally.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). The tool
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). The tool
                       queries getAmountsOut to find the expected native-asset output and sets
                       amountOutMin accordingly. Defaults to 50 bps. Use a higher value for
                       volatile tokens or low-liquidity pools.
@@ -1933,7 +1968,7 @@ def swap_exact_tokens_for_ETH(
             "amount_in": amount_in,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -1976,7 +2011,7 @@ def swap_tokens_for_exact_ETH(
         token_in: The ticker symbol of the ERC20 token to sell (e.g. "usdc", "dai").
         amount_out_eth: The exact amount of the native asset to receive, in whole units (e.g. 1.5).
                         The tool converts this to wei internally.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied as an
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied as an
                       upward buffer on amountInMax so the swap succeeds even if the price moves
                       slightly. Defaults to 50 bps. Use a higher value for volatile tokens or
                       low-liquidity pools.
@@ -2004,7 +2039,7 @@ def swap_tokens_for_exact_ETH(
             "amount_out": amount_out_eth,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -2047,7 +2082,7 @@ def swap_exact_ETH_for_tokens(
         token_out: The ticker symbol of the ERC20 token to receive (e.g. "usdc", "dai").
         eth_amount_in: The exact amount of the native asset to spend, in whole units (e.g. 1.5).
                        The tool converts this to wei internally and forwards it as msg.value.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). The tool
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). The tool
                       queries getAmountsOut to find the expected token output and sets amountOutMin
                       accordingly. Defaults to 50 bps. Use a higher value for volatile tokens
                       or low-liquidity pools.
@@ -2075,7 +2110,7 @@ def swap_exact_ETH_for_tokens(
             "amount_in": eth_amount_in,
             "from_address": load_session_handler(user_id).address,
             "recipient": _resolve_recipient(user_id, recipient),
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     return _quote_plan(
@@ -2119,7 +2154,7 @@ def add_liquidity(
         token_b: The ticker symbol of the second token to deposit. Defaults to the chain's
                  wrapped-native token (WETH on Ethereum, WBNB on BSC), the standard pairing.
                  Only override if depositing into a non-wrapped-native pair.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied to
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied to
                       both amountAMin and amountBMin. Defaults to 50 bps.
 
     Returns:
@@ -2142,7 +2177,7 @@ def add_liquidity(
             "token_b": _resolve(user_id, token_b),
             "amount_a": amount_a,
             "from_address": load_session_handler(user_id).address,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     summary = plan["summary"]
@@ -2186,7 +2221,7 @@ def add_liquidity_eth(
         amount_token: The desired amount of the ERC20 token to deposit, in whole units
                       (e.g. 2500 for 2500 DAI). The proportional native-asset amount is computed
                       from pool reserves automatically.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied
                       to both amountTokenMin and amountETHMin. Defaults to 50 bps.
 
     Returns:
@@ -2207,7 +2242,7 @@ def add_liquidity_eth(
             "token": _resolve(user_id, token),
             "amount_token": amount_token,
             "from_address": load_session_handler(user_id).address,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     summary = plan["summary"]
@@ -2252,7 +2287,7 @@ def remove_liquidity(
                    The tool converts this to base units using the pair's decimals internally.
         token_b: The ticker symbol of the second token in the pair. Defaults to the chain's
                  wrapped-native token (WETH on Ethereum, WBNB on BSC).
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied
                       as a downward buffer on amountAMin and amountBMin. Defaults to 50 bps.
 
     Returns:
@@ -2278,7 +2313,7 @@ def remove_liquidity(
             "token_b": _resolve(user_id, token_b),
             "lp_amount": lp_amount,
             "from_address": load_session_handler(user_id).address,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     summary = plan["summary"]
@@ -2326,7 +2361,7 @@ def remove_liquidity_eth(
                side of the pair is always the chain's native asset.
         lp_amount: The amount of LP tokens to burn, in whole units (e.g. 0.5 for 0.5 LP
                    tokens). The tool converts this to base units internally.
-        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%). Applied
+        slippage_bps: Maximum acceptable slippage in basis points (e.g. 50 = 0.5%), at most 1200 (12%). Applied
                       as a downward buffer on amountTokenMin and amountETHMin. Defaults to 50 bps.
 
     Returns:
@@ -2347,7 +2382,7 @@ def remove_liquidity_eth(
             "token": _resolve(user_id, token),
             "lp_amount": lp_amount,
             "from_address": load_session_handler(user_id).address,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": _check_slippage(slippage_bps),
         }
     )
     summary = plan["summary"]
