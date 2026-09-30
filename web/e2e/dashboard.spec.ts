@@ -193,7 +193,7 @@ test('switching networks', async ({ page }, testInfo) => {
 
 test('adding a token by its address', async ({ page }, testInfo) => {
   const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
-  const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
+  const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000', listed: false }
   const wallets = new Map<number, object>([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]])
   await mockServer(page, wallets, {
     'POST /api/tokens/custom/lookup': () => ({ json: pepe }),
@@ -219,16 +219,72 @@ test('adding a token by its address', async ({ page }, testInfo) => {
   await dialog.getByRole('button', { name: 'Continue' }).click()
   await expect(dialog.getByText("Your spending limit can't cover PEPE.")).toBeVisible()
   await expect(dialog.getByText('5 PEPE')).toBeVisible()
-  await expect(dialog.getByText('This address is an ERC-20 token: it answered with its symbol and decimals.')).toBeVisible()
+  await expect(dialog.getByText('ERC-20 token')).toBeVisible()
   await expectNoSidewaysScroll(page)
   await dialog.screenshot({ path: testInfo.outputPath('add-token-preview.png') })
 
   await dialog.getByRole('button', { name: 'Add token' }).click()
   await expect(page.getByText('PEPE added. It now shows in your balances.')).toBeVisible()
   const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: /^PEPE/ }) })
-  await expect(row).toContainText('Added by you')
+  await expect(row).toContainText('No price')
   await expect(row).toContainText('Not limited')
-  await expect(page.getByRole('button', { name: 'Remove PEPE from your list' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Remove PEPE from your dashboard' })).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'dashboard-custom-token')
+})
+
+test('adding a token Mitfah lists, and counting it', async ({ page }, testInfo) => {
+  const USDT = '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'
+  const usdt = { chain_id: SEPOLIA, address: USDT, ticker: 'usdt', symbol: 'USDT', name: 'Tether USD', decimals: 6, balance_raw: '0', listed: true }
+  const wallets = new Map<number, object>([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]])
+  const { sent } = await mockServer(page, wallets, {
+    'POST /api/tokens/custom/lookup': () => ({ json: usdt }),
+    'POST /api/tokens/custom': () => ({ status: 201, json: usdt }),
+    'POST /api/wallet/watched-tokens/prepare': () => ({ json: { tx: { to: ADDRESS, data: '0x1234' }, token_address: USDT } }),
+    'POST /api/wallet/tx/confirm': () => {
+      const before = walletState(SEPOLIA, ADDRESS)
+      wallets.set(
+        SEPOLIA,
+        walletState(SEPOLIA, ADDRESS, {
+          spending: { ...before.spending, watched_tokens: [...before.spending.watched_tokens, { ticker: 'usdt', address: USDT }] },
+          balances: [...before.balances, { ticker: 'usdt', address: USDT, native: false, decimals: 6, raw: '0', amount: 0 }],
+        }),
+      )
+      return { json: { status: 'confirmed', tx_hash: TX_HASH } }
+    },
+  })
+  await page.goto('/dashboard')
+
+  await page.getByRole('button', { name: 'Add token' }).click()
+  const dialog = page.getByRole('dialog').filter({ hasText: 'Add a token' })
+  await dialog.getByLabel('Token contract address').fill(USDT)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  const preview = page.getByRole('dialog').filter({ hasText: 'Add USDT?' })
+  await expect(preview.getByText('Pricing is available for USDT.')).toBeVisible()
+  await preview.getByRole('button', { name: 'Connect wallet' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
+  await expect(preview.getByRole('checkbox', { name: 'Count USDT toward my spending limit' })).toBeChecked()
+  await expectNoSidewaysScroll(page)
+  await preview.screenshot({ path: testInfo.outputPath('add-listed-token-preview.png') })
+
+  await preview.getByRole('button', { name: 'Add token' }).click()
+  await expect(page.getByText('USDT added. It now counts toward your limit.')).toBeVisible()
+  const row = page.getByRole('row').filter({ has: page.getByRole('rowheader', { name: /^USDT/ }) })
+  await expect(row).toBeVisible()
+  await expect(row).not.toContainText('Not limited')
+  expect(sent).toHaveLength(1)
+})
+
+test('removing a token that counts asks to stop counting it first', async ({ page }, testInfo) => {
+  await mockServer(page, new Map([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]]))
+  await page.goto('/dashboard')
+
+  // ETH and WETH always count, so they have no Remove.
+  await expect(page.getByRole('button', { name: /^Remove .+ from your dashboard$/ })).toHaveCount(1)
+  await page.getByRole('button', { name: 'Remove USDC from your dashboard' }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Remove USDC?' })
+  await expect(dialog.getByText('Step 1 of 2: stop counting USDC')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Stop counting USDC' })).toBeDisabled()
+  await expectNoSidewaysScroll(page)
+  await dialog.screenshot({ path: testInfo.outputPath('remove-counted-token.png') })
 })

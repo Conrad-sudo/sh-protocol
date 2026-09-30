@@ -340,6 +340,20 @@ def init_db():
             UNIQUE (user_id, chain_id, ticker)
         );
 
+        -- The listed tokens each user shows on their dashboard, per chain. A token the wallet
+        -- counts toward its limit is always here: the wallet read copies the counted list in
+        -- (api.get_wallet_state), and removing one is refused while it still counts. Tokens added
+        -- by address live in custom_tokens instead, and being there is what shows them. Keyed by
+        -- ticker so the read is one join on supported_tokens, and a token Mitfah stops listing
+        -- drops off every dashboard with it.
+        CREATE TABLE IF NOT EXISTS dashboard_tokens (
+            user_id  INTEGER NOT NULL,
+            chain_id INTEGER NOT NULL,
+            ticker   TEXT NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, chain_id, ticker)
+        );
+
         CREATE TABLE IF NOT EXISTS chains (
             name      TEXT NOT NULL,
             chain_id  INTEGER NOT NULL,
@@ -960,6 +974,60 @@ def resolve_token(user_id: int, chain_id: int, ref: str) -> str:
                 "this user added."
             )
         return custom["address"]
+
+
+# ── Dashboard tokens ──────────────────────────────────────────────────────────
+
+
+def add_dashboard_tokens(user_id: int, chain_id: int, tickers: list[str]):
+    """
+    Puts listed tokens on the user's dashboard for `chain_id`. Already there is fine, not an error.
+
+    @param tickers  Tickers from supported_tokens, any case.
+    """
+    now = int(time.time())
+    db = get_db()
+    db.executemany(
+        "INSERT OR IGNORE INTO dashboard_tokens (user_id, chain_id, ticker, added_at) VALUES (?, ?, ?, ?)",
+        [(user_id, chain_id, ticker.lower(), now) for ticker in tickers],
+    )
+    db.commit()
+
+
+def remove_dashboard_token(user_id: int, chain_id: int, ticker: str) -> bool:
+    """
+    Takes a listed token off the user's dashboard. The tokens themselves stay in the wallet.
+
+    Whether it may go (not while it counts toward the limit) is the caller's check: it needs the chain.
+
+    @return  True if it was on the dashboard.
+    """
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM dashboard_tokens WHERE user_id = ? AND chain_id = ? AND ticker = ?",
+        (user_id, chain_id, ticker.lower()),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def get_dashboard_tokens(user_id: int, chain_id: int) -> list[dict]:
+    """
+    The listed tokens on the user's dashboard for `chain_id`, as {"ticker", "address"}, by ticker.
+
+    Joined on supported_tokens, so a token Mitfah no longer lists is left out.
+    """
+    rows = (
+        get_db()
+        .execute(
+            "SELECT s.ticker, s.address FROM dashboard_tokens d "
+            "JOIN supported_tokens s ON s.chain_id = d.chain_id AND s.ticker = d.ticker "
+            "WHERE d.user_id = ? AND d.chain_id = ? ORDER BY s.ticker ASC",
+            (user_id, chain_id),
+        )
+        .fetchall()
+    )
+    return [{"ticker": row["ticker"], "address": row["address"]} for row in rows]
 
 
 # ── Contacts ──────────────────────────────────────────────────────────────────

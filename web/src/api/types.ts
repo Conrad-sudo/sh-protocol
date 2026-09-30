@@ -105,10 +105,15 @@ export interface TokenBalance {
   address: string | null
   native: boolean
   /**
-   * True for a token the user added by address. It has no price in Mitfah, so it never counts
-   * toward the spending limit. Absent (false) for the native asset and listed tokens.
+   * True for a token the user added by address that Mitfah doesn't list. It has no price, so it
+   * never counts toward the spending limit. Absent (false) for the native asset and listed tokens.
    */
   custom?: boolean
+  /**
+   * The wrapped native token (WETH, WBNB): it always counts toward the limit, so it can't be
+   * removed from the dashboard. Absent for the native asset, which can't be removed either.
+   */
+  always_counted?: boolean
   /** A custom token's own name(), when it has a readable one. */
   name?: string | null
   decimals: number | null
@@ -214,6 +219,11 @@ export interface CustomToken {
   decimals: number
   /** The wallet's balance, as an integer string in the token's smallest unit. */
   balance_raw: string
+  /**
+   * True for a token Mitfah lists: it has a price, so it can count toward the spending limit, and
+   * adding it puts it on the dashboard under its listed ticker.
+   */
+  listed: boolean
 }
 
 /**

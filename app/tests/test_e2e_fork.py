@@ -45,7 +45,9 @@ import bundler                                        # noqa: E402
 import smart_wallet_agent                             # noqa: E402
 import tools                                          # noqa: E402
 from agent_context import AgentContext                # noqa: E402
-from constants import ETH_SENTINEL, get_chain_display_name, get_native_asset_ticker, get_router  # noqa: E402
+from constants import (  # noqa: E402
+    ETH_SENTINEL, get_always_counted_ticker, get_chain_display_name, get_native_asset_ticker, get_router,
+)
 from contracts import read_spending_config           # noqa: E402
 from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
@@ -293,7 +295,9 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
     native = [b for b in state["balances"] if b["native"]][0]
     check("the native balance matches chain",
           native["raw"] == str(w3.eth.get_balance(wallet)), native["raw"])
-    check("listed ERC20s are priced in too", len(state["balances"]) > 1, str(len(state["balances"])))
+    check("the dashboard shows only what the new wallet counts: the native token and the wrapped one",
+          [b["ticker"] for b in state["balances"]] == [get_native_asset_ticker(CHAIN_ID).lower(), get_always_counted_ticker(CHAIN_ID)],
+          str([b["ticker"] for b in state["balances"]]))
     check("no balance errored", not [b for b in state["balances"] if b.get("error")],
           str([b for b in state["balances"] if b.get("error")]))
 
@@ -304,6 +308,47 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
     check("another account gets 404, not someone else's wallet",
           c.get(f"/api/wallet/{CHAIN_ID}", headers=other_headers).status_code == 404)
     check("reading needs a token", c.get(f"/api/wallet/{CHAIN_ID}").status_code == 401)
+
+
+def test_dashboard_tokens(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    The dashboard list against the real chain: a listed token added by address shows up, is counted
+    by a real owner transaction, can't come off while it counts, and comes off once it stops.
+    Leaves USDC as it found it -- uncounted and off the dashboard -- for the tests after it.
+    """
+    print("\n[2b] dashboard tokens: add a listed token, count it, stop counting, remove it")
+    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    sh = w3.eth.contract(address=wallet, abi=abi)
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+
+    def shown() -> list[str]:
+        balances = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["balances"]
+        return [b["ticker"] for b in balances if not b["native"]]
+
+    check("USDC isn't shown to begin with", "usdc" not in shown(), str(shown()))
+    r = c.post("/api/tokens/custom/lookup", headers=headers, json={"chain_id": CHAIN_ID, "address": usdc.lower()})
+    check("a listed token's address is accepted, as the listed token",
+          r.status_code == 200 and (r.json()["listed"], r.json()["ticker"]) == (True, "usdc"), r.text[:200])
+    r = c.post("/api/tokens/custom", headers=headers, json={"chain_id": CHAIN_ID, "address": usdc})
+    check("adding it -> 201", r.status_code == 201, f"{r.status_code} {r.text[:200]}")
+    check("it shows on the dashboard", "usdc" in shown(), str(shown()))
+
+    owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "add"})
+    check("it counts on chain", sh.functions.isWatched(usdc).call() is True)
+    r = c.delete(f"/api/tokens/custom/{CHAIN_ID}/{usdc}", headers=headers)
+    check("removing it while it counts -> 409", r.status_code == 409, f"{r.status_code} {r.text[:200]}")
+    check("…and it stays", "usdc" in shown(), str(shown()))
+
+    owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "remove"})
+    check("it no longer counts on chain", sh.functions.isWatched(usdc).call() is False)
+    check("stopping counting doesn't take it off the dashboard", "usdc" in shown(), str(shown()))
+    r = c.delete(f"/api/tokens/custom/{CHAIN_ID}/{usdc}", headers=headers)
+    check("now it comes off -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    check("and no longer shows", "usdc" not in shown(), str(shown()))
+
+    always = get_always_counted_ticker(CHAIN_ID)
+    r = c.delete(f"/api/tokens/custom/{CHAIN_ID}/{get_token_address(CHAIN_ID, always)}", headers=headers)
+    check(f"{always.upper()} can't come off -> 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
 
 
 def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
@@ -861,8 +906,10 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
 
     ticker = symbol.lower()
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    r = c.post("/api/tokens/custom/lookup", headers=headers, json={"chain_id": CHAIN_ID, "address": usdc})
+    check("the real USDC comes back as the listed token, not an added one",
+          r.status_code == 200 and (r.json()["listed"], r.json()["ticker"]) == (True, "usdc"), f"{r.status_code} {r.text[:160]}")
     for label, address, expected in (
-        ("a listed token is refused", usdc, "already on Mitfah's list"),
         ("a token copying a listed symbol is refused", fake_usdc, "fake a token"),
         ("an address with no contract asks to check it again", Account.create().address, "Check the token address again"),
         # The exchange router: a contract, but with no symbol() or decimals().
@@ -1097,6 +1144,7 @@ if __name__ == "__main__":
     deployed = test_deploy_round_trip(client, owner, auth_headers)
     print(f"  wallet: {deployed}")
     test_wallet_state_read(client, auth_headers, owner, deployed)
+    test_dashboard_tokens(client, owner, auth_headers, deployed)
     test_owner_actions(client, owner, auth_headers, deployed)
     test_simulations_bite(client, owner, auth_headers, deployed)
     test_cross_user_isolation(client, owner, auth_headers, deployed)

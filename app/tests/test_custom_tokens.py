@@ -1,7 +1,8 @@
 """
 Offline checks for tokens a user adds by address (custom tokens): the add-a-token rules, the API
 routes, how the assistant's tools resolve and price them, and that those tools refuse any token
-that is neither listed nor added, and any slippage over 12%.
+that is neither listed nor added, and any slippage over 12%. Also the dashboard list: which listed
+tokens show, adding one by address, and that one still counted can't be removed.
 
 Everything runs against a throwaway database and a FAKE chain -- a dict of contracts answering raw
 eth_calls -- so it is safe to run anywhere. The real on-chain journey (deploy a token, add it, have
@@ -94,6 +95,9 @@ class FakeEth:
 
 
 CHAIN_TOKENS = {
+    USDC: _erc20("USDC", 6, 7 * 10**6, name="USD Coin"),                # listed
+    USDT: _erc20("USDT", 6, 0, name="Tether USD"),                      # listed
+    WETH: _erc20("WETH", 18, 0, name="Wrapped Ether"),                  # listed, always counted
     PEPE: _erc20("PEPE", 18, 5 * 10**18, name="Pepe"),
     SHIB: _erc20("SHIB", 18, 0, name="Shiba Inu"),
     _addr(0x0B32): _erc20("MKR", 18, 0, symbol_bytes32=True),   # old bytes32 symbol()
@@ -152,6 +156,7 @@ def test_add_rules():
     check("its ticker is the symbol, lowercased", token and token["ticker"] == "pepe")
     check("its symbol and decimals come back to show the user",
           token and (token["symbol"], token["decimals"]) == ("PEPE", 18), str(token))
+    check("it is not a listed token", token and token["listed"] is False, str(token))
     check("name, decimals and the wallet's balance are read off the chain",
           token and (token["name"], token["decimals"], token["balance_raw"]) == ("Pepe", 18, str(5 * 10**18)),
           str(token))
@@ -163,7 +168,6 @@ def test_add_rules():
         ("not an address", "0x1234", "valid token address"),
         ("the zero address", "0x" + "0" * 40, "zero address"),
         ("the wallet itself", WALLET, "wallet's own address"),
-        ("a listed token", USDC, "already on Mitfah's list"),
         ("an address with no contract", _addr(0xDEAD), "no contract at this address"),
         ("a contract without decimals()", _addr(0xBAD4), "couldn't read decimals"),
         ("a contract without symbol()", _addr(0xBAD3), "couldn't read a symbol"),
@@ -505,12 +509,112 @@ def test_ierc20_cache_follows_the_address():
         contracts.load_network_config = original
 
 
+def test_dashboard_tokens():
+    print("\n[4b] the dashboard shows only the listed tokens the user chose, and counted ones can't go")
+    uid = db.create_user(email="dashboard@example.com")
+
+    db.add_dashboard_tokens(uid, CHAIN, ["USDT", "usdc"])
+    db.add_dashboard_tokens(uid, CHAIN, ["usdc"])
+    check("tokens show sorted, once each, with their listed address",
+          db.get_dashboard_tokens(uid, CHAIN) == [{"ticker": "usdc", "address": USDC}, {"ticker": "usdt", "address": USDT}],
+          str(db.get_dashboard_tokens(uid, CHAIN)))
+    check("and on no other chain", db.get_dashboard_tokens(uid, 1) == [])
+    db.add_dashboard_tokens(uid, CHAIN, ["knc"])
+    check("a ticker Mitfah doesn't list never shows", [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdc", "usdt"])
+    check("removing reports success", db.remove_dashboard_token(uid, CHAIN, "usdt") is True)
+    check("removing again reports nothing to remove", db.remove_dashboard_token(uid, CHAIN, "usdt") is False)
+
+    api._show_counted_tokens(uid, CHAIN, [USDT.lower(), _addr(0xFEED)])
+    check("counted tokens and WETH are copied onto the dashboard, unlisted addresses skipped",
+          [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdc", "usdt", "weth"],
+          str(db.get_dashboard_tokens(uid, CHAIN)))
+
+    other = db.create_user(email="dashboard-2@example.com")
+    token, err = _inspect(other, USDC.lower())
+    check("a listed token can be added by address", err is None, err or "")
+    check("…as a listed token, under its listed ticker",
+          token and (token["listed"], token["ticker"], token["symbol"], token["decimals"]) == (True, "usdc", "USDC", 6),
+          str(token))
+    check("…with the wallet's balance", token and token["balance_raw"] == str(7 * 10**6), str(token))
+    _, err = _inspect(uid, USDC)
+    check("one already on the dashboard is refused", err is not None and "already on your dashboard" in err, str(err))
+
+    # A full list of added-by-address tokens doesn't stop a listed one: the cap is about unpriced ones.
+    for i in range(custom_tokens.MAX_CUSTOM_TOKENS_PER_CHAIN):
+        db.save_custom_token(other, CHAIN, _addr(0x200000 + i), f"d{i}", None, 18)
+    _, err = _inspect(other, USDC)
+    check("the 25-token cap doesn't apply to listed tokens", err is None, str(err))
+
+
+def test_dashboard_api():
+    print("\n[4c] the API adds a listed token to the dashboard and removes it only once it stops counting")
+    original = api._resolve_chain, api._load_wallet_for_chain, api.read_spending_config
+    watched: list[str] = []
+    api._resolve_chain = lambda chain_id: (FAKE_W3, NETWORK)
+    api._load_wallet_for_chain = lambda _w3, user_id, chain_id: SimpleNamespace(address=db.get_wallet_address(user_id, chain_id))
+    api.read_spending_config = lambda _wallet: {"watchedTokens": list(watched)}
+    try:
+        c, headers, uid = _client_for("dashboard-api@example.com")
+        db.save_wallet_address(uid, CHAIN, WALLET)
+
+        r = c.post("/api/tokens/custom/lookup", json={"chain_id": CHAIN, "address": USDT}, headers=headers)
+        check("lookup says a listed token is listed", r.status_code == 200 and r.json()["listed"] is True, r.text[:200])
+        r = c.post("/api/tokens/custom", json={"chain_id": CHAIN, "address": USDT}, headers=headers)
+        check("adding it -> 201", r.status_code == 201 and r.json()["ticker"] == "usdt", f"{r.status_code} {r.text[:160]}")
+        check("it is on the dashboard", [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdt"])
+        check("and not saved as an added-by-address token", db.get_custom_tokens(uid, CHAIN) == [])
+
+        watched.append(USDT)
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT}", headers=headers)
+        check("removing it while it counts -> 409", r.status_code == 409, f"{r.status_code} {r.text[:160]}")
+        check("…saying to stop counting it first", "Stop counting it first" in r.json().get("detail", ""), r.text[:200])
+        check("…and it stays", [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdt"])
+
+        watched.clear()
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT.lower()}", headers=headers)
+        check("once it no longer counts it can be removed", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
+        check("it is gone", db.get_dashboard_tokens(uid, CHAIN) == [])
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT}", headers=headers)
+        check("removing it again -> 404", r.status_code == 404, str(r.status_code))
+
+        db.add_dashboard_tokens(uid, CHAIN, ["weth"])
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{WETH}", headers=headers)
+        check("WETH can't be removed -> 400", r.status_code == 400 and "always counts" in r.json()["detail"], r.text[:200])
+    finally:
+        api._resolve_chain, api._load_wallet_for_chain, api.read_spending_config = original
+
+
+def test_dashboard_balances():
+    print("\n[4d] balances list the native token, the dashboard's listed tokens, then added ones")
+    uid = db.create_user(email="dashboard-balances@example.com")
+    db.add_dashboard_tokens(uid, CHAIN, ["weth", "usdc"])
+    db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+
+    def contract(address, abi):
+        return SimpleNamespace(functions=SimpleNamespace(
+            decimals=lambda: FakeCall(address, DECIMALS, "uint8"),
+            balanceOf=lambda owner: FakeCall(address, BALANCE_OF + owner[2:].lower().rjust(64, "0"), "uint256"),
+        ))
+
+    w3 = SimpleNamespace(eth=SimpleNamespace(get_balance=lambda _a: 10**18, contract=contract))
+    rows = api._token_balances(w3, uid, CHAIN, WALLET)
+    check("native first, then the dashboard's listed tokens, then added ones",
+          [r["ticker"] for r in rows] == ["eth", "usdc", "weth", "pepe"], str([r["ticker"] for r in rows]))
+    check("USDT isn't shown: it isn't on this dashboard", all(r["ticker"] != "usdt" for r in rows))
+    check("WETH is marked always counted, and only WETH",
+          [r["ticker"] for r in rows if r.get("always_counted")] == ["weth"], str(rows))
+    check("balances are read", next(r for r in rows if r["ticker"] == "usdc")["raw"] == str(7 * 10**6), str(rows))
+
+
 if __name__ == "__main__":
     try:
         test_add_rules()
         test_per_user_list_and_resolution()
         test_cap()
         test_api_routes()
+        test_dashboard_tokens()
+        test_dashboard_api()
+        test_dashboard_balances()
         test_tools_price_and_note_custom_tokens()
         test_ierc20_cache_follows_the_address()
         test_tools_only_reach_tokens_the_owner_chose()

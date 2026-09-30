@@ -9,6 +9,10 @@ reaches the assistant (langchain-erc20 reads symbol() on chain for every quote's
 the user. A token calling itself "USDC", or carrying instructions in its symbol, is a trick aimed
 at one of them, so it is refused rather than relabelled.
 
+A token Mitfah already lists can be added the same way, by address: it goes on the user's dashboard
+(db.dashboard_tokens) under the listed ticker, and none of the symbol rules apply -- Mitfah chose
+it, and the oracle prices it, so it can also count toward the limit.
+
 Everything is read from the chain here; nothing the browser says about the token is trusted.
 """
 
@@ -19,7 +23,13 @@ from web3 import Web3
 
 from constants import get_chain_display_name, get_native_asset_ticker, get_native_wrapped_ticker
 from contracts import load_ierc20
-from db import get_custom_token, get_custom_tokens, get_supported_token_by_address, get_supported_tokens_by_chain_id
+from db import (
+    get_custom_token,
+    get_custom_tokens,
+    get_dashboard_tokens,
+    get_supported_token_by_address,
+    get_supported_tokens_by_chain_id,
+)
 from network_config import load_network_config
 
 # Each added token costs the dashboard read one balanceOf, so the list is capped per network.
@@ -113,10 +123,14 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     `chain_id` the acting network first (db.acting_network); anything else is refused rather than
     read from the wrong chain.
 
+    A listed token is accepted unless it is on the user's dashboard already; it keeps the listed
+    ticker and skips the symbol rules and the per-chain cap, which are about unpriced tokens.
+
     @param address         What the user pasted.
     @param wallet_address  The user's wallet on this chain, for the balance preview.
-    @return  {"address", "ticker", "symbol", "name", "decimals", "balance_raw"} -- ticker is the
-             symbol lowercased, balance_raw a string (a uint256 does not survive JSON's float64).
+    @return  {"address", "ticker", "symbol", "name", "decimals", "balance_raw", "listed"} -- ticker
+             is the symbol lowercased (a listed token's: its listed ticker), balance_raw a string (a
+             uint256 does not survive JSON's float64), listed True for a token Mitfah prices.
     @raises CustomTokenError  With a message for the user, if the token can't be added.
     """
     network = get_chain_display_name(chain_id)
@@ -131,17 +145,16 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
 
     listed = get_supported_token_by_address(chain_id, address)
     if listed is not None:
-        raise CustomTokenError(
-            f"{listed['ticker'].upper()} is already on Mitfah's list for {network}, so it's in "
-            "your balances already."
-        )
-    existing = get_custom_token(user_id, chain_id, address)
-    if existing is not None:
-        raise CustomTokenError(f"You've already added this token ({existing['ticker'].upper()}).")
-    if len(get_custom_tokens(user_id, chain_id)) >= MAX_CUSTOM_TOKENS_PER_CHAIN:
-        raise CustomTokenError(
-            f"You can add up to {MAX_CUSTOM_TOKENS_PER_CHAIN} tokens on each network. Remove one first."
-        )
+        if any(t["ticker"] == listed["ticker"] for t in get_dashboard_tokens(user_id, chain_id)):
+            raise CustomTokenError(f"{listed['ticker'].upper()} is already on your dashboard.")
+    else:
+        existing = get_custom_token(user_id, chain_id, address)
+        if existing is not None:
+            raise CustomTokenError(f"You've already added this token ({existing['ticker'].upper()}).")
+        if len(get_custom_tokens(user_id, chain_id)) >= MAX_CUSTOM_TOKENS_PER_CHAIN:
+            raise CustomTokenError(
+                f"You can add up to {MAX_CUSTOM_TOKENS_PER_CHAIN} tokens on each network. Remove one first."
+            )
 
     w3, acting_chain_id, _ = load_network_config(user_id)
     if acting_chain_id != chain_id:
@@ -160,8 +173,13 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     balance = _read(erc20.functions.balanceOf(Web3.to_checksum_address(wallet_address)))
     if balance is None:
         raise _check_address_again(network, "This contract can't report a balance")
-
+    name = _clean_name(_read(erc20.functions.name()) or _read_bytes32_text(w3, address, _SELECTOR_NAME))
     symbol = symbol.strip()
+    token = {"address": address, "name": name, "decimals": decimals, "balance_raw": str(balance)}
+
+    if listed is not None:
+        return {**token, "ticker": listed["ticker"], "symbol": symbol, "listed": True}
+
     if not TICKER_PATTERN.fullmatch(symbol):
         shown = symbol[:24] + ("…" if len(symbol) > 24 else "")
         raise CustomTokenError(
@@ -180,13 +198,4 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
             f"You already added a different token called {symbol.upper()} ({clash['address']}). "
             "Remove that one first to add this one."
         )
-
-    name = _read(erc20.functions.name()) or _read_bytes32_text(w3, address, _SELECTOR_NAME)
-    return {
-        "address": address,
-        "ticker": ticker,
-        "symbol": symbol,
-        "name": _clean_name(name),
-        "decimals": decimals,
-        "balance_raw": str(balance),
-    }
+    return {**token, "ticker": ticker, "symbol": symbol, "listed": False}

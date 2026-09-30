@@ -365,7 +365,7 @@ describe('DashboardPage', () => {
     const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
     const FAKE_USDC = '0x9999999999999999999999999999999999999999'
     const NOT_A_TOKEN = '0x8888888888888888888888888888888888888888'
-    const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
+    const pepe = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000', listed: false }
     const checkAgain =
       "Mitfah couldn't read a symbol and decimals from this contract, so this doesn't look like an ERC-20 token on Sepolia. Check the token address again, and that it's the token's address on Sepolia."
 
@@ -428,15 +428,17 @@ describe('DashboardPage', () => {
     expect(preview).toHaveTextContent('5 PEPE')
     expect(preview).toHaveTextContent("Your spending limit can't cover PEPE.")
     expect(preview).toHaveTextContent('Buying it counts the full amount you pay.')
+    // An unpriced token can't count, so there is nothing to tick.
+    expect(within(preview).queryByRole('checkbox')).toBeNull()
     await user.click(within(preview).getByRole('button', { name: 'Add token' }))
 
     expect(await screen.findByText('PEPE added. It now shows in your balances.')).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     const row = (await screen.findByRole('rowheader', { name: /^PEPE/ })).closest('tr')!
-    expect(row).toHaveTextContent('Added by you')
+    expect(row).toHaveTextContent('No price')
     expect(row).toHaveTextContent('Not limited')
     expect(row).toHaveTextContent('5')
-    expect(screen.getByText('Tokens you added have no price in Mitfah, so they never count toward your limit.')).toBeInTheDocument()
+    expect(screen.getByText('Tokens marked "No price" can never count toward your limit: Mitfah has no price for them.')).toBeInTheDocument()
     // Looked up by its checksummed address; added once.
     expect(requests).toEqual([
       { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: NOT_A_TOKEN } },
@@ -462,16 +464,103 @@ describe('DashboardPage', () => {
     await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
-    // Listed tokens can't be removed from the list; only the user's own can.
-    expect(screen.getAllByRole('button', { name: /from your list$/ })).toHaveLength(1)
-    await user.click(screen.getByRole('button', { name: 'Remove PEPE from your list' }))
+    // Every token can come off the dashboard except ETH and WETH, which always count.
+    expect(screen.getAllByRole('button', { name: /from your dashboard$/ }).map(b => b.getAttribute('aria-label'))).toEqual([
+      'Remove USDC from your dashboard',
+      'Remove PEPE from your dashboard',
+    ])
+    await user.click(screen.getByRole('button', { name: 'Remove PEPE from your dashboard' }))
     const confirm = await screen.findByRole('alertdialog', { name: 'Remove PEPE?' })
     expect(confirm).toHaveTextContent('Any PEPE in the wallet stays there')
+    expect(confirm).not.toHaveTextContent('Step 1 of 2')
     await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
 
-    expect(await screen.findByText('PEPE removed from your list.')).toBeInTheDocument()
+    expect(await screen.findByText('PEPE removed from your dashboard.')).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByRole('rowheader', { name: /^PEPE/ })).toBeNull())
     expect(requests).toEqual([{ route: `DELETE /api/tokens/custom/${SEPOLIA}/${PEPE}`, body: undefined }])
+  })
+
+  it('adds a token Mitfah lists and counts it toward the limit', async () => {
+    const USDT = '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'
+    const usdt = { chain_id: SEPOLIA, address: USDT, ticker: 'usdt', symbol: 'USDT', name: 'Tether USD', decimals: 6, balance_raw: '0', listed: true }
+    const withUsdt = makeWalletState({
+      spending: { ...makeWalletState().spending, watched_tokens: [{ ticker: 'usdc', address: USDC }, { ticker: 'usdt', address: USDT }] },
+      balances: [...makeWalletState().balances, { ticker: 'usdt', address: USDT, native: false, decimals: 6, raw: '0', amount: 0 }],
+    })
+    const { requests, prepared } = stubServer({
+      wallets: { [SEPOLIA]: [makeWalletState(), withUsdt] },
+      extra: {
+        'POST /api/tokens/custom/lookup': () => json(200, usdt),
+        'POST /api/tokens/custom': () => json(201, usdt),
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add token' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a token' })
+    await user.type(within(dialog).getByLabelText('Token contract address'), USDT)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    const preview = await screen.findByRole('dialog', { name: 'Add USDT?' })
+    expect(preview).toHaveTextContent('Pricing is available for USDT.')
+    expect(preview).not.toHaveTextContent("Your spending limit can't cover USDT.")
+    // Counting needs the owner's signature, so it waits for the owner wallet.
+    const countIt = within(preview).getByRole('checkbox', { name: 'Count USDT toward my spending limit' })
+    expect(countIt).toBeDisabled()
+    expect(countIt).not.toBeChecked()
+    await user.click(within(preview).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await waitFor(() => expect(countIt).toBeChecked())
+    expect(countIt).toBeEnabled()
+    await user.click(within(preview).getByRole('button', { name: 'Add token' }))
+
+    expect(await screen.findByText('USDT added. It now counts toward your limit.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const row = (await screen.findByRole('rowheader', { name: /^USDT/ })).closest('tr')!
+    expect(row).not.toHaveTextContent('Not limited')
+    expect(row).not.toHaveTextContent('No price')
+    expect(requests.map(r => r.route)).toEqual(['POST /api/tokens/custom/lookup', 'POST /api/tokens/custom'])
+    expect(prepared).toEqual([
+      { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdt', action: 'add' } },
+    ])
+  })
+
+  it('stops counting a token before removing it from the dashboard', async () => {
+    const notCounted = makeWalletState({ spending: { ...makeWalletState().spending, watched_tokens: [] } })
+    const removed = makeWalletState({
+      spending: notCounted.spending,
+      balances: makeWalletState().balances.filter(b => b.ticker !== 'usdc'),
+    })
+    const { requests, prepared } = stubServer({
+      wallets: { [SEPOLIA]: [makeWalletState(), notCounted, removed] },
+      extra: { [`DELETE /api/tokens/custom/${SEPOLIA}/${USDC}`]: () => json(200, { status: 'deleted' }) },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Remove USDC from your dashboard' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Remove USDC?' })
+    expect(dialog).toHaveTextContent('Step 1 of 2: stop counting USDC')
+    expect(dialog).toHaveTextContent('move USDC out of this wallet without any limit')
+    expect(within(dialog).queryByRole('button', { name: 'Remove' })).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await within(dialog).findByText('Owner connected')
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting USDC' }))
+
+    expect(await screen.findByText('USDC no longer counts toward your limit.')).toBeInTheDocument()
+    expect(await within(dialog).findByText(/Step 2 of 2: remove it from your dashboard/)).toBeInTheDocument()
+    expect(requests).toEqual([])
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }))
+
+    expect(await screen.findByText('USDC removed from your dashboard.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('rowheader', { name: /^USDC/ })).toBeNull())
+    expect(prepared).toEqual([
+      { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdc', action: 'remove' } },
+    ])
+    expect(requests).toEqual([{ route: `DELETE /api/tokens/custom/${SEPOLIA}/${USDC}`, body: undefined }])
   })
 
   it('pauses from the dashboard', async () => {

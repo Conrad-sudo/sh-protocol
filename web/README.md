@@ -118,10 +118,19 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   decide that), its name, the wallet's balance and the whole address, with a copy button. An address
   that can't answer both symbol and decimals gets a warning to check it again; a token the server
   can't show safely — an odd symbol, or one copying a listed token's — is refused with the reason.
-  Added tokens show in `BalancesCard` as "Added by you" and "Not limited" (Mitfah has no price for
-  them, so they never count toward the limit) with a Remove link; removing only takes the token off
-  the list. No wallet signature is involved either way. Withdraw sends an ERC-20's address, not its
-  ticker, so added tokens withdraw like any other.
+  A token Mitfah lists is accepted too: the preview says "Pricing is available" and offers a "Count
+  it toward my spending limit" checkbox (ticked, once the owner wallet is connected); adding it then
+  sends the owner's `watched-tokens` transaction. If that is cancelled the token stays added,
+  uncounted, and the dialog offers to try again. Unpriced tokens show in `BalancesCard` as "No
+  price" and "Not limited". Withdraw sends an ERC-20's address, not its ticker, so added tokens
+  withdraw like any other.
+
+- **The dashboard shows only the user's tokens**: the native token, the ones picked at deploy (and
+  counted since), and the ones added. Every row but the native token and WETH/WBNB has a Remove
+  link (`RemoveTokenModal`). A token that still counts goes in two steps — "Stop counting" (the
+  owner's signature), then remove — because the dashboard must show everything the limit covers;
+  the API refuses the removal otherwise. The page shares one `useOwnerAction` between the header
+  actions and `BalancesCard`, so only one owner change is ever in flight.
 
 - **WETH/WBNB always count.** `/api/tokens` flags the wrapped native token `always_counted`. The
   onboarding picker shows it ticked and locked ("ETH and WETH always count"); Controls lists it

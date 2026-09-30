@@ -120,7 +120,8 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
       </ul>
       <AddToken key={watched.length} {...props} />
       <Text size="sm" muted className="mf-settings-note">
-        Tokens you add yourself on the Dashboard have no price in Mitfah, so they can't count toward the limit.
+        Tokens marked "No price" on the Dashboard can't count toward the limit: Mitfah has no price for them. A
+        token you count here also shows on the Dashboard.
       </Text>
     </Panel>
   )

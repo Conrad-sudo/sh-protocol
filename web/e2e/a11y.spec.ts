@@ -22,7 +22,7 @@ const CONTACTS = [
 ]
 // A token the user added by address, so the dashboard scan covers its row (tags and Remove).
 const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
-const PEPE_PREVIEW = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000' }
+const PEPE_PREVIEW = { chain_id: SEPOLIA, address: PEPE, ticker: 'pepe', symbol: 'PEPE', name: 'Pepe', decimals: 18, balance_raw: '5000000000000000000', listed: false }
 const HISTORY = [
   { role: 'user', text: 'how much can I still spend today?' },
   { role: 'assistant', text: 'You can still spend **$60** of your $100 limit.' },
@@ -122,6 +122,31 @@ test('no serious accessibility problems in the add-token dialog', async ({ page 
   await dialog.getByLabel('Token contract address').fill(PEPE)
   await dialog.getByRole('button', { name: 'Continue' }).click()
   await expect(dialog.getByText("Your spending limit can't cover PEPE.")).toBeVisible()
+  expect(await scan(page)).toEqual([])
+})
+
+test('no serious accessibility problems adding a listed token, or removing one that counts', async ({ page }) => {
+  const USDT = '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'
+  await mockServer(page)
+  // Registered after mockServer's, so it answers first: this lookup finds a token Mitfah lists.
+  await page.route('**/api/tokens/custom/lookup', route =>
+    route.fulfill({
+      json: { chain_id: SEPOLIA, address: USDT, ticker: 'usdt', symbol: 'USDT', name: 'Tether USD', decimals: 6, balance_raw: '0', listed: true },
+    }),
+  )
+  await page.goto('/dashboard')
+  await page.getByRole('button', { name: 'Add token' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Token contract address').fill(USDT)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(dialog.getByText('Pricing is available for USDT.')).toBeVisible()
+  expect(await scan(page)).toEqual([])
+
+  await dialog.getByRole('button', { name: 'Back' }).click()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toBeHidden()
+  await page.getByRole('button', { name: 'Remove USDC from your dashboard' }).click()
+  await expect(page.getByRole('alertdialog').getByText('Step 1 of 2: stop counting USDC')).toBeVisible()
   expect(await scan(page)).toEqual([])
 })
 

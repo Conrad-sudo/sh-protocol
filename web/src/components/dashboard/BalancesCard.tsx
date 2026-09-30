@@ -3,30 +3,42 @@ import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-q
 import PlusIcon from '@rsuite/icons/Plus'
 import { Button, Message, Panel, Text, useToaster } from 'rsuite'
 import { ApiError } from '../../api/client'
-import type { TokenBalance, WalletState } from '../../api/types'
+import type { Chain, TokenBalance, WalletState } from '../../api/types'
 import { removeCustomToken } from '../../api/wallet'
+import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { formatTokenAmount } from '../../lib/format'
 import { errorText } from '../../lib/tx'
 import { chainName } from '../../wallet/chains'
-import { ConfirmModal } from '../owner/ConfirmModal'
 import { StatusTag } from '../StatusTag'
 import { AddTokenModal } from './AddTokenModal'
+import { RemoveTokenModal } from './RemoveTokenModal'
 
 const REMOVE_KEY = ['custom-token', 'remove'] as const
 
+interface BalancesCardProps {
+  wallet: WalletState
+  chain: Chain | undefined
+  /** The page's owner-transaction handle: counting a token, or stopping, needs the owner's signature. */
+  tx: OwnerActionHandle
+}
+
 /**
- * What the wallet holds. The native token always counts toward the spending limit; an ERC-20 counts
- * only if it is watched, so an unwatched one is flagged — the assistant could move it without limit.
- * Tokens the user added by address can never count (Mitfah has no price for them) and are marked as
- * theirs, with a way to take them off the list. A token the server could not read shows as such
- * instead of hiding the rest.
+ * What the wallet holds, for the tokens on the dashboard: the native token, the tokens chosen when
+ * the wallet was made, and the ones added since. The native token always counts toward the spending
+ * limit; an ERC-20 counts only if it is watched, so an unwatched one is flagged — the assistant
+ * could move it without limit. Tokens Mitfah has no price for can never count and are marked so.
+ *
+ * Any token can be taken off the dashboard except the native token and its wrapped form (WETH,
+ * WBNB), which always count. One that counts has to stop counting first, and the remove dialog walks
+ * through that. A token the server could not read shows as such instead of hiding the rest.
  */
-export function BalancesCard({ wallet }: { wallet: WalletState }) {
+export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
   const queryClient = useQueryClient()
   const toaster = useToaster()
   const [addOpen, setAddOpen] = useState(false)
-  // A fresh form each time the dialog opens.
+  // A fresh dialog each time one opens.
   const [addKey, setAddKey] = useState(0)
+  const [removeKey, setRemoveKey] = useState(0)
   // Kept after closing so the dialog's text doesn't vanish while it animates out.
   const [toRemove, setToRemove] = useState<TokenBalance | null>(null)
   const [removeOpen, setRemoveOpen] = useState(false)
@@ -34,6 +46,7 @@ export function BalancesCard({ wallet }: { wallet: WalletState }) {
   const watched = new Set(wallet.spending.watched_tokens.map(t => t.address.toLowerCase()))
   const counts = (balance: TokenBalance) =>
     balance.native || (balance.address !== null && watched.has(balance.address.toLowerCase()))
+  const removable = (balance: TokenBalance) => !balance.native && !balance.always_counted
   const anyListedUnlimited = wallet.balances.some(b => !b.custom && !counts(b))
   const anyCustom = wallet.balances.some(b => b.custom)
 
@@ -59,7 +72,10 @@ export function BalancesCard({ wallet }: { wallet: WalletState }) {
     onSuccess: (removed, token) => {
       void queryClient.invalidateQueries({ queryKey: ['wallet', wallet.chain_id] })
       const name = token.ticker.toUpperCase()
-      notify(removed ? 'success' : 'info', removed ? `${name} removed from your list.` : `${name} was already removed.`)
+      notify(
+        removed ? 'success' : 'info',
+        removed ? `${name} removed from your dashboard.` : `${name} was already removed.`,
+      )
     },
     onError: (error, token) => notify('error', `Couldn't remove ${token.ticker.toUpperCase()}: ${errorText(error)}`),
   })
@@ -107,17 +123,18 @@ export function BalancesCard({ wallet }: { wallet: WalletState }) {
                 <th scope="row">
                   <span className="mf-token">
                     <span title={balance.name ?? undefined}>{name}</span>
-                    {balance.custom && <StatusTag>Added by you</StatusTag>}
+                    {balance.custom && <StatusTag>No price</StatusTag>}
                     {!counts(balance) && <StatusTag tone="warning">Not limited</StatusTag>}
-                    {balance.custom && (
+                    {removable(balance) && (
                       <Button
                         appearance="link"
                         size="xs"
                         className="mf-token-remove"
-                        aria-label={`Remove ${name} from your list`}
+                        aria-label={`Remove ${name} from your dashboard`}
                         loading={removing.includes(balance.address)}
                         onClick={() => {
                           setToRemove(balance)
+                          setRemoveKey(k => k + 1)
                           setRemoveOpen(true)
                         }}
                       >
@@ -142,36 +159,36 @@ export function BalancesCard({ wallet }: { wallet: WalletState }) {
       </table>
       {anyListedUnlimited && (
         <Text size="sm" muted>
-          Tokens marked "Not limited" don't count toward your spending limit. You can add them in Controls.
+          Tokens marked "Not limited" don't count toward your spending limit. You can count them in Controls.
         </Text>
       )}
       {anyCustom && (
         <Text size="sm" muted className={anyListedUnlimited ? 'mf-settings-note' : undefined}>
-          Tokens you added have no price in Mitfah, so they never count toward your limit.
+          Tokens marked "No price" can never count toward your limit: Mitfah has no price for them.
         </Text>
       )}
       <AddTokenModal
         key={addKey}
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        chainId={wallet.chain_id}
+        wallet={wallet}
+        chain={chain}
         networkName={chainName(wallet.chain_id)}
+        tx={tx}
         onAdded={token => notify('success', `${token.ticker.toUpperCase()} added. It now shows in your balances.`)}
       />
       {toRemove && (
-        <ConfirmModal
+        <RemoveTokenModal
+          key={removeKey}
           open={removeOpen}
-          title={`Remove ${toRemove.ticker.toUpperCase()}?`}
-          confirmLabel="Remove"
-          tone="warning"
-          onConfirm={() => remove.mutate(toRemove)}
+          token={toRemove}
+          counts={counts(toRemove)}
+          wallet={wallet}
+          chain={chain}
+          tx={tx}
+          onRemove={token => remove.mutate(token)}
           onClose={() => setRemoveOpen(false)}
-        >
-          <Text>
-            It disappears from your balances and the assistant stops recognising it. Any{' '}
-            {toRemove.ticker.toUpperCase()} in the wallet stays there, and you can add it again at any time.
-          </Text>
-        </ConfirmModal>
+        />
       )}
     </Panel>
   )

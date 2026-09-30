@@ -45,6 +45,10 @@ from db import (
     get_custom_tokens,
     save_custom_token,
     delete_custom_token,
+    add_dashboard_tokens,
+    get_dashboard_tokens,
+    remove_dashboard_token,
+    get_supported_token_by_address,
     resolve_token,
     save_wallet_address,
     save_user_network,
@@ -958,6 +962,11 @@ def list_tokens(chain_id: int):
 # needs no signature and changes nothing on chain -- it decides what the dashboard shows and which
 # names the assistant resolves. Every check (a real ERC-20, a symbol safe to show the assistant, no
 # copy of a listed ticker) is in custom_tokens.py and runs against the chain, never the request.
+#
+# A token Mitfah lists can be added the same way: it goes on the dashboard (dashboard_tokens), and
+# the web app offers to count it -- a separate owner transaction (watched-tokens/prepare). Either
+# kind can be removed, except a token the wallet still counts: the dashboard must show everything
+# the limit covers, so that one has to stop counting first.
 
 
 class CustomTokenRequest(BaseModel):
@@ -1004,14 +1013,19 @@ def lookup_custom_token(request: Request, req: CustomTokenRequest, user_id: int 
 def add_custom_token(request: Request, req: CustomTokenRequest, user_id: int = Depends(get_current_user)):
     """
     Adds a token to the signed-in account's list for `chain_id`, after checking it again on chain.
+    A listed token goes on the dashboard; counting it is the owner's separate transaction.
 
     The lookup's answer is not trusted: the checks run again here, so a request that skipped the
     preview (or raced another tab) gets the same answer.
 
-    @return  The saved token: {"chain_id", "address", "ticker", "symbol", "name", "decimals", "balance_raw"}.
+    @return  The saved token: {"chain_id", "address", "ticker", "symbol", "name", "decimals",
+             "balance_raw", "listed"}.
     @raises HTTPException 400 if the token can't be added, 409 if another request just added it.
     """
     token = _inspect_for_user(req, user_id)
+    if token["listed"]:
+        add_dashboard_tokens(user_id, req.chain_id, [token["ticker"]])
+        return {"chain_id": req.chain_id, **token}
     try:
         save_custom_token(
             user_id, req.chain_id, token["address"], token["ticker"], token["name"], token["decimals"]
@@ -1023,18 +1037,55 @@ def add_custom_token(request: Request, req: CustomTokenRequest, user_id: int = D
     return {"chain_id": req.chain_id, **token}
 
 
+def _remove_listed_token(user_id: int, chain_id: int, token: dict):
+    """Takes a listed token off the dashboard, refusing while the wallet still counts it."""
+    name = token["ticker"].upper()
+    # Both refusals that need no chain come first, so they cost no RPC round trip.
+    if token["ticker"] == get_always_counted_ticker(chain_id):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{name} always counts toward your limit, like {get_native_asset_ticker(chain_id)}, "
+            "so it stays on your dashboard.",
+        )
+    if not any(t["ticker"] == token["ticker"] for t in get_dashboard_tokens(user_id, chain_id)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{name} is not on your dashboard")
+    try:
+        get_wallet_address(user_id, chain_id)
+        has_wallet = True
+    except ValueError:
+        has_wallet = False  # nothing can count it: nothing to check
+    if has_wallet:
+        w3, _ = _resolve_chain(chain_id)
+        watched = read_spending_config(_load_wallet_for_chain(w3, user_id, chain_id))["watchedTokens"]
+        if any(Web3.to_checksum_address(a) == token["address"] for a in watched):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{name} counts toward your limit. Stop counting it first, then remove it.",
+            )
+    remove_dashboard_token(user_id, chain_id, token["ticker"])
+
+
 @app.delete("/api/tokens/custom/{chain_id}/{address}")
 def remove_custom_token(chain_id: int, address: str, user_id: int = Depends(get_current_user)):
     """
     Removes a token from the signed-in account's list. The tokens themselves stay in the wallet --
     the owner can still withdraw them, and adding the token again brings them back into view.
 
-    @raises HTTPException 404 if the token is not on this account's list for `chain_id`.
+    A listed token comes off the dashboard, but not while the wallet counts it toward the limit
+    (read from the chain, not trusted to the page), and never the wrapped native token, which
+    always counts. An added-by-address token has no price, so it never counts.
+
+    @raises HTTPException 400 for the wrapped native token, 404 if the token is not on this
+            account's list for `chain_id`, 409 while a listed token still counts.
     """
     try:
         address = Web3.to_checksum_address(address)
     except (ValueError, TypeError):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"'{address}' is not on your token list")
+    listed = get_supported_token_by_address(chain_id, address)
+    if listed is not None:
+        _remove_listed_token(user_id, chain_id, listed)
+        return {"status": "deleted", "chain_id": chain_id, "address": address}
     if not delete_custom_token(user_id, chain_id, address):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"{address} is not on your token list")
     return {"status": "deleted", "chain_id": chain_id, "address": address}
@@ -1496,15 +1547,17 @@ def _ticker_map(chain_id: int) -> dict[str, str]:
 
 def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[dict]:
     """
-    Native, listed-ERC20 and user-added-ERC20 balances for `account`.
+    Balances for `account` of the native token and the tokens on the user's dashboard: the listed
+    ones in dashboard_tokens, then the ones added by address.
 
     Each token is fetched independently and a failure is reported per-token rather than raised: one
     token with no code (a stale row, a chain that moved a deployment) must not blank out the whole
     dashboard. Raw amounts are strings -- a uint256 of wei does not survive JSON's float64.
 
-    Two eth_calls per listed token (decimals + balanceOf), which is fine for the handful of tickers
-    seeded per chain. Tokens the user added cost one: their decimals were read and stored when they
-    were added. `custom` marks those -- they have no price and never count toward the cap.
+    Two eth_calls per listed token (decimals + balanceOf). Tokens added by address cost one: their
+    decimals were read and stored when they were added. `custom` marks those -- they have no price
+    and never count toward the cap. `always_counted` marks the wrapped native token (WETH, WBNB),
+    which stays on the dashboard.
     """
     native_raw = w3.eth.get_balance(account)
     balances: list[dict] = [
@@ -1517,8 +1570,15 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
             "amount": float(Decimal(native_raw) / Decimal(10**18)),
         }
     ]
-    for address, ticker in _ticker_map(chain_id).items():
-        entry = {"ticker": ticker, "address": w3.to_checksum_address(address), "native": False, "custom": False}
+    always = get_always_counted_ticker(chain_id)
+    for token in get_dashboard_tokens(user_id, chain_id):
+        entry = {
+            "ticker": token["ticker"],
+            "address": token["address"],
+            "native": False,
+            "custom": False,
+            "always_counted": token["ticker"] == always,
+        }
         try:
             erc20 = w3.eth.contract(address=entry["address"], abi=ERC20_ABI)
             decimals = erc20.functions.decimals().call()
@@ -1537,6 +1597,7 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
             "address": token["address"],
             "native": False,
             "custom": True,
+            "always_counted": False,
             "name": token["name"],
         }
         try:
@@ -1550,6 +1611,26 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
             entry |= {"decimals": None, "raw": None, "amount": None, "error": _revert_reason(e)}
         balances.append(entry)
     return balances
+
+
+def _show_counted_tokens(user_id: int, chain_id: int, watched: list[str]):
+    """
+    Puts every token the limit covers on the dashboard. Run on every wallet read, so it covers the
+    deploy's picks, tokens counted later in Controls (or on chain directly), and wallets made before
+    the dashboard list existed. The wrapped native token goes on too: it always counts, even on an
+    older wallet that doesn't count it yet. A watched address Mitfah doesn't list is skipped -- it
+    has no ticker to show (Controls shows it by address).
+
+    @param watched  The wallet's watchedTokens, as read from the chain.
+    """
+    tickers = _ticker_map(chain_id)
+    always = get_always_counted_ticker(chain_id)
+    add_dashboard_tokens(
+        user_id,
+        chain_id,
+        [tickers[a.lower()] for a in watched if a.lower() in tickers]
+        + ([always] if always in tickers.values() else []),
+    )
 
 
 @app.get("/api/wallet/{chain_id}")
@@ -1576,7 +1657,7 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
 
     @param chain_id  The chain to read. Must be one this deployment serves.
     @return          Wallet address, owner, paused state, the spending cap and window, session-key
-                     status, the loosening knobs, and native + listed-ERC20 balances.
+                     status, the loosening knobs, and the balances of the tokens on the dashboard.
     @raises HTTPException 404 if this account has no wallet on `chain_id`.
     """
     # The wallet-row lookup comes FIRST, before _resolve_chain dials anything. Two reasons, the
@@ -1596,6 +1677,7 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     cfg = read_spending_config(wallet)
     remaining = wallet.functions.getRemainingBudget().call()
     tickers = _ticker_map(chain_id)
+    _show_counted_tokens(user_id, chain_id, cfg["watchedTokens"])
 
     # The wallet authorizes ONE key, so it can be read outright -- the old mapping getter could only
     # answer "is THIS key allowed", which is why this endpoint used to have to caveat its own answer.
