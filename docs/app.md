@@ -45,7 +45,7 @@ app/
 > UserOperation and parks it for the user to approve. That is why `abi.py` no longer carries the router/factory/pair/WETH ABIs and
 > `constants.py` no longer hardcodes factory addresses.
 
-> **Celo support is partial.** `celo_tokens` has a seeded table and the network routing handles `"celo"`/`"celo-fork"`, but there is no Solidity-side deployment path yet, and Celo is intentionally excluded from `deploy_wallet.py`'s default watched-token map (see [docs/contracts.md](contracts.md#helperconfigssol)).
+> **Celo support is partial.** Celo's tokens are seeded into `supported_tokens` and the network routing handles `"celo"`/`"celo-fork"`, but there is no Solidity-side deployment path yet, and Celo is intentionally excluded from `deploy_wallet.py`'s default watched-token map (see [docs/contracts.md](contracts.md#helperconfigssol)).
 
 ## Module Dependency Flow
 
@@ -151,21 +151,19 @@ CREATE TABLE chains (name TEXT NOT NULL, chain_id INTEGER NOT NULL, PRIMARY KEY 
 CREATE TABLE rpcs (name TEXT PRIMARY KEY, rpc_url TEXT NOT NULL);
 CREATE TABLE user_network (user_id INTEGER PRIMARY KEY, chain_name TEXT NOT NULL);
 
-CREATE TABLE anvil_tokens   (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
-CREATE TABLE mainnet_tokens (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
-CREATE TABLE sepolia_tokens (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
-CREATE TABLE bsc_tokens     (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
-CREATE TABLE celo_tokens    (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
-CREATE TABLE arbitrum_tokens (ticker TEXT PRIMARY KEY, address TEXT NOT NULL);
+CREATE TABLE supported_tokens (chain_id INTEGER NOT NULL, ticker TEXT NOT NULL, address TEXT NOT NULL,
+    PRIMARY KEY (chain_id, ticker), UNIQUE (chain_id, address));  -- the tokens Mitfah lists (and the oracle prices), every chain
 ```
 
 > **Removed with the design overhaul:** the `sessions`, `erc20_selectors`, `uniswapv2_selectors`, and `reputation_registry_selectors` tables. `init_db()` issues `DROP TABLE IF EXISTS` on all four so `make db` migrates an existing `wallet.db`. Per-target session metadata and on-chain selector allowlists no longer exist — there's one global USD cap and one bare session key, both read on-chain.
 
-**Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum token addresses are static (`seed_data.py`). The Arbitrum set is exactly the tokens `HelperConfig.getArbConfig` prices, and every address matches the corresponding `ARB_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of `anvil_tokens`.
+> **Replaced 2026-09-30:** the six per-network tables (`anvil_tokens`, `mainnet_tokens`, `sepolia_tokens`, `bsc_tokens`, `celo_tokens`, `arbitrum_tokens`) became the one `supported_tokens` table, keyed by chain ID. `init_db()` moves their rows across and drops them. A fork shares its parent's rows because it shares its chain ID.
+
+**Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum token addresses are static: one dict per chain in `seed_data.SUPPORTED_TOKENS`, keyed by chain ID. `make db` makes each chain's rows match its dict **exactly** — a token deleted from `seed_data.py` is deleted from `wallet.db` too. The Arbitrum set is exactly the tokens `HelperConfig.getArbConfig` prices, and every address matches the corresponding `ARB_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of anvil's rows, and it replaces them outright too (left alone when there is no broadcast).
 
 **Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through (the owner's withdraw endpoint relies on that). The agent's tools add one rule on top, in `tools._token_address`: an address is accepted only for a listed or added token, so the chat can never trade or send a token the owner didn't choose (THREAT_MODEL §4.2). It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bot's process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
 
-**Initialisation:** run `make db` once to create tables and seed. Re-running is safe (`INSERT OR REPLACE`, plus the drops above). The `sepolia` RPC row comes from `SEPOLIA_RPC_URL` in `.env`, keeping API-keyed URLs out of source control.
+**Initialisation:** run `make db` once to create tables and seed. Re-running is safe (`INSERT OR REPLACE`, each chain's tokens replaced as a whole, plus the drops above). The `sepolia` RPC row comes from `SEPOLIA_RPC_URL` in `.env`, keeping API-keyed URLs out of source control.
 
 ---
 

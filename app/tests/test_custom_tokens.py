@@ -55,7 +55,9 @@ SHIB = _addr(0x5B1B)
 # empty, so the few rows these checks need are written directly.
 _db = db.get_db()
 for ticker, address in (("usdc", USDC), ("usdt", USDT), ("weth", WETH)):
-    _db.execute(f"INSERT OR REPLACE INTO sepolia_tokens (ticker, address) VALUES (?, ?)", (ticker, address))
+    _db.execute(
+        "INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?)", (CHAIN, ticker, address)
+    )
 _db.execute("INSERT OR REPLACE INTO chains (name, chain_id) VALUES (?, ?)", (NETWORK, CHAIN))
 _db.commit()
 

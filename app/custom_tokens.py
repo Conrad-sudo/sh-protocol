@@ -19,7 +19,7 @@ from web3 import Web3
 
 from constants import get_chain_display_name, get_native_asset_ticker, get_native_wrapped_ticker
 from contracts import load_ierc20
-from db import get_custom_token, get_custom_tokens, get_supported_tokens_by_chain_id
+from db import get_custom_token, get_custom_tokens, get_supported_token_by_address, get_supported_tokens_by_chain_id
 from network_config import load_network_config
 
 # Each added token costs the dashboard read one balanceOf, so the list is capped per network.
@@ -129,12 +129,12 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     if address == Web3.to_checksum_address(wallet_address):
         raise CustomTokenError("That's your Mitfah wallet's own address, not a token.")
 
-    for listed in get_supported_tokens_by_chain_id(chain_id):
-        if Web3.to_checksum_address(listed["address"]) == address:
-            raise CustomTokenError(
-                f"{listed['ticker'].upper()} is already on Mitfah's list for {network}, so it's in "
-                "your balances already."
-            )
+    listed = get_supported_token_by_address(chain_id, address)
+    if listed is not None:
+        raise CustomTokenError(
+            f"{listed['ticker'].upper()} is already on Mitfah's list for {network}, so it's in "
+            "your balances already."
+        )
     existing = get_custom_token(user_id, chain_id, address)
     if existing is not None:
         raise CustomTokenError(f"You've already added this token ({existing['ticker'].upper()}).")

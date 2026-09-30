@@ -455,8 +455,9 @@ def test_router_removal_is_refused():
 def test_wrapped_native_always_counts():
     print("\n[7c] WETH/WBNB always count: flagged in the token list, never removable through the app")
     db.get_db().execute(
-        "INSERT OR REPLACE INTO sepolia_tokens (ticker, address) VALUES (?, ?), (?, ?)",
-        ("weth", "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "usdc", "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
+        "INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?), (?, ?, ?)",
+        (11155111, "weth", "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+         11155111, "usdc", "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
     )
     db.get_db().commit()
     c = make_client()

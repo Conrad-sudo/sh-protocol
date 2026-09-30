@@ -10,7 +10,7 @@ from constants import (
     CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
     CHAIN_ID_SEPOLIA,
 )
-from seed_data import CHAINS, SEEDS
+from seed_data import CHAINS, SEEDS, SUPPORTED_TOKENS
 
 CHAIN_IDs=[
     CHAIN_ID_ANVIL, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_BSC, CHAIN_ID_CELO,
@@ -21,30 +21,15 @@ DB_PATH = "./app/wallet.db"
 
 _local = threading.local()
 
-_NETWORK_DB_PREFIX: dict[str, str] = {
-    "anvil": "anvil",
-    "mainnet": "mainnet",
-    "mainnet-fork": "mainnet",
-    "sepolia": "sepolia",
-    "sepolia-fork": "sepolia",
-    "bsc": "bsc",
-    "bsc-fork": "bsc",
-    "celo": "celo",
-    "celo-fork": "celo",
-    "arbitrum": "arbitrum",
-    "arbitrum-fork": "arbitrum",
-}
-
-# The token table for a chain, keyed by chain ID. A fork shares its parent chain's table because it
-# shares its state and therefore its token addresses, which is why _NETWORK_DB_PREFIX above collapses
-# each `-fork` name onto the same prefix — this map is that same fact expressed without the name.
-_TOKEN_TABLE_BY_CHAIN_ID: dict[int, str] = {
-    CHAIN_ID_ANVIL: "anvil_tokens",
-    CHAIN_ID_MAINNET: "mainnet_tokens",
-    CHAIN_ID_SEPOLIA: "sepolia_tokens",
-    CHAIN_ID_BSC: "bsc_tokens",
-    CHAIN_ID_CELO: "celo_tokens",
-    CHAIN_ID_ARBITRUM: "arbitrum_tokens",
+# The per-network token tables that supported_tokens replaced, and the chain each one held. Only
+# _migrate_token_tables reads this, to carry an older wallet.db's rows across.
+_LEGACY_TOKEN_TABLES: dict[str, int] = {
+    "anvil_tokens": CHAIN_ID_ANVIL,
+    "mainnet_tokens": CHAIN_ID_MAINNET,
+    "sepolia_tokens": CHAIN_ID_SEPOLIA,
+    "bsc_tokens": CHAIN_ID_BSC,
+    "celo_tokens": CHAIN_ID_CELO,
+    "arbitrum_tokens": CHAIN_ID_ARBITRUM,
 }
 
 
@@ -240,10 +225,37 @@ def _migrate_chat_id_to_user_id(db: sqlite3.Connection):
     print(f"Migrated identity from chat_id to user_id ({len(legacy)} user(s) created).")
 
 
+def _migrate_token_tables(db: sqlite3.Connection):
+    """
+    Moves the rows of the old per-network token tables (mainnet_tokens, sepolia_tokens, ...) into
+    supported_tokens under their chain ID, then drops the old tables.
+
+    Anvil's rows matter most: they come from the deploy broadcast, not seed_data, so re-seeding
+    would not bring them back without the broadcast. The seeded chains' rows are replaced by
+    seed_reference_data anyway, but are carried too so init_db alone leaves nothing unlisted.
+
+    MUST run after supported_tokens exists.
+    """
+    for table, chain_id in _LEGACY_TOKEN_TABLES.items():
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            continue  # fresh install, or already migrated
+        db.execute(
+            f"INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) "
+            f"SELECT ?, ticker, address FROM {table}",
+            (chain_id,),
+        )
+        db.execute(f"DROP TABLE {table}")
+        print(f"Migrated {table} into supported_tokens (chain {chain_id}).")
+    db.commit()
+
+
 def init_db():
     """
     Creates all tables if they do not already exist, migrating any that predate the per-chain
-    wallet layout or the chat_id -> user_id identity switch. Safe to call on every startup.
+    wallet layout, the chat_id -> user_id identity switch or the single supported_tokens table.
+    Safe to call on every startup.
     """
     db = get_db()
     # Order matters: _migrate_add_chain_id still reads and writes chat_id columns, so it has to
@@ -311,7 +323,7 @@ def init_db():
         );
 
         -- Tokens a user added by address in the web app, MetaMask-style, per chain. Unlike the
-        -- listed <network>_tokens tables these have no price feed, so they can never count toward
+        -- listed supported_tokens these have no price feed, so they can never count toward
         -- the spending cap; the list only decides what is shown and what the assistant can name.
         -- Keyed per chain, not per wallet, so it survives a redeploy. `ticker` is the token's own
         -- symbol(), lowercased and validated when it was added (custom_tokens.py) -- unique per
@@ -339,29 +351,18 @@ def init_db():
             rpc_url TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS anvil_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
-        );
-         CREATE TABLE IF NOT EXISTS mainnet_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS sepolia_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS bsc_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS celo_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS arbitrum_tokens (
-            ticker  TEXT PRIMARY KEY,
-            address TEXT NOT NULL
+        -- The tokens Mitfah lists on each chain: the ones the protocol's oracle prices, so a wallet
+        -- can count them toward its limit. A fork shares its parent's rows because it shares the
+        -- parent's chain ID, and with it the state and token addresses. A ticker names one address
+        -- and an address carries one ticker, so each always resolves to the other. Addresses are
+        -- checksummed. `make db` makes each chain's rows match seed_data exactly (anvil's: its
+        -- deploy broadcast).
+        CREATE TABLE IF NOT EXISTS supported_tokens (
+            chain_id INTEGER NOT NULL,
+            ticker   TEXT NOT NULL,
+            address  TEXT NOT NULL,
+            PRIMARY KEY (chain_id, ticker),
+            UNIQUE (chain_id, address)
         );
 
         -- One wallet PER CHAIN per user: the protocol is deployed on several chains and a user
@@ -419,14 +420,29 @@ def init_db():
 
     """)
     db.commit()
+    # After the schema, because it writes into supported_tokens.
+    _migrate_token_tables(db)
+
+
+def _replace_supported_tokens(db: sqlite3.Connection, chain_id: int, tokens: dict[str, str]):
+    """
+    Makes `chain_id`'s rows in supported_tokens exactly `tokens` (ticker -> address): a token no
+    longer in the source is deleted rather than left behind. Runs inside seed_reference_data's
+    transaction, so a reader never sees the chain with no tokens.
+    """
+    db.execute("DELETE FROM supported_tokens WHERE chain_id = ?", (chain_id,))
+    db.executemany(
+        "INSERT INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?)",
+        [(chain_id, ticker.lower(), Web3.to_checksum_address(address)) for ticker, address in tokens.items()],
+    )
 
 
 def seed_reference_data():
     """
-    Seeds reference data from seed_data.SEEDS into the SQLite DB, then records
-    the deployed SHFactory address per chain from the Forge broadcast files.
-    Uses INSERT OR REPLACE, so re-running `make db` is idempotent: existing rows
-    are updated and missing rows are inserted without needing to delete the DB first.
+    Seeds reference data from seed_data into the SQLite DB, then records the deployed SHFactory
+    address per chain from the Forge broadcast files. Re-running `make db` is idempotent without
+    deleting the DB first: SEEDS rows are INSERT OR REPLACEd, and each chain's supported tokens
+    are replaced outright, so removing a token from seed_data removes it here too.
     """
     db = get_db()
 
@@ -438,6 +454,9 @@ def seed_reference_data():
                 f"INSERT OR REPLACE INTO {table} ({key_col}, {value_col}) VALUES (?, ?)",
                 (key, value),
             )
+
+    for chain_id, tokens in SUPPORTED_TOKENS.items():
+        _replace_supported_tokens(db, chain_id, tokens)
 
     for chain_id in CHAIN_IDs:
 
@@ -454,22 +473,21 @@ def seed_reference_data():
                     (chain_id, Web3.to_checksum_address(address)),
                 )
 
-    # Anvil has no real token deployments to hardcode (unlike mainnet/sepolia/bsc/celo in
-    # seed_data.py): HelperConfig.getOrCreateAnvilConfig() deploys fresh ERC20Mock/MockWeth mocks
-    # inside the (broadcast) deploy, at addresses that change every run. Recover ticker->address
-    # from the broadcast's decoded constructor arguments (symbol is arg index 1), e.g.
-    # `new ERC20Mock("Circle USD","USDC",6)` -> ticker "usdc". This is the only writer of anvil_tokens.
+    # Anvil has no real token deployments to hardcode (unlike the chains in seed_data.py):
+    # HelperConfig.getOrCreateAnvilConfig() deploys fresh ERC20Mock/MockWeth mocks inside the
+    # (broadcast) deploy, at addresses that change every run. Recover ticker->address from the
+    # broadcast's decoded constructor arguments (symbol is arg index 1), e.g.
+    # `new ERC20Mock("Circle USD","USDC",6)` -> ticker "usdc". This is the only writer of anvil's
+    # rows. With no broadcast they are left as they are, like the factory row above.
     anvil_broadcast = f"./broadcast/DeploySHProtocol.s.sol/{CHAIN_ID_ANVIL}/run-latest.json"
     if os.path.exists(anvil_broadcast):
+        anvil_tokens = {}
         for item in get_json(anvil_broadcast)["transactions"]:
             if item.get("contractName") in ("ERC20Mock", "MockWeth"):
                 args = item.get("arguments") or []
                 if len(args) >= 2 and item.get("contractAddress"):
-                    ticker = str(args[1]).strip().strip('"').lower()
-                    db.execute(
-                        "INSERT OR REPLACE INTO anvil_tokens (ticker, address) VALUES (?, ?)",
-                        (ticker, Web3.to_checksum_address(item["contractAddress"])),
-                    )
+                    anvil_tokens[str(args[1]).strip().strip('"').lower()] = item["contractAddress"]
+        _replace_supported_tokens(db, CHAIN_ID_ANVIL, anvil_tokens)
 
     db.commit()
     print("Seeding complete.")
@@ -544,20 +562,10 @@ def get_wallet_chains(user_id: int) -> list[int]:
 # ── Tokens ────────────────────────────────────────────────────────────────────
 
 
-def save_anvil_token_address(ticker: str, address: str):
-    """
-    Saves the deployed ERC20 token address for a given ticker symbol.
-
-    @param ticker   The token ticker symbol (e.g. "usdc").
-    @param address  The checksummed Ethereum address of the deployed ERC20 token.
-    """
-    db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO anvil_tokens (ticker, address) VALUES (?, ?)",
-        (ticker.lower(), address),
-    )
-    db.commit()
-    print(f"Token address saved for {ticker}: {address}")
+def _require_token_chain(chain_id: int):
+    """Raises ValueError for a chain Mitfah keeps no token list for."""
+    if chain_id not in CHAIN_IDs:
+        raise ValueError(f"Unsupported chain_id: {chain_id}")
 
 
 def get_token_address(chain_id: int, token: str) -> str:
@@ -569,12 +577,13 @@ def get_token_address(chain_id: int, token: str) -> str:
     @return          The checksummed Ethereum address of the token contract.
     @raises ValueError  If the chain_id is unsupported or the ticker is not found.
     """
-    table = _TOKEN_TABLE_BY_CHAIN_ID.get(chain_id)
-    if table is None:
-        raise ValueError(f"Unsupported chain_id: {chain_id}")
+    _require_token_chain(chain_id)
     row = (
         get_db()
-        .execute(f"SELECT address FROM {table} WHERE ticker = ?", (token.lower(),))
+        .execute(
+            "SELECT address FROM supported_tokens WHERE chain_id = ? AND ticker = ?",
+            (chain_id, token.lower()),
+        )
         .fetchone()
     )
     if row is None:
@@ -774,55 +783,69 @@ def get_chain_name_from_id(chain_id: int) -> str | None:
 
 def get_supported_tokens(user_id: int) -> list[str]:
     """
-    Returns all supported token tickers for the network the user is connected to,
-    sorted alphabetically. Resolves the correct table (anvil_tokens or mainnet_tokens)
-    by looking up the user's saved network via get_user_network().
+    Returns all supported token tickers for the network the user is connected to, sorted
+    alphabetically. The chain comes from the user's network (get_user_network), by name.
 
     @param user_id  The application user ID. Used to determine which network
-                    the user is on and therefore which token table to query.
+                    the user is on and therefore which chain's tokens to list.
     @return         A list of ticker strings (e.g. ["dai", "usdc"]).
-    @raises ValueError  If the user's network is not set or is not "anvil" or "mainnet".
+    @raises ValueError  If the user's network is not set or has no token list.
     """
     network = get_user_network(user_id)
-    prefix = _NETWORK_DB_PREFIX.get(network)
-    if prefix is None:
+    chain_id = get_chain_id_from_name(network) if network else None
+    if chain_id not in CHAIN_IDs:
         raise ValueError(f"Unsupported network: '{network}'")
-    table = f"{prefix}_tokens"
-    rows = (
-        get_db().execute(f"SELECT ticker FROM {table} ORDER BY ticker ASC").fetchall()
-    )
-    return [row["ticker"] for row in rows]
+    return [t["ticker"] for t in get_supported_tokens_by_chain_id(chain_id)]
 
 
 def get_supported_tokens_by_chain_id(chain_id: int) -> list[dict]:
     """
     Returns every supported token on `chain_id` as {"ticker", "address"} dicts, sorted by ticker.
 
-    The by-chain_id twin of get_supported_tokens(), which resolves the table through the user's
+    The by-chain_id twin of get_supported_tokens(), which resolves the chain through the user's
     SAVED network. The API needs the list for a chain the user has not switched to yet — they pick
     watched tokens for the wallet they are about to deploy, before any network is saved for them —
     so the chain is passed explicitly here rather than read back out of user_network.
 
-    Keyed by chain ID, not name, so it answers the same question get_token_address does off the same
-    map. That also sidesteps the fork ambiguity: `sepolia` and `sepolia-fork` share chain 11155111
-    AND the token table, so the caller does not need to have picked between them to list tokens.
+    Keyed by chain ID, not name, which also sidesteps the fork ambiguity: `sepolia` and
+    `sepolia-fork` share chain 11155111 and therefore its tokens, so the caller does not need to
+    have picked between them to list tokens.
 
     Returns the address alongside the ticker because the front end shows the ticker but the deploy
     endpoint validates what comes back; sending both lets it display one and echo the other.
 
     @param chain_id  The numeric chain ID to list tokens for.
-    @return          A list of {"ticker": str, "address": str} dicts, empty if the table is unseeded.
-    @raises ValueError If chain_id has no token table.
+    @return          A list of {"ticker": str, "address": str} dicts, empty if the chain is unseeded.
+    @raises ValueError If Mitfah keeps no token list for chain_id.
     """
-    table = _TOKEN_TABLE_BY_CHAIN_ID.get(chain_id)
-    if table is None:
-        raise ValueError(f"Unsupported chain_id: {chain_id}")
+    _require_token_chain(chain_id)
     rows = (
         get_db()
-        .execute(f"SELECT ticker, address FROM {table} ORDER BY ticker ASC")
+        .execute(
+            "SELECT ticker, address FROM supported_tokens WHERE chain_id = ? ORDER BY ticker ASC",
+            (chain_id,),
+        )
         .fetchall()
     )
     return [{"ticker": row["ticker"], "address": row["address"]} for row in rows]
+
+
+def get_supported_token_by_address(chain_id: int, address: str) -> dict | None:
+    """
+    The supported token at `address` on `chain_id`, or None if Mitfah doesn't list it there.
+
+    @param address  Any case; compared checksummed, which is how supported_tokens stores it.
+    @return         {"ticker", "address"}.
+    """
+    row = (
+        get_db()
+        .execute(
+            "SELECT ticker, address FROM supported_tokens WHERE chain_id = ? AND address = ?",
+            (chain_id, Web3.to_checksum_address(address)),
+        )
+        .fetchone()
+    )
+    return {"ticker": row["ticker"], "address": row["address"]} if row else None
 
 
 # ── Custom tokens ─────────────────────────────────────────────────────────────

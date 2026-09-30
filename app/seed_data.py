@@ -7,13 +7,16 @@ of source control.
 
 SEEDS at the bottom is the manifest db.py iterates over. To add a dataset:
 define the dict here, add a SEEDS entry, and CREATE the table in db.py
-init_db().
+init_db(). A chain's tokens go in SUPPORTED_TOKENS instead: one entry per
+chain, all in the one supported_tokens table.
 """
 
 import os
 
 from dotenv import load_dotenv
 from langchain_erc20 import KNOWN_NETWORKS as ERC20_NETWORKS
+
+from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA
 
 load_dotenv()
 
@@ -208,9 +211,15 @@ CELO_TOKENS = {
 SEEDS = [
     ("chains", "name", "chain_id", CHAINS, False),
     ("rpcs", "name", "rpc_url", RPCS, False),
-    ("mainnet_tokens", "ticker", "address", MAINNET_TOKENS, True),
-    ("sepolia_tokens", "ticker", "address", SEPOLIA_TOKENS, True),
-    ("bsc_tokens", "ticker", "address", BSC_TOKENS, True),
-    ("celo_tokens", "ticker", "address", CELO_TOKENS, True),
-    ("arbitrum_tokens", "ticker", "address", ARBITRUM_TOKENS, True),
 ]
+
+# Each chain's tokens, seeded into supported_tokens under its chain ID. `make db` makes a chain's
+# rows match its list here exactly, so deleting a line here removes the token from wallet.db too.
+# Anvil is absent: its tokens are mocks read from its deploy broadcast (see db.seed_reference_data).
+SUPPORTED_TOKENS = {
+    CHAIN_ID_MAINNET: MAINNET_TOKENS,
+    CHAIN_ID_SEPOLIA: SEPOLIA_TOKENS,
+    CHAIN_ID_BSC: BSC_TOKENS,
+    CHAIN_ID_CELO: CELO_TOKENS,
+    CHAIN_ID_ARBITRUM: ARBITRUM_TOKENS,
+}
