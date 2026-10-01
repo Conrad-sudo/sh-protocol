@@ -16,6 +16,7 @@ import time
 
 from network_config import load_network_config
 from bundler import (
+    UserOpReverted,
     broadcast_user_op as _broadcast_user_op,
     check_bundler_funds as _check_bundler_funds,
     prepare_user_op as _prepare_user_op,
@@ -28,6 +29,7 @@ from userop import (
     prepare_execute_call,
 )
 import quotes
+import tx_history
 
 from constants import (
     ETH_SENTINEL,
@@ -482,22 +484,40 @@ def confirm_transaction(runtime: ToolRuntime[AgentContext], quote_id: str) -> st
 
     w3, _, _ = load_network_config(user_id)
     bundler = _resolve_bundler(w3)
+    session_handler = load_session_handler(user_id)
     try:
         prepared = _prepare_user_op(
             user_id,
             pending.key_ciphertext,
-            load_session_handler(user_id),
+            session_handler,
             load_entry_point(user_id),
             pending.quote,
             bundler,
         )
-        tx_hash, receipt = _broadcast_user_op(user_id, prepared, bundler)
     except RuntimeError as e:
         raise ToolException(str(e))
 
-    if receipt["status"] != 1:
-        raise ToolException(f"UserOp failed! tx: {tx_hash.hex()}")
-    return f"Sent — {pending.action}. Tx hash: `{tx_hash.hex()}`, Status: {receipt['status']}"
+    # Into the History tab BEFORE it is sent. A send that outlives the wait below (a TimeoutError,
+    # left to propagate) is then still listed, as pending, and settled there once it lands -- the
+    # chat it was asked for in is cleared after every transaction, so it can't be the record.
+    record = tx_history.start_assistant_tx(
+        user_id, chain_id, session_handler.address, pending.action, prepared
+    )
+    try:
+        tx_hash, receipt = _broadcast_user_op(user_id, prepared, bundler)
+    except UserOpReverted as e:
+        # On chain, and paid for: listed as failed, with the hash of the transaction that ran it.
+        tx_history.finish_assistant_tx(record, w3, e.receipt, succeeded=False)
+        raise ToolException(str(e))
+    except RuntimeError as e:
+        tx_history.discard_assistant_tx(record)  # never executed: nothing to list
+        raise ToolException(str(e))
+
+    succeeded = receipt["status"] == 1
+    tx_history.finish_assistant_tx(record, w3, receipt, succeeded)
+    if not succeeded:
+        raise ToolException(f"UserOp failed! tx: {Web3.to_hex(tx_hash)}")
+    return f"Sent — {pending.action}. Tx hash: `{Web3.to_hex(tx_hash)}`, Status: {receipt['status']}"
 
 
 @tool
@@ -3352,8 +3372,8 @@ def parse_registration_receipt(runtime: ToolRuntime[AgentContext], tx_hash: str)
     user_id = runtime.context.user_id
     print("Running parse_registration_receipt")
     w3, _, _ = load_network_config(user_id)
-    # Every write tool in this file reports its hash as bare hex (HexBytes.hex() drops the
-    # prefix), so the hash the agent is handing back here usually has none. web3 needs one.
+    # confirm_transaction reports 0x-prefixed hashes, but a user may paste one without the prefix
+    # (HexBytes.hex() drops it, and older replies were written with it). web3 needs one.
     tx_hash = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
     try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)

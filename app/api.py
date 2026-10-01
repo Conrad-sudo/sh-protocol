@@ -10,6 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 
+import functools
 import os
 import secrets
 import sqlite3
@@ -61,6 +62,7 @@ from db import (
     delete_pending_session_key,
     get_wallet_address,
     get_wallet_chains,
+    get_transactions,
     create_user,
     get_user_by_id,
     get_user_by_email,
@@ -85,6 +87,7 @@ from smart_wallet_agent import (
     init_agent,
     open_checkpointer,
 )
+import tx_history
 
 from langchain_erc20 import ERC20_ABI
 from langchain_erc20.amounts import to_base_units
@@ -854,6 +857,99 @@ def chat_history(
     return {"chain_id": chain_id, "messages": get_history(user_id, chain_id, limit)}
 
 
+# ── Transaction history ───────────────────────────────────────────────────────
+
+
+class DepositRequest(BaseModel):
+    """Body of POST /api/transactions/deposit."""
+
+    chain_id: int
+    tx_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+
+
+def _web3_or_none(chain_id: int) -> Web3 | None:
+    """
+    A Web3 for `chain_id` when this server serves it and its RPC answers, else None: for work that
+    skips a chain it can't reach rather than failing, like settling the History tab's pending rows.
+    """
+    if chain_id not in CHAIN_NAME_BY_ID:
+        return None
+    try:
+        return _resolve_chain(chain_id)[0]
+    except HTTPException:
+        return None
+
+
+def _transaction_json(row: dict) -> dict:
+    """A transactions row as the History tab sees it. The fields that find a lost op stay inside."""
+    return {
+        "id": row["id"],
+        "chain_id": row["chain_id"],
+        "source": row["source"],
+        "action": row["action"],
+        "status": row["status"],
+        "tx_hash": row["tx_hash"],
+        "created_at": row["created_at"],
+        "mined_at": row["mined_at"],
+    }
+
+
+@app.get("/api/transactions")
+def list_transactions(
+    chain_id: int | None = None,
+    before: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    user_id: int = Depends(get_current_user),
+):
+    """
+    The History tab: every transaction made through Mitfah for this account, newest first -- what
+    the assistant sent, from the web or Telegram, and what the user signed in the browser.
+
+    Reading the first page also settles transactions still pending, where it can: a send that
+    outlived the wait, or an owner transaction whose page was closed before it mined. That reads
+    the chain, hence a plain `def`.
+
+    @param chain_id  Only this chain's transactions; every chain's when omitted.
+    @param before    The `next_before` of the previous page.
+    @param limit     How many to return (1-100).
+    @return          {"transactions": [{"id", "chain_id", "source", "action", "status", "tx_hash",
+                     "created_at", "mined_at"}, ...], "next_before": int | None}. Times are Unix
+                     seconds; `mined_at` is the block's.
+    """
+    if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
+    if before is None:
+        tx_history.settle_pending(user_id, functools.cache(_web3_or_none))
+    rows = get_transactions(user_id, chain_id, before, limit + 1)
+    page = rows[:limit]
+    return {
+        "transactions": [_transaction_json(row) for row in page],
+        "next_before": page[-1]["id"] if len(rows) > limit else None,
+    }
+
+
+@app.post("/api/transactions/deposit")
+def record_deposit(req: DepositRequest, user_id: int = Depends(get_current_user)):
+    """
+    Lists a deposit made from the Fund drawer in the History tab.
+
+    The browser sends a deposit itself -- anyone may fund a wallet, so it never goes through the
+    owner confirms -- and reports the hash here. Only a transaction actually sent to this user's
+    wallet on the chain is recorded (tx_history.record_owner_tx checks). Answers at once: a deposit
+    that has not mined yet is listed as pending and settled when the History tab is read.
+
+    @return  {"status": "ok"}, whether or not the transaction qualified.
+    """
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    try:
+        receipt = w3.eth.get_transaction_receipt(req.tx_hash)
+    except TransactionNotFound:
+        receipt = None
+    tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash, receipt)
+    return {"status": "ok"}
+
+
 def _require_own_deployer(user_id: int, deployer: str):
     """
     Refuses a deploy unless the deploying EOA is the one this account proved it holds via SIWE.
@@ -1272,6 +1368,9 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
         return {"status": "pending", "tx_hash": req.tx_hash}
 
     if receipt["status"] != 1:
+        # Listed as failed (it cost gas) -- but only when it is this user's own transaction.
+        if Web3.to_checksum_address(receipt["from"]) == deployer:
+            tx_history.record_deploy(w3, user_id, chain_id, predicted, req.tx_hash, receipt)
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             _failed_tx_detail(w3, req.tx_hash, receipt, "deployWallet", ", or watch fewer tokens"),
@@ -1291,6 +1390,8 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
             f"No WalletDeployed event for {deployer} in tx {req.tx_hash} — wrong transaction?",
         )
     wallet_address = logs[0]["args"]["walletAddress"]
+    # Recorded as soon as the deploy is proved, before anything below can refuse: it is on chain.
+    tx_history.record_deploy(w3, user_id, chain_id, wallet_address, req.tx_hash, receipt)
 
     # The prediction can go stale: deployCount is per-owner, so a second deploy by this same user
     # between /api/deploy and their signature moves the address. The key seeded into initialize() is
@@ -1871,6 +1972,8 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
     try:
         receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
     except (TimeExhausted, TransactionNotFound):
+        # In the History tab from the first poll, so closing the page before it mines loses nothing.
+        tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash)
         response.status_code = status.HTTP_202_ACCEPTED
         return {"status": "pending", "tx_hash": req.tx_hash}
 
@@ -1882,6 +1985,7 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
             f"Transaction {req.tx_hash} was not sent to your wallet on chain {req.chain_id}.",
         )
 
+    tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash, receipt)
     if receipt["status"] != 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -2082,6 +2186,7 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
     try:
         receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
     except (TimeExhausted, TransactionNotFound):
+        tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash)
         response.status_code = status.HTTP_202_ACCEPTED
         return {"status": "pending", "tx_hash": req.tx_hash}
 
@@ -2092,6 +2197,7 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
             status.HTTP_400_BAD_REQUEST,
             f"Transaction {req.tx_hash} was not sent to your wallet on chain {req.chain_id}.",
         )
+    tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash, receipt)
     if receipt["status"] != 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

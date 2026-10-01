@@ -422,15 +422,47 @@ def init_db():
             PRIMARY KEY (user_id, chain_id, target)
         );
 
-                
-       
-                     
+
+
+
          CREATE TABLE IF NOT EXISTS factory (
             chain_id  INTEGER PRIMARY KEY,
             address  TEXT NOT NULL
         );
-                     
-        
+
+        -- Every transaction made through Mitfah, for the History tab. Kept apart from the chat,
+        -- which is cleared after each transaction, so a hash never lives only in a conversation.
+        -- `source` is 'assistant' (a UserOperation sent with the session key) or 'owner' (signed
+        -- by the user's own wallet in the browser). `action` is written by the server, never by
+        -- the model or the browser. An assistant row is written BEFORE its op is broadcast, keyed
+        -- by user_op_hash, so a send that outlives the wait is still here as 'pending' --
+        -- op_nonce and from_block are what tx_history.settle_pending needs to finish it later.
+        -- `status` is 'pending', 'confirmed', 'failed' (mined, reverted) or 'dropped' (never
+        -- mined, and now never will be). `mined_at` is the block's timestamp.
+        CREATE TABLE IF NOT EXISTS transactions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL,
+            chain_id     INTEGER NOT NULL,
+            wallet       TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            action       TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            tx_hash      TEXT,
+            user_op_hash TEXT,
+            op_nonce     TEXT,
+            from_block   INTEGER,
+            created_at   INTEGER NOT NULL,
+            mined_at     INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS transactions_by_user ON transactions (user_id, id);
+        -- One row per op, and per owner transaction: the web confirms are polled, so the same
+        -- hash arrives many times.
+        CREATE UNIQUE INDEX IF NOT EXISTS transactions_by_op
+            ON transactions (chain_id, user_op_hash) WHERE user_op_hash IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS transactions_by_owner_hash
+            ON transactions (chain_id, tx_hash) WHERE source = 'owner';
+
+
 
     """)
     db.commit()
@@ -1507,6 +1539,125 @@ def consume_siwe_nonce(nonce: str, ttl_secs: int) -> bool:
     db.execute("DELETE FROM siwe_nonces WHERE nonce = ?", (nonce,))
     db.commit()
     return row is not None and row["issued_at"] >= int(time.time()) - ttl_secs
+
+
+# ── Transaction history ───────────────────────────────────────────────────────
+# Plain storage. What gets recorded, and when, is tx_history.py's business.
+
+_TRANSACTION_COLUMNS = (
+    "id, user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash, op_nonce, "
+    "from_block, created_at, mined_at"
+)
+
+
+def add_transaction(
+    user_id: int,
+    chain_id: int,
+    wallet: str,
+    source: str,
+    action: str,
+    status: str,
+    *,
+    tx_hash: str | None = None,
+    user_op_hash: str | None = None,
+    op_nonce: int | None = None,
+    from_block: int | None = None,
+    mined_at: int | None = None,
+) -> int | None:
+    """
+    Records a transaction for the History tab.
+
+    @param source  'assistant' or 'owner'.
+    @param status  'pending', 'confirmed', 'failed' or 'dropped'.
+    @return        The new row's id, or None if this op or owner transaction is already recorded.
+    """
+    db = get_db()
+    cur = db.execute(
+        "INSERT OR IGNORE INTO transactions (user_id, chain_id, wallet, source, action, status, "
+        "tx_hash, user_op_hash, op_nonce, from_block, created_at, mined_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash,
+            None if op_nonce is None else str(op_nonce), from_block, int(time.time()), mined_at,
+        ),
+    )
+    db.commit()
+    return cur.lastrowid if cur.rowcount else None
+
+
+def settle_transaction(
+    tx_id: int, status: str, tx_hash: str | None = None, mined_at: int | None = None
+) -> bool:
+    """
+    Moves a pending transaction to its outcome. A row that is no longer pending is left alone.
+
+    @return  True if the row was pending and is now settled.
+    """
+    db = get_db()
+    cur = db.execute(
+        "UPDATE transactions SET status = ?, tx_hash = COALESCE(?, tx_hash), "
+        "mined_at = COALESCE(?, mined_at) WHERE id = ? AND status = 'pending'",
+        (status, tx_hash, mined_at, tx_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_transaction(tx_id: int):
+    """Removes a row recorded for something that never reached the chain."""
+    db = get_db()
+    db.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+    db.commit()
+
+
+def get_owner_transaction(user_id: int, chain_id: int, tx_hash: str) -> dict | None:
+    """The user's row for an owner transaction, by hash, or None."""
+    row = (
+        get_db()
+        .execute(
+            f"SELECT {_TRANSACTION_COLUMNS} FROM transactions "
+            "WHERE user_id = ? AND chain_id = ? AND tx_hash = ? AND source = 'owner'",
+            (user_id, chain_id, tx_hash),
+        )
+        .fetchone()
+    )
+    return dict(row) if row else None
+
+
+def get_transactions(
+    user_id: int, chain_id: int | None = None, before_id: int | None = None, limit: int = 50
+) -> list[dict]:
+    """
+    The user's transactions, newest first.
+
+    @param chain_id   Only this chain's, or every chain's when None.
+    @param before_id  Only rows older than this id: the cursor for the next page.
+    """
+    query = f"SELECT {_TRANSACTION_COLUMNS} FROM transactions WHERE user_id = ?"
+    params: list = [user_id]
+    if chain_id is not None:
+        query += " AND chain_id = ?"
+        params.append(chain_id)
+    if before_id is not None:
+        query += " AND id < ?"
+        params.append(before_id)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    return [dict(row) for row in get_db().execute(query, params).fetchall()]
+
+
+def get_pending_transactions(user_id: int, limit: int) -> list[dict]:
+    """The user's oldest still-pending transactions, up to `limit`."""
+    rows = (
+        get_db()
+        .execute(
+            f"SELECT {_TRANSACTION_COLUMNS} FROM transactions "
+            "WHERE user_id = ? AND status = 'pending' ORDER BY id ASC LIMIT ?",
+            (user_id, limit),
+        )
+        .fetchall()
+    )
+    return [dict(row) for row in rows]
 
 
 if __name__ == "__main__":

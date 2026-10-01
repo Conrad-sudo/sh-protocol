@@ -187,6 +187,18 @@ class UserOpQuote:
         return self.op_gas * self.max_fee
 
 
+class UserOpReverted(RuntimeError):
+    """
+    The op was executed and its call reverted. Unlike every other failure here, it is ON CHAIN: the
+    wallet paid for the gas, so the History tab records it with the hash of the transaction that ran it.
+    """
+
+    def __init__(self, message: str, tx_hash: bytes, receipt):
+        super().__init__(message)
+        self.tx_hash = tx_hash
+        self.receipt = receipt
+
+
 @dataclass
 class PreparedUserOp:
     """A signed UserOp, checked and sized, ready for broadcast_user_op."""
@@ -697,8 +709,12 @@ def prepare_user_op(
     return PreparedUserOp(signed, user_op_hash, outer_gas, fees, from_block)
 
 
-def _find_user_op_receipt(w3: Web3, entry_point: Contract, user_op_hash: bytes, from_block: int):
-    """The receipt of whichever transaction executed this UserOp since from_block, or None."""
+def find_user_op_receipt(w3: Web3, entry_point: Contract, user_op_hash: bytes, from_block: int):
+    """
+    The receipt of whichever transaction executed this UserOp since from_block, or None.
+
+    Also how tx_history settles a send that outlived the wait in broadcast_user_op.
+    """
     events = entry_point.events.UserOperationEvent().get_logs(
         argument_filters={"userOpHash": user_op_hash}, from_block=from_block, to_block="latest"
     )
@@ -735,8 +751,10 @@ def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAcco
     @param prepared  The op from prepare_user_op.
     @param bundler   The account that prepared it.
     @return          (tx_hash, receipt) of the transaction that executed the op.
-    @raises RuntimeError if the op was not executed, or was executed and failed.
-    @raises TimeoutError if neither our transaction nor anyone else's executed it in time.
+    @raises UserOpReverted  if the op was executed and its call reverted (a RuntimeError, carrying
+                            that transaction's hash and receipt).
+    @raises RuntimeError    if the op was not executed.
+    @raises TimeoutError    if neither our transaction nor anyone else's executed it in time.
     """
     w3, chain_id, chain_name = load_network_config(user_id)
     entry_point = load_entry_point(user_id=user_id)
@@ -760,13 +778,13 @@ def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAcco
     try:
         receipt = send_and_confirm(w3, chain_name, bundler, tx, send_w3=_send_w3_for(chain_name))
     except TimeoutError:
-        receipt = _find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
+        receipt = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
         if receipt is None:
             raise
         print(f"[bundler] our handleOps stalled, but the op was executed in {receipt['transactionHash'].hex()}")
     else:
         if receipt["status"] == 0:
-            landed = _find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
+            landed = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
             if landed is None:
                 raise RuntimeError(
                     f"handleOps outer transaction reverted: {_replay_revert(w3, tx, receipt)}"
@@ -797,10 +815,12 @@ def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAcco
             if bytes(r["args"]["userOpHash"]) == prepared.user_op_hash
         ]
         reason = describe_revert_data(reasons[0]["args"]["revertReason"]) if reasons else "reason not reported"
-        raise RuntimeError(
+        raise UserOpReverted(
             f"UserOperation inner call failed with {reason} "
             f"(nonce={evt['args']['nonce']}, gas_cost={evt['args']['actualGasCost']} wei). "
-            f"The transaction was mined but the inner call reverted."
+            f"The transaction was mined but the inner call reverted.",
+            receipt["transactionHash"],
+            receipt,
         )
 
     return receipt["transactionHash"], receipt

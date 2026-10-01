@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test py-test e2e-test agent-smoke api
 
 
 
@@ -52,8 +52,13 @@ auth-test:
 custom-tokens-test:
 	.venv/bin/python3 app/tests/test_custom_tokens.py
 
+# The History tab: recording, describing and settling transactions, and the history routes. Fake
+# chain, so offline.
+history-test:
+	.venv/bin/python3 app/tests/test_history.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test
+py-test: identity-test auth-test custom-tokens-test history-test
 
 # The real journey against a running fork: signup -> SIWE -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia

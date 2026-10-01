@@ -1132,6 +1132,81 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
     check("the real feed is back: prices read again", agent_read_message() == "", agent_read_message()[:200])
 
 
+def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    The History tab against the real chain. A send by the assistant is listed with the hash its
+    reply reported; a deposit sent straight from the owner's wallet, as the Fund drawer sends one,
+    is listed once reported; and the deploy and owner actions this run made are all there,
+    described from their calldata, with hashes the chain knows and the outcome it recorded.
+    """
+    print("\n[9] the History tab: this run's transactions, with the hashes the chain knows")
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
+    turn = itertools.count(1_000_000)
+
+    def next_turn() -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
+
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    deal_erc20(usdc, wallet, 10 * 10 ** w3.eth.contract(address=usdc, abi=ERC20_ABI).functions.decimals().call())
+    quoted = tools.transfer_erc20.func(
+        next_turn(), session_key_ciphertext=key_ciphertext, token="usdc", recipient="payee", amount=1
+    )
+    reply = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    sent_hash = reply.split("`")[1]
+    check("the reply reports a 0x-prefixed hash", sent_hash.startswith("0x") and len(sent_hash) == 66, sent_hash)
+    sent_receipt = w3.eth.get_transaction_receipt(sent_hash)
+
+    deposit = acct.sign_transaction({
+        "to": wallet, "value": w3.to_wei("0.05", "ether"), "nonce": w3.eth.get_transaction_count(acct.address),
+        "chainId": CHAIN_ID, "gas": 100_000, "gasPrice": w3.eth.gas_price * 2,
+    })
+    deposit_hash = Web3.to_hex(w3.eth.send_raw_transaction(deposit.raw_transaction))
+    w3.eth.wait_for_transaction_receipt(deposit_hash, timeout=60)
+    r = c.post("/api/transactions/deposit", headers=headers, json={"chain_id": CHAIN_ID, "tx_hash": deposit_hash})
+    check("the deposit is reported", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
+
+    r = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=100", headers=headers)
+    check("the history reads", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    listed = r.json()["transactions"]
+    by_hash = {t["tx_hash"]: t for t in listed}
+    actions = [t["action"] for t in listed]
+
+    sent = by_hash.get(sent_hash.lower())
+    check("the assistant's send is listed under the hash its reply reported", sent is not None, str(actions[:5]))
+    if sent:
+        check("...as the assistant's, confirmed, described by its quote",
+              sent["source"] == "assistant" and sent["status"] == "confirmed" and sent["action"] == quoted["action"],
+              str(sent))
+        check("...at the time its block was mined",
+              sent["mined_at"] == w3.eth.get_block(sent_receipt["blockNumber"])["timestamp"], str(sent))
+    added = by_hash.get(deposit_hash.lower())
+    check("the deposit is listed, confirmed, described from the transaction",
+          added is not None and added["status"] == "confirmed" and added["action"] == "Add 0.05 ETH to the wallet"
+          and added["source"] == "owner", str(added))
+
+    for expected in ("Set the spending limit to $1,234", "Set the spending period to 1 hour", "Pause the wallet",
+                     "Unpause the wallet", "Turn the assistant off", "Count USDC toward the limit",
+                     "Stop counting USDC toward the limit"):
+        check(f"the owner action “{expected}” is listed", expected in actions, str(actions))
+    check("the withdrawal is listed with its amount",
+          any(a.startswith("Withdraw 0.1 ETH to 0x") for a in actions), str(actions))
+    deploys = [t for t in listed if t["action"] == "Create your Mitfah wallet"]
+    check("the deploy is listed as confirmed, and the out-of-gas one as failed",
+          sorted(t["status"] for t in deploys) == ["confirmed", "failed"], str(deploys))
+    check("nothing is left pending", not [t for t in listed if t["status"] == "pending"],
+          str([t for t in listed if t["status"] == "pending"]))
+
+    disagree = []
+    for t in listed:
+        receipt = w3.eth.get_transaction_receipt(t["tx_hash"])
+        if t["source"] == "owner" and (receipt["status"] == 1) != (t["status"] == "confirmed"):
+            disagree.append(t)
+    check("every hash is a transaction the chain knows, and owner outcomes match its receipts", not disagree,
+          str(disagree))
+    check("newest first", [t["id"] for t in listed] == sorted((t["id"] for t in listed), reverse=True))
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     require_local_fork()
@@ -1152,5 +1227,6 @@ if __name__ == "__main__":
     test_self_bundling(client, owner, auth_headers, deployed)
     test_custom_tokens(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)
+    test_transaction_history(client, owner, auth_headers, deployed)
 
     finish(f"All fork e2e checks passed on {NETWORK}.")
