@@ -7,7 +7,7 @@ export function PrivacyPage() {
       title="Privacy Policy"
       description="What Mitfah stores about you and why, what stays in your browser, who else sees your data, how long it is kept and your choices."
       path="/privacy"
-      updated="17 September 2026"
+      updated="1 October 2026"
     >
       <p>
         This policy explains what Mitfah stores about you, why, and who else sees it. Mitfah is an AI assistant that
@@ -33,7 +33,13 @@ export function PrivacyPage() {
         </li>
         <li>
           <strong>Chat history:</strong> your messages to the assistant and its replies, including the tools it used and
-          their results, kept per wallet so the conversation can continue.
+          their results, kept per wallet so the conversation can continue. It is cleared after each transaction, keeping
+          only the last message and reply, and you can delete it at any time.
+        </li>
+        <li>
+          <strong>Transaction history:</strong> each transaction made through Mitfah — its hash, what it did, the
+          network and when — so you can look back at it. It is kept when you clear the chat; the same details are
+          public on the blockchain anyway.
         </li>
         <li>
           <strong>Telegram:</strong> if you link Telegram, the numeric ID of that chat.
@@ -88,7 +94,7 @@ export function PrivacyPage() {
 
       <h2>Your choices</h2>
       <ul>
-        <li>You can remove contacts and unlink Telegram at any time in the app.</li>
+        <li>You can remove contacts, delete your chat history and unlink Telegram at any time in the app.</li>
         <li>
           To get a copy of your data, correct it, or delete your account, write to {CONTACT_EMAIL}. Deleting your account
           doesn't delete your Mitfah wallet or its funds: they stay yours, and you can still withdraw them with your

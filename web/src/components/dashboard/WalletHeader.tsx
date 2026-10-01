@@ -13,8 +13,8 @@ import { StatusTag } from '../StatusTag'
  * Which wallet this is and whether it can act: the address, paused or active, and whether the
  * assistant may use it. Anything that weakens the user's protection is spelled out underneath.
  */
-export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: boolean }) {
-  const link = explorerUrl(wallet.chain_id, 'address', wallet.address, fork)
+export function WalletHeader({ wallet }: { wallet: WalletState }) {
+  const link = explorerUrl(wallet.chain_id, 'address', wallet.address)
   const now = useNow(60_000)
   const assistant = assistantStatus(wallet.session)
   const expiresAt = (wallet.session.expires_at ?? 0) * 1_000

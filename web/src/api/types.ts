@@ -241,4 +241,33 @@ export interface Contact {
 export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
+  /**
+   * True on the two messages a conversation started afresh with: the server clears the chat after
+   * each transaction and keeps only the last exchange.
+   */
+  carried_over?: boolean
+}
+
+/** One transaction made through Mitfah, from GET /api/transactions. */
+export interface Transaction {
+  id: number
+  chain_id: number
+  /** Who sent it: the assistant (from the web chat or Telegram), or the owner in the browser. */
+  source: 'assistant' | 'owner'
+  /** What it does, written by the server from the transaction itself. */
+  action: string
+  /** `dropped`: never mined, and now never will be. */
+  status: 'pending' | 'confirmed' | 'failed' | 'dropped'
+  /** Null only while an assistant transaction hasn't been seen on chain yet. */
+  tx_hash: string | null
+  /** Unix seconds: when Mitfah recorded it. */
+  created_at: number
+  /** Unix seconds: when its block was mined. Null until then. */
+  mined_at: number | null
+}
+
+/** GET /api/transactions: a page, newest first. `next_before` asks for the page after it. */
+export interface TransactionPage {
+  transactions: Transaction[]
+  next_before: number | null
 }

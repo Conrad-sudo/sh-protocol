@@ -5,14 +5,13 @@ import { chainName, explorerUrl } from '../../wallet/chains'
 interface DeployProgressProps {
   state: DeployState
   chainId: number
-  fork: boolean
   onRetry: () => void
   onResume: () => void
 }
 
 /** What is happening while the wallet is created, and what to do if it stops. */
-export function DeployProgress({ state, chainId, fork, onRetry, onResume }: DeployProgressProps) {
-  const txLink = state.txHash ? explorerUrl(chainId, 'tx', state.txHash, fork) : null
+export function DeployProgress({ state, chainId, onRetry, onResume }: DeployProgressProps) {
+  const txLink = state.txHash ? explorerUrl(chainId, 'tx', state.txHash) : null
   const viewTx = txLink && (
     <a href={txLink} target="_blank" rel="noreferrer">
       View the transaction

@@ -1,3 +1,4 @@
+import { Link } from 'react-router'
 import { Button, Message } from 'rsuite'
 import type { ChatMessage } from '../../api/types'
 import { mayHaveRun, type ChatSend } from '../../hooks/useChat'
@@ -29,6 +30,12 @@ export function ChatLog({ messages, latest, onRetry, onEdit, onCheck }: ChatLogP
   return (
     <>
       <div className="mf-chat-log" role="log" aria-label="Conversation with Mitfah">
+        {/* The server starts the chat afresh after each transaction, keeping only the last exchange. */}
+        {messages[0]?.carried_over && (
+          <p className="mf-chat-cleared">
+            Earlier messages were cleared. Every transaction is listed in <Link to="/history">History</Link>.
+          </p>
+        )}
         {messages.map((message, index) => (
           <Bubble key={index} {...message} />
         ))}
@@ -42,7 +49,7 @@ export function ChatLog({ messages, latest, onRetry, onEdit, onCheck }: ChatLogP
   )
 }
 
-function Bubble({ role, text }: ChatMessage) {
+function Bubble({ role, text }: Pick<ChatMessage, 'role' | 'text'>) {
   return (
     <div className="mf-msg" data-role={role}>
       <span className="mf-visually-hidden">{role === 'user' ? 'You said:' : 'Mitfah said:'}</span>

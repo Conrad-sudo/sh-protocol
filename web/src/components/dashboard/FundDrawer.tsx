@@ -116,7 +116,7 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
               >
                 Send
               </Button>
-              <FundStatus state={state} chainId={wallet.chain_id} fork={fork} />
+              <FundStatus state={state} chainId={wallet.chain_id} />
             </>
           )}
         </section>
@@ -125,8 +125,8 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
   )
 }
 
-function FundStatus({ state, chainId, fork }: { state: FundState; chainId: number; fork: boolean }) {
-  const link = state.txHash ? explorerUrl(chainId, 'tx', state.txHash, fork) : null
+function FundStatus({ state, chainId }: { state: FundState; chainId: number }) {
+  const link = state.txHash ? explorerUrl(chainId, 'tx', state.txHash) : null
   const viewTx = link && (
     <>
       {' '}

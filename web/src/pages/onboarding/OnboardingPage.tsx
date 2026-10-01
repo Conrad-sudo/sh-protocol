@@ -146,7 +146,6 @@ export function OnboardingPage() {
     <DeployProgress
       state={deployState}
       chainId={deployChainId}
-      fork={chains.find(c => c.chain_id === deployChainId)?.fork ?? false}
       onRetry={reset}
       onResume={resume}
     />

@@ -12,7 +12,11 @@ export function MobileTabBar() {
   const current = NAV_ITEMS.findIndex(({ to }) => isActive(pathname, to))
 
   return (
-    <nav className="mf-tabbar mf-glass-surface" aria-label="Main" style={{ '--mf-tab': current } as CSSProperties}>
+    <nav
+      className="mf-tabbar mf-glass-surface"
+      aria-label="Main"
+      style={{ '--mf-tab': current, '--mf-tabs': NAV_ITEMS.length } as CSSProperties}
+    >
       <GlassLayer shape="capsule" />
       {current >= 0 && <span className="mf-tab-pill" aria-hidden />}
       {NAV_ITEMS.map(({ to, short, Icon }) => (

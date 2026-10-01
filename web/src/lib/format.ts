@@ -50,6 +50,19 @@ export function formatDate(ms: number): string {
   return date.format(ms)
 }
 
+const dateTime = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+})
+
+/** A moment in the reader's own time zone, e.g. "Oct 24, 2026, 2:05 PM", from milliseconds. */
+export function formatDateTime(ms: number): string {
+  return dateTime.format(ms)
+}
+
 /** Time until something happens, compactly: "2 d 3 h", "5 h 12 min", "40 min". */
 export function formatTimeLeft(ms: number): string {
   if (ms < 60_000) return 'less than a minute'

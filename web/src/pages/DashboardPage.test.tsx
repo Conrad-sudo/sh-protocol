@@ -259,8 +259,10 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/wallets/new'))
   })
 
-  it('funds the wallet from the connected browser wallet', async () => {
-    const { walletCalls, sent } = stubServer()
+  it('funds the wallet from the connected browser wallet, and lists the deposit in the history', async () => {
+    const { walletCalls, sent, requests } = stubServer({
+      extra: { 'POST /api/transactions/deposit': () => json(200, { status: 'ok' }) },
+    })
     const user = userEvent.setup()
     await renderRoutes(routes, '/dashboard')
 
@@ -288,6 +290,11 @@ describe('DashboardPage', () => {
     ])
     // The balance was read again once the transfer confirmed.
     await waitFor(() => expect(walletCalls).toEqual([SEPOLIA, SEPOLIA]))
+    // Reported for the History tab as soon as it was sent, and again once it had mined.
+    expect(requests).toEqual([
+      { route: 'POST /api/transactions/deposit', body: { chain_id: SEPOLIA, tx_hash: TX_HASH } },
+      { route: 'POST /api/transactions/deposit', body: { chain_id: SEPOLIA, tx_hash: TX_HASH } },
+    ])
   })
 
   it('withdraws to the owner wallet, checking the amount against the balance', async () => {

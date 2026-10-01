@@ -229,6 +229,7 @@
 .mf-demo-plate,
 .mf-rules-plate,
 .mf-contact-plate,
+.mf-tx-plate,
 .mf-budget-strip {
   position: relative;
 }
@@ -242,6 +243,7 @@
 .mf-demo-plate > :not(.mf-glass),
 .mf-rules-plate > .mf-rules,
 .mf-contact-plate > .mf-contact-list,
+.mf-tx-plate > .mf-tx-list,
 .mf-budget-strip > :not(.mf-glass),
 .mf-composer > :is(.rs-textarea, .mf-composer-send, .mf-composer-count) {
   position: relative;
@@ -494,7 +496,8 @@
   inset: auto 8px calc(8px + env(safe-area-inset-bottom));
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* --mf-tabs is how many tabs there are (MobileTabBar). */
+  grid-template-columns: repeat(var(--mf-tabs, 6), minmax(0, 1fr));
   padding: 6px;
   border-radius: 999px;
 }
@@ -504,7 +507,7 @@
   top: 6px;
   bottom: 6px;
   left: 6px;
-  width: calc((100% - 12px) / 5);
+  width: calc((100% - 12px) / var(--mf-tabs, 6));
   transform: translateX(calc(var(--mf-tab) * 100%));
 }
 
@@ -2205,6 +2208,94 @@ main p a {
   }
 }
 
+/* ── History ────────────────────────────────────────────────────────────── */
+
+.mf-tx-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mf-tx-scope {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+/* One glass plate holding the list, ruled apart like the contacts. */
+.mf-tx-plate {
+  border-radius: var(--mf-radius-card);
+}
+
+.mf-tx-list {
+  margin: 0;
+  padding: 6px 22px;
+  list-style: none;
+}
+
+/* What it did and when on the left; its status and hash on the right. */
+.mf-tx {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'action status'
+    'meta hash';
+  align-items: center;
+  gap: 4px 16px;
+  padding: 12px 0;
+}
+
+.mf-tx + .mf-tx {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-tx-action {
+  grid-area: action;
+  margin: 0;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+
+.mf-tx-meta {
+  grid-area: meta;
+  margin: 0;
+  font-size: 13px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-tx-status {
+  grid-area: status;
+  justify-self: end;
+}
+
+.mf-tx-hash {
+  grid-area: hash;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.mf-tx-more.rs-btn {
+  align-self: center;
+}
+
+/* On phones: what it did, then when and where, then the status beside the hash. */
+@media (max-width: 479px) {
+  .mf-tx-list {
+    padding: 4px 18px;
+  }
+
+  .mf-tx {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      'action action'
+      'meta meta'
+      'status hash';
+    gap: 6px 12px;
+  }
+}
+
 /* The whole address, in groups of four, for checking before it is saved. */
 .mf-full-address-groups {
   display: inline-flex;
@@ -2261,6 +2352,14 @@ main p a {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Where the conversation was started afresh after a transaction. */
+.mf-chat-cleared {
+  margin: 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--rs-text-secondary);
 }
 
 .mf-msg {

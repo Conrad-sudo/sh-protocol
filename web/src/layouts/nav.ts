@@ -1,5 +1,6 @@
 import DashboardIcon from '@rsuite/icons/Dashboard'
 import GearIcon from '@rsuite/icons/Gear'
+import HistoryIcon from '@rsuite/icons/History'
 import MessageIcon from '@rsuite/icons/Message'
 import PeoplesIcon from '@rsuite/icons/Peoples'
 import ShieldIcon from '@rsuite/icons/Shield'
@@ -8,6 +9,7 @@ import ShieldIcon from '@rsuite/icons/Shield'
 export const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', short: 'Home', Icon: DashboardIcon },
   { to: '/assistant', label: 'Assistant', short: 'Assistant', Icon: MessageIcon },
+  { to: '/history', label: 'History', short: 'History', Icon: HistoryIcon },
   { to: '/contacts', label: 'Contacts', short: 'Contacts', Icon: PeoplesIcon },
   { to: '/controls', label: 'Controls', short: 'Controls', Icon: ShieldIcon },
   { to: '/settings', label: 'Settings', short: 'Settings', Icon: GearIcon },

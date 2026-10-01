@@ -1,5 +1,4 @@
 import { Button, Loader, Message } from 'rsuite'
-import { useSelectedChain } from '../../chain/useSelectedChain'
 import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { chainName, explorerUrl } from '../../wallet/chains'
 
@@ -13,12 +12,10 @@ interface TxStatusProps {
 
 /** How an owner transaction is going, and what to do if it stopped. */
 export function TxStatus({ tx, txKey, doneText }: TxStatusProps) {
-  const { chains } = useSelectedChain()
   const { state } = tx
   if (state.key !== txKey) return null
 
-  const fork = chains.find(c => c.chain_id === state.chainId)?.fork ?? false
-  const link = state.txHash && state.chainId ? explorerUrl(state.chainId, 'tx', state.txHash, fork) : null
+  const link = state.txHash && state.chainId ? explorerUrl(state.chainId, 'tx', state.txHash) : null
   const viewTx = link && (
     <>
       {' '}

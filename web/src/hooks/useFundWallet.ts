@@ -4,7 +4,9 @@ import { parseUnits, type Address } from 'viem'
 import { waitForTransactionReceipt } from 'viem/actions'
 import { useConfig, useSendTransaction } from 'wagmi'
 import { getConnectorClient } from 'wagmi/actions'
+import { reportDeposit } from '../api/transactions'
 import { errorText, isUserRejection } from '../lib/tx'
+import { TRANSACTIONS_KEY } from './useTransactions'
 import { chainById, isSupportedChainId } from '../wallet/chains'
 
 export type FundPhase = 'idle' | 'signing' | 'confirming' | 'done' | 'cancelled' | 'error'
@@ -23,6 +25,10 @@ const RECEIPT_TIMEOUT_MS = 10 * 60_000
  * Anyone may fund a wallet, so this does not go through the API's owner-only confirm endpoint.
  * The receipt is read through the connected wallet instead: it is the node the transfer went to,
  * and on a local fork the only one that knows about it.
+ *
+ * The hash is reported to the API for the History tab twice: as soon as there is one, so a page
+ * closed mid-wait still lists it, and once it has mined, in case the API's node hadn't seen it the
+ * first time. Neither report holds up or fails the transfer.
  */
 export function useFundWallet(chainId: number, walletAddress: string) {
   const { mutateAsync: sendTransactionAsync } = useSendTransaction()
@@ -45,6 +51,8 @@ export function useFundWallet(chainId: number, walletAddress: string) {
         chainId,
       })
       txHash = hash
+      const report = () => reportDeposit(chainId, hash).catch(() => undefined)
+      void report()
       setState({ phase: 'confirming', txHash: hash })
       const client = await getConnectorClient(config, { chainId })
       const receipt = await waitForTransactionReceipt(client, {
@@ -52,6 +60,8 @@ export function useFundWallet(chainId: number, walletAddress: string) {
         pollingInterval: 2_000,
         timeout: RECEIPT_TIMEOUT_MS,
       })
+      await report()
+      void queryClient.invalidateQueries({ queryKey: TRANSACTIONS_KEY })
       if (receipt.status !== 'success') throw new Error('The transfer failed on the network.')
       await queryClient.invalidateQueries({ queryKey: ['wallet', chainId] })
       setState({ phase: 'done', txHash: hash })

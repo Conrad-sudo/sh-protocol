@@ -32,8 +32,8 @@ describe('AppShell', () => {
     expect(nav.closest('.mf-sidebar')).toHaveAttribute('data-expanded', 'true')
     expect(within(nav).getByRole('link', { name: /Contacts/ })).toHaveAttribute('aria-current', 'page')
     expect(within(nav).getByRole('link', { name: /Dashboard/ })).not.toHaveAttribute('aria-current')
-    // The lit pill sits under the third item.
-    expect(nav.querySelector<HTMLElement>('.mf-nav')!.style.getPropertyValue('--mf-nav')).toBe('2')
+    // The lit pill sits under the fourth item.
+    expect(nav.querySelector<HTMLElement>('.mf-nav')!.style.getPropertyValue('--mf-nav')).toBe('3')
     expect(nav.querySelector('.mf-nav-pill')).toBeInTheDocument()
     expect(await screen.findByText('sam@example.com')).toBeInTheDocument()
     expect(document.querySelector('.mf-tabbar')).toBeNull()
@@ -67,10 +67,11 @@ describe('AppShell', () => {
 
     const tabs = await screen.findByRole('navigation', { name: 'Main' })
     expect(tabs).toHaveClass('mf-tabbar')
-    expect(within(tabs).getAllByRole('link')).toHaveLength(5)
+    expect(within(tabs).getAllByRole('link')).toHaveLength(6)
+    expect(tabs.style.getPropertyValue('--mf-tabs')).toBe('6')
     expect(within(tabs).getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page')
-    // The lit pill sits under the fifth tab.
-    expect(tabs.style.getPropertyValue('--mf-tab')).toBe('4')
+    // The lit pill sits under the sixth tab.
+    expect(tabs.style.getPropertyValue('--mf-tab')).toBe('5')
     expect(tabs.querySelector('.mf-tab-pill')).toBeInTheDocument()
     expect(document.querySelector('.mf-sidebar')).toBeNull()
   })

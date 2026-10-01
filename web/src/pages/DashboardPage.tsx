@@ -45,7 +45,7 @@ function WalletOverview({ wallet, tx }: { wallet: WalletState; tx: OwnerActionHa
   const { chain } = useSelectedChain()
   return (
     <div className="mf-dashboard">
-      <WalletHeader wallet={wallet} fork={chain?.fork ?? false} />
+      <WalletHeader wallet={wallet} />
       <div className="mf-card-grid">
         <SpendingCard spending={wallet.spending} />
         <BalancesCard wallet={wallet} chain={chain} tx={tx} />

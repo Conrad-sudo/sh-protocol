@@ -19,6 +19,7 @@ app/
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
+├── tx_history.py          ← The History tab's record: every transaction made through Mitfah, kept apart from the chat
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
@@ -33,6 +34,7 @@ app/
     ├── test_identity.py   ← No tool lets the model choose the account (make identity-test)
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
+    ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
@@ -155,6 +157,18 @@ CREATE TABLE user_network (user_id INTEGER PRIMARY KEY, chain_name TEXT NOT NULL
 
 CREATE TABLE supported_tokens (chain_id INTEGER NOT NULL, ticker TEXT NOT NULL, address TEXT NOT NULL,
     PRIMARY KEY (chain_id, ticker), UNIQUE (chain_id, address));  -- the tokens Mitfah lists (and the oracle prices), every chain
+
+-- The History tab: every transaction made through Mitfah. See tx_history.py.
+CREATE TABLE transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL,
+    wallet TEXT NOT NULL,
+    source TEXT NOT NULL,                       -- 'assistant' (session-key UserOp) or 'owner' (signed in the browser)
+    action TEXT NOT NULL,                       -- written by the server, never by the model or the browser
+    status TEXT NOT NULL,                       -- 'pending' | 'confirmed' | 'failed' | 'dropped'
+    tx_hash TEXT,                               -- NULL only while an assistant op hasn't been seen on chain
+    user_op_hash TEXT, op_nonce TEXT, from_block INTEGER,  -- assistant ops: how a late one is found and settled
+    created_at INTEGER NOT NULL, mined_at INTEGER          -- mined_at: the block's timestamp
+);  -- unique per (chain_id, user_op_hash) and per owner (chain_id, tx_hash): the web confirms are polled
 ```
 
 > **Removed with the design overhaul:** the `sessions`, `erc20_selectors`, `uniswapv2_selectors`, and `reputation_registry_selectors` tables. `init_db()` issues `DROP TABLE IF EXISTS` on all four so `make db` migrates an existing `wallet.db`. Per-target session metadata and on-chain selector allowlists no longer exist — there's one global USD cap and one bare session key, both read on-chain.
@@ -515,6 +529,50 @@ All 29 tools of [`langchain-erc8004`](https://pypi.org/project/langchain-erc8004
 
 ---
 
+## `tx_history.py`
+
+The History tab's record: every transaction made through Mitfah, with its hash, what it did, the
+network and when. It lives apart from the chat because the chat is cleared after every transaction
+(see Section 3), so a conversation can't be where a hash is kept.
+
+```python
+start_assistant_tx(user_id, chain_id, wallet, action, prepared) -> row id   # pending, BEFORE broadcast
+finish_assistant_tx(row_id, w3, receipt, succeeded)                      # the executing tx's hash + block time
+discard_assistant_tx(row_id)                                             # never executed: nothing to list
+record_owner_tx(w3, user_id, chain_id, wallet, tx_hash, receipt=None)    # owner actions and deposits; idempotent
+record_deploy(w3, user_id, chain_id, wallet_address, tx_hash, receipt)
+describe_wallet_tx(w3, user_id, chain_id, wallet, tx) -> str             # "Withdraw 0.5 ETH to sam", from calldata
+settle_pending(user_id, web3_for)                                        # finishes rows left pending
+```
+
+- **The assistant's sends are recorded before they go.** `tools.confirm_transaction` writes a
+  pending row keyed by the op's `userOpHash` between `prepare_user_op` and `broadcast_user_op`, then
+  fills in the hash of the transaction that executed it — a rival's, if one landed the op first.
+  An op whose call reverted is on chain and paid for, so it is listed as `failed` with its hash
+  (`bundler.UserOpReverted` carries it). One that never executed is removed. One that outlives the
+  wait (a `TimeoutError`) stays `pending`. The description is the quote's own `action`, written by
+  code from the calldata.
+- **Owner transactions are recorded when the app is handed their hash**: by every poll of the three
+  web confirms (`/api/deploy/confirm`, `/api/wallet/tx/confirm`, `/api/wallet/session/confirm`) and
+  by `POST /api/transactions/deposit` for the Fund drawer. The first poll that can see the
+  transaction records it, the one with the receipt settles it, and the unique index stops
+  duplicates. Only a transaction sent to the user's own wallet is recorded, and it is described from
+  its calldata against the SessionHandler ABI, never from anything the browser says.
+- **Settling.** Reading the History tab's first page runs `settle_pending`. An assistant op is
+  searched for by its `userOpHash` from `from_block`. If it isn't there and its nonce has since been
+  used by another op, it can never land, so it becomes `dropped`. The nonce is read before the log
+  search so this op's own late execution can't pass for another's. An owner transaction is settled
+  from its receipt, and is `dropped` once the node hasn't known it for a day (a "speed up" in the
+  browser wallet replaces it under a new hash).
+- **Best effort, always.** Every recording function logs and swallows its own errors. By the time
+  one runs, the transaction is already on its way, and an exception would turn a payment that went
+  through into one that looks failed — the outcome that leads a user to send it twice.
+
+Not covered: transfers into the wallet from outside Mitfah and anything done directly on chain.
+Those would need a block-explorer API or an indexer.
+
+---
+
 ## Section 3 — LangChain Agent
 
 `app/smart_wallet_agent.py` wraps the tools in a LangChain agent powered by Claude (`claude-sonnet-4-6` by default).
@@ -539,7 +597,37 @@ The `SYSTEM_PROMPT` teaches the agent the new model up front:
 - **A paused wallet rejects every transaction** until the owner unpauses it in the web app; the agent can't unpause, and says so.
 - A fresh **`preflight_check`** before every spend, never reusing an earlier result (the owner can change the limit in the web app mid-conversation); pass the incoming leg (`token_received`/`amount_received`) for swaps and wraps; **never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` only); resolve the wrapped-native ticker per chain; never invent addresses; always confirm before an on-chain write; never expose the ciphertext.
 
-The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
+The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
+
+### Short memory: the chat starts afresh after each transaction
+
+A wallet assistant needs no long memory, and an unbounded one breaks: every model call re-sends the
+whole thread on top of ~28k tokens of prompt and tool descriptions, so a thread kept forever grows
+dearer and slower until it overflows the model's window and every turn fails. So at the start of
+each turn `chat()` runs `_start_fresh_if_due`, which deletes the thread and starts a new one carrying
+only the **text** of the last exchange (the user's last message and the reply; no tool calls,
+results or ciphertext, marked `carried_over`). That way a "yes" to the assistant's last question
+still makes sense. It does this when:
+
+- the conversation holds a `confirm_transaction` that succeeded (a failed one is kept, so the user
+  can ask why), or it has grown past `HISTORY_TOKEN_LIMIT` (40k approximate tokens) — a user who
+  only asks questions never sends a transaction;
+- **and** the user has no quote waiting for an answer on that chain (`quotes.has_pending`): its
+  description and id live only in the conversation, so clearing it would leave the next "yes" with
+  nothing to confirm.
+
+It runs at the start of the next turn rather than at the end of the one that sent, so the new
+thread is written by the graph itself and the "Sent" reply stays on screen until the user writes
+again. Deleting the thread also deletes its old checkpoints. The lasting record is the History tab
+(`tx_history.py`), and the prompt tells the agent to point there when asked about older
+transactions.
+
+**Deleting on request.** `DELETE /api/chat/history?chain_id=` (or with no chain, every chain) runs
+`clear_history`. It deletes the threads and drops the quotes raised in them. The request is refused
+with 409 while a turn is running on one of them in this process, because a turn that finishes after
+its thread was deleted writes the whole history back. A turn running in the Telegram bot (another
+process) can't be seen, so that rare overlap can still undo a delete. The transaction history is
+never touched.
 
 ---
 
@@ -571,7 +659,7 @@ The expiry warning is why this job matters to a Telegram-only user: renewing a k
 other. It has no privileges of its own: everything goes through `api.py`, with the same `user_id`
 rules as the bot, so nothing below this layer has to trust the browser.
 
-Two things it does that the bot cannot:
+What it does that the bot cannot:
 
 - **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
   is owned by a key the server has never seen. The API only prepares the transaction and records it
@@ -588,6 +676,13 @@ Two things it does that the bot cannot:
   reconciliation, so a grant whose tab was closed before it confirmed is still picked up the next
   time anyone looks at the wallet. The dashboard, the chat page and Controls all warn once fewer
   than three days are left (`session.needs_renewal`), and say so once the key has run out.
+
+- **The History tab.** Every transaction made through Mitfah, newest first, from
+  `GET /api/transactions` (paged by `before`, filterable by `chain_id`): what it did, the date and
+  time in the reader's time zone, the network, who sent it, its status, and its hash as a link to the
+  network's live block explorer. That includes forks, which link where the live network would. The
+  Fund drawer reports its deposits with `POST /api/transactions/deposit`. The Assistant page's
+  "Clear chat" and Settings' "Delete all" call `DELETE /api/chat/history`.
 
 Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
 never write to it. The chat page is a front end over `chat(user_id, chain_id, …, network)` — the same agent,

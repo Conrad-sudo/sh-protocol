@@ -27,6 +27,8 @@ interface ServerOptions {
   walletFailsLater?: boolean
   walletChains?: number[]
   contacts?: Contact[]
+  /** What DELETE /api/chat/history answers: 200 clears the chat, 409 means a turn is running. */
+  clearStatus?: number
 }
 
 /** A signed-in account with a wallet on Sepolia and a chat that behaves like app/api.py. */
@@ -40,9 +42,11 @@ function stubServer({
   walletFailsLater = false,
   walletChains = [SEPOLIA],
   contacts = [SAM],
+  clearStatus = 200,
 }: ServerOptions = {}) {
   let thread = [...history]
   const posted: unknown[] = []
+  const cleared: string[] = []
   const calls = { history: 0, wallet: 0 }
   vi.stubGlobal(
     'fetch',
@@ -56,6 +60,14 @@ function stubServer({
         calls.wallet++
         if (walletFailsLater && calls.wallet > 1) return Promise.resolve(json(502, { detail: 'RPC unavailable' }))
         return Promise.resolve(json(200, wallet))
+      }
+      if (url.startsWith('/api/chat/history') && method === 'DELETE') {
+        cleared.push(url)
+        if (clearStatus !== 200) {
+          return Promise.resolve(json(clearStatus, { detail: 'The assistant is still answering a message.' }))
+        }
+        thread = []
+        return Promise.resolve(json(200, { status: 'cleared', chain_ids: [SEPOLIA] }))
       }
       if (url.startsWith('/api/chat/history?')) {
         calls.history++
@@ -85,7 +97,7 @@ function stubServer({
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { posted, calls }
+  return { posted, calls, cleared }
 }
 
 function composer() {
@@ -487,5 +499,68 @@ describe('AssistantPage', () => {
     expect(screen.queryByRole('complementary', { name: 'What the assistant can do' })).not.toBeInTheDocument()
     const send = screen.getByRole('button', { name: 'Send' })
     expect(send).not.toHaveTextContent('Send')
+  })
+
+  it('clears the chat after asking, so the assistant forgets it', async () => {
+    const { cleared } = stubServer({
+      history: [
+        { role: 'user', text: 'what can you do?' },
+        { role: 'assistant', text: 'I can pay your contacts.' },
+      ],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await composer()
+    expect(await within(log()).findByText('what can you do?')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear chat' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/including anything said on Telegram/)
+    expect(dialog).toHaveTextContent(/transaction history stay as they are/)
+    await user.click(within(dialog).getByRole('button', { name: 'Clear chat' }))
+
+    expect(await screen.findByText('Chat cleared.')).toBeInTheDocument()
+    expect(cleared).toEqual([`/api/chat/history?chain_id=${SEPOLIA}`])
+    await waitFor(() => expect(within(log()).queryByText('what can you do?')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(screen.getByRole('button', { name: 'Clear chat' })).toBeDisabled()
+  })
+
+  it('says so when the chat cannot be cleared while the assistant is answering', async () => {
+    stubServer({ history: [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'hello' }], clearStatus: 409 })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await composer()
+    await within(log()).findByText('hi')
+    await user.click(screen.getByRole('button', { name: 'Clear chat' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Clear chat' }))
+    expect(await screen.findByText(/still answering your last message/)).toBeInTheDocument()
+    expect(within(log()).getByText('hi')).toBeInTheDocument()
+  })
+
+  it('offers nothing to clear in an empty chat', async () => {
+    stubServer()
+    await renderRoutes(routes, '/assistant')
+
+    await composer()
+    expect(screen.getByRole('button', { name: 'Clear chat' })).toBeDisabled()
+  })
+
+  it('marks where the chat started afresh after a transaction, and points to the history', async () => {
+    stubServer({
+      history: [
+        { role: 'user', text: 'yes', carried_over: true },
+        { role: 'assistant', text: 'Sent 5 USDC to sam.', carried_over: true },
+        { role: 'user', text: "what's my balance?" },
+        { role: 'assistant', text: 'You have 20 USDC.' },
+      ],
+    })
+    await renderRoutes(routes, '/assistant')
+
+    await composer()
+    expect(await within(log()).findByText(/Earlier messages were cleared/)).toBeInTheDocument()
+    expect(within(log()).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
+    expect(within(log()).getByText('Sent 5 USDC to sam.')).toBeInTheDocument()
   })
 })

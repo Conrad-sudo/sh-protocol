@@ -23,3 +23,12 @@ export async function sendChat(chainId: number, message: string) {
   })
   return reply
 }
+
+/**
+ * Deletes the conversation on one network, or on every network when `chainId` is left out. The
+ * server answers 409 while the assistant is still answering a message there.
+ */
+export async function deleteChatHistory(chainId?: number) {
+  const query = chainId === undefined ? '' : `?chain_id=${chainId}`
+  await apiFetch<{ status: 'cleared'; chain_ids: number[] }>(`/api/chat/history${query}`, { method: 'DELETE' })
+}
