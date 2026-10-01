@@ -52,8 +52,8 @@ auth-test:
 custom-tokens-test:
 	.venv/bin/python3 app/tests/test_custom_tokens.py
 
-# The History tab: recording, describing and settling transactions, and the history routes. Fake
-# chain, so offline.
+# The History tab and the short chat memory: recording, describing and settling transactions,
+# the history routes, and the conversation starting afresh after a send. Fake chain, so offline.
 history-test:
 	.venv/bin/python3 app/tests/test_history.py
 

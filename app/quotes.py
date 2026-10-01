@@ -162,3 +162,30 @@ def drop(user_id: int, quote_id: str) -> bool:
             return False
         del _pending[quote_id]
         return True
+
+
+def has_pending(user_id: int, chain_id: int) -> bool:
+    """
+    Whether the user has a quote on `chain_id` still waiting for an answer.
+
+    The conversation is not started afresh while one is (smart_wallet_agent.chat): the quote's
+    description and id live only there, so clearing it would leave the user's next "yes" with
+    nothing to confirm.
+    """
+    with _lock:
+        _prune(time.time())
+        return any(p.user_id == user_id and p.chain_id == chain_id for p in _pending.values())
+
+
+def drop_all(user_id: int, chain_id: int) -> int:
+    """
+    Discards every quote the user has on `chain_id`: their chat there was just deleted, and a quote
+    must not outlive the conversation that showed it.
+
+    @return  How many were discarded.
+    """
+    with _lock:
+        doomed = [q for q, p in _pending.items() if p.user_id == user_id and p.chain_id == chain_id]
+        for quote_id in doomed:
+            del _pending[quote_id]
+        return len(doomed)

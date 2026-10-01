@@ -4,14 +4,18 @@ from agent_context import AgentContext
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from db import DB_PATH, acting_network
 from contract_errors import name_revert
+import quotes
 import asyncio
+import collections
 import logging
 import threading
+from contextlib import contextmanager
 
 load_dotenv()
 
@@ -334,6 +338,11 @@ invent an agent id: if the user names an agent you have no id for, ask, or check
 - **Ask for missing information.** If the request is missing the token, recipient, or amount, ask
   before calling any tool.
 - **Never repeat the session_key_ciphertext.** Use it only as a tool argument, never in a response.
+- **Your memory of this chat is short.** After each transaction the conversation starts afresh,
+  keeping only the last message and your reply to it. If the user asks about an earlier
+  transaction or something said before that, don't guess: say you no longer have it, and point
+  them to the History tab in the web app, which lists every transaction with its hash, date and
+  time.
 - **Notify before blocking calls.** Immediately before calling `confirm_transaction` — the one
   tool that waits on the chain — send the user a short, upbeat message such as: "Sending
   transaction, this may take a moment - don't touch that dial." Vary the joke; keep it short.
@@ -448,6 +457,120 @@ def thread_id(user_id: int, chain_id: int) -> str:
     return f"{user_id}:{chain_id}"
 
 
+# How long a conversation may grow before it starts afresh even without a transaction, in
+# approximate tokens of message history (characters / 4). Every model call re-sends the whole
+# history on top of ~28k tokens of prompt and tool descriptions, so a short one is also cheaper and
+# faster. Far under Sonnet's 200k window, which an unbounded thread used to fill until every turn
+# failed; a local model with a smaller window needs a smaller figure.
+HISTORY_TOKEN_LIMIT = 40_000
+
+# Turns running per thread in this process: a conversation is not deleted under a turn (see
+# clear_history). A Counter, because two tabs can run turns on one thread at once.
+_running: collections.Counter = collections.Counter()
+_running_lock = threading.Lock()
+
+
+class ConversationBusy(Exception):
+    """A turn is running on the conversation, so it can't be deleted yet."""
+
+
+@contextmanager
+def _turn_running(tid: str):
+    with _running_lock:
+        _running[tid] += 1
+    try:
+        yield
+    finally:
+        with _running_lock:
+            _running[tid] -= 1
+            if not _running[tid]:
+                del _running[tid]
+
+
+def _sent_a_transaction(messages: list) -> bool:
+    """Whether the conversation holds a transaction that went out: a confirm_transaction that succeeded."""
+    return any(
+        isinstance(m, ToolMessage) and m.name == "confirm_transaction" and m.status != "error"
+        for m in messages
+    )
+
+
+def _last_exchange(messages: list) -> list:
+    """
+    The text of the last exchange -- the user's last message and what the assistant said back -- to
+    begin a fresh conversation with, so a "yes" to the assistant's last question still makes sense.
+
+    Text only, marked as carried over: no tool calls, no tool results, no ciphertext. Empty when
+    there is no complete exchange to carry.
+    """
+    asked_at = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), None)
+    if asked_at is None:
+        return []
+    asked = _message_text(messages[asked_at].content).strip()
+    replied = "\n\n".join(
+        text
+        for message in messages[asked_at + 1:]
+        if isinstance(message, AIMessage) and (text := _message_text(message.content).strip())
+    )
+    if not asked or not replied:
+        return []
+    carried = {"carried_over": True}
+    return [HumanMessage(content=asked, additional_kwargs=carried), AIMessage(content=replied, additional_kwargs=carried)]
+
+
+def _start_fresh_if_due(user_id: int, chain_id: int) -> list:
+    """
+    Starts the user's conversation on `chain_id` afresh if it is due, returning what to carry over.
+
+    Due once a transaction has gone out, or once the history passes HISTORY_TOKEN_LIMIT. A wallet
+    assistant needs no long memory, and a short one is cheaper, faster, and leaves less old text
+    for a prompt injection to sit in. Every transaction stays in the History tab (tx_history),
+    which is the lasting record. Never while a quote is waiting for an answer, though: its
+    description and id live only in this conversation, so the user's next "yes" would have
+    nothing to confirm.
+
+    Run at the START of the next turn rather than at the end of the one that sent. The fresh thread
+    is then written by the graph itself, and the user goes on seeing the "Sent" reply until they
+    write again.
+
+    @return  The last exchange to begin the new conversation with, or [] when nothing was cleared.
+    """
+    tid = thread_id(user_id, chain_id)
+    messages = agent.get_state({"configurable": {"thread_id": tid}}).values.get("messages", [])
+    if not messages:
+        return []
+    due = _sent_a_transaction(messages) or count_tokens_approximately(messages) > HISTORY_TOKEN_LIMIT
+    if not due or quotes.has_pending(user_id, chain_id):
+        return []
+    carried = _last_exchange(messages)
+    agent.checkpointer.delete_thread(tid)
+    return carried
+
+
+def clear_history(user_id: int, chain_ids: list[int]):
+    """
+    Deletes the user's conversations on `chain_ids`, and any quote raised in them.
+
+    All or nothing, and refused while a turn is running on any of them: a turn that finishes after
+    its conversation was deleted writes the whole of it back -- each checkpoint carries the full
+    history -- so the delete would quietly not happen. A turn running in the Telegram bot, a
+    separate process, is not visible here; that rare overlap can still undo a delete.
+
+    The transaction history is not touched: it is a record of what happened on chain, not chat.
+
+    @raises ConversationBusy  If a turn is running on one of them in this process.
+    """
+    tids = [thread_id(user_id, chain_id) for chain_id in chain_ids]
+    # Held across the deletes, so no turn can start on one of them in between.
+    with _running_lock:
+        if any(_running[tid] for tid in tids):
+            raise ConversationBusy()
+        for tid in tids:
+            agent.checkpointer.delete_thread(tid)
+    for chain_id in chain_ids:
+        quotes.drop_all(user_id, chain_id)
+
+
 async def main():
 
     await open_checkpointer()
@@ -487,6 +610,9 @@ def chat(user_id: int, chain_id: int, user_input: str, network: str) -> str:
     conversation could argue with. Now the model never sees it and no tool accepts it as an
     argument.
 
+    The conversation starts afresh at the beginning of the turn after a transaction went out, or
+    once it grows past HISTORY_TOKEN_LIMIT -- see _start_fresh_if_due.
+
     @param user_id     The application user ID, from the caller's own authentication -- never from
                        anything the user typed.
     @param chain_id    The chain this conversation is about: picks the history.
@@ -501,10 +627,18 @@ def chat(user_id: int, chain_id: int, user_input: str, network: str) -> str:
     @raises ValueError  If `network` is not `chain_id` -- a caller bug, so it is not swallowed.
     """
     # Entered outside the try, so a mismatched network raises instead of becoming the apology.
-    with acting_network(user_id, network, chain_id):
+    with acting_network(user_id, network, chain_id), _turn_running(thread_id(user_id, chain_id)):
+      try:
+        carried = _start_fresh_if_due(user_id, chain_id)
+      except Exception:
+        # Tidying up must never cost the user their turn: carry on with the conversation as it is.
+        logging.getLogger(__name__).exception(
+            "Could not start the conversation afresh (user %s, chain %s)", user_id, chain_id
+        )
+        carried = []
       try:
         response = agent.invoke(
-            {"messages": [HumanMessage(content=user_input)]},
+            {"messages": [*carried, HumanMessage(content=user_input)]},
             config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
             context=AgentContext(user_id=user_id, turn_id=_next_turn_id()),
         )
@@ -544,7 +678,8 @@ def get_history(user_id: int, chain_id: int, limit: int) -> list[dict]:
     @param user_id   The application user ID, from the caller's token.
     @param chain_id  The chain whose conversation to read.
     @param limit     The most recent messages to return.
-    @return          [{"role": "user" | "assistant", "text": str}, ...].
+    @return          [{"role": "user" | "assistant", "text": str}, ...]. The two messages carried
+                     into a conversation that started afresh also have "carried_over": True.
     """
     state = agent.get_state({"configurable": {"thread_id": thread_id(user_id, chain_id)}})
     visible = []
@@ -557,7 +692,10 @@ def get_history(user_id: int, chain_id: int, limit: int) -> list[dict]:
             continue
         text = _message_text(message.content).strip()
         if text:
-            visible.append({"role": role, "text": text})
+            item = {"role": role, "text": text}
+            if message.additional_kwargs.get("carried_over"):
+                item["carried_over"] = True
+            visible.append(item)
     return visible[-limit:]
 
 

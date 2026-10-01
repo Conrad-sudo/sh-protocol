@@ -81,7 +81,9 @@ from custom_tokens import CustomTokenError, inspect_custom_token
 import auth
 from auth import get_current_user
 from smart_wallet_agent import (
+    ConversationBusy,
     chat,
+    clear_history,
     close_checkpointer,
     get_history,
     init_agent,
@@ -855,6 +857,36 @@ def chat_history(
     if chain_id not in CHAIN_NAME_BY_ID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
     return {"chain_id": chain_id, "messages": get_history(user_id, chain_id, limit)}
+
+
+@app.delete("/api/chat/history")
+def delete_chat_history(chain_id: int | None = None, user_id: int = Depends(get_current_user)):
+    """
+    Deletes the conversation on one chain, or on every chain when `chain_id` is left out.
+
+    The conversation is shared with Telegram, so this also clears what the assistant remembers
+    there. Quotes raised in it are discarded with it. The transaction history is kept: it records
+    what happened on chain, which deleting a chat can't undo.
+
+    A plain `def`: deleting a checkpoint thread is a sync call into the async checkpointer, which
+    works only off the event loop.
+
+    @param chain_id  The chain whose conversation to delete; every chain's when omitted.
+    @return          {"status": "cleared", "chain_ids": [...]}.
+    @raises HTTPException 400 for a chain this server does not serve; 409 while the assistant is
+            still answering a message in one of them (nothing is deleted then).
+    """
+    if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
+    chain_ids = [chain_id] if chain_id is not None else sorted(CHAIN_NAME_BY_ID)
+    try:
+        clear_history(user_id, chain_ids)
+    except ConversationBusy:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The assistant is still answering a message. Try again once it has replied.",
+        )
+    return {"status": "cleared", "chain_ids": chain_ids}
 
 
 # ── Transaction history ───────────────────────────────────────────────────────

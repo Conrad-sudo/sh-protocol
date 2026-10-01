@@ -1,10 +1,11 @@
 """
-Offline checks for the History tab: how transactions are recorded (the assistant's and the
-owner's), described, settled and listed, and the history routes.
+Offline checks for the History tab and the short chat memory: how transactions are recorded (the
+assistant's and the owner's), described, settled and listed, and how the conversation starts afresh
+after a transaction or is deleted on request.
 
-Everything runs against a throwaway database and a FAKE chain, so it is safe to run anywhere. The
-real journey -- a send on a fork landing in the history with the same hash the chat reported -- is
-in test_e2e_fork.
+Everything runs against a throwaway database, a FAKE chain and a scripted model, so it is safe to
+run anywhere. The real journey -- a send on a fork landing in the history with the same hash the
+chat reported -- is in test_e2e_fork.
 
 Run: make history-test   (or: python app/tests/test_history.py)
 """
@@ -27,12 +28,19 @@ db.init_db()
 
 from fastapi.testclient import TestClient   # noqa: E402
 from hexbytes import HexBytes               # noqa: E402
+from langchain.agents import create_agent   # noqa: E402
+from langchain.agents.middleware import ToolRetryMiddleware  # noqa: E402
+from langchain.tools import tool            # noqa: E402
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 from langchain_core.tools import ToolException  # noqa: E402
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from web3 import Web3                       # noqa: E402
 from web3.exceptions import TransactionNotFound  # noqa: E402
 
 import api                                  # noqa: E402
 import quotes                               # noqa: E402
+import smart_wallet_agent                   # noqa: E402
 import tools                                # noqa: E402
 import tx_history                           # noqa: E402
 from agent_context import AgentContext      # noqa: E402
@@ -539,6 +547,155 @@ def test_deposits_from_the_fund_drawer_are_listed():
         api._resolve_chain, api._load_wallet_for_chain, api._web3_or_none = saved
 
 
+# ── The chat starts afresh after a transaction ───────────────────────────────
+
+
+class ScriptedModel(GenericFakeChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+@tool
+def confirm_transaction(quote_id: str) -> str:
+    """Sends a quoted transaction (a stand-in with the real tool's name)."""
+    if quote_id == "bad":
+        raise ToolException("UserOp failed! tx: 0xdead")
+    return f"Sent — Transfer 5 USDC to sam. Tx hash: `0x{'ab' * 32}`, Status: 1"
+
+
+def _confirm_call(quote_id: str) -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": "confirm_transaction", "args": {"quote_id": quote_id},
+                                              "id": f"call-{quote_id}-{time.time_ns()}", "type": "tool_call"}])
+
+
+def _use_scripted_agent(replies: list):
+    # The production failure handling, so a failed send becomes an error ToolMessage, as it does live.
+    smart_wallet_agent.agent = create_agent(
+        ScriptedModel(messages=iter(replies)), tools=[confirm_transaction], checkpointer=InMemorySaver(),
+        context_schema=AgentContext,
+        middleware=[ToolRetryMiddleware(max_retries=0, on_failure=smart_wallet_agent._tool_failure_message)],
+    )
+
+
+def _thread(user: int, chain: int = CHAIN) -> list:
+    config = {"configurable": {"thread_id": smart_wallet_agent.thread_id(user, chain)}}
+    return smart_wallet_agent.agent.get_state(config).values.get("messages", [])
+
+
+def test_the_chat_starts_afresh_after_a_transaction():
+    """
+    After a transaction goes out, the next turn starts a fresh conversation carrying only the last
+    exchange's text. A failed send, or a quote still waiting for an answer, keeps it; a history
+    over the size limit clears it too.
+    """
+    print("\n[7] the conversation starts afresh after a transaction, carrying only the last exchange")
+    original = smart_wallet_agent.agent
+    user = _create("fresh@example.com")
+    try:
+        _use_scripted_agent([
+            AIMessage(content="Here's a quote."),
+            _confirm_call("q1"), AIMessage(content="Sent 5 USDC to sam. Anything else?"),
+            AIMessage(content="Your balance is 20 USDC."),
+            AIMessage(content="Still here."),
+        ])
+        smart_wallet_agent.chat(user, CHAIN, "send 5 usdc to sam", NETWORK)
+        smart_wallet_agent.chat(user, CHAIN, "yes", NETWORK)
+        check("the turn that sent keeps its whole conversation", len(_thread(user)) == 6, str(len(_thread(user))))
+
+        smart_wallet_agent.chat(user, CHAIN, "what's my balance?", NETWORK)
+        thread = _thread(user)
+        check("the next turn starts afresh: the last exchange, then the new one",
+              [(type(m).__name__, m.content) for m in thread] == [
+                  ("HumanMessage", "yes"), ("AIMessage", "Sent 5 USDC to sam. Anything else?"),
+                  ("HumanMessage", "what's my balance?"), ("AIMessage", "Your balance is 20 USDC."),
+              ], str([(type(m).__name__, m.content) for m in thread]))
+        check("the carried messages are marked, and carry no tool traffic",
+              all(m.additional_kwargs.get("carried_over") for m in thread[:2]) and not thread[1].tool_calls)
+        history = smart_wallet_agent.get_history(user, CHAIN, 50)
+        check("the web chat sees where it was cleared",
+              history[0] == {"role": "user", "text": "yes", "carried_over": True}
+              and "carried_over" not in history[2], str(history))
+
+        smart_wallet_agent.chat(user, CHAIN, "thanks", NETWORK)
+        check("with no new transaction it doesn't clear again", len(_thread(user)) == 6, str(len(_thread(user))))
+
+        failed_user = _create("fresh-failed@example.com")
+        _use_scripted_agent([_confirm_call("bad"), AIMessage(content="That didn't go through."), AIMessage(content="ok")])
+        smart_wallet_agent.chat(failed_user, CHAIN, "yes", NETWORK)
+        smart_wallet_agent.chat(failed_user, CHAIN, "why?", NETWORK)
+        check("a failed send keeps the conversation, so the user can ask why",
+              len(_thread(failed_user)) == 6 and _thread(failed_user)[0].content == "yes", str(len(_thread(failed_user))))
+
+        waiting_user = _create("fresh-quote@example.com")
+        _use_scripted_agent([
+            _confirm_call("q1"), AIMessage(content="Swapped. Here's the quote for sending half to Tim."),
+            AIMessage(content="Sent."),
+        ])
+        smart_wallet_agent.chat(waiting_user, CHAIN, "yes", NETWORK)
+        pending = quotes.put(waiting_user, CHAIN, 1, "Transfer half to tim", [], "vault:v1:x", None, {})
+        try:
+            smart_wallet_agent.chat(waiting_user, CHAIN, "yes", NETWORK)
+            check("a quote still waiting for an answer keeps the conversation",
+                  _thread(waiting_user)[0].content == "yes" and len(_thread(waiting_user)) == 6, str(len(_thread(waiting_user))))
+        finally:
+            quotes.drop(waiting_user, pending.quote_id)
+
+        long_user = _create("fresh-long@example.com")
+        _use_scripted_agent([AIMessage(content="x" * 400), AIMessage(content="short")])
+        saved_limit = smart_wallet_agent.HISTORY_TOKEN_LIMIT
+        smart_wallet_agent.HISTORY_TOKEN_LIMIT = 50
+        try:
+            smart_wallet_agent.chat(long_user, CHAIN, "tell me a lot", NETWORK)
+            smart_wallet_agent.chat(long_user, CHAIN, "and now?", NETWORK)
+        finally:
+            smart_wallet_agent.HISTORY_TOKEN_LIMIT = saved_limit
+        check("a conversation over the size limit starts afresh too, with no transaction",
+              [m.content for m in _thread(long_user)] == ["tell me a lot", "x" * 400, "and now?", "short"]
+              and _thread(long_user)[0].additional_kwargs.get("carried_over"), str([m.content[:12] for m in _thread(long_user)]))
+    finally:
+        smart_wallet_agent.agent = original
+
+
+def test_deleting_the_chat():
+    print("\n[8] DELETE /api/chat/history: per chain or all, refused mid-turn, quotes go with it")
+    original = smart_wallet_agent.agent
+    c = make_client()
+    me, headers = _sign_up(c, "delete-chat@example.com")
+    other, _ = _sign_up(c, "delete-other@example.com")
+    try:
+        _use_scripted_agent([AIMessage(content=f"reply {n}") for n in range(4)])
+        smart_wallet_agent.chat(me, CHAIN, "hi on sepolia", NETWORK)
+        smart_wallet_agent.chat(me, BSC, "hi on bsc", BSC_NETWORK)
+        smart_wallet_agent.chat(other, CHAIN, "theirs", NETWORK)
+        quote = quotes.put(me, CHAIN, 1, "Transfer 1 USDC to sam", [], "vault:v1:x", None, {})
+        db.add_transaction(me, CHAIN, WALLET, "assistant", "kept", "confirmed", tx_hash=_hash(0x501))
+
+        check("deleting needs a token", c.delete(f"/api/chat/history?chain_id={CHAIN}").status_code == 401)
+        check("an unsupported chain -> 400",
+              c.delete("/api/chat/history?chain_id=999999", headers=headers).status_code == 400)
+
+        with smart_wallet_agent._turn_running(smart_wallet_agent.thread_id(me, CHAIN)):
+            r = c.delete(f"/api/chat/history?chain_id={CHAIN}", headers=headers)
+        check("refused with 409 while the assistant is answering there", r.status_code == 409, f"{r.status_code} {r.text[:120]}")
+        check("...and nothing was deleted", len(_thread(me)) == 2)
+
+        r = c.delete(f"/api/chat/history?chain_id={CHAIN}", headers=headers)
+        check("deletes one chain's conversation", r.status_code == 200 and _thread(me) == [], f"{r.status_code} {r.text[:120]}")
+        check("its quotes go with it", not quotes.has_pending(me, CHAIN) and quote.quote_id not in quotes._pending)
+        check("the other chain's conversation is kept", len(_thread(me, BSC)) == 2)
+        check("another account's is untouched", len(_thread(other)) == 2)
+        check("the transaction history is kept", [t["action"] for t in db.get_transactions(me)] == ["kept"])
+
+        with smart_wallet_agent._turn_running(smart_wallet_agent.thread_id(me, BSC)):
+            r = c.delete("/api/chat/history", headers=headers)
+        check("deleting every chain is refused if any is busy", r.status_code == 409 and len(_thread(me, BSC)) == 2)
+        r = c.delete("/api/chat/history", headers=headers)
+        check("with no chain named, every chain's conversation goes",
+              r.status_code == 200 and _thread(me, BSC) == [] and CHAIN in r.json()["chain_ids"], f"{r.status_code} {r.text[:160]}")
+    finally:
+        smart_wallet_agent.agent = original
+
+
 if __name__ == "__main__":
     try:
         test_owner_transactions_are_described_from_their_calldata()
@@ -547,6 +704,8 @@ if __name__ == "__main__":
         test_pending_rows_are_settled_later()
         test_history_route_lists_only_your_own_newest_first()
         test_deposits_from_the_fund_drawer_are_listed()
+        test_the_chat_starts_afresh_after_a_transaction()
+        test_deleting_the_chat()
     finally:
         os.unlink(_tmp_db.name)
     finish("All history checks passed.")

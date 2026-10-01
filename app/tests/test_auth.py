@@ -669,6 +669,8 @@ def test_chat_turn_returns_text_and_hides_failures():
     never repeats an exception to the user: its text can carry an RPC URL with an API key in it.
     """
     print("\n[10b] a chat turn returns text, and a failed turn hides its error")
+    from types import SimpleNamespace
+
     from langchain_core.messages import AIMessage
 
     import smart_wallet_agent
@@ -678,6 +680,10 @@ def test_chat_turn_returns_text_and_hides_failures():
 
     class StubAgent:
         fail = False
+
+        def get_state(self, config):
+            # An empty conversation: nothing for chat() to start afresh.
+            return SimpleNamespace(values={"messages": []})
 
         def invoke(self, state, config, context):
             turns.append((state["messages"][0].content, config["configurable"]["thread_id"], context.user_id))
@@ -734,6 +740,7 @@ def test_chat_acts_on_the_pages_network():
     from langchain.tools import ToolRuntime, tool
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
 
     import smart_wallet_agent
     from agent_context import AgentContext
@@ -755,7 +762,9 @@ def test_chat_acts_on_the_pages_network():
     model = ScriptedModel(messages=iter([AIMessage(content="", tool_calls=calls), AIMessage(content="done")]))
 
     original = smart_wallet_agent.agent
-    smart_wallet_agent.agent = create_agent(model, tools=[which_network], context_schema=AgentContext)
+    smart_wallet_agent.agent = create_agent(
+        model, tools=[which_network], context_schema=AgentContext, checkpointer=InMemorySaver()
+    )
     try:
         c = make_client()
         body = c.post("/api/auth/signup", json={"email": "network@example.com", "password": "hunter2hunter2"}).json()
