@@ -44,7 +44,7 @@ export function ConnectDialog({ open, onClose }: { open: boolean; onClose: () =>
             <a href="https://metamask.io/download/" target="_blank" rel="noreferrer">
               MetaMask
             </a>
-            , then reload this page.
+            , then reload this page. On a phone, open this page in your wallet app's browser.
           </Message>
         ) : (
           <div className="mf-connector-list">

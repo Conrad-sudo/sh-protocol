@@ -1,37 +1,17 @@
 import { apiFetch } from './client'
 import type { Me, TokenResponse } from './types'
 
-export interface Credentials {
-  email: string
-  password: string
-}
-
-export function signup(credentials: Credentials) {
-  return apiFetch<TokenResponse>('/api/auth/signup', { method: 'POST', body: credentials, auth: false })
-}
-
-export function login(credentials: Credentials) {
-  return apiFetch<TokenResponse>('/api/auth/login', { method: 'POST', body: credentials, auth: false })
+/** A fresh nonce for the Sign-In With Ethereum message the user is about to sign. */
+export function siweNonce() {
+  return apiFetch<{ nonce: string }>('/api/auth/siwe/nonce', { auth: false })
 }
 
 /**
- * Signs in with a Google ID token, creating the account on first use. A 409 means a password
- * account already has this email — the user must sign in with the password and link Google.
+ * Signs in with a signed SIWE message — the only way in. The first sign-in for an address creates
+ * its account; the refresh token comes back as an httpOnly cookie.
  */
-export function googleSignIn(idToken: string) {
-  return apiFetch<TokenResponse>('/api/auth/google', {
-    method: 'POST',
-    body: { id_token: idToken },
-    auth: false,
-  })
-}
-
-/** Attaches a Google account to the signed-in account. */
-export function linkGoogle(idToken: string) {
-  return apiFetch<{ status: string }>('/api/auth/google/link', {
-    method: 'POST',
-    body: { id_token: idToken },
-  })
+export function siweLogin(body: { message: string; signature: string; nonce: string }) {
+  return apiFetch<TokenResponse>('/api/auth/siwe/login', { method: 'POST', body, auth: false })
 }
 
 /** Revokes the refresh cookie on the server and clears it in the browser. */

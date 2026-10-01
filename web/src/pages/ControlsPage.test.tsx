@@ -23,7 +23,7 @@ const TOKENS = [
   // The API flags the wrapped native token: it always counts, like ETH.
   { ticker: 'weth', address: WETH, always_counted: true },
 ]
-const PENDING_KEY = 'mitfah-pending-owner-tx:7'
+const PENDING_KEY = `mitfah-pending-owner-tx:7:${SEPOLIA}`
 // Sepolia's exchange router, as /api/chains names it.
 const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
 
@@ -585,7 +585,8 @@ describe('ControlsPage', () => {
     await renderRoutes(routes, '/controls')
 
     await connectFromOwnerBar(user)
-    expect(await screen.findByText(/Switch to the linked account in your wallet\./)).toBeInTheDocument()
+    // The addresses sit in elements of their own, so only the words around them are matched.
+    expect(await screen.findByText(/You're signed in as .*but your wallet is connected as/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Link this address instead' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeDisabled()
   })
@@ -644,6 +645,36 @@ describe('ControlsPage', () => {
     expect(await screen.findByText('Assistant renewed.')).toBeInTheDocument()
     expect(server.sessionConfirms).toHaveLength(2)
     expect(server.confirms).toEqual([])
+  })
+
+  it("doesn't wait on this network for a change sent on another", async () => {
+    sessionStorage.setItem(
+      `mitfah-pending-owner-tx:7:${MAINNET}`,
+      JSON.stringify({ chainId: MAINNET, txHash: TX_HASH, key: 'pause', success: 'Wallet paused.', sentAt: Date.now() }),
+    )
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    expect(screen.queryByText(/Waiting for/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeEnabled()
+    expect(server.confirms).toEqual([])
+  })
+
+  it('stops waiting for a change sent more than ten minutes ago', async () => {
+    sessionStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({ chainId: SEPOLIA, txHash: TX_HASH, key: 'pause', success: 'Wallet paused.', sentAt: Date.now() - 11 * 60_000 }),
+    )
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeEnabled()
+    expect(server.confirms).toEqual([])
+    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
   })
 
   it('finishes a change on the next page if this one is left while the wallet is open', async () => {

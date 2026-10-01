@@ -2,12 +2,12 @@ import { expect, type Page, type TestInfo } from '@playwright/test'
 
 export const TOKEN = { access_token: 'e2e-token', token_type: 'bearer', expires_in: 900, user_id: 7 }
 
+/** The address the mocked account signs in as: the owner of every mocked wallet (walletState). */
+export const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
+
 export const ME = {
   user_id: 7,
-  email: 'sam@example.com',
-  owner_addr: null as string | null,
-  has_password: true,
-  google_linked: false,
+  owner_addr: OWNER as string | null,
   telegram_linked: false,
   wallet_chains: [] as number[],
 }
@@ -49,7 +49,7 @@ export function walletState(chainId: number, address: string, overrides: Record<
     chain_id: chainId,
     chain_name: 'sepolia-fork',
     address,
-    owner: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+    owner: OWNER,
     is_owner: true,
     paused: false,
     spending: {

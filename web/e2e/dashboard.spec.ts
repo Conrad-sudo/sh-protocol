@@ -13,23 +13,6 @@ const ADDRESS = '0x2222222222222222222222222222222222222222'
 const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const TX_HASH = `0x${'34'.repeat(32)}`
 
-const RECEIPT = {
-  transactionHash: TX_HASH,
-  transactionIndex: '0x0',
-  blockHash: `0x${'56'.repeat(32)}`,
-  blockNumber: '0x1f',
-  from: OWNER,
-  to: ADDRESS,
-  cumulativeGasUsed: '0x5208',
-  gasUsed: '0x5208',
-  effectiveGasPrice: '0x3b9aca00',
-  contractAddress: null,
-  logs: [],
-  logsBloom: `0x${'00'.repeat(256)}`,
-  status: '0x1',
-  type: '0x2',
-}
-
 /**
  * A signed-in account with a wallet on each chain in `wallets`, in that order. `extra` answers other
  * API routes, keyed by "METHOD /path".
@@ -53,12 +36,6 @@ async function mockServer(
       sent.push({ tx, chainId })
       return TX_HASH
     },
-    request: async method => {
-      if (method === 'eth_blockNumber') return '0x20'
-      if (method === 'eth_getTransactionReceipt') return RECEIPT
-      if (method === 'eth_getTransactionByHash') return null
-      throw new Error(`Unexpected wallet request ${method}`)
-    },
   })
 
   await page.route(isApiUrl, route => {
@@ -73,6 +50,9 @@ async function mockServer(
     switch (path) {
       case '/api/auth/refresh':
         return route.fulfill({ json: TOKEN })
+      // A deposit from the Fund drawer, followed through the API: mined at the first ask.
+      case '/api/transactions/deposit':
+        return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH } })
       case '/api/me':
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: walletChains } })
       case '/api/chains':

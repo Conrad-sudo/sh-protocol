@@ -26,14 +26,9 @@ export function PublicLayout() {
               Open app
             </LinkButton>
           ) : (
-            <>
-              <LinkButton to="/login" appearance="subtle">
-                Sign in
-              </LinkButton>
-              <LinkButton to="/signup" appearance="primary">
-                Get started
-              </LinkButton>
-            </>
+            <LinkButton to="/login" appearance="primary">
+              Sign in
+            </LinkButton>
           )}
         </nav>
       </header>

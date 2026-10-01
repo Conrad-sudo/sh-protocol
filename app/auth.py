@@ -1,11 +1,16 @@
 """
-Account authentication for the web API: passwords, JWT access tokens, rotating refresh tokens,
-Google sign-in and SIWE wallet binding.
+Account authentication for the web API: Sign-In With Ethereum (the only way in), JWT access
+tokens, rotating refresh tokens, and the EIP-712 signature that adds a contact.
 
 Everything here exists to answer one question -- which `user_id` is this request for? -- from
 evidence the caller cannot forge. That id then flows to the agent as runtime context and to the
 database as the account key, so getting it wrong here is the whole ballgame: a request that
 resolves to the wrong user reaches that user's wallet, bounded only by its spending cap.
+
+An account IS an address: whoever signs a SIWE message for it signs in to its account, and the
+same address owns the account's wallets on chain. There is no email, password or Google sign-in
+(removed 2026-10-01), so there is nothing to recover an account with -- losing the wallet loses the
+account, just as it already lost control of the wallet itself.
 
 Nothing in this module signs blockchain transactions. The user's own EOA owns their SessionHandler
 (deployWallet sets owner = msg.sender), so pause, withdraw and ownership changes are signed in the
@@ -20,27 +25,22 @@ import time
 from datetime import datetime, timezone
 
 import jwt
-from argon2 import PasswordHasher
-from argon2.exceptions import InvalidHashError, VerifyMismatchError
-from eth_account.messages import encode_defunct
+from eth_account.messages import encode_defunct, encode_typed_data
 from eth_account import Account
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from db import (
+    consume_contact_nonce,
     get_refresh_token,
     get_user_by_id,
     revoke_all_refresh_tokens,
     revoke_refresh_token,
+    save_contact_nonce,
     save_refresh_token,
     save_siwe_nonce,
     consume_siwe_nonce,
 )
-
-# Argon2id with the library's defaults, which track the RFC 9106 recommendations. Deliberately
-# argon2-cffi rather than passlib: passlib's last release was 2020 and warns against modern bcrypt,
-# and hash/verify is the entire surface needed here.
-_hasher = PasswordHasher()
 
 # Signing key for access tokens. Fails closed: an unset secret in production would mean tokens
 # anyone can mint, so there is no default value to fall back to.
@@ -54,6 +54,8 @@ ACCESS_TOKEN_TTL_SECS = 15 * 60
 REFRESH_TOKEN_TTL_SECS = 30 * 86_400
 # How long a SIWE nonce stays redeemable. Long enough to read the message and click sign.
 SIWE_NONCE_TTL_SECS = 10 * 60
+# How long the nonce in a contact's typed data stays redeemable. The same reasoning.
+CONTACT_NONCE_TTL_SECS = 10 * 60
 # How long a Telegram deep link stays redeemable.
 TELEGRAM_NONCE_TTL_SECS = 10 * 60
 
@@ -68,51 +70,6 @@ def _require_secret() -> str:
             "JWT_SECRET is not set. The API cannot issue or verify tokens without it.",
         )
     return JWT_SECRET
-
-
-# ── Passwords ─────────────────────────────────────────────────────────────────
-
-
-def hash_password(password: str) -> str:
-    """
-    Hashes a password with Argon2id.
-
-    @param password  The plaintext password. Never stored or logged anywhere.
-    @return          The encoded hash, safe to store.
-    """
-    return _hasher.hash(password)
-
-
-def verify_password(password_hash: str | None, password: str) -> bool:
-    """
-    Checks a password against a stored hash.
-
-    Tolerates a None hash (an account created through Google or SIWE that has no password yet) by
-    returning False rather than raising, so the caller has one uniform "bad credentials" path and
-    cannot accidentally leak which accounts have passwords.
-
-    @param password_hash  The stored Argon2 hash, or None.
-    @param password       The plaintext password to check.
-    @return               True if the password matches.
-    """
-    if not password_hash:
-        return False
-    try:
-        return _hasher.verify(password_hash, password)
-    except (VerifyMismatchError, InvalidHashError):
-        return False
-
-
-def needs_rehash(password_hash: str) -> bool:
-    """
-    True when a stored hash was made with weaker parameters than the current policy.
-
-    @param password_hash  The stored Argon2 hash.
-    """
-    try:
-        return _hasher.check_needs_rehash(password_hash)
-    except InvalidHashError:
-        return False
 
 
 # ── Access tokens ─────────────────────────────────────────────────────────────
@@ -243,18 +200,18 @@ def revoke_refresh(token: str):
     revoke_refresh_token(_hash_token(token))
 
 
-# ── SIWE (EIP-4361) wallet binding ────────────────────────────────────────────
+# ── SIWE (EIP-4361) sign-in ───────────────────────────────────────────────────
 
 
 # The site(s) a SIWE message must name as its `domain`. This check is what makes SIWE worth having.
-# The nonce endpoint is open, so a phishing page can fetch a nonce and get a victim to sign it; the
-# victim's wallet shows the domain written in the message (MetaMask warns when it does not match the
-# page asking), so that page has to write ITS OWN domain -- and this set refuses it. Without the
-# check, the victim's address would be bound to the attacker's account, and since owner_addr is
-# UNIQUE the victim could never bind it to their own.
+# The nonce endpoint is open, so a phishing page can fetch a nonce and get a victim to sign it, then
+# replay the signature here to sign in AS the victim. The victim's wallet shows the domain written
+# in the message and warns when it does not match the page asking, so a phishing page that wants no
+# warning has to write ITS OWN domain -- and this set refuses it. Writing ours instead gets the
+# victim a deceptive-site warning before they sign.
 #
 # Comma-separated, for an apex plus www. Defaults to the local dev server, so a production deploy
-# that forgets to set it fails closed: every bind is refused rather than every domain accepted.
+# that forgets to set it fails closed: every sign-in is refused rather than every domain accepted.
 SIWE_DOMAINS = {
     d.strip().lower() for d in os.getenv("SIWE_DOMAIN", "localhost:3000").split(",") if d.strip()
 }
@@ -292,7 +249,7 @@ def issue_siwe_nonce() -> str:
     @return  The nonce, to be included in the message the user signs.
     """
     nonce = secrets.token_hex(16)
-    save_siwe_nonce(nonce)
+    save_siwe_nonce(nonce, SIWE_NONCE_TTL_SECS)
     return nonce
 
 
@@ -355,8 +312,8 @@ def verify_siwe(message: str, signature: str, nonce: str) -> str:
     - the nonce is burned, so a captured (message, signature) pair cannot be replayed;
     - the signer must be the address the message names, or the message is describing someone else.
 
-    The chain ID is parsed but not restricted: binding an owner address is not a per-chain act, and
-    refusing a user whose wallet happens to sit on another network would add friction, not safety.
+    The chain ID is parsed but not restricted: signing in is not a per-chain act, and refusing a
+    user whose wallet happens to sit on another network would add friction, not safety.
 
     @param message    The exact message the user signed.
     @param signature  The hex signature returned by their wallet.
@@ -398,36 +355,83 @@ def verify_siwe(message: str, signature: str, nonce: str) -> str:
     return signer
 
 
-# ── Google sign-in ────────────────────────────────────────────────────────────
+# ── Signed contacts (EIP-712) ─────────────────────────────────────────────────
 
 
-def verify_google_id_token(id_token_str: str) -> tuple[str, str | None]:
+# The contact list is the allowlist of destinations for the wallet's funds (see the note above the
+# contacts routes in api.py), so adding to it takes the owner wallet's signature over the exact name
+# and address, not just a session. A stolen session alone -- a token lifted by an XSS bug, a browser
+# left signed in -- can then add no payee, and the wallet shows the user the address they are
+# approving.
+#
+# No chainId in the domain: a contact belongs to the account, not to one network, and wallets refuse
+# typed data whose chainId differs from the network they are on. Replay is stopped by the nonce
+# instead, which is single-use and issued for one account, name and address.
+CONTACT_DOMAIN = {"name": "Mitfah", "version": "1"}
+CONTACT_TYPES = {
+    "AddContact": [
+        {"name": "name", "type": "string"},
+        {"name": "address", "type": "address"},
+        {"name": "nonce", "type": "string"},
+    ],
+}
+_DOMAIN_TYPE = [{"name": "name", "type": "string"}, {"name": "version", "type": "string"}]
+
+
+def contact_typed_data(name: str, address: str, nonce: str) -> dict:
     """
-    Verifies a Google ID token server-side and returns its subject and email.
+    The EIP-712 typed data the owner signs to save `name` as `address`.
 
-    Verification happens here, never in the browser: a client-side check proves nothing to this
-    server. The returned `sub` is what accounts are keyed on, because a Google account's email can
-    change while `sub` cannot, and an unverified email must never select an account.
+    Shaped for viem's signTypedData and eth_signTypedData_v4: the domain's own type is left out of
+    `types`, because both derive it from `domain`.
 
-    @param id_token_str  The ID token from Google Identity Services.
-    @return              (google_sub, email or None if Google did not assert a verified one).
-    @raises HTTPException 400/500 if the token is invalid or the client ID is unset.
+    @param name     The contact name, already normalised (lowercase, trimmed).
+    @param address  The checksummed address.
+    @param nonce    From issue_contact_nonce.
     """
-    # Imported lazily so the module loads (and the rest of auth works) without google-auth present.
-    from google.auth.transport import requests as google_requests
-    from google.oauth2 import id_token as google_id_token
+    return {
+        "domain": CONTACT_DOMAIN,
+        "types": CONTACT_TYPES,
+        "primaryType": "AddContact",
+        "message": {"name": name, "address": address, "nonce": nonce},
+    }
 
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    if not client_id:
+
+def issue_contact_nonce(user_id: int, name: str, address: str) -> str:
+    """
+    Issues the nonce for one contact's typed data, bound to the account and to that name and address.
+
+    @return  The nonce, alphanumeric like a SIWE one.
+    """
+    nonce = secrets.token_hex(16)
+    save_contact_nonce(nonce, user_id, name, address, CONTACT_NONCE_TTL_SECS)
+    return nonce
+
+
+def verify_contact_signature(user_id: int, owner: str, name: str, address: str, nonce: str, signature: str):
+    """
+    Checks that the account's owner signed contact_typed_data(name, address, nonce).
+
+    The nonce is burned first, as in verify_siwe, so a captured signature cannot be replayed -- not
+    even to put back a contact the owner has since deleted.
+
+    @param owner  The account's owner address: the only signer accepted.
+    @raises HTTPException 400 if the nonce is unknown, stale or for another contact, or the
+            signature is not the owner's.
+    """
+    if not consume_contact_nonce(nonce, user_id, name, address, CONTACT_NONCE_TTL_SECS):
         raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "GOOGLE_CLIENT_ID is not configured"
+            status.HTTP_400_BAD_REQUEST,
+            "That approval has expired or was for a different contact. Please try again.",
         )
+    typed = contact_typed_data(name, address, nonce)
+    full = {**typed, "types": {"EIP712Domain": _DOMAIN_TYPE, **typed["types"]}}
     try:
-        claims = google_id_token.verify_oauth2_token(
-            id_token_str, google_requests.Request(), client_id
+        signer = Account.recover_message(encode_typed_data(full_message=full), signature=signature)
+    except Exception:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not verify that signature")
+    if signer.lower() != owner.lower():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"That was signed by {signer}, not by your wallet's owner {owner}.",
         )
-    except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid Google token: {e}")
-
-    email = claims.get("email") if claims.get("email_verified") else None
-    return claims["sub"], email

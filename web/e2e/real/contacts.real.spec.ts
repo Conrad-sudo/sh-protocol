@@ -1,9 +1,11 @@
 import { expect, test } from '@playwright/test'
+import { apiSignIn, installRealOwner, signIn } from './realSetup.ts'
 
 /*
- * Contacts for real, against the running API and its database: a fresh account adds someone,
- * replaces their address and removes a contact whose name needs encoding in the URL, and the API's
- * own list agrees after each step. Nothing touches a chain.
+ * Contacts for real, against the running API and its database: a fresh account signs in with its
+ * wallet, adds someone, replaces their address and removes a contact whose name needs encoding in
+ * the URL, and the API's own list agrees after each step. Every save is signed by the wallet
+ * (EIP-712) and checked by the API. Nothing touches a chain.
  * Run with: E2E_REAL=1 npx playwright test real/contacts --project=desktop-light
  */
 
@@ -13,30 +15,26 @@ const ODD = "o'neil & co? #1"
 
 test('contacts are saved, replaced and removed through the real API', async ({ page, request }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-light', 'One real run per suite is enough.')
-  const email = `e2e-contacts-${Date.now()}@example.com`
-  const password = 'Contacts-e2e-2026'
+  const owner = await installRealOwner(page)
 
-  await page.goto('/signup?next=%2Fcontacts')
-  await page.getByLabel('Email').fill(email)
-  await page.locator('input[name="password"]').fill(password)
-  await page.getByRole('button', { name: 'Create account' }).click()
+  await signIn(page, '/contacts')
   await expect(page.getByRole('heading', { name: 'No contacts yet' })).toBeVisible()
 
-  const login = await request.post('/api/auth/login', { data: { email, password } })
-  expect(login.ok()).toBeTruthy()
-  const { access_token } = (await login.json()) as { access_token: string }
-  const headers = { Authorization: `Bearer ${access_token}` }
+  const headers = await apiSignIn(request, owner.account)
   const saved = async () => {
     const response = await request.get('/api/contacts', { headers })
     return ((await response.json()) as { contacts: unknown[] }).contacts
   }
 
-  // The server refuses the names the page refuses: "me" means the wallet itself, and a browser
-  // could never send the request to delete "." or "..".
+  // The server refuses the names the page refuses, before any wallet is asked to sign: "me" means
+  // the wallet itself, and a browser could never send the request to delete "." or "..".
   for (const name of ['me', '.', '..']) {
-    const response = await request.post('/api/contacts', { headers, data: { name, address: SAM } })
-    expect(response.status(), `saving ${name}`).toBe(422)
+    const response = await request.post('/api/contacts/prepare', { headers, data: { name, address: SAM } })
+    expect(response.status(), `preparing ${name}`).toBe(422)
   }
+  // And a session alone, without the wallet's signature, saves nothing.
+  const unsigned = await request.post('/api/contacts', { headers, data: { name: 'mallory', address: SAM } })
+  expect(unsigned.status()).toBe(422)
 
   const add = async (name: string, address: string, confirmLabel: string) => {
     await page.getByRole('button', { name: 'Add contact' }).click()
@@ -44,6 +42,7 @@ test('contacts are saved, replaced and removed through the real API', async ({ p
     await dialog.getByLabel('Name').fill(name)
     await dialog.getByLabel('Address').fill(address)
     await dialog.getByRole('button', { name: 'Continue' }).click()
+    // The wallet, still connected from signing in, signs the contact as it is saved.
     await dialog.getByRole('button', { name: confirmLabel }).click()
     await expect(dialog).toBeHidden()
   }

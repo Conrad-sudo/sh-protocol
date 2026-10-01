@@ -1,22 +1,20 @@
-import { Outlet, type RouteObject } from 'react-router'
+import { Outlet, redirect, type RouteObject } from 'react-router'
 import { RedirectIfSignedIn } from './auth/RedirectIfSignedIn'
 import { RequireAuth } from './auth/RequireAuth'
 import { FullPageLoader } from './components/FullPageLoader'
 import { AuthLayout } from './layouts/AuthLayout'
 import { PublicLayout } from './layouts/PublicLayout'
 import { HomePage } from './pages/HomePage'
-import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { RouteError } from './pages/RouteError'
-import { SignupPage } from './pages/SignupPage'
 
 /**
  * The whole route tree. Exported bare so tests can mount it in a memory router.
  *
- * The pages a visitor lands on — home, legal, sign-in, sign-up — are in the first bundle. The
- * signed-in app is loaded on demand (`lazy`), which keeps wagmi, viem and the chat Markdown
- * renderer out of that first load; the guards stay eager so a signed-out visitor is sent to
- * /login without downloading the app.
+ * The pages a visitor lands on — home and legal — are in the first bundle. Sign-in (which needs the
+ * browser wallet) and the signed-in app are loaded on demand (`lazy`), which keeps wagmi, viem and
+ * the chat Markdown renderer out of that first load; the guards stay eager so a signed-out visitor
+ * is sent to /login without downloading the app.
  */
 export const routes: RouteObject[] = [
   {
@@ -41,8 +39,10 @@ export const routes: RouteObject[] = [
           </RedirectIfSignedIn>
         ),
         children: [
-          { path: 'login', element: <LoginPage /> },
-          { path: 'signup', element: <SignupPage /> },
+          { path: 'login', lazy: async () => ({ Component: (await import('./pages/LoginPage')).LoginPage }) },
+          // Sign-up became sign-in (the first one creates the account); old links still arrive, `?next=` and all.
+          // Nothing to render (the loader redirects first); `null` says so, where none would warn.
+          { path: 'signup', loader: ({ request }) => redirect(`/login${new URL(request.url).search}`), element: null },
         ],
       },
       {

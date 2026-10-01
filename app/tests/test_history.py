@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
 
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
@@ -36,7 +36,7 @@ from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 from langchain_core.tools import ToolException  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from web3 import Web3                       # noqa: E402
-from web3.exceptions import TransactionNotFound  # noqa: E402
+from web3.exceptions import TimeExhausted, TransactionNotFound  # noqa: E402
 
 import api                                  # noqa: E402
 import quotes                               # noqa: E402
@@ -131,6 +131,11 @@ class FakeEth:
             raise TransactionNotFound(f"Transaction {tx_hash} not found")
         return self.receipts[tx_hash]
 
+    def wait_for_transaction_receipt(self, tx_hash, timeout):
+        if tx_hash not in self.receipts:
+            raise TimeExhausted(f"Transaction {tx_hash} is not in the chain after {timeout} seconds")
+        return self.receipts[tx_hash]
+
     def get_block(self, number):
         return {"timestamp": self.blocks[number]}
 
@@ -154,8 +159,8 @@ def _owner_tx(fn_name: str, args: list, to: str = WALLET) -> dict:
     return {"to": to, "input": HexBytes(WALLET_CONTRACT.encode_abi(fn_name, args=args)), "value": 0}
 
 
-def _create(email: str) -> int:
-    return db.create_user(email=email, password_hash="x")
+def _create(owner_addr: str | None = None) -> int:
+    return db.create_user(owner_addr=owner_addr)
 
 
 # ── Describing an owner transaction ──────────────────────────────────────────
@@ -167,9 +172,8 @@ def test_owner_transactions_are_described_from_their_calldata():
     words the controls use. Nothing the browser says is involved.
     """
     print("\n[1] owner transactions are described from their own calldata")
-    user = _create("describe@example.com")
+    user = _create(OWNER)
     db.save_contact(user, "sam", SAM)
-    db.link_owner_addr(user, OWNER)
     db.save_custom_token(user, CHAIN, PEPE, "pepe", "Pepe", 6)
     w3 = FakeW3()
 
@@ -214,7 +218,7 @@ def test_owner_transactions_are_recorded_once_and_settled():
     transaction sent TO the user's wallet is recorded.
     """
     print("\n[2] owner transactions: recorded once, settled by the receipt, only if sent to the wallet")
-    user = _create("owner-record@example.com")
+    user = _create()
     w3 = FakeW3()
     tx_hash = _hash(0x1)
     w3.eth.txs[tx_hash] = _owner_tx("pause", [])
@@ -302,7 +306,7 @@ def test_assistant_sends_are_recorded_before_they_go():
     failure to record never changes what the tool tells the user.
     """
     print("\n[3] the assistant's sends: recorded before they go, settled after, never lost")
-    user = _create("assistant-record@example.com")
+    user = _create()
     runtime = SimpleNamespace(context=AgentContext(user_id=user, turn_id=2))
     w3 = FakeW3()
     w3.eth.blocks[101] = 1_790_000_123
@@ -391,7 +395,7 @@ def test_pending_rows_are_settled_later():
     owner transaction the node no longer knows a day on (dropped).
     """
     print("\n[4] pending rows are settled when the history is read")
-    user = _create("settle@example.com")
+    user = _create()
     w3 = FakeW3()
     w3.eth.blocks[200] = 1_790_000_500
     nonce = (7 << 64) | 3
@@ -466,16 +470,16 @@ def make_client() -> TestClient:
     return TestClient(api.app)
 
 
-def _sign_up(client: TestClient, email: str) -> tuple[int, dict]:
-    body = client.post("/api/auth/signup", json={"email": email, "password": "hunter2hunter2"}).json()
-    return body["user_id"], {"Authorization": f"Bearer {body['access_token']}"}
+def _sign_up(client: TestClient) -> tuple[int, dict]:
+    body, headers, _ = sign_in(client)
+    return body["user_id"], headers
 
 
 def test_history_route_lists_only_your_own_newest_first():
     print("\n[5] GET /api/transactions: authenticated, per account, newest first, paged")
     c = make_client()
-    me, headers = _sign_up(c, "history-route@example.com")
-    other, _ = _sign_up(c, "history-other@example.com")
+    me, headers = _sign_up(c)
+    other, _ = _sign_up(c)
     for n in range(3):
         db.add_transaction(me, CHAIN, WALLET, "assistant", f"mine {n}", "confirmed", tx_hash=_hash(0x300 + n))
     db.add_transaction(me, BSC, WALLET, "owner", "mine on bsc", "confirmed", tx_hash=_hash(0x310))
@@ -512,39 +516,216 @@ def test_history_route_lists_only_your_own_newest_first():
 
 
 def test_deposits_from_the_fund_drawer_are_listed():
-    print("\n[6] POST /api/transactions/deposit lists a deposit sent to the wallet, and settles it later")
+    print("\n[6] POST /api/transactions/deposit waits for a deposit sent to the wallet, and lists it")
     c = make_client()
-    me, headers = _sign_up(c, "deposit@example.com")
+    me, headers = _sign_up(c)
     w3 = FakeW3()
-    deposit, elsewhere = _hash(0x401), _hash(0x402)
+    deposit, elsewhere, unseen, failed = _hash(0x401), _hash(0x402), _hash(0x403), _hash(0x404)
     w3.eth.txs[deposit] = {"to": WALLET, "input": HexBytes(b""), "value": 2 * 10**17}
     w3.eth.txs[elsewhere] = {"to": STRANGER, "input": HexBytes(b""), "value": 10**18}
+    w3.eth.txs[failed] = {"to": WALLET, "input": HexBytes(b""), "value": 10**17}
+    w3.eth.receipts[failed] = {"status": 0, "blockNumber": 8}
+    w3.eth.blocks[8] = 1_790_000_800
 
     saved = api._resolve_chain, api._load_wallet_for_chain, api._web3_or_none
     api._resolve_chain = lambda _chain: (w3, NETWORK)
     api._load_wallet_for_chain = lambda _w3, _user, _chain: WALLET_CONTRACT
     api._web3_or_none = lambda _chain: w3
     try:
+        def post(tx_hash: str):
+            return c.post("/api/transactions/deposit", json={"chain_id": CHAIN, "tx_hash": tx_hash}, headers=headers)
+
         body = {"chain_id": CHAIN, "tx_hash": deposit}
-        check("reporting a deposit needs a token", c.post("/api/transactions/deposit", json=body).status_code == 401)
-        r = c.post("/api/transactions/deposit", json=body, headers=headers)
-        check("a deposit is accepted", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
+        check("following a deposit needs a token", c.post("/api/transactions/deposit", json=body).status_code == 401)
+        r = post(unseen)
+        check("a hash the node never saw -> 202, seen false, and nothing listed",
+              r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": unseen, "seen": False}
+              and db.get_transactions(me) == [], f"{r.status_code} {r.text[:160]}")
+        r = post(deposit)
+        check("one waiting in the pool -> 202, seen true",
+              r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": deposit, "seen": True},
+              f"{r.status_code} {r.text[:160]}")
         rows = db.get_transactions(me)
         check("listed as pending until it mines, described from the transaction",
               len(rows) == 1 and rows[0]["status"] == "pending" and rows[0]["action"] == "Add 0.2 ETH to the wallet", str(rows))
 
-        c.post("/api/transactions/deposit", json={"chain_id": CHAIN, "tx_hash": elsewhere}, headers=headers)
-        check("a transaction to somebody else's address is not listed", len(db.get_transactions(me)) == 1)
-        check("a malformed hash -> 422",
-              c.post("/api/transactions/deposit", json={"chain_id": CHAIN, "tx_hash": "0x12"}, headers=headers).status_code == 422)
+        r = post(elsewhere)
+        check("a transaction to somebody else's address -> 400, and not listed",
+              r.status_code == 400 and "was not sent to your wallet" in r.json()["detail"]
+              and len(db.get_transactions(me)) == 1, f"{r.status_code} {r.text[:160]}")
+        check("a malformed hash -> 422", post("0x12").status_code == 422)
+
+        r = post(failed)
+        check("a transfer that failed -> 400, listed as failed",
+              r.status_code == 400 and "The transfer reverted" in r.json()["detail"]
+              and [t["status"] for t in db.get_transactions(me) if t["tx_hash"] == failed] == ["failed"],
+              f"{r.status_code} {r.text[:160]}")
 
         w3.eth.receipts[deposit] = {"status": 1, "blockNumber": 9}
         w3.eth.blocks[9] = 1_790_000_900
-        listed = c.get("/api/transactions", headers=headers).json()["transactions"]
-        check("reading the history settles it", listed[0]["status"] == "confirmed" and listed[0]["mined_at"] == 1_790_000_900,
-              str(listed[0]))
+        listed = {t["tx_hash"]: t for t in c.get("/api/transactions", headers=headers).json()["transactions"]}
+        check("reading the history settles it", listed[deposit]["status"] == "confirmed"
+              and listed[deposit]["mined_at"] == 1_790_000_900, str(listed[deposit]))
+        r = post(deposit)
+        check("once mined -> 200, confirmed", r.status_code == 200
+              and r.json() == {"status": "confirmed", "tx_hash": deposit}, f"{r.status_code} {r.text[:160]}")
     finally:
         api._resolve_chain, api._load_wallet_for_chain, api._web3_or_none = saved
+
+
+def test_owner_confirm_says_whether_the_network_has_seen_it():
+    """
+    An owner confirm answers 202 for a hash with no receipt either way, but says whether the node
+    has seen it at all. A hash it has never seen -- the wallet failed to broadcast it, sent it
+    through another RPC, or the fork was restarted -- will never mine, and the web page stops
+    waiting once it has stayed unseen for a while instead of spinning out its whole deadline.
+    """
+    print("\n[6b] an owner confirm says whether the network has seen the transaction")
+    c = make_client()
+    _, headers = _sign_up(c)
+    w3 = FakeW3()
+    unseen, waiting = _hash(0x501), _hash(0x502)
+    w3.eth.txs[waiting] = _owner_tx("pause", [])
+
+    saved = api._resolve_chain, api._load_wallet_for_chain
+    api._resolve_chain = lambda _chain: (w3, NETWORK)
+    api._load_wallet_for_chain = lambda _w3, _user, _chain: WALLET_CONTRACT
+    try:
+        for path in ("/api/wallet/tx/confirm", "/api/wallet/session/confirm"):
+            r = c.post(path, json={"chain_id": CHAIN, "tx_hash": unseen}, headers=headers)
+            check(f"{path}: a hash the node never saw -> 202, seen false",
+                  r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": unseen, "seen": False},
+                  f"{r.status_code} {r.text[:160]}")
+            r = c.post(path, json={"chain_id": CHAIN, "tx_hash": waiting}, headers=headers)
+            check(f"{path}: one waiting in the pool -> 202, seen true",
+                  r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": waiting, "seen": True},
+                  f"{r.status_code} {r.text[:160]}")
+    finally:
+        api._resolve_chain, api._load_wallet_for_chain = saved
+
+
+# Where two accounts' deploys land: the addresses /api/deploy predicted for them.
+DEPLOYED = _addr(0xDE9)
+DEPLOYED_TOO = _addr(0xDEA)
+
+
+class FakeDeployEth(FakeEth):
+    """FakeEth, plus the wallets already on chain, as /api/deploy/confirm reads them."""
+
+    def __init__(self):
+        super().__init__()
+        self.wallets: dict[str, tuple[str, str, int]] = {}   # address -> (owner, session key, block made in)
+        self.block_number = 50
+        self.archive = True   # False: a node that can't read old state
+
+    def get_code(self, address, block_identifier="latest"):
+        if block_identifier != "latest" and not self.archive:
+            raise ValueError("missing trie node")
+        wallet = self.wallets.get(Web3.to_checksum_address(address))
+        block = self.block_number if block_identifier == "latest" else block_identifier
+        return b"\x60" if wallet and block >= wallet[2] else b""
+
+    def contract(self, address, abi):
+        address = Web3.to_checksum_address(address)
+        if address not in self.wallets:
+            return super().contract(address, abi)
+        owner, key, _ = self.wallets[address]
+        return SimpleNamespace(functions=SimpleNamespace(
+            owner=lambda: _Call(owner),
+            isSessionActive=lambda k: _Call(k == key),
+            currentSessionValidUntil=lambda: _Call(1_800_000_000),
+        ))
+
+
+class FakeFactory:
+    """WalletDeployed logs, behind a provider that searches at most 10 blocks at a time (Alchemy's free tier)."""
+
+    def __init__(self):
+        self.logs: list[dict] = []
+
+    def _get_logs(self, argument_filters, from_block, to_block):
+        if to_block - from_block > 10:
+            raise ValueError("Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range")
+        return [log for log in self.logs if log["args"]["walletAddress"] == argument_filters["walletAddress"]
+                and from_block <= log["blockNumber"] <= to_block]
+
+    @property
+    def events(self):
+        return SimpleNamespace(WalletDeployed=lambda: SimpleNamespace(get_logs=self._get_logs))
+
+
+def test_deploy_confirm_says_whether_the_network_has_seen_it():
+    """
+    /api/deploy/confirm says whether the node has seen the hash, like the owner confirms -- except
+    when the wallet is already at the predicted address. The user's wallet replaced the deploy (sped
+    it up, say), so it mined under a hash nobody told the app. Reported as never received, the page
+    would offer to start over, and a second deploy makes a second wallet; so it is finished from the
+    chain instead, and listed under the hash that created it.
+    """
+    print("\n[6c] a deploy confirm says whether the network has seen it, and finishes a replaced deploy")
+    c = make_client()
+    w3 = SimpleNamespace(eth=FakeDeployEth())
+    factory = FakeFactory()
+    lost, waiting, sped_up = _hash(0x601), _hash(0x602), _hash(0x603)
+    w3.eth.txs[waiting] = {"to": _addr(0xFAC), "input": HexBytes(b""), "value": 10**17}
+    # The sped-up deploy mined in block 37, under a hash the page never learned.
+    w3.eth.receipts[sped_up] = {"status": 1, "blockNumber": 37, "transactionHash": HexBytes(sped_up)}
+    w3.eth.blocks[37] = 1_790_000_900
+    factory.logs = [{"args": {"walletAddress": DEPLOYED}, "transactionHash": sped_up, "blockNumber": 37}]
+
+    saved = api._resolve_chain, api._load_factory_for_chain
+    api._resolve_chain = lambda _chain: (w3, NETWORK)
+    api._load_factory_for_chain = lambda _w3, _chain: factory
+    try:
+        body, headers, account = sign_in(c)
+        me, owner, key = body["user_id"], account.address, _addr(0x5E55)
+        db.save_pending_session_key(me, CHAIN, DEPLOYED, key, "vault:v1:test")
+
+        def confirm(tx_hash: str, predicted: str = DEPLOYED, as_headers: dict = headers, deployer: str = owner):
+            return c.post("/api/deploy/confirm", headers=as_headers, json={
+                "chain_id": CHAIN, "deployer": deployer, "tx_hash": tx_hash, "predicted_address": predicted,
+            })
+
+        r = confirm(lost)
+        check("a hash the node never saw, and no wallet there -> 202, seen false",
+              r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": lost, "seen": False},
+              f"{r.status_code} {r.text[:160]}")
+        r = confirm(waiting)
+        check("one waiting in the pool -> 202, seen true",
+              r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": waiting, "seen": True},
+              f"{r.status_code} {r.text[:160]}")
+
+        w3.eth.wallets[DEPLOYED] = (STRANGER, key, 37)
+        r = confirm(lost)
+        check("a wallet somebody else owns there finishes nothing",
+              r.status_code == 202 and r.json()["seen"] is False and db.get_wallet_chains(me) == [],
+              f"{r.status_code} {r.text[:160]}")
+
+        w3.eth.wallets[DEPLOYED] = (owner, key, 37)
+        r = confirm(lost)
+        answer = r.json()
+        check("the wallet is there under another hash -> 200, filed from the chain",
+              r.status_code == 200 and answer["status"] == "deployed" and answer["wallet_address"] == DEPLOYED
+              and answer["session_key"] == key and answer["session_key_authorized"] is True,
+              f"{r.status_code} {r.text[:200]}")
+        check("saved as the account's wallet, its key promoted out of pending",
+              db.get_wallet_address(me, CHAIN) == DEPLOYED and db.get_pending_session_key(me, CHAIN, DEPLOYED) is None)
+        rows = db.get_transactions(me)
+        check("listed under the hash that created it, found one block at a time",
+              [(t["action"], t["tx_hash"], t["status"], t["mined_at"]) for t in rows]
+              == [("Create your Mitfah wallet", sped_up, "confirmed", 1_790_000_900)], str(rows))
+
+        # Another account, on a node that can't read old state: still filed, just not listed.
+        body, other_headers, other = sign_in(c)
+        db.save_pending_session_key(body["user_id"], CHAIN, DEPLOYED_TOO, key, "vault:v1:test")
+        w3.eth.wallets[DEPLOYED_TOO] = (other.address, key, 44)
+        w3.eth.archive = False
+        r = confirm(_hash(0x604), DEPLOYED_TOO, other_headers, other.address)
+        check("a node without old state still files the wallet, just without the History row",
+              r.status_code == 200 and db.get_wallet_address(body["user_id"], CHAIN) == DEPLOYED_TOO
+              and db.get_transactions(body["user_id"]) == [], f"{r.status_code} {r.text[:200]}")
+    finally:
+        api._resolve_chain, api._load_factory_for_chain = saved
 
 
 # ── The chat starts afresh after a transaction ───────────────────────────────
@@ -590,7 +771,7 @@ def test_the_chat_starts_afresh_after_a_transaction():
     """
     print("\n[7] the conversation starts afresh after a transaction, carrying only the last exchange")
     original = smart_wallet_agent.agent
-    user = _create("fresh@example.com")
+    user = _create()
     try:
         _use_scripted_agent([
             AIMessage(content="Here's a quote."),
@@ -619,14 +800,14 @@ def test_the_chat_starts_afresh_after_a_transaction():
         smart_wallet_agent.chat(user, CHAIN, "thanks", NETWORK)
         check("with no new transaction it doesn't clear again", len(_thread(user)) == 6, str(len(_thread(user))))
 
-        failed_user = _create("fresh-failed@example.com")
+        failed_user = _create()
         _use_scripted_agent([_confirm_call("bad"), AIMessage(content="That didn't go through."), AIMessage(content="ok")])
         smart_wallet_agent.chat(failed_user, CHAIN, "yes", NETWORK)
         smart_wallet_agent.chat(failed_user, CHAIN, "why?", NETWORK)
         check("a failed send keeps the conversation, so the user can ask why",
               len(_thread(failed_user)) == 6 and _thread(failed_user)[0].content == "yes", str(len(_thread(failed_user))))
 
-        waiting_user = _create("fresh-quote@example.com")
+        waiting_user = _create()
         _use_scripted_agent([
             _confirm_call("q1"), AIMessage(content="Swapped. Here's the quote for sending half to Tim."),
             AIMessage(content="Sent."),
@@ -640,7 +821,7 @@ def test_the_chat_starts_afresh_after_a_transaction():
         finally:
             quotes.drop(waiting_user, pending.quote_id)
 
-        long_user = _create("fresh-long@example.com")
+        long_user = _create()
         _use_scripted_agent([AIMessage(content="x" * 400), AIMessage(content="short")])
         saved_limit = smart_wallet_agent.HISTORY_TOKEN_LIMIT
         smart_wallet_agent.HISTORY_TOKEN_LIMIT = 50
@@ -660,8 +841,8 @@ def test_deleting_the_chat():
     print("\n[8] DELETE /api/chat/history: per chain or all, refused mid-turn, quotes go with it")
     original = smart_wallet_agent.agent
     c = make_client()
-    me, headers = _sign_up(c, "delete-chat@example.com")
-    other, _ = _sign_up(c, "delete-other@example.com")
+    me, headers = _sign_up(c)
+    other, _ = _sign_up(c)
     try:
         _use_scripted_agent([AIMessage(content=f"reply {n}") for n in range(4)])
         smart_wallet_agent.chat(me, CHAIN, "hi on sepolia", NETWORK)
@@ -704,6 +885,8 @@ if __name__ == "__main__":
         test_pending_rows_are_settled_later()
         test_history_route_lists_only_your_own_newest_first()
         test_deposits_from_the_fund_drawer_are_listed()
+        test_owner_confirm_says_whether_the_network_has_seen_it()
+        test_deploy_confirm_says_whether_the_network_has_seen_it()
         test_the_chat_starts_afresh_after_a_transaction()
         test_deleting_the_chat()
     finally:

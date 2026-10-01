@@ -15,6 +15,8 @@ export interface WalletBackend {
   chainId: number
   /** `personal_sign`. `message` is hex-encoded, as the app sends it. */
   signMessage: (message: string) => Promise<string>
+  /** `eth_signTypedData_v4`, which signing a contact uses. `typedData` is the JSON the app sends. */
+  signTypedData?: (typedData: string) => Promise<string>
   /**
    * `eth_sendTransaction`. The request carries no chain id, so `chainId` is the network the wallet
    * was on when asked, as a real wallet would use.
@@ -40,6 +42,7 @@ export const FAKE_WALLET_NAME = 'Test Wallet'
 export async function installFakeWallet(page: Page, backend: WalletBackend) {
   await page.exposeFunction('__fakeWalletBackend', (method: string, params: unknown[], chainId: number) => {
     if (method === 'personal_sign') return backend.signMessage(params[0] as string)
+    if (method === 'eth_signTypedData_v4' && backend.signTypedData) return backend.signTypedData(params[1] as string)
     if (method === 'eth_sendTransaction') return backend.sendTransaction(params[0] as WalletTx, chainId)
     if (backend.request) return backend.request(method, params)
     throw new Error(`The test wallet does not support ${method}`)

@@ -61,16 +61,14 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
   const inFlight = tx.busy && tx.state.key === KEY
   const canSubmit = readiness === 'ready' && !!balance && amount !== '' && !amountError && toValid
 
-  const clearResult = () => {
-    if (!tx.busy && tx.state.key === KEY) tx.reset()
-  }
+  // Only reached while nothing is in flight: the form is locked until it ends.
+  const clearResult = () => tx.release(KEY)
 
   const close = () => {
-    // A withdrawal in flight keeps going; reopening shows how it's doing.
-    if (!inFlight) {
-      clearResult()
-      setAmount('')
-    }
+    // A withdrawal already sent keeps going, and reopening shows how it's doing. Waiting on the
+    // wallet stops, though; should it send after all, the page still picks the withdrawal up.
+    if (!(inFlight && tx.state.phase === 'confirming')) setAmount('')
+    tx.release(KEY)
     onClose()
   }
 

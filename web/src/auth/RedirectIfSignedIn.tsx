@@ -4,7 +4,7 @@ import { FullPageLoader } from '../components/FullPageLoader'
 import { safeNext } from './safeNext'
 import { useAuth } from './useAuth'
 
-/** Sends a signed-in user past the login and sign-up pages to where they were headed. */
+/** Sends a signed-in user past the sign-in page to where they were headed. */
 export function RedirectIfSignedIn({ children }: { children: ReactNode }) {
   const { status } = useAuth()
   const [params] = useSearchParams()

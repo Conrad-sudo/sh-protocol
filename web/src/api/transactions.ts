@@ -1,5 +1,5 @@
 import { apiFetch } from './client'
-import type { TransactionPage } from './types'
+import type { DepositConfirmResult, TransactionPage } from './types'
 
 /** How many transactions to load at a time. The server allows up to 100. */
 export const TRANSACTIONS_PAGE_SIZE = 25
@@ -13,12 +13,13 @@ export function fetchTransactions(chainId: number | null, before?: number) {
 }
 
 /**
- * Lists a deposit the Fund drawer just sent in the History tab. The server checks that the
- * transaction really went to this account's wallet.
+ * Waits for a deposit the Fund drawer sent, and lists it in the History tab. Answers `pending` (HTTP
+ * 202) until it has mined; the server checks that it really went to this account's wallet.
  */
-export async function reportDeposit(chainId: number, txHash: string) {
-  await apiFetch<{ status: 'ok' }>('/api/transactions/deposit', {
+export function confirmDeposit(chainId: number, txHash: string, signal?: AbortSignal) {
+  return apiFetch<DepositConfirmResult>('/api/transactions/deposit', {
     method: 'POST',
     body: { chain_id: chainId, tx_hash: txHash },
+    signal,
   })
 }

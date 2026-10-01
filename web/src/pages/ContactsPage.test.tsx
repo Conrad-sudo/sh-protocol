@@ -5,11 +5,13 @@ import { getAddress } from 'viem'
 import { resetClientForTests } from '../api/client'
 import type { Contact } from '../api/types'
 import { routes } from '../routes'
-import { json, ME, renderRoutes, setViewportWidth, TOKEN } from '../test/utils'
+import { answerRpc, isRpc, json, makeWagmiConfig, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 const SAM = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const ALEX = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
 const NEW = '0x90F79bf6EB2c4f870365E785982E1f101E93b906'
+const OTHER = '0x9999999999999999999999999999999999999999'
+const SIGNATURE = `0x${'cd'.repeat(65)}`
 
 interface ServerOptions {
   contacts?: Contact[]
@@ -23,6 +25,14 @@ interface ServerOptions {
   saveError?: { status: number; detail: string }
   /** DELETE answers 404 (removed elsewhere, so gone) or 500 (still there). */
   deleteStatus?: 404 | 500
+  /** The address the account signs in as; the mock wallet's by default. */
+  ownerAddr?: string
+}
+
+/** What the mock wallet was asked to sign, as eth_signTypedData_v4 received it. */
+interface SignRequest {
+  account: string
+  typedData: { domain: unknown; primaryType: string; message: Record<string, string> }
 }
 
 /** What an unhandled server error looks like: plain text, not JSON. */
@@ -38,17 +48,48 @@ function stubServer({
   saveGate = Promise.resolve(),
   saveError,
   deleteStatus,
+  ownerAddr = WALLET,
 }: ServerOptions = {}) {
   let saved = [...contacts]
   let lists = 0
+  let nonces = 0
   const posted: unknown[] = []
   const deleted: string[] = []
+  const signed: SignRequest[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
+      if (isRpc(url)) {
+        return Promise.resolve(
+          answerRpc(init, {
+            eth_signTypedData_v4: ([account, typedData]) => {
+              signed.push({ account: String(account), typedData: JSON.parse(String(typedData)) })
+              return SIGNATURE
+            },
+          }),
+        )
+      }
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
-      if (url === '/api/me') return Promise.resolve(json(200, ME))
+      if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: ownerAddr }))
+      if (url === '/api/contacts/prepare' && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Contact
+        nonces++
+        return Promise.resolve(
+          json(200, {
+            domain: { name: 'Mitfah', version: '1' },
+            types: {
+              AddContact: [
+                { name: 'name', type: 'string' },
+                { name: 'address', type: 'address' },
+                { name: 'nonce', type: 'string' },
+              ],
+            },
+            primaryType: 'AddContact',
+            message: { name: body.name.trim().toLowerCase(), address: getAddress(body.address), nonce: `nonce${nonces}` },
+          }),
+        )
+      }
       if (url === '/api/contacts' && method === 'GET') {
         lists++
         if (listFailures-- > 0 || (listFailsLater && lists > 1)) return Promise.resolve(serverError())
@@ -78,7 +119,14 @@ function stubServer({
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { posted, deleted }
+  return { posted, deleted, signed }
+}
+
+/** Connects the mock wallet from the dialog's "Connect wallet", the one that approves the contact. */
+async function connectInDialog(user: UserEvent, dialog: HTMLElement) {
+  await user.click(within(dialog).getByRole('button', { name: 'Connect wallet' }))
+  await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+  await waitFor(() => expect(within(dialog).queryByRole('button', { name: 'Connect wallet' })).toBeNull())
 }
 
 async function openAddDialog(user: UserEvent) {
@@ -104,6 +152,8 @@ describe('ContactsPage', () => {
     cleanup()
     vi.unstubAllGlobals()
   })
+
+  const signedSave = (name: string, address: string, nonce: string) => ({ name, address, nonce, signature: SIGNATURE })
 
   it('lists the contacts, and says what the list is for', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }, { name: 'alex', address: ALEX }] })
@@ -138,8 +188,8 @@ describe('ContactsPage', () => {
     expect(await screen.findByRole('heading', { name: 'Your contacts (1)' })).toBeInTheDocument()
   })
 
-  it('adds a contact after a look at the whole address', async () => {
-    const { posted } = stubServer()
+  it('adds a contact after a look at the whole address, signed by the wallet', async () => {
+    const { posted, signed } = stubServer()
     const user = userEvent.setup()
     await renderRoutes(routes, '/contacts')
 
@@ -160,9 +210,25 @@ describe('ContactsPage', () => {
     expect(within(dialog).getByLabelText('Name')).toHaveValue('Sam')
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
 
+    // Saving takes the signed-in wallet's signature, so it waits for that wallet.
+    expect(within(dialog).getByRole('button', { name: 'Save contact' })).toBeDisabled()
+    expect(within(dialog).getByText(/to approve this contact\./)).toBeInTheDocument()
+    await connectInDialog(user, dialog)
+    expect(within(dialog).getByText(/Your wallet will ask you to sign this contact/)).toBeInTheDocument()
+
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
     expect(await screen.findByText('sam saved. Your assistant can now pay them.')).toBeInTheDocument()
-    expect(posted).toEqual([{ name: 'sam', address: SAM }])
+    // The wallet signed exactly the contact the server will store, as the signed-in address.
+    expect(signed).toHaveLength(1)
+    expect(signed[0].account.toLowerCase()).toBe(WALLET)
+    expect(signed[0].typedData).toMatchObject({
+      domain: { name: 'Mitfah', version: '1' },
+      primaryType: 'AddContact',
+      message: { name: 'sam', nonce: 'nonce1' },
+    })
+    // viem sends the address in lowercase; as an EIP-712 address it signs the same bytes.
+    expect(signed[0].typedData.message.address.toLowerCase()).toBe(SAM.toLowerCase())
+    expect(posted).toEqual([signedSave('sam', SAM, 'nonce1')])
     await waitFor(() => expect(rows()).toEqual(['sam']))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Check the address' })).toBeNull())
 
@@ -179,6 +245,7 @@ describe('ContactsPage', () => {
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
 
     // Saving refreshes the list, and that refresh fails.
@@ -196,6 +263,7 @@ describe('ContactsPage', () => {
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
     await waitFor(() => expect(posted).toHaveLength(1))
     await user.keyboard('{Escape}')
@@ -253,10 +321,11 @@ describe('ContactsPage', () => {
     const compare = dialog.querySelector<HTMLElement>('.mf-address-compare')!
     expect(within(compare).getByText(SAM)).toBeInTheDocument()
     expect(within(compare).getByText(NEW)).toBeInTheDocument()
+    await connectInDialog(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Replace address' }))
 
     expect(await screen.findByText("sam's address updated.")).toBeInTheDocument()
-    expect(posted).toEqual([{ name: 'sam', address: NEW }])
+    expect(posted).toEqual([signedSave('sam', NEW, 'nonce1')])
     const sam = document.querySelector<HTMLElement>('[data-contact="sam"]')!
     await waitFor(() => expect(within(sam).getByText(NEW)).toBeInTheDocument())
   })
@@ -291,6 +360,7 @@ describe('ContactsPage', () => {
     const dialog = await openAddDialog(user)
     await fillContact(user, dialog, 'sam', SAM)
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
 
     expect(
@@ -298,6 +368,37 @@ describe('ContactsPage', () => {
     ).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Save contact' })).toBeEnabled()
     expect(rows()).toEqual([])
+  })
+
+  it('saves nothing when the signature is declined', async () => {
+    const { posted } = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts', { wagmiConfig: makeWagmiConfig({ signTypedDataError: true }) })
+
+    const dialog = await openAddDialog(user)
+    await fillContact(user, dialog, 'sam', SAM)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
+
+    expect(await within(dialog).findByText('Cancelled — nothing was saved.')).toBeInTheDocument()
+    expect(posted).toEqual([])
+    expect(within(dialog).getByRole('button', { name: 'Save contact' })).toBeEnabled()
+  })
+
+  it('asks for the wallet the account signs in with when another one is connected', async () => {
+    const { posted } = stubServer({ ownerAddr: OTHER })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts')
+
+    const dialog = await openAddDialog(user)
+    await fillContact(user, dialog, 'sam', SAM)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
+
+    expect(within(dialog).getByText(/You're signed in as .*but your wallet is connected as/)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Save contact' })).toBeDisabled()
+    expect(posted).toEqual([])
   })
 
   it('removes a contact after asking, by its encoded name', async () => {

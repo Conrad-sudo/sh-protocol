@@ -8,7 +8,7 @@ export function TermsPage() {
       title="Terms of Service"
       description="The terms for using Mitfah: your account, your wallet and its limits, the AI assistant, fees, risks and liability."
       path="/terms"
-      updated="17 September 2026"
+      updated="1 October 2026"
     >
       <p>
         These terms cover your use of Mitfah (the website, the app and the Telegram bot). By creating an account you
@@ -25,7 +25,7 @@ export function TermsPage() {
       <h2>Your account</h2>
       <ul>
         <li>You must be old enough to agree to these terms where you live, and allowed to use crypto services there.</li>
-        <li>Keep your password and your owner wallet safe. Anything done with them is treated as done by you.</li>
+        <li>Keep your owner wallet safe: you sign in with it, and anything done with it is treated as done by you.</li>
         <li>Give us accurate information, and tell us if you think someone else is using your account.</li>
       </ul>
 

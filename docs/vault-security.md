@@ -34,7 +34,6 @@ APP_USER_ID=1                                   # which account the local harnes
 
 # Web API (`make api`)
 JWT_SECRET=                                     # REQUIRED for the API; long random string, fails closed if unset
-GOOGLE_CLIENT_ID=                               # optional — only for Google sign-in
 CORS_ORIGINS=http://localhost:3000              # comma-separated; the refresh cookie needs credentialed CORS
 COOKIE_SECURE=1                                 # set 0 for local http development
 SIWE_DOMAIN=localhost:3000                      # the site SIWE messages must name; mitfah.com in production (comma-separated)

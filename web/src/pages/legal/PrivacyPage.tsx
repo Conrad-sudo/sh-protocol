@@ -17,19 +17,17 @@ export function PrivacyPage() {
       <h2>What we store</h2>
       <ul>
         <li>
-          <strong>Account:</strong> your email address and a hash of your password (never the password itself). If you
-          sign in with Google, the account ID Google gives us, not your Google password.
-        </li>
-        <li>
-          <strong>Wallet owner:</strong> the address of the browser wallet you linked as the owner, and the address of
-          each Mitfah wallet you created, per network.
+          <strong>Account:</strong> the address of the browser wallet you sign in with, which also owns your Mitfah
+          wallets, and the address of each Mitfah wallet you created, per network. We don't ask for your name, email
+          address or a password.
         </li>
         <li>
           <strong>Assistant keys:</strong> the key the assistant uses to act for each wallet. It is stored encrypted, and
           the encryption key is kept in a separate key service, not in our database.
         </li>
         <li>
-          <strong>Contacts:</strong> the names and addresses you save as people the assistant may pay.
+          <strong>Contacts:</strong> the names and addresses you save as people the assistant may pay. Your wallet signs
+          each one you add; we check the signature and don't keep it.
         </li>
         <li>
           <strong>Chat history:</strong> your messages to the assistant and its replies, including the tools it used and
@@ -74,9 +72,6 @@ export function PrivacyPage() {
           blockchain node providers.
         </li>
         <li>
-          <strong>Google</strong>, only if you sign in with Google.
-        </li>
-        <li>
           <strong>Telegram</strong>, only if you link it. Messages you send the bot pass through Telegram.
         </li>
         <li>
@@ -104,7 +99,7 @@ export function PrivacyPage() {
       </ul>
 
       <h2>Changes</h2>
-      <p>If this policy changes in a way that matters, we'll tell you in the app or by email before it takes effect.</p>
+      <p>If this policy changes in a way that matters, we'll tell you in the app before it takes effect.</p>
 
       <h2>Contact</h2>
       <p>Questions about privacy: {CONTACT_EMAIL}.</p>

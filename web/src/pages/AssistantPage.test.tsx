@@ -8,6 +8,10 @@ import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 const CHAINS = [{ chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false }]
+const TOKENS = [
+  { ticker: 'weth', address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', always_counted: true },
+  { ticker: 'usdc', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' },
+]
 const SAM: Contact = { name: 'sam', address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
 
 type Answer = { reply: string } | { status: number; detail?: string } | 'offline'
@@ -29,6 +33,8 @@ interface ServerOptions {
   contacts?: Contact[]
   /** What DELETE /api/chat/history answers: 200 clears the chat, 409 means a turn is running. */
   clearStatus?: number
+  /** The network's exchange router; without one the assistant can't swap. */
+  router?: string
 }
 
 /** A signed-in account with a wallet on Sepolia and a chat that behaves like app/api.py. */
@@ -43,6 +49,7 @@ function stubServer({
   walletChains = [SEPOLIA],
   contacts = [SAM],
   clearStatus = 200,
+  router,
 }: ServerOptions = {}) {
   let thread = [...history]
   const posted: unknown[] = []
@@ -54,7 +61,8 @@ function stubServer({
       const method = init?.method ?? 'GET'
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
-      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
+      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS.map(c => ({ ...c, router })) }))
+      if (url === `/api/tokens?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { tokens: TOKENS }))
       if (url === '/api/contacts') return Promise.resolve(json(200, { contacts }))
       if (url === `/api/wallet/${SEPOLIA}`) {
         calls.wallet++
@@ -297,6 +305,18 @@ describe('AssistantPage', () => {
     expect(posted).toEqual([{ chain_id: SEPOLIA, message: 'What’s in my wallet?' }])
     expect(await within(log()).findByText('You said: What’s in my wallet?')).toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Suggestions' })).not.toBeInTheDocument()
+  })
+
+  it('drafts a swap where the assistant can trade, without sending it', async () => {
+    const { posted } = stubServer({ router: '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3' })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
+    await user.click(await within(suggestions).findByRole('button', { name: 'Swap 1 ETH for USDC…' }))
+    expect(posted).toHaveLength(0)
+    expect(await composer()).toHaveValue('Swap 1 ETH for USDC')
+    expect(await composer()).toHaveFocus()
   })
 
   it('leaves out the payment suggestion when there is no one to pay', async () => {

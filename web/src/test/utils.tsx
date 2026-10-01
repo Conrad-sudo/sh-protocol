@@ -26,18 +26,16 @@ export const TOKEN = {
   user_id: 7,
 }
 
-export const ME = {
-  user_id: 7,
-  email: 'sam@example.com',
-  owner_addr: null,
-  has_password: true,
-  google_linked: false,
-  telegram_linked: false,
-  wallet_chains: [],
-}
-
 /** The address the mock wallet connects as. */
 export const WALLET = '0x1111111111111111111111111111111111111111'
+
+/** The signed-in account. Accounts sign in with their wallet, so it is the mock wallet's address. */
+export const ME = {
+  user_id: 7,
+  owner_addr: WALLET,
+  telegram_linked: false,
+  wallet_chains: [] as number[],
+}
 
 /**
  * The app's wagmi setup with a mock wallet in place of browser wallets. The mock starts on the

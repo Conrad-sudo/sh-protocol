@@ -27,14 +27,13 @@ from types import SimpleNamespace
 
 from dotenv import load_dotenv
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import add_contact, check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
 
 load_dotenv()
 os.environ["COOKIE_SECURE"] = "0"
 os.environ.setdefault("TELEGRAM_BOT_USERNAME", "test_wallet_bot")
 
 from eth_account import Account                       # noqa: E402
-from eth_account.messages import encode_defunct       # noqa: E402
 from eth_utils import keccak                          # noqa: E402
 from fastapi.testclient import TestClient             # noqa: E402
 from web3 import Web3                                 # noqa: E402
@@ -147,22 +146,9 @@ def sign_and_send(acct, tx: dict) -> str:
     return w3.eth.send_raw_transaction(signed.raw_transaction).hex()
 
 
-def signup_and_bind(c: TestClient, acct, email: str) -> dict:
-    """Signs up, then binds `acct` to the account through the real SIWE endpoints."""
-    body = c.post("/api/auth/signup", json={"email": email, "password": "hunter2hunter2"}).json()
-    headers = {"Authorization": f"Bearer {body['access_token']}"}
-
-    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    message = api.auth.build_siwe_message(
-        next(iter(api.auth.SIWE_DOMAINS)), acct.address, nonce, CHAIN_ID
-    )
-    signature = Account.sign_message(encode_defunct(text=message), acct.key).signature.hex()
-    r = c.post(
-        "/api/auth/siwe/verify",
-        headers=headers,
-        json={"message": message, "signature": signature, "nonce": nonce},
-    )
-    assert r.status_code == 200, f"SIWE bind failed: {r.status_code} {r.text[:200]}"
+def sign_in_as(c: TestClient, acct) -> dict:
+    """Signs in as `acct` through the real SIWE endpoint -- the only way in -- and returns its headers."""
+    _, headers, _ = sign_in(c, acct, CHAIN_ID)
     return headers
 
 
@@ -304,7 +290,7 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
     # A second account must not read the first's wallet: it has no wallet on this chain, so the
     # lookup is keyed by the CALLER and 404s rather than falling through to somebody else's row.
     other = new_funded_account()
-    other_headers = signup_and_bind(c, other, f"reader{int(time.time())}@example.com")
+    other_headers = sign_in_as(c, other)
     check("another account gets 404, not someone else's wallet",
           c.get(f"/api/wallet/{CHAIN_ID}", headers=other_headers).status_code == 404)
     check("reading needs a token", c.get(f"/api/wallet/{CHAIN_ID}").status_code == 401)
@@ -511,7 +497,7 @@ def test_cross_user_isolation(c: TestClient, acct, headers: dict, wallet: str):
     print("\n[5] one account cannot reach another's wallet")
 
     other = new_funded_account()
-    other_headers = signup_and_bind(c, other, f"other{int(time.time())}@example.com")
+    other_headers = sign_in_as(c, other)
 
     # A real transaction against wallet A, reported by account B.
     r = c.post("/api/wallet/pause/prepare", headers=headers, json={"chain_id": CHAIN_ID})
@@ -532,9 +518,10 @@ def test_cross_user_isolation(c: TestClient, acct, headers: dict, wallet: str):
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
 
-def test_contacts_are_owner_managed(c: TestClient, headers: dict):
+def test_contacts_are_owner_managed(c: TestClient, headers: dict, acct):
     """
-    The contact routes that replaced the save_contact / delete_contact tools.
+    The contact routes that replaced the save_contact / delete_contact tools. Adding one takes the
+    owner wallet's EIP-712 signature (`acct` here).
 
     The offline suite covers these in depth; what this adds is the real deployed app -- the same
     process that just built and confirmed transactions -- rather than a TestClient with a stubbed
@@ -543,12 +530,15 @@ def test_contacts_are_owner_managed(c: TestClient, headers: dict):
     print("\n[6] contacts are managed by the owner, not the agent")
 
     # Compared against the account's own starting list rather than assumed empty: on a fresh
-    # wallet.db the first signup is handed user id 1 -- the harness user APP_USER_ID usually names,
+    # wallet.db the first sign-in is handed user id 1 -- the harness user APP_USER_ID usually names,
     # whose demo contact deploy_wallet.py has already saved.
     baseline = c.get("/api/contacts", headers=headers).json()["contacts"]
     payee = Account.create().address
-    r = c.post("/api/contacts", headers=headers, json={"name": "Sandy", "address": payee})
-    check("the owner can add a contact", r.status_code == 201, f"{r.status_code} {r.text[:140]}")
+    r = add_contact(c, headers, Account.create(), "Sandy", payee)
+    check("a signature from any wallet but the owner's adds nothing", r.status_code == 400,
+          f"{r.status_code} {r.text[:140]}")
+    r = add_contact(c, headers, acct, "Sandy", payee)
+    check("the owner's signature adds a contact", r.status_code == 201, f"{r.status_code} {r.text[:140]}")
 
     listed = c.get("/api/contacts", headers=headers).json()["contacts"]
     check("it is listed back", {"name": "sandy", "address": payee} in listed and len(listed) == len(baseline) + 1,
@@ -664,7 +654,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     unit = 10 ** token.functions.decimals().call()
     deal_erc20(usdc, wallet, 1_000 * unit)
     payee = Account.create().address
-    r = c.post("/api/contacts", headers=headers, json={"name": "payee", "address": payee})
+    r = add_contact(c, headers, acct, "payee", payee)
     check("the payee is saved as a contact", r.status_code == 201, f"{r.status_code} {r.text[:140]}")
 
     def quote_transfer(amount: float) -> dict:
@@ -1213,7 +1203,7 @@ if __name__ == "__main__":
 
     client = make_client()
     owner = new_funded_account()
-    auth_headers = signup_and_bind(client, owner, f"e2e{int(time.time())}@example.com")
+    auth_headers = sign_in_as(client, owner)
     print(f"  test owner: {owner.address}")
 
     deployed = test_deploy_round_trip(client, owner, auth_headers)
@@ -1223,7 +1213,7 @@ if __name__ == "__main__":
     test_owner_actions(client, owner, auth_headers, deployed)
     test_simulations_bite(client, owner, auth_headers, deployed)
     test_cross_user_isolation(client, owner, auth_headers, deployed)
-    test_contacts_are_owner_managed(client, auth_headers)
+    test_contacts_are_owner_managed(client, auth_headers, owner)
     test_self_bundling(client, owner, auth_headers, deployed)
     test_custom_tokens(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)

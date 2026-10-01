@@ -1,13 +1,18 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { getAddress } from 'viem'
-import { Button, Form, Input, Message, Modal, Text } from 'rsuite'
-import { saveContact } from '../../api/contacts'
+import { getAddress, type Address } from 'viem'
+import { useConnection, useSignTypedData } from 'wagmi'
+import { Button, Form, Input, Loader, Message, Modal, Text } from 'rsuite'
+import { prepareContact, saveContact } from '../../api/contacts'
 import type { Contact } from '../../api/types'
 import { CONTACTS_KEY } from '../../hooks/useContacts'
+import { useMe } from '../../hooks/useMe'
 import { addressProblem, nameProblem, normalizeName } from '../../lib/contacts'
-import { errorText } from '../../lib/tx'
+import { errorText, isUserRejection } from '../../lib/tx'
+import { AddressText } from '../AddressText'
 import { FullAddress } from '../FullAddress'
+import { AccountMismatchBanner } from '../wallet/AccountMismatchBanner'
+import { ConnectDialog } from '../wallet/ConnectDialog'
 
 interface AddContactModalProps {
   open: boolean
@@ -27,15 +32,35 @@ interface Review {
 /**
  * Adds someone the assistant may pay, in two steps: the details, then a look at the whole address
  * before it is saved. A name that is already saved gets the new address, so that look shows both.
+ *
+ * Saving takes the signature of the wallet the user signed in with, over the exact name and address
+ * (EIP-712, from POST /api/contacts/prepare): the contact list is where the assistant may send
+ * money, so a signed-in session alone can't add to it, and the wallet shows the address once more.
  */
 export function AddContactModal({ open, onClose, contacts, onSaved }: AddContactModalProps) {
   const queryClient = useQueryClient()
+  const { data: me } = useMe()
+  const owner = me?.owner_addr ?? null
+  const { address: connected } = useConnection()
+  const { mutateAsync: signTypedDataAsync } = useSignTypedData()
   const [name, setName] = useState('')
   const [address, setAddress] = useState('')
   const [review, setReview] = useState<Review | null>(null)
+  const [signing, setSigning] = useState(false)
+  const signerReady = !!owner && !!connected && connected.toLowerCase() === owner.toLowerCase()
 
   const save = useMutation({
-    mutationFn: ({ contact }: Review) => saveContact(contact),
+    mutationFn: async ({ contact }: Review) => {
+      // Checked by the server first, so a contact it would refuse never reaches the wallet.
+      const typed = await prepareContact(contact)
+      setSigning(true)
+      try {
+        const signature = await signTypedDataAsync({ ...typed, account: owner as Address })
+        return await saveContact({ ...typed.message, signature })
+      } finally {
+        setSigning(false)
+      }
+    },
     onSuccess: (saved, { previous }) => {
       queryClient.setQueryData<Contact[]>(CONTACTS_KEY, list =>
         [...(list ?? []).filter(c => c.name !== saved.name), saved].sort((a, b) => (a.name < b.name ? -1 : 1)),
@@ -137,9 +162,18 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
         Check every character against the address {review.contact.name} gave you. Scam addresses often match only the
         first and last few.
       </Message>
+      {owner && <SignerBar owner={owner} />}
+      {signerReady &&
+        (signing ? (
+          <Loader className="mf-tx-status" content="Confirm in your wallet." />
+        ) : (
+          <Text size="sm" muted className="mf-settings-note">
+            Your wallet will ask you to sign this contact. Signing is free and moves no funds.
+          </Text>
+        ))}
       {save.isError && (
         <Message type="error" showIcon className="mf-settings-note">
-          Couldn't save: {errorText(save.error)}
+          {isUserRejection(save.error) ? 'Cancelled — nothing was saved.' : `Couldn't save: ${errorText(save.error)}`}
         </Message>
       )}
     </>
@@ -171,6 +205,7 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
               appearance="primary"
               color="orange"
               loading={save.isPending}
+              disabled={!signerReady}
               onClick={() =>
                 // Closing is left to this call: it doesn't run once this dialog has been closed and
                 // opened afresh, so a slow save can't close the new one.
@@ -202,4 +237,35 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
       )}
     </Modal>
   )
+}
+
+/**
+ * Connecting the wallet that signs the contact — the one the user signed in with — or switching back
+ * to it. Nothing once it is connected.
+ */
+function SignerBar({ owner }: { owner: string }) {
+  const { address, isConnected } = useConnection()
+  const [connectOpen, setConnectOpen] = useState(false)
+
+  if (!isConnected || !address) {
+    return (
+      <div className="mf-owner-bar mf-owner-bar-row">
+        <Text>
+          Connect your wallet, <AddressText address={owner} />, to approve this contact.
+        </Text>
+        <Button appearance="primary" onClick={() => setConnectOpen(true)}>
+          Connect wallet
+        </Button>
+        <ConnectDialog open={connectOpen} onClose={() => setConnectOpen(false)} />
+      </div>
+    )
+  }
+  if (address.toLowerCase() !== owner.toLowerCase()) {
+    return (
+      <div className="mf-owner-bar">
+        <AccountMismatchBanner ownerAddr={owner} connected={address} />
+      </div>
+    )
+  }
+  return null
 }

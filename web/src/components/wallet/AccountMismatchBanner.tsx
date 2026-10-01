@@ -1,33 +1,16 @@
-import type { Address } from 'viem'
 import { Message } from 'rsuite'
 import { AddressText } from '../AddressText'
-import { SiweVerifyCard } from './SiweVerifyCard'
 
 /**
- * The connected wallet is not the one this account is linked to. Owner actions must be signed by
- * the linked address, so the usual fix is to switch accounts in the wallet. Re-linking is offered
- * only before any Mitfah wallet exists: an existing wallet's owner is fixed on chain, and changing
- * the link would leave the account unable to control it.
+ * The browser wallet is connected as another address than the one this account signs in as — the
+ * address that owns its Mitfah wallets and signs their changes. The fix is to switch accounts in the
+ * wallet. (Signing in with the other address would reach that address's own account instead.)
  */
-export function AccountMismatchBanner({
-  ownerAddr,
-  connected,
-  chainId,
-  canRelink,
-}: {
-  ownerAddr: string
-  connected: Address
-  chainId: number
-  canRelink: boolean
-}) {
+export function AccountMismatchBanner({ ownerAddr, connected }: { ownerAddr: string; connected: string }) {
   return (
-    <>
-      <Message type="warning" showIcon className="mf-settings-note">
-        Your account is linked to <AddressText address={ownerAddr} />, but your wallet is connected as{' '}
-        <AddressText address={connected} />. Switch to the linked account in your wallet
-        {canRelink ? ', or link this address instead.' : '.'}
-      </Message>
-      {canRelink && <SiweVerifyCard address={connected} chainId={chainId} actionLabel="Link this address instead" />}
-    </>
+    <Message type="warning" showIcon className="mf-settings-note">
+      You're signed in as <AddressText address={ownerAddr} />, but your wallet is connected as{' '}
+      <AddressText address={connected} />. Switch to <AddressText address={ownerAddr} /> in your wallet.
+    </Message>
   )
 }

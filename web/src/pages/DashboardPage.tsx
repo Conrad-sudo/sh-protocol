@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
+import { AddressText } from '../components/AddressText'
 import { BalancesCard } from '../components/dashboard/BalancesCard'
 import { FundDrawer } from '../components/dashboard/FundDrawer'
 import { SpendingCard } from '../components/dashboard/SpendingCard'
@@ -18,10 +19,15 @@ import { useWalletView } from '../hooks/useWalletView'
 export function DashboardPage() {
   const { data: me } = useMe()
   const view = useWalletView()
-  const description = me?.email ? `Signed in as ${me.email}` : undefined
+  const description = me?.owner_addr ? (
+    <>
+      Signed in as <AddressText address={me.owner_addr} />
+    </>
+  ) : undefined
 
+  // Keyed by network: an owner transaction in flight on one network must not follow you to another.
   return view.wallet ? (
-    <WalletDashboard wallet={view.wallet} description={description} />
+    <WalletDashboard key={view.wallet.chain_id} wallet={view.wallet} description={description} />
   ) : (
     <>
       <PageHeader title="Dashboard" description={description} />
@@ -31,7 +37,7 @@ export function DashboardPage() {
 }
 
 /** One owner-transaction handle for the whole page: only one change can be in flight at a time. */
-function WalletDashboard({ wallet, description }: { wallet: WalletState; description: string | undefined }) {
+function WalletDashboard({ wallet, description }: { wallet: WalletState; description: ReactNode }) {
   const tx = useOwnerAction(wallet.chain_id, wallet.owner)
   return (
     <>

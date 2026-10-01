@@ -106,11 +106,11 @@ describe('api client', () => {
 
   it('never sends a token or refreshes for auth:false requests', async () => {
     setSession(TOKEN)
-    const fetch = mockFetch(() => json(401, { detail: 'Incorrect email or password' }))
+    const fetch = mockFetch(() => json(401, { detail: 'Unknown or expired nonce' }))
 
-    const error = await failure(apiFetch('/api/auth/login', { method: 'POST', body: {}, auth: false }))
+    const error = await failure(apiFetch('/api/auth/siwe/login', { method: 'POST', body: {}, auth: false }))
     expect(error).toBeInstanceOf(ApiError)
-    expect(error.message).toBe('Incorrect email or password')
+    expect(error.message).toBe('Unknown or expired nonce')
     expect(refreshCalls(fetch)).toBe(0)
     expect(authHeader(fetch.mock.calls[0][1] as RequestInit)).toBeUndefined()
   })
@@ -119,23 +119,23 @@ describe('api client', () => {
     mockFetch(() =>
       json(422, {
         detail: [
-          { loc: ['body', 'email'], msg: 'value is not a valid email address' },
-          { loc: ['body', 'password'], msg: 'String should have at least 8 characters' },
+          { loc: ['body', 'name'], msg: 'String should have at least 1 character' },
+          { loc: ['body', 'signature'], msg: 'Field required' },
         ],
       }),
     )
-    const error = await failure(apiFetch('/api/auth/signup', { method: 'POST', auth: false }))
+    const error = await failure(apiFetch('/api/contacts', { method: 'POST' }))
     expect(error.status).toBe(422)
     expect(error.fieldErrors).toEqual({
-      email: 'value is not a valid email address',
-      password: 'String should have at least 8 characters',
+      name: 'String should have at least 1 character',
+      signature: 'Field required',
     })
-    expect(error.message).toBe('value is not a valid email address')
+    expect(error.message).toBe('String should have at least 1 character')
   })
 
   it('gives rate limiting a readable message (slowapi sends no `detail`)', async () => {
     mockFetch(() => json(429, { error: 'Rate limit exceeded: 10 per 1 minute' }))
-    const error = await failure(apiFetch('/api/auth/login', { method: 'POST', auth: false }))
+    const error = await failure(apiFetch('/api/auth/siwe/login', { method: 'POST', auth: false }))
     expect(error.status).toBe(429)
     expect(error.message).toMatch(/too many attempts/i)
   })

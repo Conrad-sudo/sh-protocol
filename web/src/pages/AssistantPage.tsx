@@ -12,11 +12,14 @@ import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
 import { useChatHistory, useChatSend, type ChatSend } from '../hooks/useChat'
 import { useKeyboardResizesPage } from '../hooks/useKeyboardResizesPage'
+import { useTokens } from '../hooks/useTokens'
 import { useWalletView } from '../hooks/useWalletView'
 import { useLayoutMode, type LayoutMode } from '../layouts/useLayoutMode'
 
 /** How close to the end counts as "reading the latest", in pixels. */
 const NEAR_END = 160
+/** What the swap example buys with the native coin: the first of these the network lists. */
+const SWAP_TARGETS = ['usdc', 'usdt', 'dai']
 
 /** Chat with the assistant about the selected network's wallet. */
 export function AssistantPage() {
@@ -29,7 +32,9 @@ export function AssistantPage() {
       <PageHeader
         title="Assistant"
         description={
-          mode === 'mobile' ? undefined : 'Ask about your wallet, or ask it to pay a contact. It can only spend within your limit.'
+          mode === 'mobile'
+            ? undefined
+            : 'Ask about your wallet, or ask it to pay a contact or swap tokens. It can only spend within your limit.'
         }
         actions={view.wallet && <ClearChatButton key={view.wallet.chain_id} chainId={view.wallet.chain_id} />}
       />
@@ -48,6 +53,7 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
   const chainId = wallet.chain_id
   const { chain } = useSelectedChain()
   const history = useChatHistory(chainId)
+  const tokens = useTokens(chainId)
   const chat = useChatSend(chainId)
   const [draft, setDraft] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -104,6 +110,12 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
   }
 
   const payTicker = (wallet.spending.watched_tokens.find(t => t.ticker)?.ticker ?? chain?.native_ticker ?? 'eth').toUpperCase()
+  // Only where the assistant can swap: the network has an exchange and lists a stablecoin to buy.
+  const swapTo = SWAP_TARGETS.find(ticker => tokens.data?.some(token => token.ticker === ticker))
+  const swap =
+    chain?.router && chain.native_ticker && swapTo
+      ? { from: chain.native_ticker.toUpperCase(), to: swapTo.toUpperCase() }
+      : null
 
   return (
     <div className="mf-chat-layout" data-wide={mode === 'desktop' || undefined}>
@@ -117,6 +129,7 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
         {history.data && messages.length === 0 && !unanswered && (
           <SuggestedPrompts
             payTicker={payTicker}
+            swap={swap}
             disabled={chat.busy}
             onAsk={send}
             onDraft={text => {

@@ -24,15 +24,24 @@ export function TxStatus({ tx, txKey, doneText }: TxStatusProps) {
       </a>
     </>
   )
+  // Nothing has been sent yet, so giving up is always safe: the page picks it up if the wallet sends later.
+  const waiting = (text: string) => (
+    <div className="mf-tx-status">
+      <Loader content={text} />{' '}
+      <Button appearance="link" size="sm" onClick={tx.abandon}>
+        Stop waiting
+      </Button>
+    </div>
+  )
 
   // The Loader is already a status region; wrapping it in another makes screen readers repeat it.
   switch (state.phase) {
     case 'preparing':
-      return <Loader className="mf-tx-status" content="Checking the change…" />
+      return waiting('Checking the change…')
     case 'switching':
-      return <Loader className="mf-tx-status" content={`Switch your wallet to ${chainName(state.chainId)}.`} />
+      return waiting(`Switch your wallet to ${chainName(state.chainId)}.`)
     case 'signing':
-      return <Loader className="mf-tx-status" content="Confirm in your wallet." />
+      return waiting('Confirm in your wallet.')
     case 'confirming':
       return (
         <div className="mf-tx-status">
@@ -51,6 +60,12 @@ export function TxStatus({ tx, txKey, doneText }: TxStatusProps) {
       return (
         <Message type="info" showIcon className="mf-tx-status">
           Cancelled — nothing was sent.
+        </Message>
+      )
+    case 'abandoned':
+      return (
+        <Message type="info" showIcon className="mf-tx-status">
+          Stopped waiting. If your wallet still shows the request, reject it there.
         </Message>
       )
     case 'error':

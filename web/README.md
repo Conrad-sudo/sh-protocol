@@ -46,28 +46,28 @@ E2E_REAL=1 npx playwright test real --project=desktop-light
 
 It needs Vault, `make sepolia-fork` and the API with `APP_FORK_MODE=1`. A restarted fork has no
 protocol on it — `make deploy ARGS=sepolia-fork && make db` puts it back. `real/journey` walks the
-whole path in one sitting (sign up → create → fund → contact → reload → pause → withdraw →
+whole path in one sitting (sign in → create → fund → contact → reload → pause → withdraw →
 unpause); the others each go deep on one part.
 
 Set `VITE_API_URL` only if the API is served from a different origin (e.g. `https://api.mitfah.com`);
 by default requests go to the same origin.
 
-**Google sign-in** uses the same `GOOGLE_CLIENT_ID` as the API: `vite.config.ts` reads it from the
-repo's `.env` (only that one value — the rest of that file never reaches the bundle).
-`VITE_GOOGLE_CLIENT_ID` in `web/.env.local` overrides it. With neither set, Google buttons are
-hidden. Setup steps are in [docs/setup.md](../docs/setup.md).
+**Signing in** is done with the browser wallet alone (SIWE): `/login` connects it and asks it to
+sign a message for this site, and an address's first sign-in creates its account. There is no
+email, password or Google sign-in; `/signup` redirects to `/login`. The page is loaded on demand
+with wagmi, like the signed-in app. On a phone, signing in needs WalletConnect
+(`VITE_WALLETCONNECT_PROJECT_ID`) or the wallet app's own browser.
 
 ## Going live
 
 | Setting | Where | What it is |
 |---|---|---|
 | `CORS_ORIGINS` | API | Every origin the site is served from, comma-separated. The refresh cookie needs credentialed CORS, so a missing origin signs people out. |
-| `SIWE_DOMAIN` | API | The site a wallet-binding message must name (`mitfah.com`). The check is what stops a phishing page binding someone else's address. |
+| `SIWE_DOMAIN` | API | The site a sign-in message must name (`mitfah.com`). The check is what stops a phishing page replaying someone's signature to sign in as them. |
 | `COOKIE_SECURE` | API | `1` in production; `0` only for local http. |
 | `JWT_SECRET` | API | A long random string. |
-| `GOOGLE_CLIENT_ID` | API + build | Google sign-in. Without it the Google buttons stay hidden. |
 | `TELEGRAM_BOT_USERNAME` | API | Needed to mint Telegram deep links. |
-| `VITE_WALLETCONNECT_PROJECT_ID` | build | A Reown project id. Empty means WalletConnect is dropped from the bundle entirely; with one, it is loaded on demand. |
+| `VITE_WALLETCONNECT_PROJECT_ID` | build | A Reown project id. Empty means WalletConnect is dropped from the bundle entirely; with one, it is loaded on demand. Without it, a phone can sign in only from a wallet app's own browser. |
 
 **Hosting.** `dist/` is static. Serve `/terms` from `terms.html` and `/privacy` from
 `privacy.html` (most static hosts do this for "clean URLs"), and answer every other address that
@@ -111,6 +111,13 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   `ASSISTANT_KEY_DAYS` — and `useOwnerAction` finishes it through `/api/wallet/session/confirm`,
   **never** the generic `/api/wallet/tx/confirm`: that one would leave the API signing with the key
   the wallet just dropped.
+- **Every wallet wait ends.** Creating a wallet (`useDeploy`), the owner changes (`useOwnerAction`)
+  and the Fund drawer (`useFundWallet`) wait the same way, with the timings in `src/lib/tx.ts`.
+  Before the wallet answers, "Stop waiting" (or closing the dialog) lets go; a transaction the wallet
+  sends anyway is still followed. Once it is sent, the API says whether its node has `seen` the
+  hash, and one still unseen after 90 s may never arrive, so the page says so and offers "Check
+  again". Creating a wallet is stricter: it offers to start over only for a transaction the network
+  never saw, because a second deploy makes a second wallet.
 
 - `src/components/dashboard/AddTokenModal.tsx` — adding a token by its contract address,
   MetaMask-style: paste the address, then check what the chain says it is before adding it. The
@@ -169,7 +176,7 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   accepted so every icon matches the logo. `npm run og` re-renders the share image, which embeds the
   dark mark.
 - `scripts/wallpaper/` — `npm run wallpaper` draws the wallpaper behind the landing page, the
-  sign-in and sign-up card and every page of the signed-in app (`AppShell` renders it, so the glass
+  sign-in card and every page of the signed-in app (`AppShell` renders it, so the glass
   always has something to bend): the logo's ring as a polished metal band (with its
   crescent, and a gap where the key's shaft would cross), and circuit traces running from it to
   every edge. Light mode has raised steel traces; dark mode has glowing emerald ones. The 3D and the

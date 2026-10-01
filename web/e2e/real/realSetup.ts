@@ -11,7 +11,8 @@ import {
 } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
-import { installFakeWallet } from '../fakeWallet.ts'
+import { createSiweMessage } from 'viem/siwe'
+import { FAKE_WALLET_NAME, installFakeWallet } from '../fakeWallet.ts'
 import { walkOnboarding } from '../onboardingFlow.ts'
 
 /*
@@ -20,6 +21,8 @@ import { walkOnboarding } from '../onboardingFlow.ts'
  */
 
 export const RPC = 'http://127.0.0.1:8545'
+/** The dev server's host, which a SIWE message must name (the API's SIWE_DOMAIN defaults to it). */
+const SITE = 'localhost:3000'
 const transport = http(RPC)
 export const publicClient = createPublicClient({ chain: sepolia, transport })
 export const testClient = createTestClient({ chain: sepolia, mode: 'anvil', transport })
@@ -75,6 +78,7 @@ export async function installRealOwner(page: Page): Promise<RealOwner> {
     address: account.address,
     chainId: sepolia.id,
     signMessage: message => account.signMessage({ message: { raw: message as Hex } }),
+    signTypedData: typedData => account.signTypedData(JSON.parse(typedData)),
     sendTransaction: (tx, chainId) => {
       sentOn.push(chainId)
       return walletClient.sendTransaction({
@@ -102,37 +106,58 @@ export interface ApiWallet {
 }
 
 export interface Account {
-  email: string
-  password: string
   /** Reads the wallet through the API as this user. */
   readWallet: () => Promise<ApiWallet>
 }
 
 /**
- * Signs up a new account and walks onboarding with the defaults: Sepolia, $100 a day, every token,
- * 1 ETH of gas funds. Returns once the dashboard shows the new wallet.
+ * Signs in to the API as `account` the way the page does — a SIWE message, signed here in Node —
+ * and returns the headers for its calls. The first sign-in for an address creates its account.
  */
-export async function signUpAndDeploy(page: Page, request: APIRequestContext, prefix: string): Promise<Account> {
-  const email = `${prefix}-${Date.now()}@example.com`
-  const password = 'Onboard-e2e-2026'
-  await page.goto('/signup?next=%2Fonboarding')
-  await page.getByLabel('Email').fill(email)
-  await page.locator('input[name="password"]').fill(password)
-  await page.getByRole('button', { name: 'Create account' }).click()
+export async function apiSignIn(request: APIRequestContext, account: PrivateKeyAccount) {
+  const { nonce } = (await (await request.get('/api/auth/siwe/nonce')).json()) as { nonce: string }
+  const message = createSiweMessage({
+    domain: SITE,
+    address: account.address,
+    uri: `http://${SITE}`,
+    version: '1',
+    chainId: sepolia.id,
+    nonce,
+  })
+  const signature = await account.signMessage({ message })
+  const response = await request.post('/api/auth/siwe/login', { data: { message, signature, nonce } })
+  expect(response.ok(), await response.text()).toBeTruthy()
+  const { access_token } = (await response.json()) as { access_token: string }
+  return { Authorization: `Bearer ${access_token}` }
+}
+
+/** Signs in through the page with the installed wallet, then lands on `next`. */
+export async function signIn(page: Page, next: string) {
+  await page.goto(`/login?next=${encodeURIComponent(next)}`)
+  await page.getByRole('button', { name: 'Connect wallet' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.waitForURL(url => url.pathname === next)
+}
+
+/**
+ * Signs in as a fresh owner and walks onboarding with the defaults: Sepolia, $100 a day, every
+ * token, a 1 ETH prefund. Returns once the dashboard shows the new wallet.
+ */
+export async function signInAndDeploy(page: Page, request: APIRequestContext, owner: RealOwner): Promise<Account> {
+  await signIn(page, '/onboarding')
   await expect(page.getByRole('heading', { name: 'Create your wallet' })).toBeVisible()
 
   await walkOnboarding(page)
   await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
 
+  // Signed in once: sign-in is rate limited, and the access token outlasts any one spec.
+  let headers: Record<string, string> | undefined
   const readWallet = async () => {
-    const login = await request.post('/api/auth/login', { data: { email, password } })
-    expect(login.ok()).toBeTruthy()
-    const { access_token } = (await login.json()) as { access_token: string }
-    const response = await request.get(`/api/wallet/${sepolia.id}`, {
-      headers: { Authorization: `Bearer ${access_token}` },
-    })
+    headers ??= await apiSignIn(request, owner.account)
+    const response = await request.get(`/api/wallet/${sepolia.id}`, { headers })
     expect(response.ok()).toBeTruthy()
     return (await response.json()) as ApiWallet
   }
-  return { email, password, readWallet }
+  return { readWallet }
 }

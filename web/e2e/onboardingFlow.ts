@@ -2,11 +2,10 @@ import { expect, type Locator, type Page } from '@playwright/test'
 import { FAKE_WALLET_NAME } from './fakeWallet.ts'
 
 export const STEPS = {
-  connect: 'Connect the wallet that will own your Mitfah wallet',
-  verify: 'Prove this wallet is yours',
+  connect: 'Connect the wallet you signed in with',
   network: 'Where should your wallet live?',
   limits: 'How much may the assistant spend?',
-  fund: 'Add funds for network fees',
+  fund: 'Prefund your Mitfah wallet',
   review: 'Check the details',
 } as const
 
@@ -23,7 +22,8 @@ interface WalkOptions {
 
 /**
  * Walks /onboarding from "Connect wallet" to "Create wallet" with the fake wallet, then stops: the
- * caller decides what a finished deploy should look like.
+ * caller decides what a finished deploy should look like. The account must already sign in as the
+ * fake wallet's address; signing in proved it, so there is no verify step.
  */
 export async function walkOnboarding(page: Page, { network, editLimits, onStep }: WalkOptions = {}) {
   const step = async (name: StepName) => {
@@ -34,12 +34,14 @@ export async function walkOnboarding(page: Page, { network, editLimits, onStep }
   }
   const next = (region: Locator) => region.getByRole('button', { name: 'Continue' }).click()
 
-  const connect = await step('connect')
-  await connect.getByRole('button', { name: 'Connect wallet' }).click()
-  await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
-
-  const verify = await step('verify')
-  await verify.getByRole('button', { name: 'Verify with wallet' }).click()
+  // Still connected from signing in, the wallet goes straight to the network; otherwise it is asked for.
+  const connect = page.getByRole('region', { name: STEPS.connect })
+  await expect(connect.or(page.getByRole('region', { name: STEPS.network }))).toBeVisible()
+  if (await connect.isVisible()) {
+    await onStep?.('connect', connect)
+    await connect.getByRole('button', { name: 'Connect wallet' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
+  }
 
   const networkStep = await step('network')
   if (network) await networkStep.getByText(network).click()

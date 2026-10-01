@@ -14,7 +14,7 @@ import os
 import tempfile
 from types import SimpleNamespace
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
 
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
@@ -148,7 +148,7 @@ def _inspect(user_id, address, wallet=WALLET):
 
 def test_add_rules():
     print("\n[1] which tokens may be added")
-    uid = db.create_user(email="rules@example.com")
+    uid = db.create_user()
 
     token, err = _inspect(uid, PEPE.lower())
     check("a real ERC-20 with a plain symbol is accepted", err is None, err or "")
@@ -189,8 +189,8 @@ def test_add_rules():
 
 def test_per_user_list_and_resolution():
     print("\n[2] the list is per account, and every name resolves to one address")
-    alice = db.create_user(email="alice-tokens@example.com")
-    bob = db.create_user(email="bob-tokens@example.com")
+    alice = db.create_user()
+    bob = db.create_user()
 
     db.save_custom_token(alice, CHAIN, PEPE, "pepe", "Pepe", 18)
     check("the token is on the owner's list", [t["ticker"] for t in db.get_custom_tokens(alice, CHAIN)] == ["pepe"])
@@ -220,7 +220,7 @@ def test_per_user_list_and_resolution():
 
 def test_cap():
     print("\n[3] at most 25 tokens per network")
-    uid = db.create_user(email="cap@example.com")
+    uid = db.create_user()
     for i in range(custom_tokens.MAX_CUSTOM_TOKENS_PER_CHAIN):
         db.save_custom_token(uid, CHAIN, _addr(0x100000 + i), f"t{i}", None, 18)
     _, err = _inspect(uid, SHIB)
@@ -230,7 +230,7 @@ def test_cap():
     check("and allowed once one is removed", err is None, str(err))
 
 
-def _client_for(email: str):
+def _client_for():
     """A signed-in client whose account has a wallet on the fake chain."""
     from contextlib import asynccontextmanager
 
@@ -241,8 +241,8 @@ def _client_for(email: str):
     api.app.router.lifespan_context = _noop
     api.limiter.enabled = False
     c = TestClient(api.app)
-    body = c.post("/api/auth/signup", json={"email": email, "password": "hunter2hunter2"}).json()
-    return c, {"Authorization": f"Bearer {body['access_token']}"}, body["user_id"]
+    body, headers, _ = sign_in(c)
+    return c, headers, body["user_id"]
 
 
 def test_api_routes():
@@ -258,7 +258,7 @@ def test_api_routes():
     api._resolve_chain = lambda chain_id: (FAKE_W3, NETWORK)
     api._load_wallet_for_chain = fake_load
     try:
-        c, headers, uid = _client_for("api-tokens@example.com")
+        c, headers, uid = _client_for()
         body = {"chain_id": CHAIN, "address": PEPE}
 
         check("adding needs a token", c.post("/api/tokens/custom", json=body).status_code == 401)
@@ -279,7 +279,7 @@ def test_api_routes():
         r = c.post("/api/tokens/custom", json=body, headers=headers)
         check("adding it again -> 400", r.status_code == 400, str(r.status_code))
 
-        other, other_headers, other_uid = _client_for("api-tokens-2@example.com")
+        other, other_headers, other_uid = _client_for()
         r = other.delete(f"/api/tokens/custom/{CHAIN}/{PEPE}", headers=other_headers)
         check("another account can't remove it -> 404", r.status_code == 404, str(r.status_code))
         check("and it is still there", len(db.get_custom_tokens(uid, CHAIN)) == 1)
@@ -347,7 +347,7 @@ def _with_tool_fakes(uid: int, watched: set[str]):
 
 def test_tools_price_and_note_custom_tokens():
     print("\n[5] the assistant's tools: no price for a custom token, and the right limit note")
-    uid = db.create_user(email="tools@example.com")
+    uid = db.create_user()
     db.save_user_network(uid, NETWORK)
     db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
     functions = _with_tool_fakes(uid, watched={USDC, WETH})   # USDT is listed but not counted
@@ -438,7 +438,7 @@ def _trading_calls(token: str) -> list[tuple[str, object, dict]]:
 
 def test_tools_only_reach_tokens_the_owner_chose():
     print("\n[7] the assistant trades only tokens the owner chose, within a 12% slippage limit")
-    uid = db.create_user(email="guards@example.com")
+    uid = db.create_user()
     db.save_user_network(uid, NETWORK)
     db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
     db.save_contact(uid, "payee", _addr(0xFEE))
@@ -495,7 +495,7 @@ def test_tools_only_reach_tokens_the_owner_chose():
 
 def test_ierc20_cache_follows_the_address():
     print("\n[6] a removed and re-added name never reaches the old contract")
-    uid = db.create_user(email="cache@example.com")
+    uid = db.create_user()
     original = contracts.load_network_config
     contracts.load_network_config = lambda _uid: (Web3(), CHAIN, NETWORK)
     try:
@@ -511,7 +511,7 @@ def test_ierc20_cache_follows_the_address():
 
 def test_dashboard_tokens():
     print("\n[4b] the dashboard shows only the listed tokens the user chose, and counted ones can't go")
-    uid = db.create_user(email="dashboard@example.com")
+    uid = db.create_user()
 
     db.add_dashboard_tokens(uid, CHAIN, ["USDT", "usdc"])
     db.add_dashboard_tokens(uid, CHAIN, ["usdc"])
@@ -529,7 +529,7 @@ def test_dashboard_tokens():
           [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdc", "usdt", "weth"],
           str(db.get_dashboard_tokens(uid, CHAIN)))
 
-    other = db.create_user(email="dashboard-2@example.com")
+    other = db.create_user()
     token, err = _inspect(other, USDC.lower())
     check("a listed token can be added by address", err is None, err or "")
     check("…as a listed token, under its listed ticker",
@@ -554,7 +554,7 @@ def test_dashboard_api():
     api._load_wallet_for_chain = lambda _w3, user_id, chain_id: SimpleNamespace(address=db.get_wallet_address(user_id, chain_id))
     api.read_spending_config = lambda _wallet: {"watchedTokens": list(watched)}
     try:
-        c, headers, uid = _client_for("dashboard-api@example.com")
+        c, headers, uid = _client_for()
         db.save_wallet_address(uid, CHAIN, WALLET)
 
         r = c.post("/api/tokens/custom/lookup", json={"chain_id": CHAIN, "address": USDT}, headers=headers)
@@ -586,7 +586,7 @@ def test_dashboard_api():
 
 def test_dashboard_balances():
     print("\n[4d] balances list the native token, the dashboard's listed tokens, then added ones")
-    uid = db.create_user(email="dashboard-balances@example.com")
+    uid = db.create_user()
     db.add_dashboard_tokens(uid, CHAIN, ["weth", "usdc"])
     db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
 

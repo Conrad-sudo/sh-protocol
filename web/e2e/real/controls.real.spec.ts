@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { parseAbi, parseEther, zeroAddress, type Address } from 'viem'
 import { sepolia } from 'viem/chains'
-import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } from './realSetup.ts'
+import { installRealOwner, publicClient, requireLocalFork, signInAndDeploy } from './realSetup.ts'
 
 /*
  * The owner's controls for real, on the local Sepolia fork: a fresh owner creates a wallet, then
@@ -24,7 +24,7 @@ test('the owner changes the wallet from Controls on the local fork', async ({ pa
   await requireLocalFork(request)
 
   const owner = await installRealOwner(page)
-  const account = await signUpAndDeploy(page, request, 'e2e-controls')
+  const account = await signInAndDeploy(page, request, owner)
   const wallet = await account.readWallet()
   const address = wallet.address
   const onChain = {

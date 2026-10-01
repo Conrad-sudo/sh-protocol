@@ -75,10 +75,11 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
   const ticker = preview?.ticker.toUpperCase()
   // Counting needs the owner's signature, so it is only offered once the owner wallet is connected.
   const counting = count && readiness === 'ready'
-  const countFailed = added && tx.state.key === COUNT_KEY && (tx.state.phase === 'cancelled' || tx.state.phase === 'error')
+  const countFailed =
+    added && tx.state.key === COUNT_KEY && ['cancelled', 'abandoned', 'error'].includes(tx.state.phase)
 
   const close = () => {
-    if (!tx.busy && tx.state.key === COUNT_KEY) tx.reset()
+    tx.release(COUNT_KEY)
     onClose()
   }
 
@@ -142,7 +143,7 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
               <>
                 <Message type="info" showIcon className="mf-settings-note">
                   <strong>Pricing is available for {ticker}.</strong>{' '}
-                  <Text as="span">Mitfah has a price for it, so it can count toward your spending limit.</Text>
+                  <Text as="span">Your spending limit can be applied to {ticker}.</Text>
                 </Message>
                 <Checkbox
                   className="mf-settings-note"

@@ -31,7 +31,7 @@ export function RemoveTokenModal({ open, token, counts, wallet, chain, tx, onRem
   const key = `stop-counting:${token.ticker}`
 
   const close = () => {
-    if (!tx.busy && tx.state.key === key) tx.reset()
+    tx.release(key)
     onClose()
   }
 

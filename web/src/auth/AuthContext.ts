@@ -5,7 +5,7 @@ import type { TokenResponse } from '../api/types'
 export interface AuthState {
   status: AuthStatus
   userId: number | null
-  /** Starts a session from a login/signup response. */
+  /** Starts a session from a sign-in response. */
   signIn: (token: TokenResponse) => void
   /** Ends the session here, on the server, and in the user's other tabs. */
   signOut: () => Promise<void>

@@ -11,11 +11,11 @@ export interface TokenResponse {
 /** GET /api/me */
 export interface Me {
   user_id: number
-  email: string | null
+  /**
+   * The address the account signs in as, which owns its wallets. Null only for an account from
+   * Telegram-only days, which the web app can't sign in.
+   */
   owner_addr: string | null
-  /** False for an account created through Google. */
-  has_password: boolean
-  google_linked: boolean
   telegram_linked: boolean
   wallet_chains: number[]
 }
@@ -72,9 +72,12 @@ export interface DeployPrepared {
   tx: PreparedTx
 }
 
-/** POST /api/deploy/confirm: 202 while the transaction is pending, 200 once it has mined. */
+/**
+ * POST /api/deploy/confirm: 202 while the transaction is pending, 200 once it has mined. `seen` as in
+ * OwnerTxConfirmResult.
+ */
 export type DeployConfirmResult =
-  | { status: 'pending'; tx_hash: string }
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
   | {
       status: 'deployed'
       chain_id: number
@@ -190,9 +193,12 @@ export type OwnerAction =
   | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
   | { kind: 'max-gas'; maxCostEth: string }
 
-/** POST /api/wallet/tx/confirm: 202 while the transaction is pending, 200 once it has mined. */
+/**
+ * POST /api/wallet/tx/confirm: 202 while the transaction is pending, 200 once it has mined. `seen` is
+ * false while the network has never seen the hash: it may never arrive.
+ */
 export type OwnerTxConfirmResult =
-  | { status: 'pending'; tx_hash: string }
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
   | { status: 'confirmed'; tx_hash: string }
 
 /**
@@ -200,8 +206,13 @@ export type OwnerTxConfirmResult =
  * or forgets the revoked one. `unrecognized_key` means the wallet now trusts a key Mitfah doesn't hold.
  */
 export type SessionTxConfirmResult =
-  | { status: 'pending'; tx_hash: string }
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
   | { status: 'granted' | 'revoked' | 'unrecognized_key'; tx_hash: string }
+
+/** POST /api/transactions/deposit: a deposit from the Fund drawer, answered as OwnerTxConfirmResult. */
+export type DepositConfirmResult =
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
+  | { status: 'confirmed'; tx_hash: string }
 
 /**
  * A token as the server read it off the chain: POST /api/tokens/custom/lookup (a preview, nothing
@@ -235,6 +246,17 @@ export interface Contact {
   name: string
   /** Checksummed. */
   address: string
+}
+
+/**
+ * POST /api/contacts/prepare: the EIP-712 typed data the owner wallet signs to save a contact. The
+ * name and address are as they will be stored; the nonce works once, for this contact only.
+ */
+export interface ContactTypedData {
+  domain: { name: string; version: string }
+  types: { AddContact: { name: string; type: string }[] }
+  primaryType: 'AddContact'
+  message: { name: string; address: string; nonce: string }
 }
 
 /** One line of the conversation, from GET /api/chat/history. Tool traffic is never included. */

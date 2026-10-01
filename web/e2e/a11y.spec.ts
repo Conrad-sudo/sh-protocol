@@ -90,7 +90,8 @@ async function scan(page: Page) {
     .map(violation => `${violation.id} (${violation.impact}): ${violation.nodes.map(node => node.target).join(' · ')}`)
 }
 
-const SIGNED_OUT = ['/', '/login', '/signup', '/terms', '/privacy']
+// /signup only redirects to /login now, so it isn't scanned on its own.
+const SIGNED_OUT = ['/', '/login', '/terms', '/privacy']
 const SIGNED_IN = ['/dashboard', '/assistant', '/contacts', '/controls', '/settings', '/onboarding']
 
 for (const path of SIGNED_OUT) {

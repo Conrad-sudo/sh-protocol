@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
@@ -29,10 +29,20 @@ interface ServerOptions {
   wallets?: Partial<Record<number, WalletAnswer[]>>
   /** Answers for other API routes, keyed by "METHOD /path"; each gets the parsed request body. */
   extra?: Record<string, (body: unknown) => Response>
+  /** Holds the wallet's answer to a send until this settles, like a wallet prompt left open. */
+  walletPrompt?: Promise<void>
+  /** Answers POST /api/wallet/tx/confirm; by default every transaction has mined. */
+  confirm?: () => Response | Promise<Response>
 }
 
 /** A signed-in account whose wallets answer from `wallets`. Also answers the mock wallet's RPC. */
-function stubServer({ walletChains = [SEPOLIA], wallets = {}, extra = {} }: ServerOptions = {}) {
+function stubServer({
+  walletChains = [SEPOLIA],
+  wallets = {},
+  extra = {},
+  walletPrompt = Promise.resolve(),
+  confirm = () => json(200, { status: 'confirmed', tx_hash: TX_HASH }),
+}: ServerOptions = {}) {
   const walletCalls: number[] = []
   const sent: Record<string, string>[] = []
   const prepared: { path: string; body: unknown }[] = []
@@ -41,15 +51,13 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {}, extra = {} }: Serv
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
       if (isRpc(url)) {
-        return Promise.resolve(
+        const sending = String(init?.body).includes('"eth_sendTransaction"')
+        return (sending ? walletPrompt : Promise.resolve()).then(() =>
           answerRpc(init, {
             eth_sendTransaction: ([tx]) => {
               sent.push(tx as Record<string, string>)
               return TX_HASH
             },
-            eth_blockNumber: () => '0x20',
-            eth_getTransactionReceipt: () => receipt(),
-            eth_getTransactionByHash: () => null,
           }),
         )
       }
@@ -66,9 +74,7 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {}, extra = {} }: Serv
         prepared.push({ path: url, body: JSON.parse(String(init?.body)) })
         return Promise.resolve(json(200, { tx: { to: '0x2222222222222222222222222222222222222222', data: '0x1234' } }))
       }
-      if (url === '/api/wallet/tx/confirm') {
-        return Promise.resolve(json(200, { status: 'confirmed', tx_hash: TX_HASH }))
-      }
+      if (url === '/api/wallet/tx/confirm') return Promise.resolve(confirm())
       const match = /^\/api\/wallet\/(\d+)$/.exec(url)
       if (match) {
         const chainId = Number(match[1])
@@ -83,26 +89,20 @@ function stubServer({ walletChains = [SEPOLIA], wallets = {}, extra = {} }: Serv
   return { walletCalls, sent, prepared, requests }
 }
 
-function receipt() {
-  return {
-    transactionHash: TX_HASH,
-    transactionIndex: '0x0',
-    blockHash: `0x${'56'.repeat(32)}`,
-    blockNumber: '0x1f',
-    from: WALLET,
-    to: '0x2222222222222222222222222222222222222222',
-    cumulativeGasUsed: '0x5208',
-    gasUsed: '0x5208',
-    effectiveGasPrice: '0x3b9aca00',
-    contractAddress: null,
-    logs: [],
-    logsBloom: `0x${'00'.repeat(256)}`,
-    status: '0x1',
-    type: '0x2',
-  }
-}
-
 const walletHeader = () => screen.findByText(/^Your Mitfah wallet on/)
+const pendingKey = (chainId: number) => `mitfah-pending-owner-tx:7:${chainId}`
+
+/** Opens "Remove USDC?", connecting the owner wallet from it unless it already is. */
+async function openRemoveUsdc(user: UserEvent, { connect = true } = {}) {
+  await user.click(screen.getByRole('button', { name: 'Remove USDC from your dashboard' }))
+  const dialog = await screen.findByRole('alertdialog', { name: 'Remove USDC?' })
+  if (connect) {
+    await user.click(within(dialog).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+  }
+  await within(dialog).findByText('Owner connected')
+  return dialog
+}
 
 describe('DashboardPage', () => {
   beforeEach(() => {
@@ -113,6 +113,8 @@ describe('DashboardPage', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    sessionStorage.clear()
   })
 
   it('shows an active wallet: status, what is left to spend, and balances', async () => {
@@ -261,7 +263,7 @@ describe('DashboardPage', () => {
 
   it('funds the wallet from the connected browser wallet, and lists the deposit in the history', async () => {
     const { walletCalls, sent, requests } = stubServer({
-      extra: { 'POST /api/transactions/deposit': () => json(200, { status: 'ok' }) },
+      extra: { 'POST /api/transactions/deposit': () => json(200, { status: 'confirmed', tx_hash: TX_HASH }) },
     })
     const user = userEvent.setup()
     await renderRoutes(routes, '/dashboard')
@@ -290,11 +292,80 @@ describe('DashboardPage', () => {
     ])
     // The balance was read again once the transfer confirmed.
     await waitFor(() => expect(walletCalls).toEqual([SEPOLIA, SEPOLIA]))
-    // Reported for the History tab as soon as it was sent, and again once it had mined.
+    // Followed through the API, on the node the balance is read from; that also lists it in the history.
     expect(requests).toEqual([
       { route: 'POST /api/transactions/deposit', body: { chain_id: SEPOLIA, tx_hash: TX_HASH } },
-      { route: 'POST /api/transactions/deposit', body: { chain_id: SEPOLIA, tx_hash: TX_HASH } },
     ])
+  })
+
+  it('lets go of a wallet that never answers a transfer, so the drawer opens clean again', async () => {
+    // Nobody answers the wallet's prompt. Closing the drawer used to leave the spinner for good.
+    stubServer({ walletPrompt: new Promise(() => {}) })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add funds' }))
+    let drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await user.type(await within(drawer).findByLabelText('Amount'), '0.5')
+    await user.click(within(drawer).getByRole('button', { name: 'Send' }))
+    expect(await within(drawer).findByText('Confirm the transfer in your wallet.')).toBeInTheDocument()
+    await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    await user.click(screen.getByRole('button', { name: 'Add funds' }))
+    drawer = await screen.findByRole('dialog')
+    expect(within(drawer).queryByText('Confirm the transfer in your wallet.')).toBeNull()
+    await user.type(within(drawer).getByLabelText('Amount'), '0.5')
+    const send = within(drawer).getByRole('button', { name: 'Send' })
+    expect(send).toBeEnabled()
+
+    // Without closing the drawer, "Stop waiting" frees the button where it is.
+    await user.click(send)
+    await user.click(await within(drawer).findByRole('button', { name: 'Stop waiting' }))
+    expect(
+      within(drawer).getByText('Stopped waiting. If your wallet still shows the request, reject it there.'),
+    ).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Send' })).toBeEnabled()
+  })
+
+  it('says so when the network never receives a transfer, and checks again on request', async () => {
+    // Each check finds nothing, a minute apart, until the transfer turns up.
+    const realNow = Date.now.bind(Date)
+    let clock = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clock)
+    let arrived = false
+    stubServer({
+      extra: {
+        'POST /api/transactions/deposit': () => {
+          if (arrived) return json(200, { status: 'confirmed', tx_hash: TX_HASH })
+          clock += 60_000
+          return json(202, { status: 'pending', tx_hash: TX_HASH, seen: false })
+        },
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add funds' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await user.type(await within(drawer).findByLabelText('Amount'), '0.5')
+    await user.click(within(drawer).getByRole('button', { name: 'Send' }))
+    expect(
+      await within(drawer).findByText(
+        "Sepolia hasn't received this transfer. If your wallet says it failed, nothing was sent and you can try again.",
+      ),
+    ).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Send' })).toBeEnabled()
+
+    arrived = true
+    await user.click(within(drawer).getByRole('button', { name: 'Check again' }))
+    expect(await within(drawer).findByText(/Received. Your balance is up to date./)).toBeInTheDocument()
   })
 
   it('withdraws to the owner wallet, checking the amount against the balance', async () => {
@@ -568,6 +639,106 @@ describe('DashboardPage', () => {
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdc', action: 'remove' } },
     ])
     expect(requests).toEqual([{ route: `DELETE /api/tokens/custom/${SEPOLIA}/${USDC}`, body: undefined }])
+  })
+
+  it('lets go of a wallet that never answers, so the dialog opens clean again', async () => {
+    // Nobody answers the wallet's prompt. Cancelling used to leave the spinner for good.
+    stubServer({ walletPrompt: new Promise(() => {}) })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    let dialog = await openRemoveUsdc(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting USDC' }))
+    expect(await within(dialog).findByText('Confirm in your wallet.')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+
+    dialog = await openRemoveUsdc(user, { connect: false })
+    expect(within(dialog).queryByText('Confirm in your wallet.')).toBeNull()
+    const stop = within(dialog).getByRole('button', { name: 'Stop counting USDC' })
+    expect(stop).toBeEnabled()
+
+    // Without closing the dialog, "Stop waiting" frees the button where it is.
+    await user.click(stop)
+    await user.click(await within(dialog).findByRole('button', { name: 'Stop waiting' }))
+    expect(
+      within(dialog).getByText('Stopped waiting. If your wallet still shows the request, reject it there.'),
+    ).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Stop counting USDC' })).toBeEnabled()
+    expect(sessionStorage.getItem(pendingKey(SEPOLIA))).toBeNull()
+  })
+
+  it('still finishes a change the wallet sends after the page stopped waiting', async () => {
+    let approve!: () => void
+    stubServer({ walletPrompt: new Promise(resolve => (approve = resolve)) })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    const dialog = await openRemoveUsdc(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting USDC' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Stop waiting' }))
+    expect(within(dialog).getByText(/^Stopped waiting/)).toBeInTheDocument()
+
+    approve()
+    expect(await screen.findByText('USDC no longer counts toward your limit.')).toBeInTheDocument()
+    expect(sessionStorage.getItem(pendingKey(SEPOLIA))).toBeNull()
+  })
+
+  it('keeps a change waiting on one network from holding up another', async () => {
+    // Sent, and the network never answers: Sepolia keeps waiting, BNB Smart Chain is free.
+    stubServer({ walletChains: [SEPOLIA, BSC], confirm: () => new Promise<Response>(() => {}) })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    let dialog = await openRemoveUsdc(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting USDC' }))
+    expect(await within(dialog).findByText('Waiting for Sepolia to confirm…')).toBeInTheDocument()
+    // A sent transaction keeps being confirmed after the dialog closes.
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(sessionStorage.getItem(pendingKey(SEPOLIA))).toContain(TX_HASH)
+
+    await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
+    await user.click(screen.getByRole('menuitem', { name: 'BNB Smart Chain' }))
+    expect(await screen.findByText('Your Mitfah wallet on BNB Smart Chain')).toBeInTheDocument()
+    dialog = await openRemoveUsdc(user, { connect: false })
+    expect(within(dialog).queryByText(/Waiting for/)).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Stop counting USDC' })).toBeEnabled()
+    expect(sessionStorage.getItem(pendingKey(BSC))).toBeNull()
+  })
+
+  it('says so when the network never receives the transaction, and checks again on request', async () => {
+    // Each check finds nothing, a minute apart, until the transaction turns up.
+    const realNow = Date.now.bind(Date)
+    let clock = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clock)
+    let arrived = false
+    stubServer({
+      confirm: () => {
+        if (arrived) return json(200, { status: 'confirmed', tx_hash: TX_HASH })
+        clock += 60_000
+        return json(202, { status: 'pending', tx_hash: TX_HASH, seen: false })
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    const dialog = await openRemoveUsdc(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting USDC' }))
+    expect(
+      await within(dialog).findByText(
+        "Sepolia hasn't received this transaction. If your wallet says it failed, nothing changed and you can try again.",
+      ),
+    ).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Stop counting USDC' })).toBeEnabled()
+
+    arrived = true
+    await user.click(within(dialog).getByRole('button', { name: 'Check again' }))
+    expect(await screen.findByText('USDC no longer counts toward your limit.')).toBeInTheDocument()
   })
 
   it('pauses from the dashboard', async () => {

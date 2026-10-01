@@ -33,18 +33,21 @@ describe('HomePage', () => {
     vi.unstubAllGlobals()
   })
 
-  it('invites a visitor to sign up and lists the served networks', async () => {
+  it('invites a visitor to sign in with a wallet and lists the served networks', async () => {
     stubApi()
     await renderRoutes(routes, '/')
 
     const networks = await screen.findByRole('region', { name: 'Networks' })
     const items = within(networks).getAllByRole('listitem')
     expect(items.map(item => item.textContent)).toEqual(['SepoliaTest network', 'Arbitrum One'])
-    expect(within(networks).getByRole('link', { name: 'Add one' })).toHaveAttribute('href', '/signup')
+    expect(within(networks).getByRole('link', { name: 'Add one' })).toHaveAttribute('href', '/login')
 
+    // Signing in is signing up: every way in goes to /login.
     const main = within(screen.getByRole('main'))
-    expect(main.getAllByRole('link', { name: 'Get started' })).toHaveLength(2)
-    expect(main.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
+    const getStarted = main.getAllByRole('link', { name: 'Get started' })
+    expect(getStarted).toHaveLength(2)
+    for (const link of getStarted) expect(link).toHaveAttribute('href', '/login')
+    expect(within(screen.getByRole('banner')).getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
     for (const name of ['How it works', 'Built to keep your money safe', 'Also in Telegram', 'Questions']) {
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
     }

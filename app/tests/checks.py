@@ -31,3 +31,45 @@ def finish(success_message: str):
         print(f"FAILED ({len(failures)}): {failures}")
         sys.exit(1)
     print(success_message)
+
+
+def sign_in(client, account=None, chain_id: int = 11155111):
+    """
+    Signs in the way the web app does -- a SIWE message, the only way in -- as `account`, or as a
+    fresh address. The first sign-in for an address creates its account.
+
+    @param client  A TestClient on the API.
+    @return        (the token response, its auth headers, the eth_account account that signed).
+    """
+    import auth
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    account = account or Account.create()
+    nonce = client.get("/api/auth/siwe/nonce").json()["nonce"]
+    # Whatever this server accepts, so a SIWE_DOMAIN in .env cannot break the tests.
+    domain = sorted(auth.SIWE_DOMAINS)[0]
+    message = auth.build_siwe_message(domain, account.address, nonce, chain_id)
+    signature = Account.sign_message(encode_defunct(text=message), account.key).signature.hex()
+    r = client.post("/api/auth/siwe/login", json={"message": message, "signature": signature, "nonce": nonce})
+    if r.status_code != 200:
+        raise AssertionError(f"SIWE sign-in failed: {r.status_code} {r.text[:200]}")
+    body = r.json()
+    return body, {"Authorization": f"Bearer {body['access_token']}"}, account
+
+
+def add_contact(client, headers: dict, account, name: str, address: str):
+    """
+    Saves a contact the way the web app does: POST /api/contacts/prepare, sign the typed data it
+    returns with `account` (the owner, unless a test means otherwise), then POST /api/contacts.
+
+    @return  The response of the step that answered last: prepare's if it refused, else the save's.
+    """
+    from eth_account import Account
+
+    r = client.post("/api/contacts/prepare", headers=headers, json={"name": name, "address": address})
+    if r.status_code != 200:
+        return r
+    typed = r.json()
+    signed = Account.sign_typed_data(account.key, typed["domain"], typed["types"], typed["message"])
+    return client.post("/api/contacts", headers=headers, json={**typed["message"], "signature": signed.signature.hex()})

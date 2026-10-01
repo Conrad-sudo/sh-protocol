@@ -19,7 +19,7 @@ import { chainName } from '../wallet/chains'
 const STEPS = [
   {
     title: 'Create your wallet',
-    body: 'Sign up, connect the browser wallet you already use, and create a Mitfah wallet. Your browser wallet owns it.',
+    body: 'Sign in with the browser wallet you already use — it is your account — and create a Mitfah wallet. Your browser wallet owns it.',
   },
   {
     title: 'Set your limit',
@@ -84,11 +84,11 @@ const FAQ = [
   },
   {
     q: 'Which wallets can I connect?',
-    a: 'Any browser wallet, such as MetaMask, Rabby or Coinbase Wallet. You need one to own your Mitfah wallet.',
+    a: 'Any browser wallet, such as MetaMask, Rabby or Coinbase Wallet. You sign in with it, and it owns your Mitfah wallet. On a phone, open Mitfah in your wallet app’s browser.',
   },
   {
     q: 'Can I use it from Telegram?',
-    a: 'Yes. After you sign up, link Telegram in Settings and chat with the same assistant from your phone. It follows the same limits.',
+    a: 'Yes. After you sign in, link Telegram in Settings and chat with the same assistant from your phone. It follows the same limits.',
   },
 ]
 
@@ -135,7 +135,7 @@ export function HomePage() {
       Open your dashboard
     </LinkButton>
   ) : (
-    <LinkButton to="/signup" appearance="primary" size="lg">
+    <LinkButton to="/login" appearance="primary" size="lg">
       Get started
     </LinkButton>
   )
@@ -152,14 +152,7 @@ export function HomePage() {
           You own the wallet and set a daily dollar limit. The wallet itself refuses anything over it, whatever the
           assistant is told.
         </p>
-        <div className="mf-hero-actions">
-          {cta}
-          {!signedIn && (
-            <LinkButton to="/login" size="lg">
-              Sign in
-            </LinkButton>
-          )}
-        </div>
+        <div className="mf-hero-actions">{cta}</div>
       </section>
 
       <LimitDemo />
@@ -254,7 +247,7 @@ function Networks({ signedIn }: { signedIn: boolean }) {
         ))}
       </ul>
       <p className="mf-section-note">
-        You get a separate wallet on each network. <Link to={signedIn ? '/wallets/new' : '/signup'}>Add one</Link>{' '}
+        You get a separate wallet on each network. <Link to={signedIn ? '/wallets/new' : '/login'}>Add one</Link>{' '}
         whenever you like.
       </p>
     </section>

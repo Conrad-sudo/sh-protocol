@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react'
 import ExitIcon from '@rsuite/icons/Exit'
 import { Link, useLocation } from 'react-router'
 import { Button, IconButton, Sidenav, Text, Tooltip, Whisper } from 'rsuite'
+import { AddressText } from '../components/AddressText'
 import { Logo } from '../components/brand/Logo'
 import { GlassLayer } from '../components/Glass'
 import { useMe } from '../hooks/useMe'
@@ -72,9 +73,9 @@ export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
       <div className="mf-sidebar-footer">
         {expanded ? (
           <>
-            {me?.email && (
-              <Text size="sm" className="mf-sidebar-email" title={me.email}>
-                {me.email}
+            {me?.owner_addr && (
+              <Text size="sm" className="mf-sidebar-account">
+                <AddressText address={me.owner_addr} />
               </Text>
             )}
             <Button appearance="subtle" startIcon={<ExitIcon />} onClick={signOut} block>

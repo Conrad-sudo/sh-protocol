@@ -24,7 +24,7 @@ app/
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
-├── auth.py                ← Passwords, JWTs, Google tokens, SIWE verification
+├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
 ├── api.py                 ← FastAPI HTTP API — what the web app in web/ talks to
 ├── telebot.py             ← Telegram bot front end
 ├── agent_card.json        ← ERC-8004/v1 agent card (hosted publicly, referenced by tokenURI)
@@ -99,7 +99,9 @@ The data persistence layer. All SQLite reads and writes go through this module. 
 
 **Schema (`wallet.db`):**
 
-**Identity is an application account, not a Telegram chat.** `users.id` is what every per-user table keys on. A Telegram chat is one *optional* way to reach an account, held in `users.telegram_chat_id` and bound through a single-use deep-link nonce — never typed in, because chat ids are enumerable and a form accepting one would let anyone attach their Telegram to someone else's wallet. `users.owner_addr` is the EOA that owns the `SessionHandler` on chain, proved via SIWE; it is the only address permitted to deploy for that account. `auth.verify_siwe` requires a full EIP-4361 message naming this site (`SIWE_DOMAIN`), the issued nonce in its `Nonce:` field, and a signer equal to the address it names. The domain check is the one that matters: the nonce endpoint is open, so without it a phishing page could have a victim sign a message and bind the victim's address to the attacker's account — permanently, since `owner_addr` is UNIQUE.
+**Identity is an application account, not a Telegram chat.** `users.id` is what every per-user table keys on. A Telegram chat is one *optional* way to reach an account, held in `users.telegram_chat_id` and bound through a single-use deep-link nonce — never typed in, because chat ids are enumerable and a form accepting one would let anyone attach their Telegram to someone else's wallet. `users.owner_addr` is how the account signs in — Sign-In With Ethereum (`POST /api/auth/siwe/login`) is the only way in, and an address's first sign-in creates its account — and it is the EOA that owns the `SessionHandler` on chain, so it is the only address permitted to deploy for that account. `auth.verify_siwe` requires a full EIP-4361 message naming this site (`SIWE_DOMAIN`), the issued nonce in its `Nonce:` field, and a signer equal to the address it names. The domain check is the one that matters: the nonce endpoint is open, so without it a phishing page could have a victim sign a message for it and replay it here to sign in as the victim. Nothing can recover an account whose address is lost — just as nothing could ever recover control of its wallet.
+
+> Email, password and Google sign-in were removed on 2026-10-01, with `wallet.db` recreated rather than migrated, so there is no migration from the old `email` / `password_hash` / `google_sub` columns. The code still runs on a `users` table that has them; it just never reads them. An account with no `owner_addr` (only possible from the older Telegram-only migration) cannot sign in on the web.
 
 > Before 2026-09-10 the key was `chat_id` and *was* the Telegram chat id. `db._migrate_chat_id_to_user_id` mints a `users` row per legacy chat id, remaps every table, and rewrites the LangGraph `thread_id`s. It runs from `init_db`, after `_migrate_add_chain_id` — that order matters, since the older migration still reads `chat_id` columns.
 
@@ -109,21 +111,21 @@ The data persistence layer. All SQLite reads and writes go through this module. 
 - **Each chain gets its own session key**, even when a user's wallet has the *same address* on two chains — which is possible, since an identical protocol deploy can land `SHFactory` at the same address on each and the CREATE2 salt is the same too. Without `chain_id` in the key those wallets would share one row and one key, so a single key compromise would reach every chain.
 
 ```sql
--- The account. Every nullable sign-in field can be filled in later: an account may be born from a
--- password, from Google, or from a wallet signature, and gain the others afterwards.
+-- The account. It signs in as owner_addr (SIWE, the only way in), which also owns its wallets.
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE, password_hash TEXT,      -- Argon2id
-    google_sub TEXT UNIQUE,                     -- Google's stable subject claim, never the email
-    owner_addr TEXT UNIQUE,                     -- the EOA that owns the wallet, proved via SIWE
+    owner_addr TEXT UNIQUE,                     -- signs in, and owns the wallets; NULL only for Telegram-only legacy rows
     telegram_chat_id INTEGER UNIQUE,            -- NULL until linked; UNIQUE stops two accounts claiming one chat
     created_at INTEGER NOT NULL
 );
 
 -- Single-use, short-TTL nonces. Telegram links are redeemed by the bot's /start; SIWE nonces are
--- burned on verify so a captured signature cannot be replayed.
+-- burned on sign-in so a captured signature cannot be replayed (and pruned once expired, since the
+-- endpoint that issues them is open). A contact nonce is issued for one account, name and address,
+-- and burned when the owner's EIP-712 signature over that contact is checked.
 CREATE TABLE telegram_link_nonces (nonce TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE siwe_nonces (nonce TEXT PRIMARY KEY, issued_at INTEGER NOT NULL);
+CREATE TABLE contact_nonces (nonce TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, issued_at INTEGER NOT NULL);
 
 -- Only the SHA-256 of each refresh token is stored, so a DB read cannot be replayed as a login.
 -- Rotation marks the old row revoked rather than deleting it, which is what makes reuse detectable.
@@ -448,7 +450,7 @@ The wrappers exist — rather than exposing the package tools directly — becau
 
 Every token argument accepts a listed ticker, a ticker the user added, or a `0x` address; `_token_address` resolves it through `db.resolve_token` and the packages are always handed an address. A quote that moves a token Mitfah doesn't list carries a `details` sentence from `_limit_note` saying how the cap treats it: sending or selling one costs nothing; buying one with the native asset or a watched token counts the **full** amount paid, because what comes back has no price.
 
-> **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
+> **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts/prepare`, `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. Adding (or changing) one also takes the owner wallet's EIP-712 signature over the exact name and address: `prepare` checks the contact and returns the typed data (`AddContact`, domain `Mitfah`/`1`, a single-use nonce), and the save verifies the signature against `owner_addr` — so even a stolen web session cannot add a payee. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
 
 > **The quote tools return whole units only.** `get_quote_in` / `get_quote_out` return `{amount_in, amount_out, path}`, and `get_pool_quote` / `get_lp_amounts` return only their whole-unit fields. The old `*_base`, `decimals_a/b`, `liquidity` and `token_*_address` keys are gone: they existed so the swap tools could do their own base-unit and slippage arithmetic, which now happens inside the packages.
 >
@@ -661,6 +663,10 @@ rules as the bot, so nothing below this layer has to trust the browser.
 
 What it does that the bot cannot:
 
+- **Signing in is the wallet.** The user connects a browser wallet and signs a SIWE message for this
+  site (`GET /api/auth/siwe/nonce`, then `POST /api/auth/siwe/login`); an address's first sign-in
+  creates its account. There is no email, password or Google sign-in, and `/signup` redirects to
+  `/login`. On a phone that means WalletConnect or the wallet app's own browser.
 - **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
   is owned by a key the server has never seen. The API only prepares the transaction and records it
   once the network has it (`POST /api/deploy`, then `POST /api/deploy/confirm`).
@@ -676,16 +682,27 @@ What it does that the bot cannot:
   reconciliation, so a grant whose tab was closed before it confirmed is still picked up the next
   time anyone looks at the wallet. The dashboard, the chat page and Controls all warn once fewer
   than three days are left (`session.needs_renewal`), and say so once the key has run out.
+- **Every confirm says whether the network has the transaction.** The four confirms
+  (`/api/deploy/confirm`, `/api/wallet/tx/confirm`, `/api/wallet/session/confirm`, and
+  `POST /api/transactions/deposit` for the Fund drawer) answer 202 while it is pending, with
+  `seen: false` while the API's node has never seen the hash. The page then says it may never arrive
+  (the wallet failed to send it, sent it through another RPC, or replaced it) instead of waiting out
+  its deadline. A deploy the user's wallet sped up never mines under the hash the page holds, so when
+  the owner's wallet is already at the predicted address `/api/deploy/confirm` finishes it from the
+  chain. It lists it under the hash that created it, found by halving the last million blocks to the
+  one the wallet's code appears in and reading that block's `WalletDeployed` log (providers cap log
+  searches: Alchemy's free tier at 10 blocks). Only the caller's own wallet qualifies: the owner
+  check and the pending key that only `/api/deploy` for that account mints.
 
 - **The History tab.** Every transaction made through Mitfah, newest first, from
   `GET /api/transactions` (paged by `before`, filterable by `chain_id`): what it did, the date and
   time in the reader's time zone, the network, who sent it, its status, and its hash as a link to the
   network's live block explorer. That includes forks, which link where the live network would. The
-  Fund drawer reports its deposits with `POST /api/transactions/deposit`. The Assistant page's
-  "Clear chat" and Settings' "Delete all" call `DELETE /api/chat/history`.
+  Fund drawer follows its deposits through `POST /api/transactions/deposit`, which lists them. The
+  Assistant page's "Clear chat" and Settings' "Delete all" call `DELETE /api/chat/history`.
 
 Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
-never write to it. The chat page is a front end over `chat(user_id, chain_id, …, network)` — the same agent,
+never write to it, and adding one takes the owner wallet's EIP-712 signature (the dialog's last step). The chat page is a front end over `chat(user_id, chain_id, …, network)` — the same agent,
 the same history, shared with Telegram through the checkpointer's `thread_id`. The turn acts on
 the page's network, and every quote names the network it would run on (`network`).
 

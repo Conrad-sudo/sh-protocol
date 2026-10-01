@@ -35,7 +35,5 @@ export function explainError(message: string): string {
     if (Object.hasOwn(PLAIN, name)) return PLAIN[name]
   }
   if (/^That transaction reverted/.test(message)) return 'The transaction failed on the network, so nothing changed.'
-  // The API's wording is written for API clients: it names the endpoints to call.
-  if (/^Link your wallet address first/.test(message)) return "Your account isn't linked to a wallet yet."
   return message
 }

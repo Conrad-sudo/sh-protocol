@@ -153,9 +153,6 @@ def _migrate_chat_id_to_user_id(db: sqlite3.Connection):
     db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            email            TEXT UNIQUE,
-            password_hash    TEXT,
-            google_sub       TEXT UNIQUE,
             owner_addr       TEXT UNIQUE,
             telegram_chat_id INTEGER UNIQUE,
             created_at       INTEGER NOT NULL
@@ -276,13 +273,11 @@ def init_db():
         -- other per-user table keys on. telegram_chat_id is one OPTIONAL way to reach that
         -- account, UNIQUE so two accounts can never claim the same Telegram user -- which is the
         -- whole reason a chat id is bound through the nonce flow instead of being typed in.
-        -- email/password_hash/google_sub/owner_addr are all nullable: an account may be created
-        -- by any one of the sign-in methods and gain the others later.
+        -- owner_addr is how the account signs in (SIWE, the only way in) and the EOA that owns its
+        -- wallets on chain. Nullable only for accounts migrated from Telegram-only days, which
+        -- can't sign in on the web; every account made since has one.
         CREATE TABLE IF NOT EXISTS users (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            email            TEXT UNIQUE,
-            password_hash    TEXT,
-            google_sub       TEXT UNIQUE,
             owner_addr       TEXT UNIQUE,
             telegram_chat_id INTEGER UNIQUE,
             created_at       INTEGER NOT NULL
@@ -308,10 +303,20 @@ def init_db():
             revoked    INTEGER NOT NULL DEFAULT 0
         );
 
-        -- Nonces for SIWE (EIP-4361) wallet binding, issued before the user signs and burned on
-        -- verify so a captured signature cannot be replayed.
+        -- Nonces for SIWE (EIP-4361) sign-in, issued before the user signs and burned on use so a
+        -- captured signature cannot be replayed.
         CREATE TABLE IF NOT EXISTS siwe_nonces (
             nonce     TEXT PRIMARY KEY,
+            issued_at INTEGER NOT NULL
+        );
+
+        -- Nonces for the EIP-712 signature that adds a contact (auth.contact_typed_data). Each is
+        -- issued for one account, name and address, and burned on use.
+        CREATE TABLE IF NOT EXISTS contact_nonces (
+            nonce     TEXT PRIMARY KEY,
+            user_id   INTEGER NOT NULL,
+            name      TEXT NOT NULL,
+            address   TEXT NOT NULL,
             issued_at INTEGER NOT NULL
         );
 
@@ -1211,31 +1216,23 @@ def get_user_network(user_id: int):
 # ── Users ─────────────────────────────────────────────────────────────────────
 
 
-def create_user(
-    email: str | None = None,
-    password_hash: str | None = None,
-    google_sub: str | None = None,
-    owner_addr: str | None = None,
-) -> int:
+def create_user(owner_addr: str | None = None) -> int:
     """
     Creates an account and returns its new user ID.
 
-    Every field is optional because an account can be born from any sign-in method and pick up the
-    others later. The returned id is THE identity for this person everywhere else in the app.
+    The web app creates one on an address's first sign-in, so `owner_addr` is always set there;
+    only tests make an account without one. The returned id is THE identity for this person
+    everywhere else in the app.
 
-    @param email          Login email, lowercased by the caller's validation. Must be unique.
-    @param password_hash  An Argon2id hash from auth.hash_password. Never a plaintext password.
-    @param google_sub     Google's stable subject claim. Keyed on instead of email, which can change.
-    @param owner_addr     The EOA that owns this user's wallet on chain.
-    @return               The new user_id.
-    @raises ValueError    If any unique field is already taken.
+    @param owner_addr  The checksummed EOA that signs in to the account and owns its wallets.
+    @return            The new user_id.
+    @raises ValueError If that address already has an account.
     """
     db = get_db()
     try:
         cur = db.execute(
-            "INSERT INTO users (email, password_hash, google_sub, owner_addr, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (email, password_hash, google_sub, owner_addr, int(time.time())),
+            "INSERT INTO users (owner_addr, created_at) VALUES (?, ?)",
+            (owner_addr, int(time.time())),
         )
     except sqlite3.IntegrityError as e:
         raise ValueError(f"Account already exists: {e}")
@@ -1254,42 +1251,9 @@ def get_user_by_id(user_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def get_user_by_email(email: str) -> dict | None:
-    """
-    Returns the account row for an email address, or None. Matching is case-insensitive.
-
-    @param email  The email to look up.
-    @return       A dict of the users row, or None.
-    """
-    row = (
-        get_db()
-        .execute("SELECT * FROM users WHERE email = ?", (email.lower(),))
-        .fetchone()
-    )
-    return dict(row) if row else None
-
-
-def get_user_by_google_sub(google_sub: str) -> dict | None:
-    """
-    Returns the account row for a Google subject claim, or None.
-
-    Google sign-in keys on `sub` rather than email because a Google account's email can change
-    while `sub` cannot, and because an unverified email must never select an account.
-
-    @param google_sub  The `sub` claim from a verified Google ID token.
-    @return            A dict of the users row, or None.
-    """
-    row = (
-        get_db()
-        .execute("SELECT * FROM users WHERE google_sub = ?", (google_sub,))
-        .fetchone()
-    )
-    return dict(row) if row else None
-
-
 def get_user_by_owner_addr(owner_addr: str) -> dict | None:
     """
-    Returns the account row that has bound this EOA, or None.
+    Returns the account that signs in as this EOA, or None.
 
     @param owner_addr  A checksummed Ethereum address.
     @return            A dict of the users row, or None.
@@ -1318,54 +1282,6 @@ def get_user_id_by_telegram_chat_id(chat_id: int) -> int | None:
         .fetchone()
     )
     return row["id"] if row else None
-
-
-def set_password_hash(user_id: int, password_hash: str):
-    """
-    Sets or replaces an account's password hash.
-
-    @param user_id        The application user ID.
-    @param password_hash  An Argon2id hash from auth.hash_password.
-    """
-    db = get_db()
-    db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
-    db.commit()
-
-
-def link_google(user_id: int, google_sub: str):
-    """
-    Binds a Google account to an existing user.
-
-    @param user_id     The application user ID.
-    @param google_sub  The `sub` claim from a verified Google ID token.
-    @raises ValueError If that Google account is already bound elsewhere.
-    """
-    db = get_db()
-    try:
-        db.execute("UPDATE users SET google_sub = ? WHERE id = ?", (google_sub, user_id))
-    except sqlite3.IntegrityError:
-        raise ValueError("That Google account is already linked to another user.")
-    db.commit()
-
-
-def link_owner_addr(user_id: int, owner_addr: str):
-    """
-    Binds the on-chain owner EOA to an account.
-
-    Worth surfacing in the UI at bind time: this address owns the SessionHandler on chain and can
-    only be changed by transferOwnership signed by the current owner. If the user loses it,
-    account recovery cannot help -- the app has no authority over their wallet.
-
-    @param user_id     The application user ID.
-    @param owner_addr  A checksummed Ethereum address.
-    @raises ValueError If that address is already bound to another account.
-    """
-    db = get_db()
-    try:
-        db.execute("UPDATE users SET owner_addr = ? WHERE id = ?", (owner_addr, user_id))
-    except sqlite3.IntegrityError:
-        raise ValueError("That address is already linked to another user.")
-    db.commit()
 
 
 def link_telegram(user_id: int, chat_id: int):
@@ -1512,17 +1428,20 @@ def purge_expired_refresh_tokens():
 # ── SIWE nonces ───────────────────────────────────────────────────────────────
 
 
-def save_siwe_nonce(nonce: str):
+def save_siwe_nonce(nonce: str, ttl_secs: int):
     """
-    Records a SIWE nonce as issued.
+    Records a SIWE nonce as issued, and forgets the ones nobody redeemed in time.
 
-    @param nonce  The random nonce embedded in the message the user will sign.
+    The nonce endpoint is open to anyone, so without the clean-up every unredeemed request would
+    leave a row behind for good.
+
+    @param nonce     The random nonce embedded in the message the user will sign.
+    @param ttl_secs  How long a nonce stays redeemable.
     """
     db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO siwe_nonces (nonce, issued_at) VALUES (?, ?)",
-        (nonce, int(time.time())),
-    )
+    now = int(time.time())
+    db.execute("DELETE FROM siwe_nonces WHERE issued_at < ?", (now - ttl_secs,))
+    db.execute("INSERT OR REPLACE INTO siwe_nonces (nonce, issued_at) VALUES (?, ?)", (nonce, now))
     db.commit()
 
 
@@ -1539,6 +1458,45 @@ def consume_siwe_nonce(nonce: str, ttl_secs: int) -> bool:
     db.execute("DELETE FROM siwe_nonces WHERE nonce = ?", (nonce,))
     db.commit()
     return row is not None and row["issued_at"] >= int(time.time()) - ttl_secs
+
+
+def save_contact_nonce(nonce: str, user_id: int, name: str, address: str, ttl_secs: int):
+    """
+    Records the nonce of one contact's typed data, for that account, name and address only, and
+    forgets the ones nobody redeemed in time.
+
+    @param ttl_secs  How long a nonce stays redeemable.
+    """
+    db = get_db()
+    now = int(time.time())
+    db.execute("DELETE FROM contact_nonces WHERE issued_at < ?", (now - ttl_secs,))
+    db.execute(
+        "INSERT INTO contact_nonces (nonce, user_id, name, address, issued_at) VALUES (?, ?, ?, ?, ?)",
+        (nonce, user_id, name, address, now),
+    )
+    db.commit()
+
+
+def consume_contact_nonce(nonce: str, user_id: int, name: str, address: str, ttl_secs: int) -> bool:
+    """
+    Redeems a contact nonce, burning it whatever the outcome.
+
+    @return  True if it was outstanding, still fresh, and issued for exactly this account, name and
+             address.
+    """
+    db = get_db()
+    row = db.execute(
+        "SELECT user_id, name, address, issued_at FROM contact_nonces WHERE nonce = ?", (nonce,)
+    ).fetchone()
+    db.execute("DELETE FROM contact_nonces WHERE nonce = ?", (nonce,))
+    db.commit()
+    return (
+        row is not None
+        and row["user_id"] == user_id
+        and row["name"] == name
+        and row["address"] == address
+        and row["issued_at"] >= int(time.time()) - ttl_secs
+    )
 
 
 # ── Transaction history ───────────────────────────────────────────────────────

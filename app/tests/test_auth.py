@@ -12,7 +12,7 @@ import tempfile
 import time
 from urllib.parse import quote
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import add_contact, check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
 
 # A scratch database, set before app modules import and read db.DB_PATH.
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -48,8 +48,8 @@ def make_client(rate_limit: bool = False) -> TestClient:
     """
     A test client with the agent lifespan disabled.
 
-    Rate limiting is off by default: these tests create many accounts in a few seconds, which the
-    real 5/minute signup limit would (correctly) block. test_rate_limit turns it back on to check
+    Rate limiting is off by default: these tests sign in many times in a few seconds, which the
+    real 10/minute sign-in limit would (correctly) block. test_rate_limit turns it back on to check
     the limit itself still bites.
     """
     from contextlib import asynccontextmanager
@@ -64,43 +64,47 @@ def make_client(rate_limit: bool = False) -> TestClient:
     return TestClient(api.app)
 
 
-def test_signup_login_refresh():
-    print("\n[1] signup -> login -> refresh -> protected endpoint")
+def test_siwe_sign_in_and_refresh():
+    print("\n[1] SIWE sign-in -> refresh -> protected endpoint; an address is one account")
     c = make_client()
+    acct = Account.create()
 
-    r = c.post("/api/auth/signup", json={"email": "a@example.com", "password": "hunter2hunter2"})
-    check("signup returns 201", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
+    check("the nonce is alphanumeric, as EIP-4361 requires", nonce.isalnum() and len(nonce) >= 8, nonce)
+    r = siwe_login(c, acct, auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111), nonce)
+    check("a first sign-in answers 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
     body = r.json()
-    check("signup returns an access token", "access_token" in body)
+    check("it returns an access token", "access_token" in body)
     check("the refresh token is NOT in the body", "refresh_token" not in body)
     check("the refresh cookie is set", api.REFRESH_COOKIE in r.cookies, str(dict(r.cookies)))
-    user_id = body["user_id"]
 
     r = c.get("/api/me", headers={"Authorization": f"Bearer {body['access_token']}"})
     check("the token reaches a protected endpoint", r.status_code == 200, r.text[:120])
-    check("it resolves to the right account", r.json()["user_id"] == user_id)
+    me = r.json()
+    check("it resolves to the right account", me["user_id"] == body["user_id"], str(me))
+    check("the account is the address that signed", me["owner_addr"] == acct.address, str(me))
+    check("nothing about email, passwords or Google is left", not {"email", "has_password", "google_linked"} & set(me),
+          str(me))
 
-    r = c.post("/api/auth/signup", json={"email": "a@example.com", "password": "hunter2hunter2"})
-    check("a duplicate email is refused", r.status_code == 409, str(r.status_code))
-
-    r = c.post("/api/auth/login", json={"email": "a@example.com", "password": "wrongwrongwrong"})
-    check("a wrong password is refused", r.status_code == 401, str(r.status_code))
-
-    r = c.post("/api/auth/login", json={"email": "nobody@example.com", "password": "hunter2hunter2"})
-    check("an unknown account gives the SAME 401", r.status_code == 401, str(r.status_code))
-
-    r = c.post("/api/auth/login", json={"email": "a@example.com", "password": "hunter2hunter2"})
-    check("a correct password signs in", r.status_code == 200, r.text[:120])
+    again, _, _ = sign_in(c, acct)
+    check("signing in again reaches the same account", again["user_id"] == body["user_id"], str(again))
+    other, _, _ = sign_in(c)
+    check("another address is another account", other["user_id"] != body["user_id"], str(other))
 
     r = c.post("/api/auth/refresh")
     check("the cookie alone refreshes", r.status_code == 200, r.text[:160])
     check("refresh returns a new access token", "access_token" in r.json())
 
+    for path in ("/api/auth/signup", "/api/auth/login", "/api/auth/google", "/api/auth/google/link",
+                 "/api/auth/siwe/verify"):
+        code = c.post(path, json={}).status_code
+        check(f"{path} is gone", code == 404, str(code))
+
 
 def test_bad_tokens_rejected():
     print("\n[2] forged, expired and mistyped tokens are refused")
     c = make_client()
-    c.post("/api/auth/signup", json={"email": "b@example.com", "password": "hunter2hunter2"})
+    sign_in(c)
 
     check("no token -> 401", c.get("/api/me").status_code == 401)
     check(
@@ -143,8 +147,8 @@ def test_bad_tokens_rejected():
 def test_refresh_reuse_revokes_everything():
     print("\n[3] reusing a rotated refresh token signs every session out")
     c = make_client()
-    r = c.post("/api/auth/signup", json={"email": "c@example.com", "password": "hunter2hunter2"})
-    stolen = r.cookies[api.REFRESH_COOKIE]
+    sign_in(c)
+    stolen = c.cookies[api.REFRESH_COOKIE]
 
     r = c.post("/api/auth/refresh")
     check("the first refresh works", r.status_code == 200, r.text[:120])
@@ -163,7 +167,7 @@ def test_refresh_reuse_revokes_everything():
     # client's cookie jar applies path matching like a browser does, so this also proves the cookie
     # actually reaches /api/auth/logout -- with the old /api/auth/refresh path it never did.
     c = make_client()
-    c.post("/api/auth/signup", json={"email": "c2@example.com", "password": "hunter2hunter2"})
+    sign_in(c)
     before_logout = c.cookies[api.REFRESH_COOKIE]
     r = c.post("/api/auth/logout")
     check("logout answers 200", r.status_code == 200, str(r.status_code))
@@ -176,18 +180,18 @@ def test_refresh_reuse_revokes_everything():
 def test_identity_comes_from_token_not_body():
     print("\n[4] a request acts on the account its TOKEN names")
     c = make_client()
-    alice = c.post("/api/auth/signup", json={"email": "alice@example.com", "password": "hunter2hunter2"}).json()
-    bob = c.post("/api/auth/signup", json={"email": "bob@example.com", "password": "hunter2hunter2"}).json()
+    alice, alice_headers, alice_acct = sign_in(c)
+    bob, _, _ = sign_in(c)
     check("two distinct accounts", alice["user_id"] != bob["user_id"])
 
     # Alice's token, Bob's id in the body. The body must be ignored -- and in fact there is no
     # user_id field left to send, so this also proves the schema rejects the old shape.
-    r = c.get("/api/me", headers={"Authorization": f"Bearer {alice['access_token']}"})
+    r = c.get("/api/me", headers=alice_headers)
     check("Alice's token resolves to Alice", r.json()["user_id"] == alice["user_id"])
 
     r = c.post(
         "/api/deploy",
-        headers={"Authorization": f"Bearer {alice['access_token']}"},
+        headers=alice_headers,
         json={
             "user_id": bob["user_id"],          # ignored: not a field on DeployRequest
             "chain_id": 31337,
@@ -195,75 +199,68 @@ def test_identity_comes_from_token_not_body():
             "daily_limit_usd": 100,
         },
     )
-    # 403 because Alice has bound no address yet -- which is the point: the body cannot name an
-    # account, and it cannot name an EOA the caller has not proved they hold.
-    check("deploy refuses an unbound deployer", r.status_code == 403, f"{r.status_code} {r.text[:160]}")
-    check("the refusal names the SIWE step", "siwe" in r.text.lower(), r.text[:160])
+    # 403: the body cannot name an account, and it cannot name an EOA other than the one the
+    # caller signed in as.
+    check("deploy refuses a deployer that isn't the signed-in address", r.status_code == 403,
+          f"{r.status_code} {r.text[:160]}")
+    check("the refusal names the address Alice signs in as", alice_acct.address in r.text, r.text[:160])
 
 
-def siwe_verify(c: TestClient, headers: dict, acct, message: str, nonce: str):
-    """Signs `message` with `acct` and posts it to the SIWE verify endpoint."""
+def siwe_login(c: TestClient, acct, message: str, nonce: str):
+    """Signs `message` with `acct` and posts it to the SIWE sign-in endpoint."""
     signature = Account.sign_message(encode_defunct(text=message), acct.key).signature.hex()
-    return c.post(
-        "/api/auth/siwe/verify",
-        headers=headers,
-        json={"message": message, "signature": signature, "nonce": nonce},
-    )
+    return c.post("/api/auth/siwe/login", json={"message": message, "signature": signature, "nonce": nonce})
 
 
-def new_signed_in(c: TestClient, email: str) -> dict:
-    """Signs up a fresh account and returns its auth headers."""
-    body = c.post("/api/auth/signup", json={"email": email, "password": "hunter2hunter2"}).json()
-    return {"Authorization": f"Bearer {body['access_token']}"}
+def headers_for_account_without_address() -> dict:
+    """
+    Auth headers for an account with no wallet address, like the ones migrated from Telegram-only
+    days. The web app cannot sign one in any more; a token is minted directly to test the guards.
+    """
+    return {"Authorization": f"Bearer {auth.create_access_token(db.create_user())}"}
 
 
-def test_siwe_binding_and_deployer_check():
-    print("\n[5] SIWE binds an address, and only that address may deploy")
+def test_siwe_checks_and_deployer_check():
+    print("\n[5] SIWE sign-in refuses every forged or replayed message, and only that address may deploy")
     c = make_client()
-    headers = new_signed_in(c, "d@example.com")
-
     acct = Account.create()
     nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    check("the nonce is alphanumeric, as EIP-4361 requires", nonce.isalnum() and len(nonce) >= 8, nonce)
     message = auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111)
 
-    r = siwe_verify(c, headers, acct, message, nonce)
-    check("a valid signature binds the address", r.status_code == 200, r.text[:160])
-    check("the recovered address is right", r.json()["owner_addr"] == acct.address, r.text[:160])
+    r = siwe_login(c, acct, message, nonce)
+    check("a valid signature signs in", r.status_code == 200, r.text[:160])
+    headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
 
     # The nonce is single-use.
-    r = siwe_verify(c, headers, acct, message, nonce)
+    r = siwe_login(c, acct, message, nonce)
     check("replaying the same nonce is refused", r.status_code == 400, str(r.status_code))
 
     # A signature over text that is not a SIWE message at all.
     fresh = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    r = siwe_verify(c, headers, acct, f"unrelated message {fresh}", fresh)
+    r = siwe_login(c, acct, f"unrelated message {fresh}", fresh)
     check("a non-SIWE message is refused, even carrying the nonce", r.status_code == 400, str(r.status_code))
 
     # A well-formed message whose Nonce field is a different, also-issued nonce.
     other_nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    r = siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, other_nonce, 1), fresh)
+    r = siwe_login(c, acct, auth.build_siwe_message("localhost:3000", acct.address, other_nonce, 1), fresh)
     check("a message carrying a different nonce is refused", r.status_code == 400, str(r.status_code))
 
     # The phishing case the domain check exists for: another site fetched a nonce from us and had the
-    # victim sign a message naming ITSELF (so the victim's wallet showed no mismatch warning).
+    # victim sign a message naming ITSELF (so the victim's wallet showed no mismatch warning), and
+    # now replays it here to sign in as the victim.
     victim = Account.create()
-    attacker = new_signed_in(c, "attacker@example.com")
     nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
     phished = auth.build_siwe_message("evil.example", victim.address, nonce, 1)
-    r = siwe_verify(c, attacker, victim, phished, nonce)
+    r = siwe_login(c, victim, phished, nonce)
     check("a message written for another site is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
     check("the refusal names the other site", "evil.example" in r.text, r.text[:160])
-    r = c.get("/api/me", headers=attacker)
-    check("and the victim's address was not bound", r.json()["owner_addr"] is None, r.text[:160])
+    check("and no account was made for the victim", db.get_user_by_owner_addr(victim.address) is None)
 
     # A message that names one address but is signed by another describes someone else.
     nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    r = siwe_verify(
-        c, new_signed_in(c, "mismatch@example.com"), acct,
-        auth.build_siwe_message("localhost:3000", victim.address, nonce, 1), nonce,
-    )
+    r = siwe_login(c, acct, auth.build_siwe_message("localhost:3000", victim.address, nonce, 1), nonce)
     check("a signer different from the named address is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("and it signed nobody in as the named address", db.get_user_by_owner_addr(victim.address) is None)
 
     # Expired.
     from datetime import datetime, timedelta, timezone
@@ -272,15 +269,14 @@ def test_siwe_binding_and_deployer_check():
         "localhost:3000", victim.address, nonce, 1,
         expiration_time=datetime.now(timezone.utc) - timedelta(minutes=1),
     )
-    r = siwe_verify(c, new_signed_in(c, "expired@example.com"), victim, stale, nonce)
+    r = siwe_login(c, victim, stale, nonce)
     check("an expired message is refused", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
 
     # The layouts viem's createSiweMessage actually produces must all be accepted: with a statement,
-    # with a scheme on the domain, and with a live expiry. Each on a fresh account and address,
-    # since an address binds to one account only.
+    # with a scheme on the domain, and with a live expiry.
     for label, build in [
         ("a message with a statement",
-         lambda a, n: auth.build_siwe_message("localhost:3000", a, n, 1, statement="Link this wallet to Mitfah.")),
+         lambda a, n: auth.build_siwe_message("localhost:3000", a, n, 1, statement="Sign in to Mitfah.")),
         ("a message with an https:// scheme",
          lambda a, n: auth.build_siwe_message("localhost:3000", a, n, 1).replace(
              "localhost:3000 wants", "https://localhost:3000 wants", 1)),
@@ -290,11 +286,18 @@ def test_siwe_binding_and_deployer_check():
     ]:
         signer = Account.create()
         nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-        r = siwe_verify(c, new_signed_in(c, f"{signer.address[2:10].lower()}@example.com"),
-                        signer, build(signer.address, nonce), nonce)
+        r = siwe_login(c, signer, build(signer.address, nonce), nonce)
         check(f"{label} is accepted", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
 
-    # Deploying from an address this account did NOT prove it holds.
+    # An unredeemed nonce does not linger: issuing one clears those past their lifetime.
+    db.get_db().execute("INSERT INTO siwe_nonces (nonce, issued_at) VALUES ('abandoned0', ?)",
+                        (int(time.time()) - auth.SIWE_NONCE_TTL_SECS - 1,))
+    db.get_db().commit()
+    c.get("/api/auth/siwe/nonce")
+    check("expired nonces are cleared",
+          db.get_db().execute("SELECT 1 FROM siwe_nonces WHERE nonce = 'abandoned0'").fetchone() is None)
+
+    # Deploying from an address this account does not sign in as.
     r = c.post(
         "/api/deploy",
         headers=headers,
@@ -310,8 +313,7 @@ def test_siwe_binding_and_deployer_check():
 def test_telegram_link_nonce():
     print("\n[6] Telegram links are minted server-side and are single-use")
     c = make_client()
-    signed_in = c.post("/api/auth/signup", json={"email": "e@example.com", "password": "hunter2hunter2"}).json()
-    headers = {"Authorization": f"Bearer {signed_in['access_token']}"}
+    signed_in, headers, _ = sign_in(c)
 
     r = c.post("/api/integrations/telegram/link", headers=headers)
     check("a link is minted", r.status_code == 200, r.text[:160])
@@ -339,8 +341,8 @@ def test_bot_start_explains_a_chat_linked_elsewhere():
     import telebot
 
     c = make_client()
-    first = c.post("/api/auth/signup", json={"email": "tg1@example.com", "password": "hunter2hunter2"}).json()
-    second = c.post("/api/auth/signup", json={"email": "tg2@example.com", "password": "hunter2hunter2"}).json()
+    first, _, _ = sign_in(c)
+    second, _, _ = sign_in(c)
     chat_id = 424242
     db.link_telegram(first["user_id"], chat_id)
 
@@ -372,10 +374,10 @@ def test_bot_start_explains_a_chat_linked_elsewhere():
 
 
 def test_owner_actions_are_guarded():
-    print("\n[7] owner actions need a token AND a proved owner address")
+    print("\n[7] owner actions need a token AND an account with an owner address")
     c = make_client()
-    signed_in = c.post("/api/auth/signup", json={"email": "f@example.com", "password": "hunter2hunter2"}).json()
-    headers = {"Authorization": f"Bearer {signed_in['access_token']}"}
+    # Every account the web app signs in has an address; one from Telegram-only days does not.
+    headers = headers_for_account_without_address()
 
     bodies = {
         "/api/wallet/pause/prepare": {"chain_id": 31337},
@@ -396,8 +398,8 @@ def test_owner_actions_are_guarded():
     for path, body in bodies.items():
         r = c.post(path, headers=headers, json=body)
         # 403, not 404/503/500: the owner check runs before any chain or RPC work, so an account
-        # that has not proved an address never reaches the node.
-        check(f"{path} without a bound address -> 403", r.status_code == 403, f"{r.status_code} {r.text[:100]}")
+        # with no address never reaches the node.
+        check(f"{path} without an owner address -> 403", r.status_code == 403, f"{r.status_code} {r.text[:100]}")
 
     # An unknown action is rejected by the schema, not by a silent fall-through to "remove".
     r = c.post(
@@ -436,10 +438,7 @@ def test_owner_actions_are_guarded():
 def test_router_removal_is_refused():
     print("\n[7b] the exchange router can't be removed through the app")
     c = make_client()
-    headers = new_signed_in(c, "router@example.com")
-    acct = Account.create()
-    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111), nonce)
+    _, headers, _ = sign_in(c)
 
     router = get_router(11155111)
     # Lower case on purpose: the comparison must not depend on how the address is written.
@@ -465,10 +464,7 @@ def test_wrapped_native_always_counts():
     check("WETH is flagged as always counted", tokens.get("weth") is True, str(tokens))
     check("other tokens are not", tokens.get("usdc") is False, str(tokens))
 
-    headers = new_signed_in(c, "wrapped@example.com")
-    acct = Account.create()
-    nonce = c.get("/api/auth/siwe/nonce").json()["nonce"]
-    siwe_verify(c, headers, acct, auth.build_siwe_message("localhost:3000", acct.address, nonce, 11155111), nonce)
+    _, headers, _ = sign_in(c)
     # Upper case on purpose: the ticker comparison must not depend on how it is written.
     r = c.post(
         "/api/wallet/watched-tokens/prepare",
@@ -489,8 +485,7 @@ def test_wallet_state_read_is_guarded():
     """
     print("\n[8] wallet state reads are authenticated and per-account")
     c = make_client()
-    signed_in = c.post("/api/auth/signup", json={"email": "w@example.com", "password": "hunter2hunter2"}).json()
-    headers = {"Authorization": f"Bearer {signed_in['access_token']}"}
+    _, headers, _ = sign_in(c)
 
     check("reading needs a token", c.get("/api/wallet/31337").status_code == 401)
     check("a forged token is refused",
@@ -514,30 +509,59 @@ def test_wallet_state_read_is_guarded():
 
 def test_contacts_are_web_only_and_per_account():
     """
-    Adding a payee takes the web credential, and reaches only your own list.
+    Adding a payee takes the owner wallet's signature, and reaches only your own list.
 
     The agent has no save_contact tool (guarded in test_identity.py); this is the other half --
-    the endpoint that replaced it must actually require a signed-in account, and must not let one
-    account read, write or delete another's contacts. Contacts are the allowlist of destinations
-    for the wallet's funds, so a cross-account write here would be a way to add a payee to
-    somebody else's wallet.
+    the endpoint that replaced it must require a signed-in account AND the owner's EIP-712
+    signature over the exact contact, and must not let one account read, write or delete another's
+    contacts. Contacts are the allowlist of destinations for the wallet's funds, so a write here
+    without the owner's say-so would be a way to add a payee to somebody's wallet.
     """
-    print("\n[9] contacts need a web session and stay within one account")
+    print("\n[9] contacts need the owner's signature and stay within one account")
     c = make_client()
-    alice = c.post("/api/auth/signup", json={"email": "g@example.com", "password": "hunter2hunter2"}).json()
-    bob = c.post("/api/auth/signup", json={"email": "h@example.com", "password": "hunter2hunter2"}).json()
-    a_headers = {"Authorization": f"Bearer {alice['access_token']}"}
-    b_headers = {"Authorization": f"Bearer {bob['access_token']}"}
+    _, a_headers, alice = sign_in(c)
+    _, b_headers, bob = sign_in(c)
+    contact = {"name": "mallory", "address": ADDR}
 
     # Unauthenticated, on every verb.
+    check("preparing needs a token", c.post("/api/contacts/prepare", json=contact).status_code == 401)
     check("adding needs a token",
-          c.post("/api/contacts", json={"name": "mallory", "address": ADDR}).status_code == 401)
+          c.post("/api/contacts", json={**contact, "nonce": "abc", "signature": "0x00"}).status_code == 401)
     check("listing needs a token", c.get("/api/contacts").status_code == 401)
     check("deleting needs a token", c.delete("/api/contacts/mallory").status_code == 401)
 
+    # What the wallet is asked to sign: the contact exactly as it will be stored.
+    r = c.post("/api/contacts/prepare", headers=a_headers, json={"name": " Sandy ", "address": ADDR.lower()})
+    check("preparing answers the typed data", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    typed = r.json()
+    check("it is an AddContact for Mitfah",
+          typed["primaryType"] == "AddContact" and typed["domain"] == {"name": "Mitfah", "version": "1"}, str(typed))
+    check("it carries the name and address as they will be stored",
+          typed["message"]["name"] == "sandy" and typed["message"]["address"] == ADDR, str(typed["message"]))
+    check("preparing saves nothing", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])
+
+    # A session alone is not enough: no signature, or anybody's but the owner's, saves nothing.
+    check("a save without a signature -> 422",
+          c.post("/api/contacts", headers=a_headers, json=typed["message"]).status_code == 422)
+    signed_by_bob = Account.sign_typed_data(bob.key, typed["domain"], typed["types"], typed["message"])
+    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "signature": signed_by_bob.signature.hex()})
+    check("a signature from another wallet -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("the refusal names the owner", alice.address in r.text, r.text[:160])
+    check("and nothing was saved", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])
+
+    # The owner's signature over one contact cannot save another, or be used twice.
+    r = c.post("/api/contacts/prepare", headers=a_headers, json={"name": "sandy", "address": ADDR})
+    typed = r.json()
+    signature = Account.sign_typed_data(alice.key, typed["domain"], typed["types"], typed["message"]).signature.hex()
+    other = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "address": other, "signature": signature})
+    check("a signature for one address can't save another", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "signature": signature})
+    check("its nonce was burned by that attempt", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+
     # The happy path, and the checksumming.
-    r = c.post("/api/contacts", headers=a_headers, json={"name": "Sandy", "address": ADDR.lower()})
-    check("a signed-in user can add a contact", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
+    r = add_contact(c, a_headers, alice, "Sandy", ADDR.lower())
+    check("the owner's signature saves the contact", r.status_code == 201, f"{r.status_code} {r.text[:120]}")
     check("the name is stored lowercase", r.json()["name"] == "sandy", r.text[:80])
     check("the address is checksummed", r.json()["address"] == ADDR, r.text[:80])
 
@@ -550,8 +574,14 @@ def test_contacts_are_web_only_and_per_account():
           c.delete("/api/contacts/sandy", headers=b_headers).status_code == 404)
     check("and it survived that attempt",
           c.get("/api/contacts", headers=a_headers).json()["contacts"][0]["name"] == "sandy")
+    r = c.post("/api/contacts/prepare", headers=a_headers, json={"name": "eve", "address": other})
+    typed = r.json()
+    signature = Account.sign_typed_data(alice.key, typed["domain"], typed["types"], typed["message"]).signature.hex()
+    r = c.post("/api/contacts", headers=b_headers, json={**typed["message"], "signature": signature})
+    check("another account can't spend Alice's approval", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("so Bob's list is still empty", c.get("/api/contacts", headers=b_headers).json()["contacts"] == [])
 
-    # Bad input is refused before it can be stored and read back as a destination later.
+    # Bad input is refused before the wallet is asked to sign anything.
     for label, body in [
         ("a non-address", {"name": "x", "address": "not-an-address"}),
         ("a truncated address", {"name": "x", "address": ADDR[:-2]}),
@@ -563,32 +593,36 @@ def test_contacts_are_web_only_and_per_account():
         ("a '.' name", {"name": ".", "address": ADDR}),
         ("a '..' name", {"name": " .. ", "address": ADDR}),
     ]:
-        r = c.post("/api/contacts", headers=a_headers, json=body)
+        r = c.post("/api/contacts/prepare", headers=a_headers, json=body)
         check(f"{label} is rejected", r.status_code == 422, f"{r.status_code} {r.text[:90]}")
 
     # "me" already means the wallet itself in _resolve_contact, so a contact under that name
     # would be listed and permanently unpayable.
-    r = c.post("/api/contacts", headers=a_headers, json={"name": "Me", "address": ADDR})
+    r = c.post("/api/contacts/prepare", headers=a_headers, json={"name": "Me", "address": ADDR})
     check("'me' is reserved", r.status_code == 422, f"{r.status_code} {r.text[:90]}")
 
-    # Re-saving a name updates it rather than duplicating.
-    other = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    c.post("/api/contacts", headers=a_headers, json={"name": "sandy", "address": other})
+    # Re-saving a name updates it rather than duplicating -- with a signature of its own.
+    add_contact(c, a_headers, alice, "sandy", other)
     contacts = c.get("/api/contacts", headers=a_headers).json()["contacts"]
     check("re-saving updates in place", contacts == [{"name": "sandy", "address": other}], str(contacts))
 
     # The web app deletes by the name run through encodeURIComponent, so a name with spaces and
     # URL characters must survive that round trip.
     odd = "o'neil & co? #1"
-    c.post("/api/contacts", headers=a_headers, json={"name": odd, "address": ADDR})
+    add_contact(c, a_headers, alice, odd, ADDR)
     r = c.delete("/api/contacts/" + quote(odd, safe="-_.!~*'()"), headers=a_headers)
     check("a name with spaces, ?, & and # deletes by its encoded form",
           r.status_code == 200 and r.json()["name"] == odd, f"{r.status_code} {r.text[:90]}")
 
+    # Deleting only ever shrinks the allowlist, so it takes no signature.
     check("deleting works", c.delete("/api/contacts/SANDY", headers=a_headers).status_code == 200)
     check("the list is empty again", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])
     check("deleting an unknown contact is a 404",
           c.delete("/api/contacts/sandy", headers=a_headers).status_code == 404)
+
+    # An account with no owner address could never sign, so it is refused before a nonce is issued.
+    r = c.post("/api/contacts/prepare", headers=headers_for_account_without_address(), json=contact)
+    check("an account with no owner address can't prepare one -> 403", r.status_code == 403, f"{r.status_code}")
 
 
 def test_chat_history_shows_only_the_conversation():
@@ -634,8 +668,7 @@ def test_chat_history_shows_only_the_conversation():
     smart_wallet_agent.agent = StubAgent()
     try:
         c = make_client()
-        body = c.post("/api/auth/signup", json={"email": "chat@example.com", "password": "hunter2hunter2"}).json()
-        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        body, headers, _ = sign_in(c)
         url = "/api/chat/history?chain_id=11155111"
 
         check("history needs a token", c.get(url).status_code == 401)
@@ -700,8 +733,7 @@ def test_chat_turn_returns_text_and_hides_failures():
     smart_wallet_agent.agent = stub
     try:
         c = make_client()
-        body = c.post("/api/auth/signup", json={"email": "turn@example.com", "password": "hunter2hunter2"}).json()
-        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        body, headers, _ = sign_in(c)
         ask = {"chain_id": 11155111, "message": "what's my balance?"}
 
         check("chat needs a token", c.post("/api/chat", json=ask).status_code == 401)
@@ -767,8 +799,7 @@ def test_chat_acts_on_the_pages_network():
     )
     try:
         c = make_client()
-        body = c.post("/api/auth/signup", json={"email": "network@example.com", "password": "hunter2hunter2"}).json()
-        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        body, headers, _ = sign_in(c)
         db.save_user_network(body["user_id"], "arbitrum-fork")   # the chain they last deployed on
 
         r = c.post("/api/chat", json={"chain_id": 56, "message": "how much BNB do I have?"}, headers=headers)
@@ -844,85 +875,24 @@ def test_chains_lists_only_deployed_served_chains():
           by_id[11155111]["router"] == Web3.to_checksum_address(get_router(11155111)), str(chains))
 
 
-def test_google_sign_in_and_linking():
-    """
-    The Google routes, with token verification stubbed: the real check calls Google, and what is
-    under test here is what the API does with a verified (sub, email) pair.
-    """
-    print("\n[12] Google sign-in creates, finds and links accounts by `sub`, never by email")
-    identities = {
-        "tok-new": ("sub-new", "gnew@example.com"),
-        "tok-clash": ("sub-clash", "pw@example.com"),
-        "tok-link": ("sub-link", "someone-else@example.com"),
-        "tok-noemail": ("sub-noemail", None),
-    }
-    original = auth.verify_google_id_token
-    auth.verify_google_id_token = lambda token: identities[token]
-    try:
-        c = make_client()
-
-        r = c.post("/api/auth/google", json={"id_token": "tok-new"})
-        check("a first Google sign-in creates the account", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-        first = r.json()
-        check("and sets the refresh cookie", api.REFRESH_COOKIE in r.cookies)
-        me = c.get("/api/me", headers={"Authorization": f"Bearer {first['access_token']}"}).json()
-        check("the account is Google-linked with no password",
-              me["google_linked"] is True and me["has_password"] is False and me["email"] == "gnew@example.com",
-              str(me))
-
-        again = c.post("/api/auth/google", json={"id_token": "tok-new"}).json()
-        check("signing in again reaches the same account", again["user_id"] == first["user_id"], str(again))
-
-        r = c.post("/api/auth/google", json={"id_token": "tok-noemail"})
-        check("a Google account without a verified email still gets an account", r.status_code == 200,
-              f"{r.status_code} {r.text[:120]}")
-
-        # A password account already owns this email: no silent merge.
-        pw = c.post("/api/auth/signup", json={"email": "pw@example.com", "password": "hunter2hunter2"}).json()
-        pw_headers = {"Authorization": f"Bearer {pw['access_token']}"}
-        check("a password account reports has_password",
-              c.get("/api/me", headers=pw_headers).json()["has_password"] is True)
-        r = c.post("/api/auth/google", json={"id_token": "tok-clash"})
-        check("Google with a password account's email -> 409", r.status_code == 409, str(r.status_code))
-        check("the refusal says how to link instead", "link google" in r.text.lower(), r.text[:160])
-        check("and no account was created for that sub", db.get_user_by_google_sub("sub-clash") is None)
-
-        # The safe direction: signed in with the password, then link.
-        r = c.post("/api/auth/google/link", json={"id_token": "tok-clash"}, headers=pw_headers)
-        check("a signed-in user can link Google", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-        check("the account now shows Google as linked",
-              c.get("/api/me", headers=pw_headers).json()["google_linked"] is True)
-        r = c.post("/api/auth/google", json={"id_token": "tok-clash"})
-        check("and Google now signs into that same account",
-              r.status_code == 200 and r.json()["user_id"] == pw["user_id"], f"{r.status_code} {r.text[:120]}")
-
-        check("linking needs a session", c.post("/api/auth/google/link", json={"id_token": "tok-link"}).status_code == 401)
-        r = c.post("/api/auth/google/link", json={"id_token": "tok-new"}, headers=pw_headers)
-        check("linking a Google account that belongs to someone else -> 409", r.status_code == 409, str(r.status_code))
-    finally:
-        auth.verify_google_id_token = original
-
-
 def test_rate_limit():
-    print("\n[13] credential endpoints are rate limited")
+    print("\n[13] the open sign-in endpoints are rate limited")
     c = make_client(rate_limit=True)
-    codes = [
-        c.post(
-            "/api/auth/login", json={"email": f"rl{i}@example.com", "password": "hunter2hunter2"}
-        ).status_code
-        for i in range(14)
-    ]
-    check("repeated login attempts eventually get 429", 429 in codes, f"codes: {codes}")
+    bogus = {"message": "not a SIWE message", "signature": "0x00", "nonce": "abcdefgh"}
+    codes = [c.post("/api/auth/siwe/login", json=bogus).status_code for _ in range(14)]
+    check("repeated sign-in attempts eventually get 429", 429 in codes, f"codes: {codes}")
+    codes = [c.get("/api/auth/siwe/nonce").status_code for _ in range(34)]
+    check("so does asking for nonces without end", 429 in codes, f"codes: {codes}")
     api.limiter.enabled = False
 
 
 if __name__ == "__main__":
     try:
-        test_signup_login_refresh()
+        test_siwe_sign_in_and_refresh()
         test_bad_tokens_rejected()
         test_refresh_reuse_revokes_everything()
         test_identity_comes_from_token_not_body()
-        test_siwe_binding_and_deployer_check()
+        test_siwe_checks_and_deployer_check()
         test_telegram_link_nonce()
         test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
@@ -935,7 +905,6 @@ if __name__ == "__main__":
         test_chat_acts_on_the_pages_network()
         test_vault_failure_is_named()
         test_chains_lists_only_deployed_served_chains()
-        test_google_sign_in_and_linking()
         test_rate_limit()
     finally:
         os.unlink(_tmp_db.name)

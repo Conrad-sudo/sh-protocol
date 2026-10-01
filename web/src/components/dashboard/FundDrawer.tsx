@@ -29,7 +29,7 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
   const { isConnected, chainId: walletChainId } = useConnection()
   const [connectOpen, setConnectOpen] = useState(false)
   const [amount, setAmount] = useState('')
-  const { state, send, reset } = useFundWallet(wallet.chain_id, wallet.address)
+  const { state, send, resume, abandon, release } = useFundWallet(wallet.chain_id, wallet.address)
 
   const network = chainName(wallet.chain_id)
   const ticker = chain?.native_ticker ?? 'the native token'
@@ -39,11 +39,10 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
   const onRightNetwork = walletChainId === wallet.chain_id
 
   const close = () => {
-    // A transfer in flight keeps going; its result is still shown if the drawer is reopened.
-    if (!busy) {
-      reset()
-      setAmount('')
-    }
+    // A transfer already sent keeps being followed, and shows when the drawer opens again. A wallet
+    // that hasn't answered is let go, so the drawer opens clean rather than still waiting on it.
+    if (state.phase !== 'confirming') setAmount('')
+    release()
     onClose()
   }
 
@@ -102,7 +101,7 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
                     disabled={busy}
                     onChange={value => {
                       setAmount(value)
-                      if (!busy && state.phase !== 'idle') reset()
+                      if (!busy && state.phase !== 'idle') release()
                     }}
                   />
                 </Form.Group>
@@ -116,7 +115,7 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
               >
                 Send
               </Button>
-              <FundStatus state={state} chainId={wallet.chain_id} />
+              <FundStatus state={state} chainId={wallet.chain_id} onResume={resume} onAbandon={abandon} />
             </>
           )}
         </section>
@@ -125,7 +124,16 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
   )
 }
 
-function FundStatus({ state, chainId }: { state: FundState; chainId: number }) {
+interface FundStatusProps {
+  state: FundState
+  chainId: number
+  /** Waits again for the transfer already sent. */
+  onResume: () => void
+  /** Stops waiting on the wallet, before anything is sent. */
+  onAbandon: () => void
+}
+
+function FundStatus({ state, chainId, onResume, onAbandon }: FundStatusProps) {
   const link = state.txHash ? explorerUrl(chainId, 'tx', state.txHash) : null
   const viewTx = link && (
     <>
@@ -138,7 +146,15 @@ function FundStatus({ state, chainId }: { state: FundState; chainId: number }) {
 
   switch (state.phase) {
     case 'signing':
-      return <Loader className="mf-step-action" content="Confirm the transfer in your wallet." />
+      return (
+        // Nothing has been sent yet, so giving up is always safe: a transfer sent later is followed.
+        <div className="mf-step-action">
+          <Loader content="Confirm the transfer in your wallet." />{' '}
+          <Button appearance="link" size="sm" onClick={onAbandon}>
+            Stop waiting
+          </Button>
+        </div>
+      )
     case 'confirming':
       return <Loader className="mf-step-action" content="Waiting for the network to confirm the transfer…" />
     case 'done':
@@ -153,11 +169,25 @@ function FundStatus({ state, chainId }: { state: FundState; chainId: number }) {
           Cancelled — nothing was sent.
         </Message>
       )
+    case 'abandoned':
+      return (
+        <Message type="info" showIcon className="mf-settings-note">
+          Stopped waiting. If your wallet still shows the request, reject it there.
+        </Message>
+      )
     case 'error':
       return (
         <Message type="error" showIcon className="mf-settings-note">
           {state.error}
           {viewTx}
+          {state.canResume && (
+            <>
+              {' '}
+              <Button appearance="link" size="sm" onClick={onResume}>
+                Check again
+              </Button>
+            </>
+          )}
         </Message>
       )
     default:

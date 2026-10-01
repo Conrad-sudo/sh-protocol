@@ -2,10 +2,10 @@ import { expect, test } from '@playwright/test'
 import { FAKE_WALLET_NAME } from '../fakeWallet.ts'
 import { parseAbi, parseEther } from 'viem'
 import { sepolia } from 'viem/chains'
-import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } from './realSetup.ts'
+import { installRealOwner, publicClient, requireLocalFork, signInAndDeploy } from './realSetup.ts'
 
 /*
- * One person, one sitting, nothing mocked: sign up, create a wallet on the local Sepolia fork, top
+ * One person, one sitting, nothing mocked: sign in with a wallet, create a Mitfah wallet on the local Sepolia fork, top
  * it up, save a contact, pause and unpause the wallet, withdraw, and reload the page in the middle
  * to prove the session and the wallet come back.
  *
@@ -18,7 +18,7 @@ import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } fro
 const abi = parseAbi(['function paused() view returns (bool)'])
 const NEIGHBOUR = '0x90F79bf6EB2c4f870365E785982E1f101E93b906'
 
-test('one sitting: sign up, create, fund, save a contact, pause, withdraw, reload', async ({
+test('one sitting: sign in, create, fund, save a contact, pause, withdraw, reload', async ({
   page,
   request,
 }, testInfo) => {
@@ -27,7 +27,7 @@ test('one sitting: sign up, create, fund, save a contact, pause, withdraw, reloa
   await requireLocalFork(request)
 
   const owner = await installRealOwner(page)
-  const account = await signUpAndDeploy(page, request, 'e2e-journey')
+  const account = await signInAndDeploy(page, request, owner)
   const { address } = await account.readWallet()
   const paused = () => publicClient.readContract({ address, abi, functionName: 'paused' })
   const confirmed = (text: string) => expect(page.getByText(text)).toBeVisible({ timeout: 60_000 })
@@ -52,6 +52,7 @@ test('one sitting: sign up, create, fund, save a contact, pause, withdraw, reloa
   await add.getByLabel('Name').fill('neighbour')
   await add.getByLabel('Address').fill(NEIGHBOUR)
   await add.getByRole('button', { name: 'Continue' }).click()
+  // The wallet, still connected from signing in, signs the contact (EIP-712) as it is saved.
   await add.getByRole('button', { name: 'Save contact' }).click()
   await expect(page.getByRole('heading', { name: 'Your contacts (1)' })).toBeVisible()
 

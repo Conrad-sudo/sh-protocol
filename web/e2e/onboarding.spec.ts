@@ -1,6 +1,4 @@
 import { expect, test, type Page } from '@playwright/test'
-import { hexToString } from 'viem'
-import { parseSiweMessage } from 'viem/siwe'
 import { installFakeWallet, type WalletTx } from './fakeWallet.ts'
 import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, walletState } from './helpers.ts'
 import { walkOnboarding } from './onboardingFlow.ts'
@@ -12,8 +10,6 @@ import { walkOnboarding } from './onboardingFlow.ts'
 
 const SEPOLIA = 11155111
 const WALLET = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
-const NONCE = 'k3n9v2x8q1w7'
-const SIGNATURE = `0x${'ab'.repeat(65)}`
 const TX_HASH = `0x${'12'.repeat(32)}`
 const PREDICTED = '0x2222222222222222222222222222222222222222'
 const TOKENS = [
@@ -35,23 +31,24 @@ const PREPARED_TX = {
 }
 
 interface Recorded {
-  siwe: { message: string; nonce: string; signature: string }[]
   deploy: unknown[]
   confirms: number
+  /** Messages the wallet was asked to sign: none, as signing in already proved the wallet. */
   signed: string[]
   sent: { tx: WalletTx; chainId: number }[]
 }
 
+/** Signed in as WALLET, the fake wallet's address, with no Mitfah wallet yet. */
 async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
-  const recorded: Recorded = { siwe: [], deploy: [], confirms: 0, signed: [], sent: [] }
-  let me = { ...ME }
+  const recorded: Recorded = { deploy: [], confirms: 0, signed: [], sent: [] }
+  let me = { ...ME, owner_addr: WALLET }
 
   await installFakeWallet(page, {
     address: WALLET,
     chainId: SEPOLIA,
     signMessage: async message => {
-      recorded.signed.push(hexToString(message as `0x${string}`))
-      return SIGNATURE
+      recorded.signed.push(message)
+      throw new Error('creating a wallet signs no message')
     },
     sendTransaction: async (tx, chainId) => {
       recorded.sent.push({ tx, chainId })
@@ -84,12 +81,6 @@ async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
             ],
           },
         })
-      case '/api/auth/siwe/nonce':
-        return route.fulfill({ json: { nonce: NONCE } })
-      case '/api/auth/siwe/verify':
-        recorded.siwe.push(body)
-        me = { ...me, owner_addr: WALLET }
-        return route.fulfill({ json: { owner_addr: WALLET } })
       case '/api/tokens':
         return route.fulfill({ json: { tokens } })
       case '/api/deploy':
@@ -153,16 +144,8 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
   await expect(page.getByText(/^Your wallet is ready on Sepolia\. You can now disconnect your browser wallet/)).toBeVisible()
   await snap(page, testInfo, 'onboarding-done')
 
-  // What the wallet was asked to sign, and what the API was sent.
-  expect(recorded.signed).toHaveLength(1)
-  expect(recorded.siwe).toEqual([{ message: recorded.signed[0], nonce: NONCE, signature: SIGNATURE }])
-  expect(parseSiweMessage(recorded.signed[0])).toMatchObject({
-    domain: 'localhost:3000',
-    uri: 'http://localhost:3000',
-    nonce: NONCE,
-    address: WALLET,
-    chainId: SEPOLIA,
-  })
+  // Signing in proved the wallet, so it was only asked to send the deploy; and what the API was sent.
+  expect(recorded.signed).toEqual([])
   expect(recorded.deploy).toEqual([
     {
       chain_id: SEPOLIA,

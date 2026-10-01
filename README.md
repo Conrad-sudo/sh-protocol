@@ -1,4 +1,4 @@
-# SessionHandler Protocol 🤖⛓️
+# SessionHandler Protocol 🔑🤖⛓️
 
 [![CI](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml)
 [![Tests](https://img.shields.io/badge/tests-269-brightgreen)](test/)
@@ -18,7 +18,7 @@ It is built from the standards the ecosystem is converging on:
 - **ERC-8004** agent identity and reputation — the protocol's agent is a registered on-chain identity that users can review
 - **Chainlink** price feeds — every limit and fee is expressed in US dollars, on every chain
 
-The reference application is a **web app** in `web/`: sign in, deploy a wallet with one signature, set its rules, and talk to the assistant on the web or in Telegram.
+The reference application is a **web app** in `web/`: sign in with a browser wallet, deploy a wallet with one signature, set its rules, and talk to the assistant on the web or in Telegram.
 
 ---
 
@@ -36,8 +36,8 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  APPLICATIONS       web app  ·  Telegram bot  ·  CLI agent                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  SERVICE LAYER      FastAPI  ·  accounts, sign-in (email / Google / SIWE)   │
-│                     contacts allowlist  ·  owner actions signed in-browser  │
+│  SERVICE LAYER      FastAPI  ·  accounts, wallet sign-in (SIWE)             │
+│                     wallet-signed contacts  ·  owner actions in-browser     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)     │
 │                     the account is injected — the model can't choose it     │
@@ -109,7 +109,7 @@ SHTreasury  (operator — admin root, fee sink)
 
 The agent has 60+ tools across four areas:
 
-- **Payments** — native and ERC-20 transfers to contacts the owner has saved on the web (the contact list is the destination allowlist; the agent can read it, never edit it)
+- **Payments** — native and ERC-20 transfers to contacts the owner has saved on the web, each one signed by the owner's wallet (the contact list is the destination allowlist; the agent can read it, never edit it)
 - **DeFi trading and liquidity** — quotes, all six V2 swap types, add/remove liquidity, wrapping, with sufficiency and preflight checks before any write
 - **Budget awareness** — remaining limit, whether a planned spend fits, live USD prices
 - **Identity and reputation (ERC-8004)** — look up agents, read and give feedback, resolve registration files; the protocol's own agent is registered on-chain and user wallets act as its reviewers

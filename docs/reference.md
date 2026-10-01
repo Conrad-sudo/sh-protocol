@@ -102,7 +102,7 @@ sh-protocol/
 │   ├── tx_history.py                ← the History tab's record: every transaction made through Mitfah
 │   ├── agent_context.py             ← (user_id, chain_id) injected into every tool
 │   ├── smart_wallet_agent.py
-│   ├── auth.py                      ← passwords, JWTs, Google, SIWE
+│   ├── auth.py                      ← SIWE sign-in, JWTs, signed (EIP-712) contacts
 │   ├── api.py                       ← FastAPI HTTP API for web/
 │   ├── telebot.py
 │   ├── agent_card.json

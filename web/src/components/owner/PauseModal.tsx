@@ -22,7 +22,7 @@ export function PauseModal({ mode, onClose, wallet, chain, tx }: PauseModalProps
   const key = mode ?? 'pause'
 
   const close = () => {
-    if (!tx.busy && tx.state.key === key) tx.reset()
+    tx.release(key)
     onClose()
   }
 

@@ -428,7 +428,7 @@
   border-top: 1px solid var(--mf-rule);
 }
 
-.mf-sidebar-email {
+.mf-sidebar-account {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1441,33 +1441,6 @@ main p a {
   font-size: 0.95em;
 }
 
-/* "or" rule between the password form and the Google button */
-
-.mf-or {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 20px 0;
-  color: var(--rs-text-secondary);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.mf-or::before,
-.mf-or::after {
-  content: '';
-  flex: 1;
-  border-top: 1px solid var(--rs-border-primary);
-}
-
-.mf-google-button {
-  display: flex;
-  justify-content: center;
-  width: 100%;
-  min-height: 44px;
-}
-
 /* ── Settings ───────────────────────────────────────────────────────────── */
 
 .mf-settings-row {
@@ -1495,11 +1468,6 @@ main p a {
   align-items: center;
   gap: 4px;
   min-width: 0;
-}
-
-.mf-settings-row-action .mf-google-button {
-  width: 260px;
-  max-width: 100%;
 }
 
 .mf-settings-note {

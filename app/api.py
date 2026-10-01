@@ -65,14 +65,9 @@ from db import (
     get_transactions,
     create_user,
     get_user_by_id,
-    get_user_by_email,
-    get_user_by_google_sub,
     get_user_by_owner_addr,
-    link_google,
-    link_owner_addr,
     unlink_telegram,
     save_telegram_link_nonce,
-    set_password_hash,
 )
 from userop import create_pending_session_key, reconcile_session_key
 from contracts import invalidate_cache, read_spending_config
@@ -94,7 +89,7 @@ import tx_history
 from langchain_erc20 import ERC20_ABI
 from langchain_erc20.amounts import to_base_units
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 
 load_dotenv()
@@ -118,7 +113,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Rate limiting, applied to the endpoints that guess-able credentials would be thrown at.
+# Rate limiting, applied to the open sign-in endpoints and to the ones that issue nonces.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -185,9 +180,14 @@ SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
 # SpendingLimitModule's cap is an 18-decimal USD value. The API takes whole dollars and scales here,
 # so the front end never has to hold a 10**18-sized integer (see _to_json_tx for why that matters).
 USD_DECIMALS = 10**18
-# How long /api/deploy/confirm waits for the user's transaction before answering "still pending".
-# Short, because it holds a worker thread: the front end polls the same endpoint again.
+# How long a confirm (/api/deploy/confirm, the owner confirms, a deposit) waits for the user's
+# transaction before answering "still pending". Short, because it holds a worker thread: the front
+# end polls the same endpoint again.
 CONFIRM_POLL_TIMEOUT_SECS = 20
+# How far back /api/deploy/confirm looks for the block that created a wallet when the hash it was
+# given never mined because the user's wallet replaced it. Searched by halving, so it costs about 20
+# reads; finding nothing only leaves that deploy out of the History tab.
+REPLACED_DEPLOY_LOOKBACK_BLOCKS = 1_000_000
 
 # The API speaks chain IDs, because that is what a browser wallet reports (eth_chainId) and what the
 # user is actually connected to. Everything downstream of it speaks chain NAMES: save_user_network
@@ -356,6 +356,65 @@ def _failed_tx_detail(w3: Web3, tx_hash: str, receipt, what: str, hint: str = ""
     )
 
 
+def _tx_seen(w3: Web3, tx_hash: str) -> bool:
+    """
+    Whether this node knows the transaction at all, mined or still waiting in its pool.
+
+    The confirms answer "pending" until a receipt exists, which cannot tell a slow transaction from
+    one that never arrived: a wallet that handed back a hash and then failed to broadcast it, one
+    sent through another RPC for the same chain ID, one the wallet replaced (sped up or cancelled),
+    or a fork restarted since. Those never mine. The 202 carries this so the page can say so instead
+    of waiting out its whole deadline in silence.
+    """
+    try:
+        w3.eth.get_transaction(tx_hash)
+    except TransactionNotFound:
+        return False
+    return True
+
+
+def _is_wallet_of(w3: Web3, address: str, owner: str) -> bool:
+    """Whether `address` holds a SessionHandler that `owner` owns."""
+    if w3.eth.get_code(address) in (b"", HexBytes("0x")):
+        return False
+    abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    try:
+        return w3.eth.contract(address=address, abi=abi).functions.owner().call() == owner
+    except Exception:  # noqa: BLE001 -- code that is no wallet of ours
+        return False
+
+
+def _find_deploy_tx(w3: Web3, factory, wallet_address: str):
+    """
+    The receipt of the transaction that created `wallet_address`, or None. Best effort.
+
+    Providers cap how many blocks one log search may cover (Alchemy's free tier: 10), so rather than
+    search a range for the WalletDeployed log, this halves the last REPLACED_DEPLOY_LOOKBACK_BLOCKS
+    down to the block the wallet's code first appears in, then reads that one block's logs. Reading
+    old state needs an archive node; without one this finds nothing.
+    """
+    def has_code(block: int) -> bool:
+        return w3.eth.get_code(wallet_address, block_identifier=block) not in (b"", HexBytes("0x"))
+
+    try:
+        latest = w3.eth.block_number
+        before, created = max(0, latest - REPLACED_DEPLOY_LOOKBACK_BLOCKS), latest
+        if has_code(before) or not has_code(created):
+            return None
+        while created - before > 1:
+            middle = (before + created) // 2
+            if has_code(middle):
+                created = middle
+            else:
+                before = middle
+        logs = factory.events.WalletDeployed().get_logs(
+            argument_filters={"walletAddress": wallet_address}, from_block=created, to_block=created
+        )
+        return w3.eth.get_transaction_receipt(logs[0]["transactionHash"]) if logs else None
+    except Exception:  # noqa: BLE001 -- the History tab goes without the row
+        return None
+
+
 def _network_name(chain_id: int) -> str:
     """
     This server's network name for `chain_id` -- its `-fork` twin in fork mode -- or 400s. RPC-free.
@@ -412,35 +471,13 @@ def _resolve_chain(chain_id: int) -> tuple[Web3, str]:
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 
-class SignupRequest(BaseModel):
-    """Body of POST /api/auth/signup."""
+class SiweLoginRequest(BaseModel):
+    """Body of POST /api/auth/siwe/login."""
 
-    email: EmailStr
-    # 8 is a floor, not a policy: length is what matters for Argon2, and composition rules mostly
-    # push users toward predictable substitutions. The cap stops a megabyte of input reaching the
-    # hasher, which is CPU-bound by design and would otherwise be a cheap way to burn the server.
-    password: str = Field(min_length=8, max_length=1024)
-
-
-class LoginRequest(BaseModel):
-    """Body of POST /api/auth/login."""
-
-    email: EmailStr
-    password: str = Field(max_length=1024)
-
-
-class GoogleRequest(BaseModel):
-    """Body of POST /api/auth/google — the ID token from Google Identity Services."""
-
-    id_token: str
-
-
-class SiweVerifyRequest(BaseModel):
-    """Body of POST /api/auth/siwe/verify."""
-
-    message: str
-    signature: str
-    nonce: str
+    # Capped so an oversized body is refused before the regex and the signature recovery run.
+    message: str = Field(max_length=2048)
+    signature: str = Field(max_length=200)
+    nonce: str = Field(max_length=64)
 
 
 class ChatRequest(BaseModel):
@@ -491,50 +528,6 @@ def _issue_session(response: Response, user_id: int) -> dict:
     }
 
 
-@app.post("/api/auth/signup", status_code=status.HTTP_201_CREATED)
-@limiter.limit("5/minute")
-def signup(request: Request, req: SignupRequest, response: Response):
-    """
-    Creates an account from an email and password and signs it in.
-
-    @param req  The email and password.
-    @return     An access token; the refresh token is set as a cookie.
-    """
-    email=req.email.lower()
-    if get_user_by_email(email):
-        # Deliberately explicit. Signup is where an enumeration-proof answer costs the most (the
-        # user needs to know to log in instead), and login/reset already reveal nothing.
-        #raise HTTPException(status.HTTP_409_CONFLICT, "An account with that email already exists.")
-        raise HTTPException(status.HTTP_409_CONFLICT,"An account with that email already exists")
-    user_id = create_user(email=email, password_hash=auth.hash_password(req.password))
-    return _issue_session(response, user_id)
-
-
-@app.post("/api/auth/login")
-@limiter.limit("10/minute")
-def login(request: Request, req: LoginRequest, response: Response):
-    """
-    Signs in with an email and password.
-
-    The same 401 answers a wrong password and an unknown account, so the endpoint cannot be used
-    to discover which emails have accounts. The password is verified even when no account was
-    found, so the response time does not give the same thing away.
-
-    @param req  The email and password.
-    @return     An access token; the refresh token is set as a cookie.
-    """
-    user = get_user_by_email(req.email.lower())
-    stored_hash = user["password_hash"] if user else None
-    if not auth.verify_password(stored_hash, req.password):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password")
-
-    # Upgrade the stored hash if the cost parameters have moved on since it was written.
-    if auth.needs_rehash(stored_hash):
-        set_password_hash(user["id"], auth.hash_password(req.password))
-
-    return _issue_session(response, user["id"])
-
-
 @app.post("/api/auth/refresh")
 def refresh(response: Response, refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE)):
     """
@@ -569,59 +562,9 @@ def logout(response: Response, refresh_token: str | None = Cookie(default=None, 
     return {"status": "signed out"}
 
 
-@app.post("/api/auth/google")
-@limiter.limit("10/minute")
-def google_sign_in(request: Request, req: GoogleRequest, response: Response):
-    """
-    Signs in with a Google ID token, creating the account on first use.
-
-    Accounts are keyed on Google's `sub`, never on the email: an email can move between Google
-    accounts, and matching on it would let whoever holds the address today take over the account.
-
-    **A Google sign-in never merges into an existing password account of the same email.** Doing so
-    silently would mean anyone who can get Google to assert an address could take over the password
-    account behind it. Linking is possible, but only from the other direction: sign in with the
-    password first, then attach Google from settings.
-
-    @param req  The ID token from Google Identity Services.
-    @return     An access token; the refresh token is set as a cookie.
-    """
-    google_sub, email = auth.verify_google_id_token(req.id_token)
-
-    user = get_user_by_google_sub(google_sub)
-    if user:
-        return _issue_session(response, user["id"])
-
-    if email and get_user_by_email(email):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "An account with that email already exists. Sign in with your password, then link "
-            "Google from your account settings.",
-        )
-
-    return _issue_session(response, create_user(email=email, google_sub=google_sub))
-
-
-@app.post("/api/auth/google/link")
-def link_google_account(req: GoogleRequest, user_id: int = Depends(get_current_user)):
-    """
-    Attaches a Google account to the signed-in account.
-
-    The safe direction of the linking rule above: the caller has already proved they hold this
-    account, so binding Google to it grants nothing they did not already have.
-    """
-    google_sub, _ = auth.verify_google_id_token(req.id_token)
-    if get_user_by_google_sub(google_sub):
-        raise HTTPException(status.HTTP_409_CONFLICT, "That Google account is already linked.")
-    try:
-        link_google(user_id, google_sub)
-    except ValueError as e:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
-    return {"status": "linked"}
-
-
 @app.get("/api/auth/siwe/nonce")
-def siwe_nonce():
+@limiter.limit("30/minute")
+def siwe_nonce(request: Request):
     """
     Issues a nonce for the SIWE message the user is about to sign.
 
@@ -630,31 +573,32 @@ def siwe_nonce():
     return {"nonce": auth.issue_siwe_nonce()}
 
 
-@app.post("/api/auth/siwe/verify")
-def siwe_verify(req: SiweVerifyRequest, user_id: int = Depends(get_current_user)):
+@app.post("/api/auth/siwe/login")
+@limiter.limit("10/minute")
+def siwe_login(request: Request, req: SiweLoginRequest, response: Response):
     """
-    Binds the EOA that signed a SIWE message to the signed-in account.
+    Signs in with a Sign-In With Ethereum message, creating the account on the address's first one.
 
-    This address is the one that will OWN the SessionHandler on chain: deployWallet sets
-    owner = msg.sender, and only transferOwnership signed by that address can ever change it. The
-    app has no authority over it, so if the user loses the key, account recovery cannot restore
-    control of the wallet. Say so in the UI at bind time.
+    The only way in. The account IS the address that signed: the same EOA owns the account's
+    wallets on chain (deployWallet sets owner = msg.sender), so whoever can sign for it already
+    controls everything the account stands for. verify_siwe makes the signature evidence: this
+    site's domain, a fresh single-use nonce, and a signer that is the address the message names.
+
+    Mitfah cannot recover an account whose address is lost. Neither could it before: only that
+    address could ever pause, limit or withdraw from the wallet.
 
     @param req  The signed message, its signature, and the nonce it carries.
-    @return     {"owner_addr": str} — the bound address.
+    @return     An access token; the refresh token is set as a cookie.
     """
     address = auth.verify_siwe(req.message, req.signature, req.nonce)
-
-    existing = get_user_by_owner_addr(address)
-    if existing and existing["id"] != user_id:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "That address is already linked to another account."
-        )
+    user = get_user_by_owner_addr(address)
+    if user is not None:
+        return _issue_session(response, user["id"])
     try:
-        link_owner_addr(user_id, address)
-    except ValueError as e:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
-    return {"owner_addr": address}
+        return _issue_session(response, create_user(owner_addr=address))
+    except ValueError:
+        # The same address's first sign-in, twice at once: the other request made the account.
+        return _issue_session(response, get_user_by_owner_addr(address)["id"])
 
 
 @app.get("/api/me")
@@ -662,18 +606,13 @@ def me(user_id: int = Depends(get_current_user)):
     """
     Returns the signed-in account, without anything secret.
 
-    @return  The account's id, email, bound EOA, which sign-in methods it has, whether Telegram is
-             linked, and its wallets.
+    @return  The account's id, the address it signs in as (which owns its wallets), whether
+             Telegram is linked, and its wallets.
     """
     user = get_user_by_id(user_id)
     return {
         "user_id": user["id"],
-        "email": user["email"],
         "owner_addr": user["owner_addr"],
-        # A Google-created account has no password; the settings page says so rather than implying
-        # an email login that would always fail.
-        "has_password": user["password_hash"] is not None,
-        "google_linked": user["google_sub"] is not None,
         "telegram_linked": user["telegram_chat_id"] is not None,
         "wallet_chains": get_wallet_chains(user_id),
     }
@@ -726,7 +665,10 @@ def telegram_unlink(user_id: int = Depends(get_current_user)):
 # them and the balance.
 #
 # The case that motivates it is an unlocked stolen phone: the thief inherits the Telegram session
-# and can talk to the agent, but adding a payee now takes the web credential they do not have.
+# and can talk to the agent, but adding a payee takes the owner wallet they do not have. Since
+# 2026-10-01 not even a web session is enough: every new or changed contact carries the owner's
+# EIP-712 signature over its exact name and address (auth.contact_typed_data), so a session token
+# lifted by an XSS bug, or a browser left signed in, adds no payee either.
 # The residual is stated plainly: they can still move up to the remaining cap to contacts the
 # owner already saved, which is worth little to a thief. Revoking the session key
 # (POST /api/wallet/session/prepare) is the response to a lost device.
@@ -738,7 +680,7 @@ def telegram_unlink(user_id: int = Depends(get_current_user)):
 
 
 class ContactRequest(BaseModel):
-    """Body of POST /api/contacts."""
+    """Body of POST /api/contacts/prepare."""
 
     # Names index a lowercase column and are what the user types at the agent, so they are kept
     # short and free of the characters that would make them awkward to name back ("/" would also
@@ -747,19 +689,22 @@ class ContactRequest(BaseModel):
     address: str
 
 
-@app.post("/api/contacts", status_code=status.HTTP_201_CREATED)
-def create_contact(req: ContactRequest, user_id: int = Depends(get_current_user)):
+class SignedContactRequest(ContactRequest):
+    """Body of POST /api/contacts: the contact, and the owner's signature over its typed data."""
+
+    nonce: str = Field(max_length=64)
+    signature: str = Field(max_length=200)
+
+
+def _normalise_contact(req: ContactRequest) -> tuple[str, str]:
     """
-    Saves or updates a contact for the signed-in account. See the note above on why this is here.
+    The contact's name and address as they are signed and stored, or a 422 saying what is wrong.
 
-    The address is checksummed before storage rather than trusted as typed: it is stored once and
-    then read back as a transaction destination for as long as the contact exists, so a typo
-    caught here is a transaction that never gets built, while one stored raw surfaces much later
-    as an opaque failure deep in the calldata builder -- or, if it happens to be valid, as funds
-    sent somewhere real.
-
-    @param req  The contact name and its Ethereum address.
-    @return     The stored contact, with the address in checksummed form.
+    The address is checksummed rather than trusted as typed: it is stored once and then read back
+    as a transaction destination for as long as the contact exists, so a typo caught here is a
+    transaction that never gets built, while one stored raw surfaces much later as an opaque
+    failure deep in the calldata builder -- or, if it happens to be valid, as funds sent somewhere
+    real.
     """
     name = req.name.strip().lower()
     if not name:
@@ -782,7 +727,40 @@ def create_contact(req: ContactRequest, user_id: int = Depends(get_current_user)
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"'{req.address}' is not an Ethereum address"
         )
+    return name, address
 
+
+@app.post("/api/contacts/prepare")
+@limiter.limit("30/minute")
+def prepare_contact(request: Request, req: ContactRequest, user_id: int = Depends(get_current_user)):
+    """
+    Checks a contact and returns the EIP-712 typed data the owner wallet signs to save it.
+
+    Checked first, so a name or address that would be refused fails before the wallet is asked to
+    sign anything. The typed data carries the name and address exactly as they will be stored, and a
+    nonce issued for this account and this contact alone.
+
+    @return  {"domain", "types", "primaryType", "message"}, for viem's signTypedData as it is.
+    """
+    # An account with no owner could never produce the signature: refuse before issuing a nonce.
+    _require_owner(user_id)
+    name, address = _normalise_contact(req)
+    return auth.contact_typed_data(name, address, auth.issue_contact_nonce(user_id, name, address))
+
+
+@app.post("/api/contacts", status_code=status.HTTP_201_CREATED)
+def create_contact(req: SignedContactRequest, user_id: int = Depends(get_current_user)):
+    """
+    Saves or updates a contact for the signed-in account, given the owner's signature over it.
+    See the note above on why this is here, and why it takes a signature and not just a session.
+
+    @param req  The contact, the nonce from POST /api/contacts/prepare, and the owner wallet's
+                EIP-712 signature over that typed data.
+    @return     The stored contact, with the address in checksummed form.
+    """
+    owner = _require_owner(user_id)
+    name, address = _normalise_contact(req)
+    auth.verify_contact_signature(user_id, owner, name, address, req.nonce, req.signature)
     save_contact(user_id, name, address)
     return {"name": name, "address": address}
 
@@ -961,30 +939,52 @@ def list_transactions(
 
 
 @app.post("/api/transactions/deposit")
-def record_deposit(req: DepositRequest, user_id: int = Depends(get_current_user)):
+def confirm_deposit(req: DepositRequest, response: Response, user_id: int = Depends(get_current_user)):
     """
-    Lists a deposit made from the Fund drawer in the History tab.
+    Waits for a deposit made from the Fund drawer, and lists it in the History tab.
 
     The browser sends a deposit itself -- anyone may fund a wallet, so it never goes through the
-    owner confirms -- and reports the hash here. Only a transaction actually sent to this user's
-    wallet on the chain is recorded (tx_history.record_owner_tx checks). Answers at once: a deposit
-    that has not mined yet is listed as pending and settled when the History tab is read.
+    owner confirms -- and the drawer asks here until it has mined, through this node: the one the
+    dashboard reads the balance from. Only a transaction actually sent to this user's wallet on the
+    chain counts. A deposit is listed from the first answer that finds it on the network, so closing
+    the drawer before it mines loses nothing; the History tab settles it later.
 
-    @return  {"status": "ok"}, whether or not the transaction qualified.
+    Answers 202 while the transaction is still pending, with `seen` as in /api/wallet/tx/confirm;
+    the front end polls until it gets a 200.
+
+    @return  {"status": "confirmed", "tx_hash"} once mined.
+    @raises HTTPException 400 if it was not sent to the wallet, or failed.
     """
     w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
     try:
-        receipt = w3.eth.get_transaction_receipt(req.tx_hash)
+        tx = w3.eth.get_transaction(req.tx_hash)
     except TransactionNotFound:
-        receipt = None
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
+    if tx["to"] is None or Web3.to_checksum_address(tx["to"]) != wallet.address:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Transaction {req.tx_hash} was not sent to your wallet on chain {req.chain_id}.",
+        )
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
+    except (TimeExhausted, TransactionNotFound):
+        tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash)
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
+
     tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash, receipt)
-    return {"status": "ok"}
+    if receipt["status"] != 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, _failed_tx_detail(w3, req.tx_hash, receipt, "The transfer")
+        )
+    return {"status": "confirmed", "tx_hash": req.tx_hash}
 
 
 def _require_own_deployer(user_id: int, deployer: str):
     """
-    Refuses a deploy unless the deploying EOA is the one this account proved it holds via SIWE.
+    Refuses a deploy unless the deploying EOA is the one this account signs in as (via SIWE).
 
     Without this the deployer is just an address in the request body, and two things go wrong.
     A caller can name somebody else's EOA, which mints a session key for a wallet they will never
@@ -993,25 +993,18 @@ def _require_own_deployer(user_id: int, deployer: str):
     into the real deploy is the owner's, so the attacker's key is never authorized -- but their
     agent would happily read the victim's balances through it.
 
-    Requiring the SIWE binding first also matches the order the UI wants anyway: connect wallet,
-    prove it, then deploy.
+    The UI never sends anything else: it deploys from the wallet the user signed in with.
 
     @param user_id   The authenticated account.
     @param deployer  The checksummed EOA the request wants to deploy from.
-    @raises HTTPException 403 if no address is bound, or a different one is.
+    @raises HTTPException 403 if the account has no address, or a different one.
     """
-    owner_addr = get_user_by_id(user_id)["owner_addr"]
-    if not owner_addr:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Link your wallet address first: GET /api/auth/siwe/nonce, sign the message, then "
-            "POST /api/auth/siwe/verify.",
-        )
+    owner_addr = _require_owner(user_id)
     if owner_addr != deployer:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            f"This account is linked to {owner_addr}, not {deployer}. Switch accounts in your "
-            "wallet, or link the new address first.",
+            f"You're signed in as {owner_addr}, not {deployer}. Switch to that account in your "
+            "wallet.",
         )
 
 
@@ -1371,7 +1364,13 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     prompt from leaving a row for a wallet that does not exist, and what lets the app recover the
     address from the receipt rather than trusting the prediction.
 
-    Answers 202 while the transaction is still pending; the front end polls until it gets a 200.
+    Answers 202 while the transaction is still pending, with `seen` as in /api/wallet/tx/confirm;
+    the front end polls until it gets a 200.
+
+    A hash the node has never seen still finishes the deploy when the wallet is already at the
+    predicted address. The user's wallet replaced the transaction (sped it up, say) and it mined
+    under a hash nobody told the app. Answered "not seen", the page would offer to start over, and a
+    second deploy makes a second wallet.
 
     @param req  The chain, the user's EOA, the transaction hash and the predicted address.
     @return     {"status", "chain_id", "wallet_address", "session_key", "session_key_authorized"}.
@@ -1393,11 +1392,25 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     w3, chain_name = _resolve_chain(req.chain_id)
     chain_id = req.chain_id
 
+    # Answered at once, without the receipt wait: a hash this node has never seen may never arrive.
+    if not _tx_seen(w3, req.tx_hash):
+        # The predicted address is where this owner's deploy lands, so a wallet of theirs there is
+        # this deploy, mined under another hash. Only theirs: the owner check, and the session key
+        # that only /api/deploy for this account mints, keep anyone else's wallet out.
+        if not _is_wallet_of(w3, predicted, deployer):
+            response.status_code = status.HTTP_202_ACCEPTED
+            return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
+        replacement = _find_deploy_tx(w3, _load_factory_for_chain(w3, chain_id), predicted)
+        if replacement is not None:
+            tx_history.record_deploy(
+                w3, user_id, chain_id, predicted, replacement["transactionHash"], replacement
+            )
+        return _finish_deploy(w3, user_id, chain_id, chain_name, predicted, predicted)
     try:
         receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
     except (TimeExhausted, TransactionNotFound):
         response.status_code = status.HTTP_202_ACCEPTED
-        return {"status": "pending", "tx_hash": req.tx_hash}
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
 
     if receipt["status"] != 1:
         # Listed as failed (it cost gas) -- but only when it is this user's own transaction.
@@ -1424,7 +1437,20 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     wallet_address = logs[0]["args"]["walletAddress"]
     # Recorded as soon as the deploy is proved, before anything below can refuse: it is on chain.
     tx_history.record_deploy(w3, user_id, chain_id, wallet_address, req.tx_hash, receipt)
+    return _finish_deploy(w3, user_id, chain_id, chain_name, predicted, wallet_address)
 
+
+def _finish_deploy(
+    w3: Web3, user_id: int, chain_id: int, chain_name: str, predicted: str, wallet_address: str
+) -> dict:
+    """
+    Files a wallet that is on chain as the user's wallet on `chain_id`: the second half of
+    /api/deploy/confirm.
+
+    @param predicted       The address /api/deploy predicted, which the pending session key is under.
+    @param wallet_address  Where the wallet actually is.
+    @return                The confirm's 200 body.
+    """
     # The prediction can go stale: deployCount is per-owner, so a second deploy by this same user
     # between /api/deploy and their signature moves the address. The key seeded into initialize() is
     # still the one minted against `predicted`, so MOVE the row rather than minting a new key — a
@@ -1539,14 +1565,14 @@ def _require_owner(user_id: int) -> str:
 
     @param user_id  The authenticated account.
     @return         The checksummed owner address.
-    @raises HTTPException 403 if the account has not completed the SIWE binding.
+    @raises HTTPException 403 for an account with no address: one migrated from Telegram-only
+            days, which never signed in on the web.
     """
     owner_addr = get_user_by_id(user_id)["owner_addr"]
     if not owner_addr:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "Link your wallet address first: GET /api/auth/siwe/nonce, sign the message, then "
-            "POST /api/auth/siwe/verify.",
+            "This account has no wallet address. Sign in on the web app with the wallet that owns it.",
         )
     return owner_addr
 
@@ -1777,9 +1803,10 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
 
     Authenticated but NOT gated on `_require_owner`. That check exists so an owner ACTION has an
     address to build a transaction for; reading costs nothing and the wallet row is already keyed by
-    the caller's own user_id, so demanding a SIWE binding first would only lock out an account whose
-    wallet was created outside the browser flow. `is_owner` reports the binding instead, so a UI can
-    decide whether to offer the owner controls.
+    the caller's own user_id, so demanding an owner address first would only lock out an account
+    from Telegram-only days, whose wallet was created outside the browser flow. `is_owner` reports
+    whether the address the account signs in as owns the wallet, so a UI can decide whether to offer
+    the owner controls.
 
     **Reading the session block.** The wallet authorizes ONE session key at a time, held in
     `currentSession`, so `session.wallet_key` is the whole truth about what the wallet trusts -- no
@@ -1994,6 +2021,7 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
     /api/deploy/confirm, which exists precisely because it has a row to write.
 
     Answers 202 while the transaction is still pending; the front end polls until it gets a 200.
+    The 202's `seen` is false while this node has never seen the hash (see _tx_seen).
 
     @return  {"status", "tx_hash", "wallet_state"} once mined.
     """
@@ -2001,13 +2029,17 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
     w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
 
+    # Answered at once, without the receipt wait: a hash this node has never seen may never arrive.
+    if not _tx_seen(w3, req.tx_hash):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
     try:
         receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
     except (TimeExhausted, TransactionNotFound):
         # In the History tab from the first poll, so closing the page before it mines loses nothing.
         tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash)
         response.status_code = status.HTTP_202_ACCEPTED
-        return {"status": "pending", "tx_hash": req.tx_hash}
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
 
     # Only accept a transaction that was actually sent TO this user's wallet, so one user cannot
     # report another's transaction hash and read state back through this endpoint.
@@ -2207,7 +2239,8 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
       - zero                    -> the revocation landed; forget the key entirely, ciphertext and all
       - anything else           -> leave the rows alone and report the drift
 
-    Answers 202 while the transaction is still pending; the front end polls until it gets a 200.
+    Answers 202 while the transaction is still pending, with `seen` as in /api/wallet/tx/confirm;
+    the front end polls until it gets a 200.
 
     @return  {"status", "tx_hash", "session"} once mined.
     """
@@ -2215,12 +2248,16 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
     w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
 
+    # As in /api/wallet/tx/confirm: an unseen hash is answered at once and says so.
+    if not _tx_seen(w3, req.tx_hash):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
     try:
         receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
     except (TimeExhausted, TransactionNotFound):
         tx_history.record_owner_tx(w3, user_id, req.chain_id, wallet, req.tx_hash)
         response.status_code = status.HTTP_202_ACCEPTED
-        return {"status": "pending", "tx_hash": req.tx_hash}
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
 
     # Same guard as /api/wallet/tx/confirm: only a transaction sent TO this user's wallet counts, so
     # one user cannot report another's hash and drive state through this endpoint.

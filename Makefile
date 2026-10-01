@@ -42,8 +42,8 @@ snapshot:
 identity-test:
 	.venv/bin/python3 app/tests/test_identity.py
 
-# Full auth flow against a throwaway DB: signup, login, refresh rotation and reuse detection,
-# token forgery, SIWE binding, the deployer check and the Telegram link nonce. Also offline.
+# Full auth flow against a throwaway DB: SIWE sign-in, refresh rotation and reuse detection,
+# token forgery, the deployer check, signed (EIP-712) contacts and the Telegram link nonce. Also offline.
 auth-test:
 	.venv/bin/python3 app/tests/test_auth.py
 
@@ -60,7 +60,7 @@ history-test:
 # Everything that runs without a chain.
 py-test: identity-test auth-test custom-tokens-test history-test
 
-# The real journey against a running fork: signup -> SIWE -> deploy -> every owner action -> the
+# The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia
 # unless ARGS names another fork, e.g. `make e2e-test ARGS=arbitrum-fork`. Needs `make vault`, that
 # fork running and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.

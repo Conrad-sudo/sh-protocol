@@ -12,16 +12,6 @@ import type {
   WalletState,
 } from './types'
 
-/** A single-use nonce to put in the SIWE message. */
-export function siweNonce() {
-  return apiFetch<{ nonce: string }>('/api/auth/siwe/nonce', { auth: false })
-}
-
-/** Binds the address that signed `message` to the signed-in account as its wallet owner. */
-export function siweVerify(body: { message: string; signature: string; nonce: string }) {
-  return apiFetch<{ owner_addr: string }>('/api/auth/siwe/verify', { method: 'POST', body })
-}
-
 /** Tokens a wallet on `chainId` can count toward its limit. */
 export async function fetchTokens(chainId: number) {
   const { tokens } = await apiFetch<{ tokens: Token[] }>(`/api/tokens?chain_id=${chainId}`, { auth: false })
@@ -50,18 +40,16 @@ export function removeCustomToken(chainId: number, address: string) {
 }
 
 /** Builds the unsigned deployWallet transaction for the user's own wallet to sign. */
-export function prepareDeploy(body: DeployRequest) {
-  return apiFetch<DeployPrepared>('/api/deploy', { method: 'POST', body })
+export function prepareDeploy(body: DeployRequest, signal?: AbortSignal) {
+  return apiFetch<DeployPrepared>('/api/deploy', { method: 'POST', body, signal })
 }
 
 /** Records the wallet once the deploy has mined. Answers `pending` (HTTP 202) until then. */
-export function confirmDeploy(body: {
-  chain_id: number
-  deployer: string
-  tx_hash: string
-  predicted_address: string
-}) {
-  return apiFetch<DeployConfirmResult>('/api/deploy/confirm', { method: 'POST', body })
+export function confirmDeploy(
+  body: { chain_id: number; deployer: string; tx_hash: string; predicted_address: string },
+  signal?: AbortSignal,
+) {
+  return apiFetch<DeployConfirmResult>('/api/deploy/confirm', { method: 'POST', body, signal })
 }
 
 /** The wallet's state on `chainId`, or null when the account has no wallet there (404). */
@@ -104,14 +92,14 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
  * Builds an owner transaction for the user's own wallet to sign. The API test-runs it first, so a
  * change that would fail is refused here (400) with the reason, before the user pays for it.
  */
-export function prepareOwnerAction(chainId: number, action: OwnerAction) {
+export function prepareOwnerAction(chainId: number, action: OwnerAction, signal?: AbortSignal) {
   const [path, body] = ownerActionRequest(chainId, action)
-  return apiFetch<{ tx: PreparedTx }>(path, { method: 'POST', body })
+  return apiFetch<{ tx: PreparedTx }>(path, { method: 'POST', body, signal })
 }
 
 /** Waits for an owner transaction. Answers `pending` (HTTP 202) until it has mined. */
-export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }) {
-  return apiFetch<OwnerTxConfirmResult>('/api/wallet/tx/confirm', { method: 'POST', body })
+export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
+  return apiFetch<OwnerTxConfirmResult>('/api/wallet/tx/confirm', { method: 'POST', body, signal })
 }
 
 /**
@@ -119,6 +107,6 @@ export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }) {
  * starts using only once this sees the wallet trust it, so a grant confirmed anywhere else would
  * leave the assistant signing with the key the wallet just dropped.
  */
-export function confirmSessionTx(body: { chain_id: number; tx_hash: string }) {
-  return apiFetch<SessionTxConfirmResult>('/api/wallet/session/confirm', { method: 'POST', body })
+export function confirmSessionTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
+  return apiFetch<SessionTxConfirmResult>('/api/wallet/session/confirm', { method: 'POST', body, signal })
 }

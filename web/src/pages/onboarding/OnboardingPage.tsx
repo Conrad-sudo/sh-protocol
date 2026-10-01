@@ -28,7 +28,6 @@ import { StatusTag } from '../../components/StatusTag'
 import { AccountMismatchBanner } from '../../components/wallet/AccountMismatchBanner'
 import { ConnectDialog } from '../../components/wallet/ConnectDialog'
 import { NetworkBanner } from '../../components/wallet/NetworkBanner'
-import { SiweVerifyCard } from '../../components/wallet/SiweVerifyCard'
 import { useDeploy, type DeployPhase } from '../../hooks/useDeploy'
 import { useMe } from '../../hooks/useMe'
 import { useTokens } from '../../hooks/useTokens'
@@ -39,17 +38,10 @@ import { WINDOW_CHOICES } from '../../lib/spending'
 import { chainName, isSupportedChainId } from '../../wallet/chains'
 import { DeployProgress } from './DeployProgress'
 
-const STEP_TITLES = [
-  'Connect wallet',
-  'Verify ownership',
-  'Choose network',
-  'Set your limit',
-  'Add gas funds',
-  'Review and create',
-] as const
+const STEP_TITLES = ['Choose network', 'Set your limit', 'Prefund your wallet', 'Review and create'] as const
 
 type WizardStep = 'network' | 'limits' | 'fund' | 'review'
-const WIZARD_INDEX: Record<WizardStep, number> = { network: 2, limits: 3, fund: 4, review: 5 }
+const WIZARD_INDEX: Record<WizardStep, number> = { network: 0, limits: 1, fund: 2, review: 3 }
 
 interface Draft {
   chainId: number | null
@@ -63,9 +55,10 @@ interface Draft {
 const BUSY: DeployPhase[] = ['preparing', 'signing', 'confirming']
 
 /**
- * Creating a Mitfah wallet: connect a browser wallet, prove it's yours, then choose where the wallet
- * lives and how much the assistant may spend. The user's own wallet signs the deploy, so it owns the
- * result.
+ * Creating a Mitfah wallet: choose where it lives, how much the assistant may spend and what to put
+ * in it, then sign the deploy. Signing in already proved which wallet is the user's; that wallet
+ * signs the deploy, so it owns the result. If the browser wallet has since disconnected or moved to
+ * another account, the page asks for it back first.
  */
 export function OnboardingPage() {
   const { address, chainId: walletChainId, isConnected } = useConnection()
@@ -85,7 +78,7 @@ export function OnboardingPage() {
     prefund: null,
   })
 
-  const { state: deployState, deploy, resume, reset } = useDeploy(result => {
+  const { state: deployState, deploy, resume, abandon, startOver } = useDeploy(result => {
     setChainId(result.chainId)
     toaster.push(
       <Message type={result.assistantReady ? 'success' : 'warning'} showIcon closable>
@@ -106,16 +99,13 @@ export function OnboardingPage() {
   const chain = chains.find(c => c.chain_id === chainId)
   const prefund = draft.prefund ?? (chain?.fork ? '1' : '0.05')
 
-  const verified = Boolean(address && me?.owner_addr && me.owner_addr.toLowerCase() === address.toLowerCase())
+  const owner = me?.owner_addr ?? null
+  const ownerConnected = Boolean(address && owner && owner.toLowerCase() === address.toLowerCase())
   const deploying = BUSY.includes(deployState.phase) || deployState.canResume === true
   // A deploy picked up after a reload: the form values are gone, so only its progress — and, if it
   // failed, why — can be shown until the user starts over.
   const resumed = deployState.phase !== 'idle' && step !== 'review'
-  let index: number
-  if (deploying || resumed) index = 5
-  else if (!isConnected || !address) index = 0
-  else if (!verified) index = 1
-  else index = WIZARD_INDEX[step]
+  const index = deploying || resumed ? WIZARD_INDEX.review : WIZARD_INDEX[step]
 
   const goToLimits = async () => {
     setDraft(d => ({ ...d, chainId }))
@@ -146,8 +136,9 @@ export function OnboardingPage() {
     <DeployProgress
       state={deployState}
       chainId={deployChainId}
-      onRetry={reset}
+      onRetry={startOver}
       onResume={resume}
+      onAbandon={abandon}
     />
   )
 
@@ -166,12 +157,18 @@ export function OnboardingPage() {
         progress={progress}
       />
     )
-  } else if (index === 0) {
+  } else if (!isConnected || !address) {
     body = (
-      <StepBody title="Connect the wallet that will own your Mitfah wallet">
+      <StepBody title="Connect the wallet you signed in with">
         <Text muted>
-          Use a browser wallet such as MetaMask. You'll sign with it to create your Mitfah wallet, and only
-          it can pause the wallet, change its limits or withdraw.
+          {owner ? (
+            <>
+              Your Mitfah wallet will be owned by <AddressText address={owner} />, so it signs the deploy. Connect it
+              to continue.
+            </>
+          ) : (
+            'Connect the wallet you signed in with to continue.'
+          )}
         </Text>
         <Button appearance="primary" className="mf-step-action" onClick={() => setConnectOpen(true)}>
           Connect wallet
@@ -179,19 +176,10 @@ export function OnboardingPage() {
         <ConnectDialog open={connectOpen} onClose={() => setConnectOpen(false)} />
       </StepBody>
     )
-  } else if (index === 1 && address) {
+  } else if (!ownerConnected) {
     body = (
-      <StepBody title="Prove this wallet is yours">
-        {me?.owner_addr ? (
-          <AccountMismatchBanner
-            ownerAddr={me.owner_addr}
-            connected={address}
-            chainId={walletChainId ?? 1}
-            canRelink={walletChains.length === 0}
-          />
-        ) : (
-          <SiweVerifyCard address={address} chainId={walletChainId ?? 1} />
-        )}
+      <StepBody title="Switch to the wallet you signed in with">
+        {owner && <AccountMismatchBanner ownerAddr={owner} connected={address} />}
       </StepBody>
     )
   } else if (step === 'network') {
@@ -255,10 +243,11 @@ export function OnboardingPage() {
   } else if (step === 'fund') {
     const valid = isValidAmount(prefund)
     body = (
-      <StepBody title="Add funds for network fees">
+      <StepBody title="Prefund your Mitfah wallet">
         <Text muted>
-          Your Mitfah wallet pays its own network fees from this balance, and the assistant can spend it too
-          (within your limit). You can add more any time.
+          This is your Mitfah wallet's starting balance. Your assistant pays for everything from it — payments,
+          swaps and every other transaction, plus their network fees — and never uses the funds in the wallet you
+          connected. It can only spend within your limit. You can add more any time.
         </Text>
         <Form fluid className="mf-auth-form">
           <Form.Group controlId="prefund">
@@ -463,7 +452,7 @@ function ReviewStep({
         </dd>
         <dt>Counts toward the limit</dt>
         <dd>{[chain?.native_ticker ?? 'Native token', ...watched.map(t => t.toUpperCase())].join(', ')}</dd>
-        <dt>Gas funds</dt>
+        <dt>Wallet prefund</dt>
         <dd className="mf-num">
           {draft.prefund} {chain?.native_ticker}
         </dd>

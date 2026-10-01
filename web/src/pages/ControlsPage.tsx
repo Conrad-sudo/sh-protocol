@@ -21,7 +21,8 @@ const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the 
 /** Everything the owner can change about the wallet: the brakes, the limit, and what it counts. */
 export function ControlsPage() {
   const view = useWalletView()
-  if (view.wallet) return <Controls wallet={view.wallet} />
+  // Keyed by network: an owner transaction in flight on one network must not follow you to another.
+  if (view.wallet) return <Controls key={view.wallet.chain_id} wallet={view.wallet} />
   return (
     <>
       <PageHeader title={TITLE} description={DESCRIPTION} />

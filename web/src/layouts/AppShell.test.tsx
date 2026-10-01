@@ -3,7 +3,7 @@ import { cleanup, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import { routes } from '../routes'
-import { json, ME, renderRoutes, setViewportWidth, TOKEN } from '../test/utils'
+import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 function stubSignedIn() {
   const fetch = vi.fn((url: string) => {
@@ -35,7 +35,8 @@ describe('AppShell', () => {
     // The lit pill sits under the fourth item.
     expect(nav.querySelector<HTMLElement>('.mf-nav')!.style.getPropertyValue('--mf-nav')).toBe('3')
     expect(nav.querySelector('.mf-nav-pill')).toBeInTheDocument()
-    expect(await screen.findByText('sam@example.com')).toBeInTheDocument()
+    // The account is its address, shown where an email used to be.
+    expect(await screen.findByText(WALLET, { selector: '.mf-sidebar-account .mf-visually-hidden' })).toBeInTheDocument()
     expect(document.querySelector('.mf-tabbar')).toBeNull()
   })
 
@@ -95,7 +96,7 @@ describe('AppShell', () => {
     const [signOut] = await screen.findAllByRole('button', { name: 'Sign out' })
     await userEvent.setup().click(signOut)
 
-    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Sign in with your wallet' })).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/login')
     expect(router.state.location.search).toBe('')
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/api/auth/logout'))).toBe(true)

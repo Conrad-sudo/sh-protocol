@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { parseAbi, parseEther } from 'viem'
 import { sepolia } from 'viem/chains'
 import { formatTokenAmount } from '../../src/lib/format.ts'
-import { installRealOwner, publicClient, requireLocalFork, signUpAndDeploy } from './realSetup.ts'
+import { installRealOwner, publicClient, requireLocalFork, signInAndDeploy } from './realSetup.ts'
 
 /*
  * The whole journey for real: sign up against the running API, prove a fresh key owns the account,
@@ -16,7 +16,7 @@ test('a new user creates and funds a wallet on the local fork', async ({ page, r
   await requireLocalFork(request)
 
   const owner = await installRealOwner(page)
-  const account = await signUpAndDeploy(page, request, 'e2e-deploy')
+  const account = await signInAndDeploy(page, request, owner)
   expect(owner.sentOn).toEqual([sepolia.id])
   await page.screenshot({ path: testInfo.outputPath('deployed.png') })
 
