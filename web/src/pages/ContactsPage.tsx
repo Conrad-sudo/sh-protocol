@@ -10,6 +10,7 @@ import { AddressText } from '../components/AddressText'
 import { AddContactModal } from '../components/contacts/AddContactModal'
 import { CopyButton } from '../components/CopyButton'
 import { EmptyState } from '../components/EmptyState'
+import { GlassLayer } from '../components/Glass'
 import { ConfirmModal } from '../components/owner/ConfirmModal'
 import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
@@ -100,30 +101,34 @@ export function ContactsPage() {
             Add the first account you want your assistant to be able to pay.
           </EmptyState>
         ) : (
-          <ul className="mf-contact-list">
-            {list.map(contact => (
-              <li key={contact.name} className="mf-contact" data-contact={contact.name}>
-                <span className="mf-contact-name">{contact.name}</span>
-                <span className="mf-contact-address">
-                  <AddressText address={contact.address} />
-                  <CopyButton value={contact.address} label={`Address of ${contact.name}`} />
-                </span>
-                <Button
-                  appearance="subtle"
-                  size="sm"
-                  className="mf-contact-remove"
-                  aria-label={`Remove ${contact.name}`}
-                  loading={removing.includes(contact.name)}
-                  onClick={() => {
-                    setToRemove(contact)
-                    setRemoveOpen(true)
-                  }}
-                >
-                  Remove
-                </Button>
-              </li>
-            ))}
-          </ul>
+          // The glass sits beside the list, not in it: a list may only hold its items.
+          <div className="mf-contact-plate mf-glass-surface">
+            <GlassLayer />
+            <ul className="mf-contact-list">
+              {list.map(contact => (
+                <li key={contact.name} className="mf-contact" data-contact={contact.name}>
+                  <span className="mf-contact-name">{contact.name}</span>
+                  <span className="mf-contact-address">
+                    <AddressText address={contact.address} />
+                    <CopyButton value={contact.address} label={`Address of ${contact.name}`} />
+                  </span>
+                  <Button
+                    appearance="subtle"
+                    size="sm"
+                    className="mf-contact-remove"
+                    aria-label={`Remove ${contact.name}`}
+                    loading={removing.includes(contact.name)}
+                    onClick={() => {
+                      setToRemove(contact)
+                      setRemoveOpen(true)
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         <AddContactModal
           key={addKey}

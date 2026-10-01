@@ -1,4 +1,5 @@
-import { Button, Panel, Placeholder, Stack } from 'rsuite'
+import { Button, Placeholder, Stack } from 'rsuite'
+import { GlassPanel } from '../components/Glass'
 import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
 import { OwnerAddressCard } from '../components/settings/OwnerAddressCard'
@@ -16,9 +17,9 @@ export function SettingsPage() {
   let account
   if (isPending) {
     account = (
-      <Panel bordered>
+      <GlassPanel bordered>
         <Placeholder.Paragraph rows={3} active />
-      </Panel>
+      </GlassPanel>
     )
   } else if (isError || !me) {
     account = (
@@ -39,14 +40,14 @@ export function SettingsPage() {
       <PageHeader title="Settings" />
       <Stack direction="column" spacing={16} alignItems="stretch">
         {account}
-        <Panel bordered header="Appearance">
+        <GlassPanel bordered header="Appearance">
           <ThemeSwitch />
-        </Panel>
-        <Panel bordered header="Session">
+        </GlassPanel>
+        <GlassPanel bordered header="Session">
           <Button color="red" appearance="ghost" onClick={signOut}>
             Sign out
           </Button>
-        </Panel>
+        </GlassPanel>
       </Stack>
     </>
   )

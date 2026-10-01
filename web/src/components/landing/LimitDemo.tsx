@@ -3,6 +3,7 @@ import BlockRoundIcon from '@rsuite/icons/BlockRound'
 import CheckRoundIcon from '@rsuite/icons/CheckRound'
 import ReloadIcon from '@rsuite/icons/Reload'
 import { Button } from 'rsuite'
+import { GlassLayer } from '../Glass'
 import { LimitDial } from '../LimitDial'
 
 /*
@@ -23,7 +24,8 @@ export function LimitDemo() {
 
   return (
     <section className="mf-demo" aria-labelledby="demo-heading">
-      <div className="mf-demo-plate" key={run}>
+      <div className="mf-demo-plate mf-glass-surface" key={run}>
+        <GlassLayer />
         <LimitDial percent={30} label="30% of the $100 limit left" size={260} className="mf-demo-dial">
           <span className="mf-demo-amounts">
             <strong className="mf-dial-amount mf-num" data-step="0" aria-hidden>

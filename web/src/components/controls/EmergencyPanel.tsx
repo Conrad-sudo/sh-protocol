@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react'
-import { Panel, Text } from 'rsuite'
+import { Text } from 'rsuite'
 import { useNow } from '../../hooks/useNow'
 import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS, assistantStatus, type AssistantStatus } from '../../lib/assistant'
 import { formatDate, formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
+import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
 import { StatusTag } from '../StatusTag'
@@ -17,7 +18,7 @@ export function EmergencyPanel(props: ControlPanelProps) {
   const { wallet, tx, locked, start, ask } = props
 
   return (
-    <Panel bordered header={<h2>Emergency</h2>} className="mf-card">
+    <GlassPanel bordered header={<h2>Emergency</h2>} className="mf-card">
       <ControlRow
         title="Wallet"
         status={wallet.paused ? <StatusTag tone="danger">Paused</StatusTag> : <StatusTag tone="success">Active</StatusTag>}
@@ -75,7 +76,7 @@ export function EmergencyPanel(props: ControlPanelProps) {
       </ControlRow>
 
       <AssistantRow {...props} />
-    </Panel>
+    </GlassPanel>
   )
 }
 

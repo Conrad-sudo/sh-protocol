@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Form, Panel, Placeholder, SelectPicker, Text } from 'rsuite'
+import { Form, Placeholder, SelectPicker, Text } from 'rsuite'
 import type { Chain } from '../../api/types'
 import { useTokens } from '../../hooks/useTokens'
 import { AddressText } from '../AddressText'
+import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
@@ -26,7 +27,7 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
   const watched = wallet.spending.watched_tokens.filter(t => !alwaysAddresses.has(t.address.toLowerCase()))
 
   return (
-    <Panel bordered header={<h2>Tokens that count toward the limit</h2>} className="mf-card">
+    <GlassPanel bordered header={<h2>Tokens that count toward the limit</h2>} className="mf-card">
       <ul className="mf-token-list" aria-label="Counted tokens">
         <li>
           <div className="mf-token-row">
@@ -123,7 +124,7 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
         Tokens marked "No price" on the Dashboard can't count toward the limit: Mitfah has no price for them. A
         token you count here also shows on the Dashboard.
       </Text>
-    </Panel>
+    </GlassPanel>
   )
 }
 

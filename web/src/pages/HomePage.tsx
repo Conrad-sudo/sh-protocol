@@ -8,6 +8,7 @@ import DetailIcon from '@rsuite/icons/Detail'
 import { Link } from 'react-router'
 import { useAuth } from '../auth/useAuth'
 import { Wallpaper } from '../components/brand/Wallpaper'
+import { GlassLayer } from '../components/Glass'
 import { LimitDemo } from '../components/landing/LimitDemo'
 import { LinkButton } from '../components/LinkButton'
 import { PageMeta, SITE_URL } from '../components/PageMeta'
@@ -184,27 +185,31 @@ export function HomePage() {
           These rules are written into your wallet on the blockchain. Neither the assistant nor Mitfah can switch them
           off.
         </p>
-        <table className="mf-rules">
-          <thead>
-            <tr>
-              <th scope="col">If the assistant tries to</th>
-              <th scope="col">Your wallet</th>
-            </tr>
-          </thead>
-          <tbody>
-            {RULES.map(rule => (
-              <tr key={rule.tries}>
-                <th scope="row">
-                  <span className="mf-rule-icon" aria-hidden>
-                    {rule.icon}
-                  </span>
-                  {rule.tries}
-                </th>
-                <td>{rule.wallet}</td>
+        {/* The glass sits beside the table, not in it: a table may only hold its rows. */}
+        <div className="mf-rules-plate mf-glass-surface">
+          <GlassLayer />
+          <table className="mf-rules">
+            <thead>
+              <tr>
+                <th scope="col">If the assistant tries to</th>
+                <th scope="col">Your wallet</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {RULES.map(rule => (
+                <tr key={rule.tries}>
+                  <th scope="row">
+                    <span className="mf-rule-icon" aria-hidden>
+                      {rule.icon}
+                    </span>
+                    {rule.tries}
+                  </th>
+                  <td>{rule.wallet}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <Networks signedIn={signedIn} />

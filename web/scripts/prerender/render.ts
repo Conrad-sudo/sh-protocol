@@ -58,6 +58,14 @@ try {
     await page.evaluate(() => document.fonts.ready)
 
     const { head, root } = await page.evaluate(sourceHtml => {
+      // The glass (src/components/Glass.tsx) draws through an SVG filter kept outside #root and a
+      // lens map held in this page's memory, neither of which survives the copy. The copy keeps the
+      // bare layer, which app.css frosts, until the live page draws the glass again.
+      for (const glass of document.querySelectorAll('#root .mf-glass')) {
+        glass.replaceChildren()
+        glass.removeAttribute('style')
+      }
+
       const before = new Set(
         [...new DOMParser().parseFromString(sourceHtml, 'text/html').head.children].map(el => el.outerHTML),
       )

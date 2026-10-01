@@ -39,7 +39,8 @@
    */
   --mf-font: 'Archivo Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mf-font-heading: 'Bodoni Moda Variable', 'Bodoni 72', Didot, Georgia, serif;
-  --mf-radius-plate: 14px;
+  /* Glass plates round generously (components/Glass.tsx draws the lens with the same 28px). */
+  --mf-radius-plate: 28px;
   --mf-radius-control: 8px;
   --mf-radius-card: var(--mf-radius-plate);
 

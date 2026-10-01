@@ -1,7 +1,9 @@
+import type { CSSProperties } from 'react'
 import ExitIcon from '@rsuite/icons/Exit'
 import { Link, useLocation } from 'react-router'
 import { Button, IconButton, Sidenav, Text, Tooltip, Whisper } from 'rsuite'
 import { Logo } from '../components/brand/Logo'
+import { GlassLayer } from '../components/Glass'
 import { useMe } from '../hooks/useMe'
 import { useSignOut } from '../hooks/useSignOut'
 import { isActive, NAV_ITEMS } from './nav'
@@ -13,14 +15,19 @@ interface SidebarProps {
   onToggle: (expanded: boolean) => void
 }
 
-/** The side navigation: full width on desktop, an icon rail on tablets. */
+/**
+ * The side navigation: full width on desktop, an icon rail on tablets. It floats beside the page as a
+ * glass panel; a lit pill sits under the current page's item and slides to the next one.
+ */
 export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
   const { pathname } = useLocation()
   const { data: me } = useMe()
   const signOut = useSignOut()
+  const current = NAV_ITEMS.findIndex(({ to }) => isActive(pathname, to))
 
   return (
-    <aside className="mf-sidebar" data-expanded={expanded}>
+    <aside className="mf-sidebar mf-glass-surface" data-expanded={expanded}>
+      <GlassLayer />
       {/* Sidenav renders the <nav> landmark itself. */}
       <Sidenav appearance="inverse" expanded={expanded} aria-label="Main">
         <Sidenav.Header className="mf-sidebar-header">
@@ -29,31 +36,35 @@ export function Sidebar({ expanded, collapsible, onToggle }: SidebarProps) {
           </Link>
         </Sidenav.Header>
         <Sidenav.Body>
-          {/*
-           * The list is written out rather than built from RSuite's Nav, which puts its links
-           * straight inside the <ul> and marks the current one aria-selected — an attribute links
-           * may not carry. Its classes still do the styling.
-           */}
-          <ul className="rs-sidenav-nav rs-nav mf-nav-list">
-            {NAV_ITEMS.map(({ to, label, Icon }) => {
-              const active = isActive(pathname, to)
-              return (
-                <li key={to}>
-                  <Link
-                    to={to}
-                    className="rs-sidenav-item"
-                    data-active={active}
-                    // The collapsed rail drops the text, leaving screen readers nothing to announce.
-                    aria-label={label}
-                    aria-current={active ? 'page' : undefined}
-                  >
-                    <Icon className="rs-sidenav-item-icon rs-icon" aria-hidden />
-                    <span className="rs-sidenav-item-title">{label}</span>
-                  </Link>
-                </li>
-              )
-            })}
-          </ul>
+          {/* The pill stays outside the <ul>: a list may only hold its items. */}
+          <div className="mf-nav" style={{ '--mf-nav': current } as CSSProperties}>
+            {current >= 0 && <span className="mf-nav-pill" aria-hidden />}
+            {/*
+             * The list is written out rather than built from RSuite's Nav, which puts its links
+             * straight inside the <ul> and marks the current one aria-selected — an attribute links
+             * may not carry. Its classes still do the styling.
+             */}
+            <ul className="rs-sidenav-nav rs-nav mf-nav-list">
+              {NAV_ITEMS.map(({ to, label, Icon }, index) => {
+                const active = index === current
+                return (
+                  <li key={to}>
+                    <Link
+                      to={to}
+                      className="rs-sidenav-item"
+                      data-active={active}
+                      // The collapsed rail drops the text, leaving screen readers nothing to announce.
+                      aria-label={label}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <Icon className="rs-sidenav-item-icon rs-icon" aria-hidden />
+                      <span className="rs-sidenav-item-title">{label}</span>
+                    </Link>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
         </Sidenav.Body>
         {collapsible && <Sidenav.Toggle onToggle={onToggle} />}
       </Sidenav>

@@ -483,7 +483,7 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
 
     expect(await screen.findByRole('link', { name: '1 contact' })).toHaveAttribute('href', '/contacts')
-    expect(screen.getByText('$60.00').closest('p')).toHaveTextContent('$60.00 of $100.00 left')
+    expect(screen.getByText('$60.00').closest('.mf-budget-strip')).toHaveTextContent('$60.00 of $100.00 left')
     expect(screen.queryByRole('complementary', { name: 'What the assistant can do' })).not.toBeInTheDocument()
     const send = screen.getByRole('button', { name: 'Send' })
     expect(send).not.toHaveTextContent('Send')

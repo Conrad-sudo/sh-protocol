@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { QRCodeSVG } from 'qrcode.react'
-import { Button, Loader, Message, Panel, Text, useToaster } from 'rsuite'
+import { Button, Loader, Message, Text, useToaster } from 'rsuite'
 import { ApiError } from '../../api/client'
 import { createTelegramLink, unlinkTelegram } from '../../api/telegram'
 import type { Me } from '../../api/types'
 import { useMe } from '../../hooks/useMe'
 import { useNow } from '../../hooks/useNow'
+import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
 const POLL_MS = 3_000
@@ -142,7 +143,7 @@ export function TelegramCard({ me }: { me: Me }) {
   }
 
   return (
-    <Panel bordered header="Telegram" id="telegram">
+    <GlassPanel bordered header="Telegram" id="telegram">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
           <Text weight="medium">Telegram bot</Text>
@@ -167,6 +168,6 @@ export function TelegramCard({ me }: { me: Me }) {
           Couldn't unlink Telegram. {unlink.error.message}
         </Message>
       )}
-    </Panel>
+    </GlassPanel>
   )
 }

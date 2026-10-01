@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Form, NumberInput, Panel, SegmentedControl, Text } from 'rsuite'
+import { Form, NumberInput, SegmentedControl, Text } from 'rsuite'
 import { formatUsd, formatWindow } from '../../lib/format'
 import { WINDOW_CHOICES } from '../../lib/spending'
+import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
 import type { ControlPanelProps } from './types'
@@ -14,10 +15,10 @@ export function SpendingPanel(props: ControlPanelProps) {
   const { spending } = props.wallet
   const periodSecs = Math.round(spending.window_hours * 3_600)
   return (
-    <Panel bordered header={<h2>Spending limit</h2>} className="mf-card">
+    <GlassPanel bordered header={<h2>Spending limit</h2>} className="mf-card">
       <LimitEditor key={spending.daily_limit_usd} {...props} periodSecs={periodSecs} />
       <PeriodEditor key={periodSecs} {...props} periodSecs={periodSecs} />
-    </Panel>
+    </GlassPanel>
   )
 }
 

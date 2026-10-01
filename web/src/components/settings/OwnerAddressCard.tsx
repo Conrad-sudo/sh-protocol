@@ -1,6 +1,7 @@
-import { Message, Panel, Text } from 'rsuite'
+import { Message, Text } from 'rsuite'
 import { AddressText } from '../AddressText'
 import { CopyButton } from '../CopyButton'
+import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
 /**
@@ -10,7 +11,7 @@ import { StatusTag } from '../StatusTag'
  */
 export function OwnerAddressCard({ ownerAddr }: { ownerAddr: string | null }) {
   return (
-    <Panel bordered header="Wallet owner">
+    <GlassPanel bordered header="Wallet owner">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
           <Text weight="medium">Owner address</Text>
@@ -33,6 +34,6 @@ export function OwnerAddressCard({ ownerAddr }: { ownerAddr: string | null }) {
           ? 'Only this address can pause your wallet, change its limits or withdraw. If you lose access to it, Mitfah cannot recover your wallet for you.'
           : "You'll link it when you create your wallet. Only that address will be able to pause the wallet, change its limits or withdraw, so keep it safe."}
       </Message>
-    </Panel>
+    </GlassPanel>
   )
 }

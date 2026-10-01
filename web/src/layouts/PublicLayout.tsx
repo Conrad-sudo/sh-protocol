@@ -1,12 +1,13 @@
 import { Link, Outlet } from 'react-router'
 import { useAuth } from '../auth/useAuth'
 import { Logo } from '../components/brand/Logo'
+import { GlassLayer } from '../components/Glass'
 import { LegalLinks } from '../components/LegalLinks'
 import { LinkButton } from '../components/LinkButton'
 import { RouteProgress } from '../components/RouteProgress'
 import { SkipLink } from '../components/SkipLink'
 
-/** Header and footer around the landing and legal pages. */
+/** Header and footer around the landing and legal pages. The header floats as a glass capsule. */
 export function PublicLayout() {
   const { status } = useAuth()
 
@@ -14,7 +15,8 @@ export function PublicLayout() {
     <div className="mf-public">
       <SkipLink />
       <RouteProgress />
-      <header className="mf-public-header">
+      <header className="mf-public-header mf-glass-surface">
+        <GlassLayer shape="capsule" />
         <Link to="/" aria-label="Mitfah home">
           <Logo size={30} />
         </Link>

@@ -32,8 +32,23 @@ describe('AppShell', () => {
     expect(nav.closest('.mf-sidebar')).toHaveAttribute('data-expanded', 'true')
     expect(within(nav).getByRole('link', { name: /Contacts/ })).toHaveAttribute('aria-current', 'page')
     expect(within(nav).getByRole('link', { name: /Dashboard/ })).not.toHaveAttribute('aria-current')
+    // The lit pill sits under the third item.
+    expect(nav.querySelector<HTMLElement>('.mf-nav')!.style.getPropertyValue('--mf-nav')).toBe('2')
+    expect(nav.querySelector('.mf-nav-pill')).toBeInTheDocument()
     expect(await screen.findByText('sam@example.com')).toBeInTheDocument()
     expect(document.querySelector('.mf-tabbar')).toBeNull()
+  })
+
+  it('draws the glass out of reach of screen readers', async () => {
+    setViewportWidth(1280)
+    stubSignedIn()
+    await renderRoutes(routes, '/settings')
+    await screen.findByRole('heading', { level: 1, name: 'Settings' })
+
+    const glass = document.querySelectorAll('.mf-glass')
+    // The sidebar, the top bar and the Settings page's plates.
+    expect(glass.length).toBeGreaterThan(2)
+    for (const layer of glass) expect(layer).toHaveAttribute('aria-hidden', 'true')
   })
 
   it('collapses to an icon rail on tablets', async () => {
@@ -54,7 +69,20 @@ describe('AppShell', () => {
     expect(tabs).toHaveClass('mf-tabbar')
     expect(within(tabs).getAllByRole('link')).toHaveLength(5)
     expect(within(tabs).getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page')
+    // The lit pill sits under the fifth tab.
+    expect(tabs.style.getPropertyValue('--mf-tab')).toBe('4')
+    expect(tabs.querySelector('.mf-tab-pill')).toBeInTheDocument()
     expect(document.querySelector('.mf-sidebar')).toBeNull()
+  })
+
+  it('lights no tab on a page outside the tabs', async () => {
+    setViewportWidth(390)
+    stubSignedIn()
+    await renderRoutes(routes, '/onboarding')
+
+    const tabs = await screen.findByRole('navigation', { name: 'Main' })
+    expect(within(tabs).queryByRole('link', { current: 'page' })).toBeNull()
+    expect(tabs.querySelector('.mf-tab-pill')).toBeNull()
   })
 
   it('signs out to /login without a `next`', async () => {

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query'
 import PlusIcon from '@rsuite/icons/Plus'
-import { Button, Message, Panel, Text, useToaster } from 'rsuite'
+import { Button, Message, Text, useToaster } from 'rsuite'
 import { ApiError } from '../../api/client'
 import type { Chain, TokenBalance, WalletState } from '../../api/types'
 import { removeCustomToken } from '../../api/wallet'
@@ -9,6 +9,7 @@ import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { formatTokenAmount } from '../../lib/format'
 import { errorText } from '../../lib/tx'
 import { chainName } from '../../wallet/chains'
+import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 import { AddTokenModal } from './AddTokenModal'
 import { RemoveTokenModal } from './RemoveTokenModal'
@@ -85,7 +86,7 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
   })
 
   return (
-    <Panel
+    <GlassPanel
       bordered
       header={
         <div className="mf-section-head mf-card-head">
@@ -190,6 +191,6 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
           onClose={() => setRemoveOpen(false)}
         />
       )}
-    </Panel>
+    </GlassPanel>
   )
 }

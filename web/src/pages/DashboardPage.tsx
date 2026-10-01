@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
-import { Wallpaper } from '../components/brand/Wallpaper'
 import { BalancesCard } from '../components/dashboard/BalancesCard'
 import { FundDrawer } from '../components/dashboard/FundDrawer'
 import { SpendingCard } from '../components/dashboard/SpendingCard'
@@ -21,17 +20,12 @@ export function DashboardPage() {
   const view = useWalletView()
   const description = me?.email ? `Signed in as ${me.email}` : undefined
 
-  return (
+  return view.wallet ? (
+    <WalletDashboard wallet={view.wallet} description={description} />
+  ) : (
     <>
-      <Wallpaper place="dashboard" />
-      {view.wallet ? (
-        <WalletDashboard wallet={view.wallet} description={description} />
-      ) : (
-        <>
-          <PageHeader title="Dashboard" description={description} />
-          {view.fallback}
-        </>
-      )}
+      <PageHeader title="Dashboard" description={description} />
+      {view.fallback}
     </>
   )
 }

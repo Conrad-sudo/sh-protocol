@@ -1,8 +1,9 @@
-import { Panel, Text } from 'rsuite'
+import { Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
 import { summarizeSpending } from '../../lib/spending'
+import { GlassPanel } from '../Glass'
 import { LimitDial } from '../LimitDial'
 
 const endsAtFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
@@ -18,7 +19,7 @@ export function SpendingCard({ spending }: { spending: WalletState['spending'] }
   else status = `Resets in ${formatTimeLeft(endsAt - now)}.`
 
   return (
-    <Panel bordered header={<h2>Spending limit</h2>} className="mf-card">
+    <GlassPanel bordered header={<h2>Spending limit</h2>} className="mf-card">
       <div className="mf-spending">
         <LimitDial percent={percentLeft} label={`${percentLeft}% of the limit left`} size={200}>
           <strong className="mf-dial-amount mf-num">{formatUsd(left)}</strong>
@@ -40,6 +41,6 @@ export function SpendingCard({ spending }: { spending: WalletState['spending'] }
       <Text size="sm" muted title={ended || limit === 0 ? undefined : endsAtFormat.format(endsAt)}>
         {status}
       </Text>
-    </Panel>
+    </GlassPanel>
   )
 }

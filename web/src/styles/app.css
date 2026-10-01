@@ -156,6 +156,129 @@
   gap: 16px;
 }
 
+/*
+ * Buttons are pills, like the tags. Buttons that are parts of a field (an input group's button, a
+ * number field's steppers, a picker's toggle) keep the field's shape. :where() keeps this as weak
+ * as RSuite's own `.rs-btn`, so a component's radius (.mf-connector) still wins.
+ */
+.rs-btn:where(:not(.rs-input-group .rs-btn, .rs-picker-toggle)) {
+  border-radius: 999px;
+}
+
+/* ── Liquid glass ───────────────────────────────────────────────────────── */
+
+/*
+ * Bars and cards float over the wallpaper as liquid glass (components/Glass.tsx). The glass is a
+ * layer (.mf-glass) behind the surface's content, drawn by quick-liquid: a lens bending the
+ * wallpaper at the rim, a 12px frost, the plate colour at 40% and light on the edge. The surface
+ * itself is clear, and its content is positioned so it paints after, and so above, the layer.
+ *
+ * Nothing on a surface or its layer may set filter, opacity, mask or backdrop-filter: each starts a
+ * new "backdrop root", and the lens would see only the surface instead of the wallpaper.
+ */
+.mf-glass-surface {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.mf-glass {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/*
+ * Until the engine has drawn, in the prerendered copy (scripts/prerender takes the engine's layers
+ * out), and wherever it can't run: a frosted plate. Never together with the engine's layers, whose
+ * lens has to see past this element to the wallpaper.
+ */
+.mf-glass:not(:has(> .ql-lens)) {
+  background: color-mix(in srgb, var(--rs-bg-card) 86%, transparent);
+  backdrop-filter: blur(12px) saturate(1.4);
+  box-shadow: var(--mf-plate-shadow);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .mf-glass:not(:has(> .ql-lens)) {
+    background: var(--rs-bg-card);
+    backdrop-filter: none;
+  }
+}
+
+/* Anyone who asks for more contrast, or forces their own colours, gets a plain plate with an edge. */
+@media (prefers-contrast: more), (forced-colors: active) {
+  .mf-glass,
+  .mf-glass:not(:has(> .ql-lens)) {
+    border: 1px solid var(--rs-border-primary);
+    background: var(--rs-bg-card);
+    backdrop-filter: none;
+    /* The engine sets its shadow inline. */
+    box-shadow: none !important;
+  }
+
+  .mf-glass > * {
+    display: none;
+  }
+}
+
+/* Surfaces that aren't already sticky or fixed hold their glass layer. */
+.rs-panel.mf-glass-surface,
+.mf-auth-card,
+.mf-demo-plate,
+.mf-rules-plate,
+.mf-contact-plate,
+.mf-budget-strip {
+  position: relative;
+}
+
+/* The content paints over the glass. */
+.rs-panel.mf-glass-surface > :not(.mf-glass),
+.mf-topbar > :not(.mf-glass),
+.mf-sidebar > :not(.mf-glass),
+.mf-public-header > :not(.mf-glass),
+.mf-auth-body,
+.mf-demo-plate > :not(.mf-glass),
+.mf-rules-plate > .mf-rules,
+.mf-contact-plate > .mf-contact-list,
+.mf-budget-strip > :not(.mf-glass),
+.mf-composer > :is(.rs-textarea, .mf-composer-send, .mf-composer-count) {
+  position: relative;
+}
+
+/*
+ * The current page's lit pill, in the sidebar and the phone tab bar: a brighter lozenge of glass
+ * that slides from the last page to this one.
+ */
+.mf-nav-pill,
+.mf-tab-pill {
+  position: absolute;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 58%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 95%),
+    inset 0 -1px 0 rgb(6 42 78 / 6%),
+    0 1px 2px rgb(6 42 78 / 12%),
+    0 8px 18px -10px rgb(6 42 78 / 35%);
+  pointer-events: none;
+  transition: transform 0.45s cubic-bezier(0.3, 1.3, 0.5, 1);
+}
+
+.rs-theme-dark :is(.mf-nav-pill, .mf-tab-pill) {
+  background: rgb(207 224 243 / 11%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 14%),
+    0 8px 18px -10px rgb(0 0 0 / 70%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-nav-pill,
+  .mf-tab-pill {
+    transition: none;
+  }
+}
+
 /* ── App shell ──────────────────────────────────────────────────────────── */
 
 .mf-shell {
@@ -178,7 +301,7 @@
   padding: 24px 32px 48px;
 }
 
-/* Sidebar (desktop expanded, tablet rail) */
+/* Sidebar (desktop expanded, tablet rail): a glass panel floating beside the page */
 
 .mf-nav-list {
   margin: 0;
@@ -187,15 +310,17 @@
 }
 
 .mf-sidebar {
+  /* Every item is this tall, so the lit pill slides by whole items. */
+  --mf-nav-item: 40px;
   position: sticky;
-  top: 0;
+  top: 12px;
   flex: none;
   width: 240px;
-  height: 100dvh;
+  height: calc(100dvh - 24px);
+  margin: 12px 0 12px 12px;
   display: flex;
   flex-direction: column;
-  background: var(--mf-steel);
-  border-right: 1px solid var(--mf-rule);
+  border-radius: var(--mf-radius-plate);
   transition: width 0.2s ease;
 }
 
@@ -216,7 +341,7 @@
 }
 
 /*
- * The current page's item is raised as a plate, with a green pad lit beside it like the pads on the
+ * The current page's item sits on the lit pill, with a green pad lit beside it like the pads on the
  * wallpaper's circuit. Everything else stays flat.
  */
 .mf-sidebar .mf-nav-list {
@@ -230,17 +355,35 @@
   padding-inline: 8px;
 }
 
-.mf-sidebar .rs-sidenav-item {
+.mf-nav,
+.mf-nav > .mf-nav-list {
   position: relative;
-  border-radius: 10px;
+}
+
+.mf-nav-pill {
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  height: var(--mf-nav-item);
+  transform: translateY(calc(var(--mf-nav) * (var(--mf-nav-item) + 2px)));
+}
+
+.mf-sidebar[data-expanded='false'] .mf-nav-pill {
+  left: 8px;
+  right: 8px;
+}
+
+/* Stronger than RSuite's own height for the collapsed rail. */
+.mf-sidebar .rs-sidenav .rs-sidenav-item {
+  position: relative;
+  box-sizing: border-box;
+  height: var(--mf-nav-item);
+  border-radius: 999px;
   font-weight: 500;
 }
 
 .mf-sidebar .rs-sidenav-item[data-active='true'] {
   font-weight: 620;
-  box-shadow:
-    0 0 0 1px var(--mf-rule),
-    var(--mf-plate-shadow);
 }
 
 .mf-sidebar .rs-sidenav-item[data-active='true']::before {
@@ -299,21 +442,22 @@
   background: var(--rs-sidenav-inverse-hover-bg);
 }
 
-/* Top bar */
+/* Top bar: a glass capsule floating over the top of the page, as wide as the content under it */
 
 .mf-topbar {
   position: sticky;
-  top: 0;
+  top: 12px;
   z-index: 10;
   box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 12px;
+  width: calc(100% - 64px);
+  max-width: 1136px;
   min-height: 56px;
-  padding: 8px 32px;
-  background: color-mix(in srgb, var(--rs-body) 88%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--rs-border-primary);
+  margin: 12px auto 0;
+  padding: 8px 10px 8px 16px;
+  border-radius: 999px;
 }
 
 .mf-topbar-actions {
@@ -323,35 +467,51 @@
   gap: 8px;
 }
 
-/* Mobile: top bar + bottom tabs */
+/* Mobile: top bar + bottom tabs. Narrower margins: the phone's bar is only just wide enough. */
 
 .mf-shell[data-mode='mobile'] .mf-topbar {
-  padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
+  top: calc(8px + env(safe-area-inset-top));
+  width: calc(100% - 16px);
+  min-height: 52px;
+  margin-top: calc(8px + env(safe-area-inset-top));
+  padding: 6px 6px 6px 12px;
 }
 
 .mf-shell[data-mode='mobile'] .mf-content {
-  padding: 16px 16px calc(80px + env(safe-area-inset-bottom));
+  padding: 16px 16px calc(96px + env(safe-area-inset-bottom));
 }
 
-.mf-shell[data-mode='tablet'] .mf-content,
-.mf-shell[data-mode='tablet'] .mf-topbar {
+.mf-shell[data-mode='tablet'] .mf-content {
   padding-inline: 24px;
+}
+
+.mf-shell[data-mode='tablet'] .mf-topbar {
+  width: calc(100% - 48px);
 }
 
 .mf-tabbar {
   position: fixed;
-  inset: auto 0 0;
+  inset: auto 8px calc(8px + env(safe-area-inset-bottom));
   z-index: 20;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  padding-bottom: env(safe-area-inset-bottom);
-  background: var(--rs-bg-card);
-  border-top: 1px solid var(--rs-border-primary);
+  padding: 6px;
+  border-radius: 999px;
+}
+
+/* Under the current tab; --mf-tab is its place in the row (MobileTabBar). */
+.mf-tab-pill {
+  top: 6px;
+  bottom: 6px;
+  left: 6px;
+  width: calc((100% - 12px) / 5);
+  transform: translateX(calc(var(--mf-tab) * 100%));
 }
 
 .mf-tab {
   position: relative;
-  min-height: 56px;
+  min-height: 52px;
+  border-radius: 999px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -379,17 +539,17 @@
   font-weight: 620;
 }
 
-/* The current tab's pad is lit, as a bar along its top edge. */
+/* The current tab's pad is lit, by the icon's top corner. */
 .mf-tab[aria-current='page']::before {
   content: '';
   position: absolute;
-  top: -1px;
-  left: 30%;
-  right: 30%;
-  height: 3px;
-  border-radius: 0 0 3px 3px;
+  top: 8px;
+  left: calc(50% + 11px);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   background: var(--mf-green);
-  box-shadow: 0 0 8px var(--mf-green-glow);
+  box-shadow: 0 0 0 3px var(--mf-green-glow);
 }
 
 /* ── Wallpaper ──────────────────────────────────────────────────────────── */
@@ -452,23 +612,25 @@ body:has(.mf-wallpaper) {
 }
 
 /*
- * Dashboard: in the middle of the content area, right of the sidebar, a little below centre. It is
- * a working screen full of small text, so the wallpaper is quieter here than on the landing page.
+ * The signed-in app: in the middle of the content area, right of the sidebar, a little below
+ * centre. These are working screens full of small text, so the wallpaper is quieter here than on
+ * the landing page.
  */
-.mf-wallpaper[data-place='dashboard'] {
+.mf-wallpaper[data-place='app'] {
   --mf-ring-y: 55%;
 }
 
-.mf-wallpaper[data-place='dashboard']::before {
+.mf-wallpaper[data-place='app']::before {
   opacity: 0.6;
 }
 
+/* Half the sidebar's width and its 12px margin. */
 .mf-shell[data-mode='desktop'] .mf-wallpaper {
-  --mf-ring-x: calc(50% + 120px);
+  --mf-ring-x: calc(50% + 126px);
 }
 
 .mf-shell[data-mode='tablet'] .mf-wallpaper {
-  --mf-ring-x: calc(50% + 32px);
+  --mf-ring-x: calc(50% + 38px);
 }
 
 /*
@@ -496,7 +658,7 @@ body:has(.mf-wallpaper) :is(.mf-public, .mf-auth, .mf-content) {
 
 body:has(.mf-wallpaper)
   :is(.mf-public, .mf-auth, .mf-content)
-  :is(.rs-btn:not([data-appearance='ghost'], [data-appearance='subtle'], [data-appearance='link']), .rs-panel, .rs-tag, .rs-input, .rs-picker, .mf-landing-card, .mf-auth-card, .mf-network-list li, .mf-demo-plate, .mf-rules, .mf-trace-pad) {
+  :is(.rs-btn:not([data-appearance='ghost'], [data-appearance='subtle'], [data-appearance='link']), .rs-panel, .rs-tag, .rs-input, .rs-picker, .mf-glass-surface, .mf-network-list li, .mf-trace-pad) {
   text-shadow: none;
 }
 
@@ -516,28 +678,9 @@ body:has(.mf-wallpaper)
 }
 
 /* A card is already a surface. */
-body:has(.mf-wallpaper) :is(.rs-panel, .mf-landing-card, .mf-auth-card, .mf-demo-plate) .rs-btn {
+body:has(.mf-wallpaper) :is(.rs-panel, .mf-glass-surface) .rs-btn {
   background-image: none;
   backdrop-filter: none;
-}
-
-/*
- * Over the wallpaper the cards hover: frosted glass, so the circuit shows through them blurred, and
- * a soft shadow below. 85% is solid enough to read on where a browser can't blur, and a light 6px
- * blur is enough over thin traces: 12px dropped 1 frame in 20 while scrolling, 6px about none.
- * Fully solid for anyone whose system asks for less transparency.
- */
-body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card, .mf-demo-plate, .mf-rules) {
-  background: color-mix(in srgb, var(--rs-bg-card) 86%, transparent);
-  backdrop-filter: blur(6px) saturate(1.4);
-  box-shadow: var(--mf-plate-shadow);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-auth-card, .mf-demo-plate, .mf-rules) {
-    background: var(--rs-bg-card);
-    backdrop-filter: none;
-  }
 }
 
 /* Someone who asks for more contrast, or forces their own colours, gets a plain page. */
@@ -565,10 +708,7 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   width: 100%;
   max-width: 420px;
   padding: 32px;
-  background: var(--rs-bg-card);
-  border: 1px solid var(--rs-border-primary);
-  border-radius: 20px;
-  box-shadow: var(--mf-plate-shadow);
+  border-radius: var(--mf-radius-plate);
 }
 
 .mf-auth-logo {
@@ -595,25 +735,42 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
     justify-content: flex-start;
   }
 
+  /* On a phone the form has the whole width, on the wallpaper itself. */
   .mf-auth-card {
     padding: 24px 20px;
-    border: 0;
-    box-shadow: none;
-    background: transparent;
+  }
+
+  .mf-auth-card > .mf-glass {
+    display: none;
   }
 }
 
 /* ── Public pages ───────────────────────────────────────────────────────── */
 
+/* A glass capsule floating over the top of the page, which scrolls under it. */
 .mf-public-header {
+  position: sticky;
+  top: 12px;
+  z-index: 10;
   box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  max-width: 1200px;
-  margin-inline: auto;
-  padding: 20px 24px;
+  width: calc(100% - 32px);
+  max-width: 1152px;
+  margin: 12px auto 0;
+  padding: 8px 8px 8px 20px;
+  border-radius: 999px;
+}
+
+@media (max-width: 479px) {
+  .mf-public-header {
+    top: 8px;
+    width: calc(100% - 16px);
+    margin-top: 8px;
+    padding-left: 14px;
+  }
 }
 
 .mf-public-nav {
@@ -696,17 +853,13 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
   padding: 12px 24px 40px;
 }
 
-/* The page's largest plate, so the largest radius. */
 .mf-demo-plate {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 24px 48px;
   padding: 36px 44px;
-  border: 1px solid var(--mf-rule);
-  border-radius: 28px;
-  background: var(--rs-bg-card);
-  box-shadow: var(--mf-plate-shadow);
+  border-radius: var(--mf-radius-plate);
 }
 
 .mf-demo-log h2 {
@@ -952,7 +1105,6 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
     grid-template-columns: minmax(0, 1fr);
     justify-items: center;
     padding: 28px 20px;
-    border-radius: 22px;
   }
 
   .mf-demo-log {
@@ -1038,15 +1190,17 @@ body:has(.mf-wallpaper) :is(.mf-card, .mf-wallet-header, .mf-landing-card, .mf-a
 
 /* ── The rulebook ──────────────────────────────────────────────────────── */
 
+.mf-rules-plate {
+  border-radius: var(--mf-radius-plate);
+}
+
+/* The table is clear, on its plate's glass; it clips its header band to the plate's corners. */
 .mf-rules {
   width: 100%;
-  border: 1px solid var(--mf-rule);
-  border-radius: var(--mf-radius-plate);
+  border-radius: inherit;
   border-collapse: separate;
   border-spacing: 0;
   overflow: hidden;
-  background: var(--rs-bg-card);
-  box-shadow: var(--mf-plate-shadow);
 }
 
 .mf-rules thead th {
@@ -1503,10 +1657,6 @@ main p a {
 
 /* ── Onboarding ─────────────────────────────────────────────────────────── */
 
-.mf-onboarding {
-  background: var(--rs-bg-card);
-}
-
 .mf-steps {
   margin-bottom: 24px;
 }
@@ -1597,19 +1747,11 @@ main p a {
   gap: 16px;
 }
 
-.mf-card {
-  background: var(--rs-bg-card);
-}
-
 /* A plate's title. At this size Bodoni needs the extra weight to sit above the text face's labels. */
 .mf-card h2 {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
-}
-
-.mf-wallet-header {
-  background: var(--rs-bg-card);
 }
 
 .mf-wallet-header-row {
@@ -2006,14 +2148,15 @@ main p a {
   outline: none;
 }
 
-/* A bordered list on wider screens; a stack of cards on phones. */
+/* One glass plate holding the list; the rows are ruled apart. */
+.mf-contact-plate {
+  border-radius: var(--mf-radius-card);
+}
+
 .mf-contact-list {
   margin: 0;
-  padding: 0 16px;
+  padding: 6px 22px;
   list-style: none;
-  border: 1px solid var(--rs-border-primary);
-  border-radius: var(--mf-radius-card);
-  background: var(--rs-bg-card);
 }
 
 .mf-contact {
@@ -2047,14 +2190,10 @@ main p a {
   grid-area: remove;
 }
 
+/* On phones each contact takes two lines: the name with its Remove button, then the address. */
 @media (max-width: 479px) {
   .mf-contact-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 0;
-    border: 0;
-    background: none;
+    padding: 4px 18px;
   }
 
   .mf-contact {
@@ -2062,10 +2201,7 @@ main p a {
     grid-template-areas:
       'name remove'
       'address address';
-    padding: 12px 16px;
-    border: 1px solid var(--rs-border-primary);
-    border-radius: var(--mf-radius-card);
-    background: var(--rs-bg-card);
+    padding: 12px 0;
   }
 }
 
@@ -2327,33 +2463,29 @@ main p a {
   text-align: left;
 }
 
-/* The composer stays at the bottom of the screen while the conversation scrolls. */
+/*
+ * The composer stays at the bottom of the screen while the conversation scrolls, on a glass tray
+ * the messages pass under.
+ */
 
 .mf-composer {
   position: sticky;
-  bottom: 0;
+  bottom: 12px;
   z-index: 5;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
   margin-top: 16px;
-  padding: 12px 0 16px;
-  background: var(--rs-body);
+  padding: 10px;
+  border-radius: var(--mf-radius-plate);
 }
 
-/* Fades the messages out as they scroll under the composer. */
-.mf-composer::before {
-  content: '';
-  position: absolute;
-  inset: -16px 0 100%;
-  background: linear-gradient(transparent, var(--rs-body));
-  pointer-events: none;
-}
-
+/* Its corners follow the tray's, 10px in. */
 .mf-composer .rs-textarea {
   min-height: 44px;
   padding-block: 10px;
+  border-radius: 18px;
   line-height: 1.5;
 }
 
@@ -2373,9 +2505,12 @@ main p a {
   color: var(--mf-danger);
 }
 
-/* Phones: the composer sits on the tab bar, and takes its place while the keyboard is up. */
+/*
+ * Phones: the composer floats just above the tab bar (8px up, 64px tall, then an 8px gap), and
+ * takes its place while the keyboard is up.
+ */
 .mf-shell[data-mode='mobile']:has(.mf-composer) .mf-content {
-  padding-bottom: calc(56px + env(safe-area-inset-bottom));
+  padding-bottom: calc(80px + env(safe-area-inset-bottom));
 }
 
 .mf-shell[data-mode='mobile']:has(.mf-composer textarea:focus) .mf-content {
@@ -2383,8 +2518,7 @@ main p a {
 }
 
 .mf-shell[data-mode='mobile'] .mf-composer {
-  bottom: calc(56px + env(safe-area-inset-bottom));
-  padding-bottom: 8px;
+  bottom: calc(80px + env(safe-area-inset-bottom));
 }
 
 /* Only for the composer: its Send button keeps focus, so the tab bar can't come back under a tap. */
@@ -2398,9 +2532,10 @@ main p a {
 
 /* What the assistant can spend, and whom it can pay */
 
+/* Held 16px under the floating top bar (12px down, 56px tall). */
 .mf-chat-aside {
   position: sticky;
-  top: 72px;
+  top: 84px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2448,10 +2583,8 @@ main p a {
   justify-content: space-between;
   gap: 4px 12px;
   margin: 0 0 12px;
-  padding: 6px 12px;
-  border: 1px solid var(--rs-border-primary);
-  border-radius: 10px;
-  background: var(--rs-bg-card);
+  padding: 6px 18px;
+  border-radius: 999px;
   font-size: 14px;
 }
 

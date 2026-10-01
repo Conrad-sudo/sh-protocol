@@ -31,7 +31,7 @@ the API, so the page and the API share an origin.
 | `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
 | `npm run og` | Re-renders the social share image to `public/og.png` |
 | `npm run marks` | Rebuilds the light and dark logo marks from `scripts/brand/Key-logo.png` |
-| `npm run wallpaper` | Redraws the wallpaper (landing, sign-in, dashboard) to `public/brand/wallpaper-*.svg` |
+| `npm run wallpaper` | Redraws the wallpaper (landing, sign-in, every signed-in page) to `public/brand/wallpaper-*.svg` |
 | `npm run lint` | Oxlint |
 | `npm run typecheck` | TypeScript only |
 
@@ -169,12 +169,33 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   accepted so every icon matches the logo. `npm run og` re-renders the share image, which embeds the
   dark mark.
 - `scripts/wallpaper/` — `npm run wallpaper` draws the wallpaper behind the landing page, the
-  sign-in and sign-up card and the dashboard: the logo's ring as a polished metal band (with its
+  sign-in and sign-up card and every page of the signed-in app (`AppShell` renders it, so the glass
+  always has something to bend): the logo's ring as a polished metal band (with its
   crescent, and a gap where the key's shaft would cross), and circuit traces running from it to
   every edge. Light mode has raised steel traces; dark mode has glowing emerald ones. The 3D and the
   glow are drawn, not filtered, so the files stay sharp and cheap to paint. A fixed seed lays out
   the traces, so a re-run writes the same files; change `SEED` for a different layout.
   `components/brand/Wallpaper.tsx` puts it on a page as a fixed layer, so the page scrolls over it;
   its `place` picks where the ring sits, and `app.css` (the Wallpaper section) positions it by the
-  ring, which is the centre of the 2880px square. Over it, cards turn to frosted glass and text on
-  the wallpaper gets a halo in the page colour; it's hidden for anyone asking for more contrast.
+  ring, which is the centre of the 2880px square. Text lying on the wallpaper gets a halo in the
+  page colour; the wallpaper is hidden for anyone asking for more contrast.
+- `src/components/Glass.tsx` — the bars and cards are liquid glass, drawn by
+  [quick-liquid](https://github.com/amarnath3003/quickLiquid): a lens bending the wallpaper through a
+  30px rim, a 12px frost, the plate colour at 40% and light on the edge, with 28px corners on plates
+  and capsules for the top bar, landing header, phone tab bar and budget strip. Only Chromium bends;
+  Safari and Firefox get the frost, tint and rim light. The glass is a layer (`GlassLayer`, an
+  `aria-hidden` `.mf-glass`) placed as the FIRST child of a surface marked `mf-glass-surface`, behind
+  the content rather than wrapped round it: the engine sets `overflow: hidden`, corners and a shadow
+  inline on its own element, which on the content would clip the top bar's dropdowns and focus
+  rings. Cards use `GlassPanel` (RSuite's `Panel` drawn `as` a glass plate). A list or table can't
+  hold the layer, so its plate is a wrapping `div`. The content is positioned so it paints over
+  the layer (`app.css`, "Liquid glass"); nothing on a surface or its layer may set `filter`,
+  `opacity`, `mask` or `backdrop-filter`, or the lens sees only the surface instead of the
+  wallpaper. Until the engine draws, in the prerendered copy (the prerender strips the engine's
+  layers, whose SVG filter and lens map don't survive the copy) and under more-contrast or reduced
+  transparency, the layer shows a plain frosted plate. jsdom has no `ResizeObserver`, so in Vitest
+  the engine stays off and only the markup is tested. On a real GPU (an M1) scrolling holds 60 fps,
+  as before; with software rendering (no GPU, as in Playwright's headless browser) scrolling the
+  Controls page is about 3x slower than with the old frost, so expect the mocked suite to run
+  slower too. The current page's item, in the
+  sidebar and the tab bar, sits on a lit pill that slides from the last page (`--mf-nav`/`--mf-tab`).

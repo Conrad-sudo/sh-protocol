@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import ArrowDownLineIcon from '@rsuite/icons/ArrowDownLine'
 import { formatEther, getAddress, isAddress, parseEther } from 'viem'
-import { Form, Input, Panel, Text } from 'rsuite'
+import { Form, Input, Text } from 'rsuite'
 import { bsc } from 'viem/chains'
 import type { Chain } from '../../api/types'
 import { isValidAmount } from '../../lib/format'
 import { AddressText } from '../AddressText'
 import { AmountInput } from '../AmountInput'
+import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
 import { StatusTag } from '../StatusTag'
@@ -44,7 +45,7 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
   )
 
   return (
-    <Panel bordered header={header} bodyFill={!open} className="mf-card">
+    <GlassPanel bordered header={header} bodyFill={!open} className="mf-card">
       <div id="advanced-controls" hidden={!open}>
         <ControlRow
           title="Trusted spenders"
@@ -111,7 +112,7 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
           help="When on, the assistant may only call contracts on the wallet's list. It can't be changed here yet."
         />
       </div>
-    </Panel>
+    </GlassPanel>
   )
 }
 

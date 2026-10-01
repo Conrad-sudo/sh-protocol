@@ -1,6 +1,7 @@
 import type { KeyboardEvent, RefObject } from 'react'
 import SendIcon from '@rsuite/icons/Send'
 import { Button, Textarea, useMediaQuery } from 'rsuite'
+import { GlassLayer } from '../Glass'
 
 /** The server's limit for one message. */
 export const MAX_MESSAGE = 4_000
@@ -18,8 +19,9 @@ interface ComposerProps {
 }
 
 /**
- * Where the user types. Enter sends and Shift+Enter starts a new line — except on touch screens,
- * whose keyboards have no Shift key to spare, where Enter is a new line and the button sends.
+ * Where the user types, on a glass tray the conversation scrolls under. Enter sends and Shift+Enter
+ * starts a new line — except on touch screens, whose keyboards have no Shift key to spare, where
+ * Enter is a new line and the button sends.
  */
 export function Composer({ value, onChange, onSend, busy, compact, inputRef }: ComposerProps) {
   const [touch] = useMediaQuery(['(pointer: coarse)'])
@@ -45,12 +47,13 @@ export function Composer({ value, onChange, onSend, busy, compact, inputRef }: C
 
   return (
     <form
-      className="mf-composer"
+      className="mf-composer mf-glass-surface"
       onSubmit={event => {
         event.preventDefault()
         submit()
       }}
     >
+      <GlassLayer />
       <label htmlFor="mf-composer-input" className="mf-visually-hidden">
         Message
       </label>

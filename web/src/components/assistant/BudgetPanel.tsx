@@ -1,10 +1,11 @@
 import { Link } from 'react-router'
-import { Panel, Text } from 'rsuite'
+import { Text } from 'rsuite'
 import type { Contact, WalletState } from '../../api/types'
 import { useContacts } from '../../hooks/useContacts'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd } from '../../lib/format'
 import { summarizeSpending } from '../../lib/spending'
+import { GlassLayer, GlassPanel } from '../Glass'
 import { LimitDial } from '../LimitDial'
 import { LinkButton } from '../LinkButton'
 
@@ -26,7 +27,7 @@ export function BudgetPanel({ wallet }: { wallet: WalletState }) {
 
   return (
     <aside className="mf-chat-aside" aria-label="What the assistant can do">
-      <Panel bordered header={<h2>Left to spend</h2>} className="mf-card">
+      <GlassPanel bordered header={<h2>Left to spend</h2>} className="mf-card">
         {wallet.spending.hook_installed ? (
           <>
             <LimitDial
@@ -52,13 +53,13 @@ export function BudgetPanel({ wallet }: { wallet: WalletState }) {
             </Text>
           </>
         )}
-      </Panel>
-      <Panel bordered header={<h2>Who it can pay</h2>} className="mf-card">
+      </GlassPanel>
+      <GlassPanel bordered header={<h2>Who it can pay</h2>} className="mf-card">
         <ContactNames contacts={contacts.data} failed={contacts.isError} />
         <LinkButton to="/contacts" appearance="link" size="sm" className="mf-budget-manage">
           Manage contacts
         </LinkButton>
-      </Panel>
+      </GlassPanel>
     </aside>
   )
 }
@@ -102,8 +103,10 @@ export function BudgetStrip({ wallet }: { wallet: WalletState }) {
   const contacts = useContacts()
   const count = contacts.data?.length
 
+  // A <div>, not a <p>: the glass layer is a <div>, which a paragraph can't hold.
   return (
-    <p className="mf-budget-strip">
+    <div className="mf-budget-strip mf-glass-surface">
+      <GlassLayer shape="capsule" />
       {wallet.spending.hook_installed ? (
         <span>
           <strong className="mf-num">{formatUsd(left)}</strong> of <span className="mf-num">{formatUsd(limit)}</span>{' '}
@@ -115,6 +118,6 @@ export function BudgetStrip({ wallet }: { wallet: WalletState }) {
       <Link to="/contacts">
         {count === undefined ? 'Contacts' : `${count} ${count === 1 ? 'contact' : 'contacts'}`}
       </Link>
-    </p>
+    </div>
   )
 }

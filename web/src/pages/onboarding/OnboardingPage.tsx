@@ -8,7 +8,6 @@ import {
   Form,
   Message,
   NumberInput,
-  Panel,
   Placeholder,
   Progress,
   RadioTile,
@@ -22,6 +21,7 @@ import type { Chain, Token } from '../../api/types'
 import { useSelectedChain } from '../../chain/useSelectedChain'
 import { AddressText } from '../../components/AddressText'
 import { AmountInput } from '../../components/AmountInput'
+import { GlassPanel } from '../../components/Glass'
 import { PageHeader } from '../../components/PageHeader'
 import { QueryError } from '../../components/QueryError'
 import { StatusTag } from '../../components/StatusTag'
@@ -293,7 +293,7 @@ export function OnboardingPage() {
   return (
     <>
       <PageHeader title="Create your wallet" description="A few steps, then one signature in your wallet." />
-      <Panel bordered className="mf-onboarding">
+      <GlassPanel bordered className="mf-onboarding">
         {mode === 'mobile' ? (
           <div className="mf-step-counter">
             <Text size="sm" muted>
@@ -315,7 +315,7 @@ export function OnboardingPage() {
           </Steps>
         )}
         <div className="mf-step-body">{body}</div>
-      </Panel>
+      </GlassPanel>
     </>
   )
 }

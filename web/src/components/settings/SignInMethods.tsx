@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Loader, Message, Panel, Text, useToaster } from 'rsuite'
+import { Loader, Message, Text, useToaster } from 'rsuite'
 import { linkGoogle } from '../../api/auth'
 import { ApiError } from '../../api/client'
 import type { Me } from '../../api/types'
 import { googleEnabled } from '../../auth/google'
+import { GlassPanel } from '../Glass'
 import { GoogleButton } from '../GoogleButton'
 import { StatusTag } from '../StatusTag'
 
@@ -56,7 +57,7 @@ export function SignInMethods({ me }: { me: Me }) {
     )
 
   return (
-    <Panel bordered header="Sign-in methods">
+    <GlassPanel bordered header="Sign-in methods">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
           <Text weight="medium">Email and password</Text>
@@ -82,6 +83,6 @@ export function SignInMethods({ me }: { me: Me }) {
           {error}
         </Message>
       )}
-    </Panel>
+    </GlassPanel>
   )
 }

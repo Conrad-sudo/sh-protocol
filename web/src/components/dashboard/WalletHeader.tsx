@@ -1,4 +1,4 @@
-import { Message, Panel, Text } from 'rsuite'
+import { Message, Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { assistantStatus } from '../../lib/assistant'
@@ -6,6 +6,7 @@ import { formatDate, formatTimeLeft } from '../../lib/format'
 import { chainName, explorerUrl } from '../../wallet/chains'
 import { AddressText } from '../AddressText'
 import { CopyButton } from '../CopyButton'
+import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
 /**
@@ -19,7 +20,7 @@ export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: bool
   const expiresAt = (wallet.session.expires_at ?? 0) * 1_000
 
   return (
-    <Panel bordered className="mf-wallet-header">
+    <GlassPanel bordered className="mf-wallet-header">
       <div className="mf-wallet-header-row">
         <div className="mf-wallet-id">
           <Text size="sm" muted>
@@ -77,6 +78,6 @@ export function WalletHeader({ wallet, fork }: { wallet: WalletState; fork: bool
           account isn't linked to that address. You can still see and fund the wallet here.
         </Message>
       )}
-    </Panel>
+    </GlassPanel>
   )
 }
