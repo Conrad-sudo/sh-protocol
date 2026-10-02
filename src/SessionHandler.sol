@@ -191,13 +191,12 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev uint64 (~1.8e19 wallets), the same type as SHFactory's {SHFactory-totalWallets}.
     uint64 public WALLET_ID;
     /// @dev Entry count for {sessionTargetAllowlist}; lets {toggleAllowList} refuse an empty one.
-    ///      uint32 (~4.3 billion) is far more targets than any owner could pay gas to add.
     uint32 public allowedTargetCount;
 
     /// @notice Targets a session key may call, when {sessionAllowlistEnabled} is true. OFF by default.
     /// @dev Confines a key to a fixed set of venues — mainly to keep it away from protocols where the
     ///      account can take on a LIABILITY, which the balance-diff meter never charges to the cap
-    ///      (THREAT_MODEL §3.13). Address-granular, never selector-granular, so the account needs no
+    ///      Address-granular, never selector-granular, so the account needs no
     ///      ABI knowledge of what it calls.
     mapping(address target => bool allowed) public sessionTargetAllowlist;
 

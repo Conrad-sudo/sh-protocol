@@ -45,7 +45,7 @@ contract SHOracle is Ownable {
     error PriceOracle_UnsupportedToken();
 
     /// @dev Reverts when a Chainlink price feed has not been updated within its configured heartbeat
-    error PriceOracle_StalePrice();
+    error PriceOracle_StalePrice(address feed);
 
     /// @dev Reverts when a Chainlink feed reports a non-positive price (0 or negative). This signals a
     ///      feed malfunction, not a real quote, and must be rejected before the cast to uint256.
@@ -260,7 +260,7 @@ contract SHOracle is Ownable {
         (, int256 price,, uint256 updatedAt,) = AggregatorV3Interface(priceFeed).latestRoundData();
 
         if (block.timestamp - updatedAt > heartbeat) {
-            revert PriceOracle_StalePrice();
+            revert PriceOracle_StalePrice(priceFeed);
         }
         // A non-positive price is a feed malfunction, not a real quote; reject it before the cast
         // below would turn a negative value into an enormous uint that wildly mis-prices the call.

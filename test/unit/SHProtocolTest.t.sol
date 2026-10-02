@@ -897,9 +897,9 @@ contract SHProtocolTest is Test {
         _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
         assertEq(usdc.balanceOf(kani), 100e6);
 
-        // Moving dai now trips its stale feed.
+        // Moving dai now trips its stale feed, and the error names that feed.
         vm.prank(owner);
-        vm.expectRevert(SHOracle.PriceOracle_StalePrice.selector);
+        vm.expectRevert(abi.encodeWithSelector(SHOracle.PriceOracle_StalePrice.selector, config.daiUsdPriceFeed));
         wallet.execute(
             bytes32(0), abi.encodePacked(address(dai), uint256(0), abi.encodeCall(ERC20Mock.transfer, (kani, 100e18)))
         );
