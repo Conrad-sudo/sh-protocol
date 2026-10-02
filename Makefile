@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test speed-test py-test e2e-test agent-smoke api
 
 
 
@@ -57,8 +57,13 @@ custom-tokens-test:
 history-test:
 	.venv/bin/python3 app/tests/test_history.py
 
+# What keeps the assistant quick: the chain id asked once, independent reads run together, the
+# wallet checks every transaction tool runs itself, and a UserOp's hash worked out locally. Offline.
+speed-test:
+	.venv/bin/python3 app/tests/test_speed.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test
+py-test: identity-test auth-test custom-tokens-test history-test speed-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia
@@ -312,4 +317,12 @@ api:
 setup-agent: deploy fund db deploy-wallet agent
 setup-test: deploy fund db deploy-wallet 
 setup-bot: deploy fund db deploy-wallet bot
-
+wipe-db:
+	rm ./app/wallet.db
+	rm ./app/wallet.db-shm
+	rm ./app/wallet.db-wal
+clear-broadcast:
+	rm -rf ./broadcast/DeploySHProtocol.s.sol/31337/*
+	rm -rf ./broadcast/DeploySHProtocol.s.sol/42161/*
+	rm -rf ./broadcast/DeploySHProtocol.s.sol/11155111/*
+	rm -rf ./broadcast/DeploySHProtocol.s.sol/1/*

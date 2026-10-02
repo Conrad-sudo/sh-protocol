@@ -170,10 +170,35 @@ def test_thread_id_is_per_chain():
     check("different users -> different threads", thread_id(1, 31337) != thread_id(2, 31337))
 
 
+def test_me_is_the_users_own_wallet():
+    """
+    "me" as an ERC-8004 reviewer is the wallet of the user the turn is FOR -- taken from the
+    runtime's user id, never from anything the model wrote -- and nothing else is rewritten.
+    """
+    print("\n[5] \"me\" as a reviewer is the user's own wallet")
+    from types import SimpleNamespace
+
+    import tools
+
+    wallets = {1: "0x" + "11" * 20, 2: "0x" + "22" * 20}
+    original = tools.load_session_handler
+    tools.load_session_handler = lambda user_id: SimpleNamespace(address=wallets[user_id])
+    try:
+        check("\"me\" resolves to the turn's own wallet", tools._resolve_reviewer(1, "me") == wallets[1])
+        check("...for whichever user the turn is for", tools._resolve_reviewer(2, " Me ") == wallets[2])
+        other = "0x" + "33" * 20
+        check("an address passes through untouched", tools._resolve_reviewer(1, other) == other)
+        check("no reviewer stays no reviewer", tools._resolve_reviewer(1, None) is None)
+        check("lists resolve entry by entry", tools._resolve_reviewers(1, ["me", other]) == [wallets[1], other])
+    finally:
+        tools.load_session_handler = original
+
+
 if __name__ == "__main__":
     test_no_tool_exposes_identity()
     test_context_beats_model_supplied_id()
     test_no_tool_writes_the_contact_list()
     test_thread_id_is_per_chain()
+    test_me_is_the_users_own_wallet()
 
     finish("All identity guards passed.")

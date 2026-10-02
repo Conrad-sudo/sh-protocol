@@ -40,12 +40,14 @@ from web3.logs import DISCARD
 from contract_errors import describe_revert_data
 from contracts import load_entry_point
 from network_config import load_network_config
+from parallel import read_all
 from tx_sender import send_and_confirm
 from userop import (
     create_signed_user_op,
-    current_session_nonce,
+    hash_user_op,
     prepare_execute_call,
     prepare_execute_batch_call,
+    session_nonce_read,
 )
 
 load_dotenv()
@@ -243,25 +245,12 @@ def resolve_bundler(w3: Web3) -> LocalAccount:
     return w3.eth.account.from_key(key)
 
 
-def _fees(w3: Web3) -> tuple[int, int]:
-    """
-    Returns (max_fee_per_gas, max_priority_fee_per_gas) for both the UserOp and the outer tx.
-
-    A UserOp's fees are fixed at signing, so a thin cushion strands it the moment the base fee
-    climbs past the cap. The 2x base-fee headroom survives a spike of up to ~2x and is the figure
-    SessionHandler's {maxOpGasCost} was sized against. It is a cap, not a price: the EntryPoint
-    repays at min(cap, tip + base fee), the same as the outer transaction costs the bundler.
-
-    @param w3  Web3 connection for the target network.
-    @return    (max_fee_per_gas, max_priority_fee_per_gas), both in wei.
-    """
-    base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
+def _priority_fee(w3: Web3) -> int:
+    """The node's suggested tip, in wei, or 2 gwei from a node that doesn't implement eth_maxPriorityFeePerGas."""
     try:
-        tip = w3.eth.max_priority_fee
+        return w3.eth.max_priority_fee
     except Exception:
-        # Some nodes don't implement eth_maxPriorityFeePerGas; a 2 gwei tip is a safe default.
-        tip = w3.to_wei(2, "gwei")
-    return 2 * base_fee + tip, tip
+        return w3.to_wei(2, "gwei")
 
 
 def _revert_reason(exc: Exception) -> str:
@@ -403,37 +392,41 @@ def _session_override(session_handler: Contract, key_address: str) -> dict:
     }
 
 
+def _override_honoured(session_handler: Contract, probe_key: LocalAccount, override: dict) -> bool:
+    """
+    Whether the node honours `override` -- and whether CURRENT_SESSION_SLOT still points at the
+    packed (currentSession, currentSessionValidUntil) pair.
+
+    A node that silently ignores overrides would otherwise fail the simulation on the signature and
+    have it reported to the user as "this transaction would fail". isSessionActive checks BOTH
+    halves of the slot, so a layout change that moved only the deadline is caught too. Needs only
+    the throwaway key, so it runs alongside the quote's first round of reads.
+    """
+    try:
+        return bool(
+            session_handler.functions.isSessionActive(probe_key.address).call(state_override=override)
+        )
+    except Exception:  # noqa: BLE001 -- any refusal means overrides are unusable here
+        return False
+
+
 def _simulate_handle_ops(
     w3: Web3,
     entry_point: Contract,
-    session_handler: Contract,
     op: tuple,
     bundler: LocalAccount,
-    probe_key: LocalAccount,
+    override: dict,
 ) -> int | None:
     """
     Gas for the whole handleOps bundle, with the throwaway key overridden into the allowlist.
 
-    @return  The simulated gas, or None if this node will not honour a state override -- in which
+    Only called once _override_honoured has said the node will apply `override`.
+
+    @return  The simulated gas, or None if the node refuses the override on estimateGas -- in which
              case the caller sizes the outer transaction from the parts instead. None is a
              degraded quote, not a failure; a revert is a failure and is raised.
     @raises RuntimeError if the bundle would revert.
     """
-    override = _session_override(session_handler, probe_key.address)
-
-    # Confirm the node honoured the override AND that CURRENT_SESSION_SLOT still points at the
-    # packed (currentSession, currentSessionValidUntil) pair. A node that silently ignores overrides
-    # would otherwise fail the simulation on the signature and have it reported to the user as
-    # "this transaction would fail". isSessionActive checks BOTH halves of the slot, so a layout
-    # change that moved only the deadline is caught too.
-    try:
-        if not session_handler.functions.isSessionActive(probe_key.address).call(
-            state_override=override
-        ):
-            return None
-    except Exception:  # noqa: BLE001 -- any refusal means overrides are unusable here
-        return None
-
     data = entry_point.encode_abi(abi_element_identifier="handleOps", args=[[op], bundler.address])
     try:
         return w3.eth.estimate_gas(
@@ -542,18 +535,43 @@ def quote_user_op(
     @param entry_point     Bound EntryPoint contract.
     @param calldata        Hex-encoded SessionHandler.execute() calldata (0x-prefixed).
     @param nonce           The sender's current nonce, for the estimates only -- the op is built
-                           with a freshly read nonce when it is finally signed.
+                           with a freshly read nonce when it is finally signed. None to read it
+                           here, alongside the other reads, which is quicker.
     @param bundler         The account that will sign and pay for handleOps.
     @return                The gas limits, fees and cost of the op.
     @raises RuntimeError   If the op would fail, or the gas price exceeds what the wallet allows.
     """
-    w3, _, chain_name = load_network_config(user_id)
-    max_fee, tip = _fees(w3)
-    base_fee = w3.eth.get_block("latest")["baseFeePerGas"]
+    w3, chain_id, chain_name = load_network_config(user_id)
     probe_key = Account.create()
+    override = _session_override(session_handler, probe_key.address)
+
+    # Three rounds of reads rather than a dozen one after another: everything that needs nothing but
+    # the calldata goes out at once, then validation (which signs over the nonce), then the whole
+    # bundle (which needs every gas figure). See parallel.py.
+    reads = {
+        # First, so that when the transaction would fail, its revert is the error raised.
+        "call_gas_used": lambda: _estimate_call_gas(w3, entry_point, session_handler, calldata),
+        "block": lambda: w3.eth.get_block("latest"),
+        "tip": lambda: _priority_fee(w3),
+        "max_op_gas_cost": session_handler.functions.maxOpGasCost().call,
+        "override_honoured": lambda: _override_honoured(session_handler, probe_key, override),
+    }
+    if nonce is None:
+        reads["nonce"] = session_nonce_read(user_id, session_handler, entry_point)
+    first = read_all(reads)
+    if nonce is None:
+        nonce = first["nonce"]
+
+    # A UserOp's fees are fixed at signing, so a thin cushion strands it the moment the base fee
+    # climbs past the cap. The 2x base-fee headroom survives a spike of up to ~2x and is the figure
+    # SessionHandler's {maxOpGasCost} was sized against. It is a cap, not a price: the EntryPoint
+    # repays at min(cap, tip + base fee), the same as the outer transaction costs the bundler.
+    base_fee = first["block"]["baseFeePerGas"]
+    tip = first["tip"]
+    max_fee = 2 * base_fee + tip
 
     # Estimated first, then buffered: the op carries the LIMIT, the quote keeps the estimate.
-    call_gas_used = _estimate_call_gas(w3, entry_point, session_handler, calldata)
+    call_gas_used = first["call_gas_used"]
     verification_gas_used = _estimate_verification_gas(
         w3, entry_point, session_handler, session_handler.address, nonce, calldata, probe_key
     )
@@ -575,7 +593,7 @@ def quote_user_op(
     # and reverts above the account's own maxOpGasCost. That revert happens during validation, where
     # the EntryPoint repays nothing, so clamp the cap rather than let it happen.
     op_gas = verification_gas + call_gas + pre_verification_gas
-    affordable_max_fee = session_handler.functions.maxOpGasCost().call() // op_gas
+    affordable_max_fee = first["max_op_gas_cost"] // op_gas
     if max_fee > affordable_max_fee:
         if affordable_max_fee <= base_fee:
             raise RuntimeError(
@@ -600,12 +618,14 @@ def quote_user_op(
         pre_verification_gas, max_fee, tip,
         bytes(
             probe_key.sign_message(
-                encode_defunct(entry_point.functions.getUserOpHash(unsigned_probe).call())
+                encode_defunct(hash_user_op(unsigned_probe, entry_point, chain_id))
             ).signature
         ),
     )
-    simulated_gas = _simulate_handle_ops(
-        w3, entry_point, session_handler, probe_op, bundler, probe_key
+    simulated_gas = (
+        _simulate_handle_ops(w3, entry_point, probe_op, bundler, override)
+        if first["override_honoured"]
+        else None
     )
     # Without a simulation, size the outer transaction from the parts. It is an over-estimate of
     # the whole bundle, which costs nothing: the bundler pays for gas used, not for the limit.
@@ -628,7 +648,11 @@ def quote_user_op(
 
 
 def check_bundler_funds(
-    user_id: int, quote: UserOpQuote, bundler: LocalAccount, outer_gas: int | None = None
+    user_id: int,
+    quote: UserOpQuote,
+    bundler: LocalAccount,
+    outer_gas: int | None = None,
+    balance: int | None = None,
 ) -> None:
     """
     Refuses a transaction the service could not afford to submit.
@@ -638,11 +662,14 @@ def check_bundler_funds(
 
     @param outer_gas  The outer transaction's gas limit, when a better figure than the quote's is
                       available (prepare_user_op re-estimates it with the real signature).
+    @param balance    The bundler's balance, when the caller has already read it alongside other
+                      reads; read here otherwise.
     @raises RuntimeError if the bundler EOA cannot cover the outer transaction at the fee cap.
     """
-    w3, _, _ = load_network_config(user_id)
     needed = (quote.outer_gas if outer_gas is None else outer_gas) * quote.max_fee
-    balance = w3.eth.get_balance(bundler.address)
+    if balance is None:
+        w3, _, _ = load_network_config(user_id)
+        balance = w3.eth.get_balance(bundler.address)
     if balance < needed:
         raise RuntimeError(
             f"The service's bundler account {bundler.address} on {quote.chain_name} holds "
@@ -676,18 +703,24 @@ def prepare_user_op(
     @raises RuntimeError   If the op would fail, or the bundler cannot afford the outer
                            transaction. Nothing is sent.
     """
-    w3, _, _ = load_network_config(user_id)
-    nonce = current_session_nonce(user_id, session_handler, entry_point)
+    w3, chain_id, _ = load_network_config(user_id)
+    # The three reads this needs depend on nothing but the wallet, so they go out together.
+    # from_block is read before the op exists, so the search for its receipt can only start early.
+    first = read_all({
+        "nonce": session_nonce_read(user_id, session_handler, entry_point),
+        "from_block": lambda: w3.eth.block_number,
+        "bundler_balance": lambda: w3.eth.get_balance(bundler.address),
+    })
 
     unsigned = _pack_op(
-        session_handler, quote.calldata, nonce, quote.call_gas, quote.verification_gas,
+        session_handler, quote.calldata, first["nonce"], quote.call_gas, quote.verification_gas,
         quote.pre_verification_gas, quote.max_fee, quote.tip, b"",
     )
+    user_op_hash = hash_user_op(unsigned, entry_point, chain_id)
     signed = create_signed_user_op(
-        user_id=user_id, user_op=unsigned, entry_point=entry_point, key_ciphertext=key_ciphertext
+        user_id=user_id, user_op=unsigned, entry_point=entry_point, key_ciphertext=key_ciphertext,
+        user_op_hash=user_op_hash,
     )
-    user_op_hash = bytes(entry_point.functions.getUserOpHash(unsigned).call())
-    from_block = w3.eth.block_number
 
     # Re-run the whole bundle with the real signature. Nothing has been sent yet, so this is still
     # free, and it catches anything that moved between the quote and the user agreeing to it.
@@ -705,8 +738,8 @@ def prepare_user_op(
     outer_gas = int(outer_gas * OUTER_GAS_BUFFER)
     fees = {"maxFeePerGas": quote.max_fee, "maxPriorityFeePerGas": quote.tip}
 
-    check_bundler_funds(user_id, quote, bundler, outer_gas)
-    return PreparedUserOp(signed, user_op_hash, outer_gas, fees, from_block)
+    check_bundler_funds(user_id, quote, bundler, outer_gas, balance=first["bundler_balance"])
+    return PreparedUserOp(signed, user_op_hash, outer_gas, fees, first["from_block"])
 
 
 def find_user_op_receipt(w3: Web3, entry_point: Contract, user_op_hash: bytes, from_block: int):

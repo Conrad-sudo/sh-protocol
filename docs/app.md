@@ -14,6 +14,7 @@ app/
 ├── toolkits.py            ← Per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits (cached)
 ├── userop.py              ← UserOp calldata, nonce and session-key signing
 ├── bundler.py             ← The app's own ERC-4337 bundler, on every network — single + batch
+├── parallel.py            ← Runs independent chain reads at the same time (two pools: reads, tasks)
 ├── tx_sender.py           ← Nonce-safe EOA broadcast: locked nonce allocation + fee-bump/timeout
 ├── contract_errors.py     ← Names contract reverts (custom errors incl. SHOracle's, Error(string)) for the API and the agent
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
@@ -35,6 +36,7 @@ app/
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
     ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
+    ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
@@ -209,6 +211,14 @@ def load_network_config(user_id: int) -> tuple[Web3, int, str]        # (Web3, c
 def load_network_config_by_name(chain_name: str) -> tuple[Web3, int]  # bypasses user lookup (deploy scripts)
 ```
 
+**The chain id is asked once.** web3's validation middleware reads `w3.eth.chain_id` before every
+`eth_call` and `eth_estimateGas` — twice per call in practice — so until 2026-10-02 most requests the
+app sent were that one question (22 of the 37 in quoting a transfer). Every connection now uses
+`_ChainIdOnceProvider`, which keeps the node's first answer and reuses it for every thread. It is
+the node's real answer, not the database's, so the middleware's check still means something; an
+error is not kept. (web3's own request cache keys entries by thread, and LangGraph runs each turn's
+tools on fresh threads, so it would still have asked about once per tool call.)
+
 ---
 
 ## `contracts.py`
@@ -257,6 +267,8 @@ Three configuration choices carry weight:
 | `factory_address=None` | The toolkit reads `router.factory()`, so pair lookups cannot drift from the router in use, and chains with no hardcoded factory work. |
 | `reset_residual_approvals=True` | Appends `approve(spender, 0)` wherever the router may pull less than approved. Already the default in calls mode; explicit because the module depends on it. |
 
+**They share the app's provider.** Each package builds its own web3 connection from the bare RPC URL, with web3's stock provider — the one that asks the chain id before every call. `_share_provider` points the ERC-20 and Uniswap toolkits' connections at the app's (`toolkit.w3.provider = w3.provider`), so they ask once too and share one HTTP session per chain; their contracts look the provider up per call, so everything already bound follows. The ERC-8004 toolkit keeps its own: it sets a 20 s timeout of its own and is off the send/swap path.
+
 `_BLOCKED_TOOLS` withholds `approve`, `approve_token` and `revoke_approval` from the returned dicts. They build valid calldata but always revert here (see the approvals note under `tools.py`), so exposing them would only let the agent burn a UserOp on a guaranteed failure.
 
 ---
@@ -268,7 +280,7 @@ Every transaction the app signs with one of *its own* EOAs goes out through here
 Two problems it exists to solve, both invisible on a single-user Anvil run:
 
 - **Nonce races.** `telebot.py` serves each user request on its own thread (`asyncio.to_thread`), but a handful of shared keys sign for everyone — one bundler EOA per process, one deployer per chain. Reading the nonce per-thread hands the same value to two threads, and the second transaction is dropped or replaces the first. `send_tx()` allocates from a cached `(chain_name, address) → nonce` counter under a process-wide lock spanning allocate → sign → broadcast. The counter is seeded from `pending` (not `latest`, which does not count the mempool) and advanced locally; any failure clears it so the next caller re-seeds, which also self-heals a counter left stale by an out-of-band transaction. The lock covers **one process**: that is why the API and the Telegram bot bundle with different keys (`API_BUNDLER`, `TELEGRAM_BUNDLER`) — sharing one, each process would keep its own counter and hand out the same nonces.
-- **Stuck transactions.** A fee cap the base fee has since overtaken will never be mined, so an unbounded `wait_for_transaction_receipt` hangs a user's request permanently. `send_and_confirm()` gives each attempt `ATTEMPT_TIMEOUT_SECS`, then replaces the transaction at its own nonce with both fee fields bumped past the node's price floor, up to `MAX_FEE_BUMPS` times, and raises `TimeoutError` rather than hanging. The replacement cap is floored against the *current* base fee, not just scaled from the stale one. All broadcast hashes are polled, since a replacement races the transaction it replaces and either may win.
+- **Stuck transactions.** A fee cap the base fee has since overtaken will never be mined, so an unbounded `wait_for_transaction_receipt` hangs a user's request permanently. `send_and_confirm()` gives each attempt `ATTEMPT_TIMEOUT_SECS`, then replaces the transaction at its own nonce with both fee fields bumped past the node's price floor, up to `MAX_FEE_BUMPS` times, and raises `TimeoutError` rather than hanging. The replacement cap is floored against the *current* base fee, not just scaled from the stale one. All broadcast hashes are polled, every `RECEIPT_POLL_INTERVAL_SECS` (0.5 s — the user is waiting on it), since a replacement races the transaction it replaces and either may win.
 
 Only the outer transaction is ever re-signed; an ERC-4337 UserOp in its calldata is untouched and its session-key signature stays valid, because the EntryPoint prices reimbursement purely from the UserOp's own gas fields.
 
@@ -287,8 +299,8 @@ The blockchain execution layer. The app is its **own ERC-4337 bundler on every n
 send_user_op_as_session(user_id, key_ciphertext, target, value, data)
 send_batch_user_op_as_session(user_id, key_ciphertext, executions)     # atomic multi-call, unattended
 
-quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler) -> UserOpQuote
-check_bundler_funds(user_id, quote, bundler)                           # can the service afford to send it
+quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler) -> UserOpQuote  # nonce=None: read with the rest
+check_bundler_funds(user_id, quote, bundler, outer_gas=None, balance=None)  # can the service afford to send it
 prepare_user_op(user_id, key_ciphertext, session_handler, entry_point, quote, bundler) -> PreparedUserOp
 broadcast_user_op(user_id, prepared, bundler) -> (tx_hash, receipt)
 use_bundler_key(env_name)                                              # which key this process signs with
@@ -298,6 +310,17 @@ use_bundler_key(env_name)                                              # which k
 and `broadcast_user_op` sends it. The split is what lets the user be shown a price before an
 executable transaction exists anywhere — see `quotes.py`. `send_user_op_as_session` runs all three
 back to back for the unattended path (tests, and anything with nobody to ask).
+
+**In rounds, not one read after another (2026-10-02).** A quote used to make about a dozen chain
+reads in sequence; now `quote_user_op` makes three rounds (`parallel.read_all`): everything that
+needs only the calldata at once — the execution estimate, the latest block (one read, where it used
+to be two), the tip, `maxOpGasCost`, the override check and, when the caller passes `nonce=None`,
+the nonce — then the validation estimate (it signs over the nonce), then the whole-bundle
+simulation. `prepare_user_op` makes two: the nonce, the block number and the bundler's balance at
+once, then the signed estimate. The op's hash is no longer asked of the EntryPoint at all:
+`userop.hash_user_op` works it out with ERC-4337 v0.7's formula, checks the first op on each
+(chain, EntryPoint) against `getUserOpHash`, and asks the EntryPoint every time after if they ever
+disagree. (Signing used to ask for the same hash twice.)
 
 **Which key signs.** Chosen by the *process*, not the chain: the API bundles with `API_BUNDLER` (the default), and `telebot.py` switches to `TELEGRAM_BUNDLER` at startup. `tx_sender`'s nonce lock only coordinates threads within one process, so two processes sharing a key would hand out the same nonces. Anything else that runs the agent in its own process (`make agent`, `make agent-smoke`) uses `API_BUNDLER` and must not run beside the API. Both keys must be plain EOAs with no code on every chain they bundle for — the EntryPoint's bare ETH send to the beneficiary reverts AA91 against code — which is why the well-known Anvil keys are never used. `make fund` tops both up on a local node; on a live chain the operator funds them.
 
@@ -334,7 +357,7 @@ a random id. `confirm_transaction(quote_id)` is the only thing in the app that s
 
 ```python
 QUOTE_TTL_SECONDS = 300
-put(user_id, chain_id, turn_id, action, calls, key_ciphertext, quote, cost) -> PendingTransaction
+put(user_id, chain_id, turn_id, action, calls, quote, cost) -> PendingTransaction   # holds no key
 take(user_id, chain_id, quote_id, turn_id) -> PendingTransaction   # claims it; single-use
 drop(user_id, quote_id) -> bool                                    # the user said no
 ```
@@ -406,7 +429,7 @@ DEFAULT_WATCHED_TICKERS = {                 # tokens metered against the cap, pe
 
 **`deploy_wallet(user_id, chain_name)`** calls **`SHFactory.deployWallet(DEFAULT_DAILY_LIMIT_USD, DEFAULT_WINDOW_SECS, watched_tokens, session_key, session_key_valid_until, trusted_spenders)`** — the first three seed the wallet's spending-cap config (`watched_tokens` is `DEFAULT_WATCHED_TICKERS` resolved to addresses); the rest make the wallet usable immediately, replacing what used to be two follow-up owner transactions. The key's deadline is `DEFAULT_SESSION_TTL_SECS` (30 days) from now; the contract refuses anything past `MAX_SESSION_TTL` (90). It decodes `WalletDeployed`, asserts the address matches the CREATE2 prediction, and persists it.
 
-Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress(deployer)` returns the address this deploy will land on — the factory salts with its own per-owner `deployCount`, so the value advances after each of our deploys and is untouched by anyone else's — then `create_pending_session_key(user_id, chain_id, predicted)` mints a fresh key **under the address the wallet is about to have** — the same `(user_id, chain_id, wallet_address)` key `tools.get_session_keys` resolves — and holds it in `pending_session_keys` until the deploy has mined. Without a predictable address the key could not exist before the deploy that takes it as an argument. The mismatch check after the receipt is deliberate: a wrong address would silently orphan the key. On a stale prediction it re-files the session key under the address that actually deployed rather than raising — the on-chain grant is already correct for it, and raising would strand a funded wallet with no `session_handlers` row.
+Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress(deployer)` returns the address this deploy will land on — the factory salts with its own per-owner `deployCount`, so the value advances after each of our deploys and is untouched by anyone else's — then `create_pending_session_key(user_id, chain_id, predicted)` mints a fresh key **under the address the wallet is about to have** — the same `(user_id, chain_id, wallet_address)` key `tools._get_session_keys` resolves — and holds it in `pending_session_keys` until the deploy has mined. Without a predictable address the key could not exist before the deploy that takes it as an argument. The mismatch check after the receipt is deliberate: a wrong address would silently orphan the key. On a stale prediction it re-files the session key under the address that actually deployed rather than raising — the on-chain grant is already correct for it, and raising would strand a funded wallet with no `session_handlers` row.
 
 ⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `[constants.get_router(chain_id)]`, or empty on bare Anvil, which has no Uniswap deployment. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
 
@@ -430,23 +453,23 @@ Wraps blockchain operations as LangChain `@tool`-decorated functions; each docst
 
 The wrappers exist — rather than exposing the package tools directly — because the package tools take no `user_id` (a toolkit instance is bound to one user's chain), `langchain-uniswap-v2` accepts raw addresses only, and neither package submits anything. Their docstrings describe a *different* function signature (addresses, `from_address`, `nonce`, returns an unsubmitted plan), so they are not interchangeable with the docstrings here, which are the contract the LLM actually sees. See [langchain-packages-migration.md](langchain-packages-migration.md) §3.
 
-**One key, one budget.** `get_session_keys(user_id, <anything>)` always returns the session key for the wallet on the user's CURRENT chain — the argument is kept for tool-API compatibility but selects nothing. Spending is bounded by one wallet-wide USD cap per window, read on-chain.
+**One key, one budget — and the model never handles the key.** The wallet on the user's CURRENT chain has exactly one session key, so there is nothing to choose: no tool takes it as an argument. `_quote_executions` reads it only to refuse early when there is none, and `confirm_transaction` reads it when it signs, so a key renewed between quote and confirm is the one used. (Until 2026-10-02 a `get_session_keys` tool handed the model the Vault ciphertext to pass back into every write — one model call to fetch it and ~90 characters of random text to repeat, per transaction.) Spending is bounded by one wallet-wide USD cap per window, read on-chain.
 
 ### Session / budget / pricing tools
 
 | Tool | Description |
 |---|---|
-| `get_all_sessions(user_id)` | On-chain wallet status: `{paused, session_active, session_expires_at, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `paused`/`getConfig`/`getRemainingBudget`/`isSessionActive`/`currentSessionValidUntil`) |
-| `get_session_keys(user_id, token)` | Returns `(key_address, vault_ciphertext)` for the wallet's session key |
-| `check_session_validity(user_id, token)` | Whether the app's key is the wallet's `currentSession` **and** has not expired (`isSessionActive`) |
-| `check_remaining_budget(user_id)` | Remaining USD budget this window (no token arg — the cap is global) |
-| `check_spending_within_budget(user_id, token, amount)` | Prices `amount` via the oracle and compares to remaining budget. A token the user added is always within budget (it can't count) and is never priced |
-| `preflight_check(user_id, token, amount, token_received?, amount_received?)` | Session validity + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, session_expires_in_secs, expiring_imminently, within_budget, usd_value, charged_usd, remaining_usd` (`usd_value` is `null` for a token the user added: it has no price); the agent proceeds only if not paused, session active and within budget. `session_active` is reported false once under `SESSION_EXPIRY_MARGIN_SECS` (60s) remain, so a transaction cannot be quoted, confirmed and then refused with `AA22` while in flight |
-| `get_price(user_id, token)` / `get_usd_value(user_id, token, amount)` | Unit price / USD value via `SHOracle.getPrice`. Refuse a token the user added by name ("no price") rather than letting the oracle revert |
+| `get_wallet_status()` | On-chain wallet status: `{paused, session_active, session_expires_at, session_expires_in_secs, daily_limit_usd, spent_usd, remaining_usd, window_hours, watched_tokens}` (reads `paused`/`getConfig`/`getRemainingBudget`/`isSessionActive`/`currentSessionValidUntil` in one round of parallel calls). `remaining_usd` is floored at 0, as in a quote. Called `get_all_sessions` until 2026-10-02 — a name left over from per-token sessions; its plain half `_get_wallet_status` also serves the Telegram bot's `budget_alert` |
+| `preflight_check(token, amount, token_received?, amount_received?)` | **For questions only since 2026-10-02** ("could I send $500 of ETH?") — every write tool runs the same checks itself (`_wallet_checks`, shared). Pause + session validity + balance + budget check + USD value in one call. Charges what the module will: the metered value leaving minus the metered value coming back (native + watched tokens only), so a wrap into a watched WETH is `charged_usd: 0`. Returns `is_paused, session_active, session_expires_in_secs, expiring_imminently, enough_balance, within_budget, usd_value, charged_usd, remaining_usd`, plus `balance_short` when the wallet doesn't hold the amount (`usd_value` is `null` for a token the user added: it has no price). `session_active` is reported false once under `SESSION_EXPIRY_MARGIN_SECS` (60s) remain, so a transaction cannot be quoted, confirmed and then refused with `AA22` while in flight. Its chain reads run in two rounds of parallel calls (the wallet's state with each token's watched flag, decimals and — for what is sent — balance, then the prices) — on a live RPC that is ~1 s instead of 3–4.5 s one after another. A price that is only shown (a token the limit doesn't count) may fail without failing the checks: `usd_value` is then `null` and `usd_value_unavailable` says why. The balance is the amount alone: the fees come on top, in the native asset, and only a quote knows them |
+| `get_price(token, amount?)` | Unit price via the oracle (`getUsdValue` of one whole token), or the USD value of `amount`. Refuses a token the user added by name ("no price") rather than letting the oracle revert |
 
-### Read / quote / sufficiency tools
+Removed on 2026-10-02, each covered by a tool above or by the checks every quote makes: `check_session_validity` (it took a `token` it ignored, from the per-token sessions), `check_remaining_budget`, `check_spending_within_budget` (it also counted a listed token the limit doesn't watch at full value, and took a whole-number amount) and `get_usd_value` (now `get_price`'s `amount`).
 
-`get_eth_balance`, `get_erc20_balance`, `get_contact_erc20_balance`, `get_erc20_allowance` (≈always 0 by design), `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance`, `is_derived_input_sufficient`, `is_exact_input_sufficient`, `is_liquidity_sufficient`, `is_liquidity_removal_sufficient`, plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens` (returns `{"listed": [...], "custom": [...]}` — the second list is the tokens the user added), `get_native_asset`.
+### Read and quote tools
+
+`get_eth_balance`, `get_erc20_balance(token, contact?)` (the wallet's own balance, or a saved contact's with `contact`), `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance` (`token_b` defaults to `"eth"`, the native asset's pool), plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens` (returns `{"native": "ETH", "listed": [...], "custom": [...]}` — `custom` is the tokens the user added). The quote and preview tools are for questions: the write tools quote the router themselves.
+
+Removed on 2026-10-02: `get_contact_erc20_balance` (now `get_erc20_balance`'s `contact`), `get_native_asset` (`get_supported_tokens` returns it as `native`, `get_eth_balance` as `asset`, and every quote's `action` names it), `get_erc20_allowance` (the wallet's allowance to a contact is always 0 by design, and the one that matters — a contact's to the wallet, for `transferFrom_erc20` — that tool checks itself), and the four `is_*_sufficient` tools (every write tool refuses a short balance itself).
 
 Every token argument accepts a listed ticker, a ticker the user added, or a `0x` address; `_token_address` resolves it through `db.resolve_token` and the packages are always handed an address. A quote that moves a token Mitfah doesn't list carries a `details` sentence from `_limit_note` saying how the cap treats it: sending or selling one costs nothing; buying one with the native asset or a watched token counts the **full** amount paid, because what comes back has no price.
 
@@ -454,33 +477,61 @@ Every token argument accepts a listed ticker, a ticker the user added, or a `0x`
 
 > **The quote tools return whole units only.** `get_quote_in` / `get_quote_out` return `{amount_in, amount_out, path}`, and `get_pool_quote` / `get_lp_amounts` return only their whole-unit fields. The old `*_base`, `decimals_a/b`, `liquidity` and `token_*_address` keys are gone: they existed so the swap tools could do their own base-unit and slippage arithmetic, which now happens inside the packages.
 >
-> **`"eth"` is accepted by the Uniswap-side tools only** — the quote, sufficiency, swap and liquidity tools all route their token arguments through `tools._resolve`, which maps `"eth"` to the chain's wrapped-native address and passes a raw `0x…` through unchanged (that is how LP tokens are named). The six ERC20 tools (`get_erc20_balance`, `get_contact_erc20_balance`, `get_erc20_allowance`, `wrap_eth`, `transfer_erc20`, `transferFrom_erc20`) hand the ticker straight to `langchain-erc20`, which resolves it against the DB token map — and that map has no `"eth"` entry. Use `get_eth_balance` / `send_eth` for the native asset, as before.
->
-> `is_derived_input_sufficient` and `is_liquidity_sufficient` keep their `{is_sufficient, derived_input}` / `{is_sufficient, amount_b}` shapes; the wrappers rename the packages' `required_input` / `required_b` / `required_native` fields so the agent-facing contract is unchanged.
+> **`"eth"` (or `"bnb"`) means the native asset in the Uniswap-side tools only.** `swap`, `add_liquidity` and `remove_liquidity` take a native side through the router's native functions (`swapExactETHForTokens`, `addLiquidityETH`, …), so it is sent or received as the native asset itself; `"weth"`/`"wbnb"` names the wrapped token. The quote and preview tools route their token arguments through `tools._resolve`, which maps the native asset to the wrapped-native address — the pool the native asset trades in — and passes a raw `0x…` through. The four ERC20 tools (`get_erc20_balance`, `wrap_eth`, `transfer_erc20`, `transferFrom_erc20`) hand the ticker to `langchain-erc20`, whose token map has no `"eth"`: use `get_eth_balance` / `send_eth` for the native asset.
 
 ### Write tools
 
+**Every write tool checks before it quotes (2026-10-02).** `_quote_executions(runtime, executions, action, legs)` runs `_wallet_checks` — the pause, the session key (and the 60 s expiry margin), and, from `legs` (`[(token, amount, SENT | RECEIVED)]`), whether the wallet holds what it sends and what the spending limit would count — on a task thread *alongside* the quote's own reads, and refuses with the reason (`_enforce_wallet_checks`) before anything is parked: "the owner has paused this wallet", "the session key is no longer active … Controls → Renew", "Not enough ETH: the wallet holds X, and this needs Y", "this would count $X toward the spending limit, but only $Y is left". A failed check wins over a failed simulation, being the clearer reason. A passing quote carries `usd_value`, `charged_usd`, `remaining_usd` and `session_expires_in_secs`. Writes that move nothing countable (registry writes, removing liquidity, a `transferFrom` from a contact) pass `legs=None` and check only the pause and the key. Adding liquidity counts **both** deposits (the LP token back has no price). The packages' own preflight (`preflight=True`) refuses a short token balance too, while building the plan; `send_eth` has no package plan, so its balance is checked only here.
+
+**The native asset has to cover the fees as well (`_check_native_headroom`).** One balance pays, in this order, the gas the EntryPoint asks for up front (whatever the wallet's deposit there doesn't cover), Mitfah's fee, then the value the calls carry. So when the calls carry native value, the quote also reads the wallet's balance and its EntryPoint deposit, and refuses unless value + fee + (`max_gas_wei` − deposit) fits — saying the most it can use now. Before this, "send all my ETH" was refused as a bare `FailedCall()`, and an amount a little smaller passed the quote and then failed on chain after the user agreed, charging them the gas. When the quote itself failed (the value plus the fee already don't fit), the gas is unknown and only the fee is counted.
+
+The swaps' quotes carry the router's figures, so no `get_quote_*` first: the package reports only the slippage-bounded amount, and `_quote_exact_input_swap` / `_quote_exact_output_swap` recover the expected one from it (`min × 10000 / (10000 − bps)`, `max × 10000 / (10000 + bps)` — exact to within a unit in the last place) for `details` ("received: about X, at least Y (slippage tolerance 0.5%)") and for the limit's estimate. The cost comes from one native price read (`getUsdValue(ETH, 1e18)`, scaled — the oracle is linear, so this is the three old reads to the wei), started alongside everything else. `confirm_transaction` reads the remaining budget while the History row is written.
+
 | Tool | Description |
 |---|---|
-| `send_eth(...)` | Sends native ETH/BNB/CELO (metered — native value counts against the cap) |
+| `send_eth(...)` | Sends native ETH/BNB (metered — native value counts against the cap) |
 | `transfer_erc20(...)` | Sends tokens (metered if watched) |
-| `transferFrom_erc20(...)` | Transfers from an approved sender |
+| `transferFrom_erc20(...)` | Transfers from a sender who has approved the wallet (the package checks that allowance and their balance) |
 | `wrap_eth(...)` | Wraps native → WETH/WBNB |
-| `swap_*` (all six variants) | Uniswap/PancakeSwap V2 swaps — **approve + swap sent as one atomic batch**. Optional `recipient` delivers the output straight to a saved contact (see below) |
-| `add_liquidity(...)` / `add_liquidity_eth(...)` | Add liquidity — approvals batched and residuals zeroed atomically |
-| `remove_liquidity(...)` / `remove_liquidity_eth(...)` | Remove liquidity — the pool's **LP token** is approved by address to the trusted router (granted in the `deployWallet` call itself) and consumed in one batch |
-| `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the session key and broadcasts it |
+| `swap(token_in, token_out, amount_in? \| amount_out?, slippage_bps, recipient?)` | Uniswap/PancakeSwap V2 swaps — **approve + swap sent as one atomic batch**. Exactly one amount; picks the router function (below). Optional `recipient` delivers the output straight to a saved contact (see below) |
+| `add_liquidity(token_a, amount_a, token_b="eth", slippage_bps)` | Add liquidity — approvals batched and residuals zeroed atomically. The native asset by default (`addLiquidityETH`); `token_a`'s amount is the one fixed, and a native `token_a` is refused ("Name how much X to deposit first") |
+| `remove_liquidity(token_a, lp_amount, token_b="eth", slippage_bps)` | Remove liquidity — the pool's **LP token** is approved by address to the trusted router (granted in the `deployWallet` call itself) and consumed in one batch. The native asset back by default (`removeLiquidityETH`); a pool named native-first is turned round |
+| `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the wallet's current session key and broadcasts it. Its result ends with what is left of the spending limit (`_budget_left`; omitted if the read fails — never an error after a send), so the agent needs no `get_wallet_status` call |
 | `cancel_transaction(quote_id)` | Discards a quote the user declined |
 
 > **Every row above except the last two returns a QUOTE, not a receipt.** The tool builds the exact
 > calldata, prices the whole UserOperation against the chain, and returns `action` (what it does,
-> composed from the calls rather than by the model), `total_usd`, `max_total_usd`, `protocol_fee_usd`
-> and a `quote_id`. Nothing is signed and nothing is sent until `confirm_transaction`, which must
-> come in a **later conversation turn** — so the user has actually replied to the price. The swap and
-> liquidity tools put their slippage bounds in the quote's `details`, where they are of some use,
-> rather than beside the receipt where they used to be.
+> composed from the calls rather than by the model; `_action_of` leaves out the approvals around the
+> step, by their `approve`/`approve_reset` roles — until 2026-10-02 it kept only an `action` role,
+> which the Uniswap package doesn't use, so swap and liquidity quotes listed every approval), `network`, `total_usd`, `max_total_usd`,
+> `protocol_fee_usd`, the wallet-check figures, a `quote_id` and a `next_step` saying what to show.
+> Nothing is signed and nothing is sent until `confirm_transaction`, which must come in a **later
+> conversation turn** — so the user has actually replied to the price. The swap and liquidity tools
+> put the expected amounts and their slippage bounds in the quote's `details`. Every write tool's
+> docstring ends the same way: a quote, nothing sent, show it as its `next_step` says — one line,
+> where it used to be a six-line paragraph in each of them that had fallen behind `next_step`.
 
-> **Swap-and-send in one transaction.** All six `swap_*` tools take an optional `recipient`, passed
+> **One swap tool, one add, one remove (2026-10-02).** They used to be ten tools — six swaps named
+> after the router functions and an `_eth` twin of each liquidity tool — and the model had to pick
+> the function by name. Now it fills in what the user fixed, and the tool picks:
+>
+> | `swap` gets | native side | router function |
+> |---|---|---|
+> | `amount_in` | none | `swapExactTokensForTokens` |
+> | `amount_out` | none | `swapTokensForExactTokens` |
+> | `amount_in` | `token_in` | `swapExactETHForTokens` |
+> | `amount_out` | `token_in` | `swapETHForExactTokens` |
+> | `amount_in` | `token_out` | `swapExactTokensForETH` |
+> | `amount_out` | `token_out` | `swapTokensForExactETH` |
+>
+> Both amounts or neither, the native asset on both sides, or the same token on both (the native
+> asset and its wrapped form count as one: `wrap_eth` wraps, and unwrapping isn't offered) are
+> refused before anything is built. "eth" now always means the native asset here: before, passing
+> it to a token-to-token swap or as `add_liquidity`'s `token_b` quietly used WETH while the quote
+> said ETH. The quote helpers (`_quote_exact_input_swap` / `_quote_exact_output_swap`) are
+> unchanged, and `test_custom_tokens` checks that each shape reaches its own package function.
+
+> **Swap-and-send in one transaction.** `swap` takes an optional `recipient`, passed
 > through to the router's own recipient argument, so "swap 1 ETH for USDC and send it to Sandy" is
 > one atomic UserOp rather than a swap followed by a `transfer_erc20`. Beyond saving a set of fees,
 > it removes a real correctness problem: a swap returns a *minimum* output, not an exact figure, so
@@ -492,8 +543,8 @@ Every token argument accepts a listed ticker, a ticker the user added, or a `0x`
 > `"me"`, keeps the output in the wallet.
 
 > **All contact resolution goes through `tools._resolve_contact`.** `send_eth`, `transfer_erc20`,
-> `transferFrom_erc20` (both sender and recipient), `get_contact_erc20_balance`,
-> `get_erc20_allowance` and the swap `recipient` all use it. It exists because `db.get_contact`
+> `transferFrom_erc20` (both sender and recipient), `get_erc20_balance`'s `contact` and the swap
+> `recipient` all use it. It exists because `db.get_contact`
 > returns `None` for an unknown name rather than raising — passing that `None` onward surfaced as
 > an opaque `"must be a string, got NoneType"` from inside the calldata builder, which gives the
 > agent nothing to act on. Now the error names the person, the role they were being used as
@@ -509,19 +560,19 @@ Every token argument accepts a listed ticker, a ticker the user added, or a `0x`
 
 ### ERC-8004 tools
 
-All 29 tools of [`langchain-erc8004`](https://pypi.org/project/langchain-erc8004/) are wrapped — the package owns the registry ABIs, address resolution, registration-file resolution, the sybil-aware read shapes and all calldata construction. `toolkits.get_erc8004_tools(user_id)` builds the toolkit per user, reading **both registry addresses off the wallet** (`SessionHandler.IDENTITY_REGISTRY()` / `.REPUTATION_REGISTRY()`) rather than from the package's chain table: that is the canonical `0x8004…` pair on Sepolia/BSC but the local mocks on Anvil, and chain 31337 is not in the package's `KNOWN_NETWORKS` at all.
+[`langchain-erc8004`](https://pypi.org/project/langchain-erc8004/) owns the registry ABIs, address resolution, registration-file resolution, the sybil-aware read shapes and all calldata construction. `toolkits.get_erc8004_tools(user_id)` builds the toolkit per user, reading **both registry addresses off the wallet** (`SessionHandler.IDENTITY_REGISTRY()` / `.REPUTATION_REGISTRY()`) rather than from the package's chain table: that is the canonical `0x8004…` pair on Sepolia/BSC but the local mocks on Anvil, and chain 31337 is not in the package's `KNOWN_NETWORKS` at all.
 
 **Who the agent is.** `DeploySHProtocol.s.sol` registers exactly **one** agent per deployment, stores its id in `SHRegistry.agentId`, and leaves the ERC-721 with the deploying operator's key. That agent is the *protocol's* on-chain identity, shared by every wallet on the chain — a user's SessionHandler is a smart account, not an agent, and has no registry entry of its own. This shapes the whole surface: `"protocol"` is the default for every `agent` argument (resolved by `_resolve_agent` via `get_agent_id`, which stays project-side), the user's wallet is always the *reviewer* rather than the subject, and the identity writes are withheld.
 
 | Group | Tools | Exposed to the agent? |
 |---|---|---|
-| identity reads | `get_registry_info`, `get_agent_identity`, `agent_exists`, `get_agent_owner`, `get_agent_uri`, `get_agent_wallet`, `get_agent_metadata`, `resolve_registration_file`, `verify_agent_endpoint` | yes |
-| reputation reads | `get_feedback_clients`, `get_agent_feedback`, `list_all_feedback`, `get_feedback_summary`, `read_feedback`, `get_last_feedback_index`, `get_response_count`, `get_agent_reputation` | yes |
+| identity reads | `get_registry_info`, `get_agent_identity`, `agent_exists`, `get_agent_metadata`, `verify_agent_endpoint` | yes |
+| reputation reads | `get_feedback_clients`, `get_agent_feedback`, `list_all_feedback`, `get_last_feedback_index`, `get_response_count`, `get_agent_reputation` | yes |
 | reputation writes | `post_reputation_feedback`, `give_feedback`, `revoke_feedback`, `append_response` | yes |
-| identity writes | `register_agent`, `parse_registration_receipt`, `set_agent_uri`, `set_agent_metadata`, `transfer_agent` | **no** |
+| identity writes | `register_agent`, `parse_registration_receipt`, `set_agent_uri`, `set_agent_metadata`, `transfer_agent`, and `resolve_registration_file` (it exists to check a file before registering one) | **no** |
 | agent wallet | `build_agent_wallet_typed_data`, `set_agent_wallet`, `unset_agent_wallet` | **no** |
 
-21 registered, 60 agent tools in total (was 62 until `save_contact` and `delete_contact` moved to the API — see above). Every write returns a plan and is quoted through the same `_quote_plan` as the ERC20/Uniswap tools (via `_quote_registry_plan`, which carries the package's `summary` into the quote), so a registry write is confirmed exactly like a transfer; all write tools accept `session_key_ciphertext` — the opaque Vault ciphertext; never decrypted or logged at the tool layer. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
+15 exposed, 37 agent tools in total (2026-10-02: down from 61). Five of the package's reads are not wrapped at all, because another tool returns what they do: `get_agent_owner`, `get_agent_uri` and `get_agent_wallet` (all three are in `get_agent_identity`, which reports an unreachable registration file as data rather than failing), `get_feedback_summary` (the registry's truncated average — `get_agent_reputation` is the one to show) and `read_feedback` (`get_agent_feedback` with one reviewer lists each entry with its index). Wherever a read takes a reviewer (`client`, `clients`, `responders`), `"me"` is the user's own wallet (`_resolve_reviewer`): the model is never told the wallet's address, and `revoke_feedback` needs the user's own entries to find the index. The feedback writes ask for no yes of their own: the quote is the confirmation, and their docstrings say to state that the write is public and permanent when showing it. Every write returns a plan and is quoted through the same `_quote_plan` as the ERC20/Uniswap tools (via `_quote_registry_plan`, which carries the package's `summary` into the quote), so a registry write is confirmed exactly like a transfer; like every write, none takes the session key — it is read when the user confirms. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
 
 > **The eight identity writes are defined but withheld from `get_tools()`**, on the same principle as `toolkits._BLOCKED_TOOLS`: a tool that cannot succeed is worse than no tool. Changing the protocol agent is governance done with the operator's key, and a user's wallet cannot own an agent of its own either — `register_agent` mints the ERC-721 to the wallet, and `SessionHandler` installs no ERC-7579 fallback handler for `onERC721Received`, so any mint or `safeTransferFrom` to the account reverts with `ERC7579MissingFallbackHandler(0x150b7a02)`. Each wrapper additionally calls `_reject_protocol_agent_write`, which refuses the protocol's own agent before any calldata is built — so a deployment whose wallet *does* own an agent (or has been granted `setApprovalForAll`) can re-enable them by adding them back to the list, without exposing the protocol identity.
 
@@ -583,8 +634,10 @@ Those would need a block-explorer API or an indexer.
 
 ```python
 def init_agent():
-    agent = create_agent(model=llm, tools=get_tools(), system_prompt=SYSTEM_PROMPT, checkpointer=_checkpointer, middleware=[...])
+    agent = create_agent(model=llm, tools=get_tools(), system_prompt=SystemMessage(<SYSTEM_PROMPT, cached 1h>), checkpointer=_checkpointer, middleware=[...])
 ```
+
+**Prompt caching has two points.** The tools and the prompt (~20k tokens since the 2026-10-02 tool review, ~30k before; the same for every user) end in a cache marker of their own with a one-hour lifetime, so every conversation — a new user's, or one started afresh after a transaction — reads that block from the cache. `AnthropicPromptCachingMiddleware` marks the last message (five minutes), which caches each conversation's growing history. Before 2026-10-02 only the second existed, and every new conversation's first call wrote the whole ~33k-token block again (measured: 0 read, 32,828 written; now ~30,300 read, ~400 written). The longer-lived marker has to come first, and it does.
 
 `AsyncSqliteSaver` persists message history keyed by `thread_id(user_id, chain_id)` (e.g. `"1:42161"`), so each user has an isolated, restart-surviving conversation per chain, shared by Telegram and the web app.
 
@@ -592,19 +645,20 @@ def init_agent():
 
 The `SYSTEM_PROMPT` teaches the agent the new model up front:
 
-- **One session key, one global USD budget** per rolling window — no per-token limits. The key **expires** (30 days by default, 90 at most) and only one is authorized at a time; `get_all_sessions` reports cap/spent/remaining/watched tokens and when the key runs out.
+- **One session key, one global USD budget** per rolling window — no per-token limits. The key **expires** (30 days by default, 90 at most) and only one is authorized at a time; `get_wallet_status` reports cap/spent/remaining/watched tokens and when the key runs out.
 - **Watched tokens and native value count against the cap;** only unwatched tokens move freely. A swap is charged its **net** value change, not the gross input.
 - **Approvals are automatic** — there is no approve step or tool; swap/liquidity tools batch them atomically. A "please approve X" request should be declined with an explanation.
-- **Removing liquidity is free** against the cap (it returns value — a net inflow); it checks the pause and the session via `get_all_sessions` instead of `preflight_check`.
+- **Removing liquidity is free** against the cap (it returns value — a net inflow).
 - **A paused wallet rejects every transaction** until the owner unpauses it in the web app; the agent can't unpause, and says so.
-- A fresh **`preflight_check`** before every spend, never reusing an earlier result (the owner can change the limit in the web app mid-conversation); pass the incoming leg (`token_received`/`amount_received`) for swaps and wraps; **never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` only); resolve the wrapped-native ticker per chain; never invent addresses; always confirm before an on-chain write; never expose the ciphertext.
+- **One tool call, one message, one yes.** The agent calls the transaction tool straight away — it resolves the contact, checks the wallet and quotes — and shows the quote with its figures in one message; the user's reply to that is the only yes (swaps state the default 0.5% slippage there instead of asking first). No `preflight_check`, `get_contact`, `get_quote_*` or balance read first: the tool refuses with the reason when a check fails. **Never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` for questions; a swap's quote carries the router's figures); `"eth"` is the native asset in every token argument, and the wrapped token is named only when meant; never invent addresses.
+- **Measured (`make agent-smoke`, Sepolia fork):** a send went from 3 user messages, 8 model calls and 22.6 s to 2 messages, 4 calls and 8.6 s; a swap from 3 messages, 9 calls and 27.7 s to 2, 4 and 9.9 s. With 0.2 s added to every RPC request (to stand in for a live provider), quoting a send went from 37 requests and 7.9 s to 16 and 0.7 s, confirming it from 20 and 4.3 s to 8 and 1.1 s, and quoting a swap from 45 and 9.6 s to 22 and 1.35 s.
 
 The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
 
 ### Short memory: the chat starts afresh after each transaction
 
 A wallet assistant needs no long memory, and an unbounded one breaks: every model call re-sends the
-whole thread on top of ~28k tokens of prompt and tool descriptions, so a thread kept forever grows
+whole thread on top of ~20k tokens of prompt and tool descriptions, so a thread kept forever grows
 dearer and slower until it overflows the model's window and every turn fails. So at the start of
 each turn `chat()` runs `_start_fresh_if_due`, which deletes the thread and starts a new one carrying
 only the **text** of the last exchange (the user's last message and the reply; no tool calls,
@@ -647,7 +701,7 @@ never touched.
 
 ### Budget alerts
 
-A daily **`budget_alert`** job (registered per user on `/start`) reads the wallet's on-chain status via `get_all_sessions` and warns the user on three counts: the session key is inactive (revoked, replaced or already expired), the key expires within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or the remaining budget has dropped below **10%** (`BUDGET_ALERT_THRESHOLD`) of the window cap.
+A daily **`budget_alert`** job (registered per user on `/start`) reads the wallet's on-chain status via `_get_wallet_status` and warns the user on three counts: the session key is inactive (revoked, replaced or already expired), the key expires within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or the remaining budget has dropped below **10%** (`BUDGET_ALERT_THRESHOLD`) of the window cap.
 
 The expiry warning is why this job matters to a Telegram-only user: renewing a key is an owner-signed transaction they can only make in the web app, so learning about it after the key lapsed is learning too late.
 

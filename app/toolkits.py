@@ -61,6 +61,19 @@ def _token_map(user_id: int) -> dict[str, str]:
     }
 
 
+def _share_provider(package_w3, app_w3) -> None:
+    """
+    Points a package's own web3 connection at the app's provider for the same chain.
+
+    The packages build their connection from the bare RPC URL, with web3's stock provider, which
+    asks the node for its chain id before every call -- half of every read they made was that
+    question, and on a live RPC each is a full round trip. The app's provider asks once
+    (network_config._ChainIdOnceProvider) and shares one HTTP session per chain. Everything the
+    package already bound to its connection follows, since contracts look the provider up per call.
+    """
+    package_w3.provider = app_w3.provider
+
+
 def get_erc20_tools(user_id: int) -> dict[str, BaseTool]:
     """Returns {tool_name: tool} for langchain-erc20, bound to this user's chain.
 
@@ -81,6 +94,7 @@ def get_erc20_tools(user_id: int) -> dict[str, BaseTool]:
             # Matches the address(0) sentinel the wallet and SHOracle already use for native.
             native_sentinel=ETH_SENTINEL,
         )
+        _share_provider(toolkit.w3, w3)
         _erc20_tools_cache[key] = {
             t.name: t for t in toolkit.get_tools() if t.name not in _BLOCKED_TOOLS
         }
@@ -115,6 +129,7 @@ def get_uniswap_tools(user_id: int) -> dict[str, BaseTool]:
             # allowance survives the transaction.
             reset_residual_approvals=True,
         )
+        _share_provider(toolkit.w3, w3)
         _uniswap_tools_cache[key] = {
             t.name: t for t in toolkit.get_tools() if t.name not in _BLOCKED_TOOLS
         }

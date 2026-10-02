@@ -59,7 +59,6 @@ class PendingTransaction:
     created_at: float
     action: str             # what this does, in English, written here rather than by the model
     calls: list[dict]       # the executions, as {"to", "value", "data"}, for display and audit
-    key_ciphertext: str     # held so confirming does not have to re-fetch or re-pass it
     quote: UserOpQuote
     cost: dict              # the figures shown to the user; see tools._transaction_cost
 
@@ -86,7 +85,6 @@ def put(
     turn_id: int,
     action: str,
     calls: list[dict],
-    key_ciphertext: str,
     quote: UserOpQuote,
     cost: dict,
 ) -> PendingTransaction:
@@ -107,7 +105,6 @@ def put(
         created_at=now,
         action=action,
         calls=calls,
-        key_ciphertext=key_ciphertext,
         quote=quote,
         cost=cost,
     )

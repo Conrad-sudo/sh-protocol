@@ -40,7 +40,11 @@ MAX_FEE_BUMPS = 4
 # How long one attempt waits for inclusion before replacing itself at a higher fee. Several
 # blocks on any chain here, so a transaction that is merely unlucky is not replaced needlessly.
 ATTEMPT_TIMEOUT_SECS = 45
-RECEIPT_POLL_INTERVAL_SECS = 2
+# How often a sent transaction is checked for a receipt. The user is waiting on every one of these
+# (confirm_transaction blocks until it lands), and on a 12-second chain a 2-second poll added about a
+# second on average after the block that mined it; on BSC or Arbitrum, faster than the poll itself,
+# it was most of the wait. A receipt lookup is one cheap RPC call.
+RECEIPT_POLL_INTERVAL_SECS = 0.5
 
 
 def send_tx(

@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 from smart_wallet_agent import chat, init_agent,open_checkpointer,close_checkpointer
 from bundler import TELEGRAM_BUNDLER_ENV, use_bundler_key
-from tools import _get_all_sessions
+from tools import _get_wallet_status
 from db import consume_telegram_link_nonce, get_user_id_by_telegram_chat_id, link_telegram
 from network_config import load_network_config
 
@@ -63,7 +63,7 @@ async def budget_alert(context: ContextTypes.DEFAULT_TYPE):
     try:
         # The plain function, not the @tool: this job runs on a timer with no agent, so there is
         # no ToolRuntime to satisfy the tool wrapper's first parameter.
-        status = _get_all_sessions(user_id)
+        status = _get_wallet_status(user_id)
     except Exception:
         # No wallet deployed for this user yet (load_session_handler raises) — nothing to report.
         return

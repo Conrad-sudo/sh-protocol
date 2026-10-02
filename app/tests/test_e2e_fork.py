@@ -47,7 +47,7 @@ from agent_context import AgentContext                # noqa: E402
 from constants import (  # noqa: E402
     ETH_SENTINEL, get_always_counted_ticker, get_chain_display_name, get_native_asset_ticker, get_router,
 )
-from contracts import read_spending_config           # noqa: E402
+from contracts import load_registry, read_spending_config  # noqa: E402
 from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
@@ -660,7 +660,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     def quote_transfer(amount: float) -> dict:
         """The quote half: builds and prices the transfer. Sends nothing."""
         return tools.transfer_erc20.func(
-            next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+            next_turn(), token="usdc",
             recipient="payee", amount=amount,
         )
 
@@ -701,7 +701,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     held_before = token.functions.balanceOf(payee).call()
     same_turn = next_turn()
     quoted = tools.transfer_erc20.func(
-        same_turn, session_key_ciphertext=key_ciphertext, token="usdc", recipient="payee", amount=7
+        same_turn, token="usdc", recipient="payee", amount=7
     )
     check("a quote says plainly that nothing was sent", "NOT SENT" in quoted["status"], quoted["status"])
     check("quoting broadcasts nothing", w3.eth.get_transaction_count(api_bundler) == sent_before)
@@ -717,6 +717,13 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
           f'{quoted["max_total_usd"]} vs {quoted["total_usd"]}')
     check("the protocol fee is quoted separately", quoted["protocol_fee_usd"] > 0,
           str(quoted.get("protocol_fee_usd")))
+    # The quote ran the wallet checks itself -- the agent no longer calls preflight_check first.
+    check("the quote says what it is worth and what the (watched) USDC counts toward the limit",
+          abs(quoted["usd_value"] - 7) < 0.1 and abs(quoted["charged_usd"] - 7) < 0.1,
+          f'{quoted.get("usd_value")} / {quoted.get("charged_usd")}')
+    check("...and what is left of the limit, and of the session key",
+          quoted["remaining_usd"] > 0 and quoted["session_expires_in_secs"] > 0,
+          f'{quoted.get("remaining_usd")} / {quoted.get("session_expires_in_secs")}')
 
     try:
         tools.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
@@ -756,20 +763,33 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     except ToolException as e:
         check("a quote cannot be confirmed twice", "no pending transaction" in str(e), str(e)[:160])
 
-    # Over the spending cap: only the chain can tell (the hook's postCheck), so this is the bundler's
-    # execution estimate refusing it -- by name, before anything is signed, sent or paid for.
+    # Over the spending cap: the quote's own wallet checks refuse it, saying how much is left --
+    # before anything is signed, sent or paid for. (The bundler's execution estimate would refuse
+    # it too, as BudgetExceeded; the check's reason is the one the user can act on.)
     deal_erc20(usdc, wallet, 5_000 * unit)
     nonce_before = w3.eth.get_transaction_count(api_bundler)
     native_before = w3.eth.get_balance(wallet)
     try:
-        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+        tools.transfer_erc20.func(next_turn(), token="usdc",
                                   recipient="payee", amount=2_000)
         check("a transfer over the cap is refused", False, "it was sent")
     except ToolException as e:
-        check("a transfer over the cap is refused by name, before sending",
-              "BudgetExceeded" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
+        check("a transfer over the cap is refused, saying what is left, before sending",
+              "spending limit" in str(e) and "is left" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
     check("...so the bundler sent nothing", w3.eth.get_transaction_count(api_bundler) == nonce_before)
     check("...and the wallet paid no gas", w3.eth.get_balance(wallet) == native_before)
+
+    # A paused wallet: refused with the reason, rather than as a failed simulation.
+    owner_action(c, headers, acct, "/api/wallet/pause/prepare", {})
+    try:
+        tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
+        check("a paused wallet's transfer is refused", False, "it was quoted")
+    except ToolException as e:
+        check("a paused wallet's transfer is refused, saying it is paused",
+              "paused" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
+    finally:
+        owner_action(c, headers, acct, "/api/wallet/unpause/prepare", {})
+    check("...and the bundler sent nothing for it either", w3.eth.get_transaction_count(api_bundler) == nonce_before)
     owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "remove"})
 
     for t in report["transfers"]:
@@ -794,6 +814,8 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     prepared = bundler.prepare_user_op(
         user_id, key_ciphertext, session_handler, entry_point, op_quote, bundler_account
     )
+    check("the op's hash, worked out locally, is the EntryPoint's own",
+          prepared.user_op_hash == bytes(entry_point.functions.getUserOpHash(prepared.op).call()))
     rival = new_funded_account()
     rival_tx = entry_point.functions.handleOps([prepared.op], rival.address).build_transaction({
         "from": rival.address, "nonce": w3.eth.get_transaction_count(rival.address),
@@ -814,7 +836,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     w3.provider.make_request("anvil_setBalance", [api_bundler, hex(10**6)])
     before = token.functions.balanceOf(payee).call()
     try:
-        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token="usdc",
+        tools.transfer_erc20.func(next_turn(), token="usdc",
                                   recipient="payee", amount=1)
         check("an unfunded bundler refuses", False, "it was sent")
     except ToolException as e:
@@ -873,7 +895,6 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     print("\n[7b] tokens the user adds: added by address, sent, bought with ETH, sold, withdrawn")
     sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
-    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
     turn = itertools.count(1_000)
 
     def next_turn() -> SimpleNamespace:
@@ -935,7 +956,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     # The assistant sends it to a contact: not charged.
     payee = c.get("/api/contacts", headers=headers).json()["contacts"]
     payee = next(p for p in payee if p["name"] == "payee")["address"]
-    quoted = tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token=ticker,
+    quoted = tools.transfer_erc20.func(next_turn(), token=ticker,
                                        recipient="payee", amount=10)
     check("the transfer quote says it isn't covered", "isn't covered by the spending limit" in quoted.get("details", ""),
           str(quoted.get("details")))
@@ -961,14 +982,18 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
           [Web3.to_checksum_address(a) for a in quote["path"]] == [usdc, weth, token_address], str(quote.get("path")))
 
     held = token.functions.balanceOf(wallet).call()
-    quoted = tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
-                                                  token_out=ticker, eth_amount_in=0.001, slippage_bps=500)
+    quoted = tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=500)
     check("the buy quote says the full amount paid counts", "full amount" in quoted.get("details", ""),
           str(quoted.get("details")))
+    check("...and shows what should come back, the least it will accept, and the tolerance",
+          all(part in quoted.get("details", "") for part in ("received: about", "at least", "slippage tolerance 5%")),
+          str(quoted.get("details")))
+    expected = sh.functions.getUsdValue(ETH_SENTINEL, w3.to_wei("0.001", "ether")).call()
+    check("...and counts the full ETH paid toward the limit",
+          abs(quoted["charged_usd"] - expected / 10**18) < 1e-9, f'{quoted.get("charged_usd")} vs {expected / 10**18}')
     receipt = confirm(quoted)
     check("the wallet received the token", token.functions.balanceOf(wallet).call() > held)
     charged = spend_metered(sh, receipt)
-    expected = sh.functions.getUsdValue(ETH_SENTINEL, w3.to_wei("0.001", "ether")).call()
     check("the limit was charged exactly the ETH paid", charged == [expected], f"{charged} vs {expected}")
 
     # Only tokens the owner chose, within 12% slippage. Both refusals happen before anything is
@@ -976,8 +1001,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     api_bundler = bundler.resolve_bundler(w3).address
     sent_before = w3.eth.get_transaction_count(api_bundler)
     try:
-        tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
-                                             token_out=fake_usdc, eth_amount_in=0.001)
+        tools.swap.func(next_turn(), token_in="eth", token_out=fake_usdc, amount_in=0.001)
         check("a token the user never added is refused by address", False, "it was quoted")
     except ToolException as e:
         check("a token the user never added is refused by address",
@@ -986,23 +1010,22 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     check("the user's own token still works by address",
           [Web3.to_checksum_address(a) for a in quote["path"]] == [weth, token_address], str(quote.get("path")))
     try:
-        tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
-                                             token_out=ticker, eth_amount_in=0.001, slippage_bps=1201)
+        tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1201)
         check("a slippage over 12% is refused", False, "it was quoted")
     except ToolException as e:
         check("a slippage over 12% is refused", "outside what this wallet allows" in str(e), str(e)[:160])
-    quoted = tools.swap_exact_ETH_for_tokens.func(next_turn(), session_key_ciphertext=key_ciphertext,
-                                                  token_out=ticker, eth_amount_in=0.001, slippage_bps=1200)
+    quoted = tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1200)
     check("exactly 12% is quoted", "NOT SENT" in quoted["status"], str(quoted.get("status")))
     tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
     check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
 
     # Selling it back: the unpriced approval clears (the router is a trusted spender), nothing charged.
     native_before = w3.eth.get_balance(wallet)
-    quoted = tools.swap_exact_tokens_for_ETH.func(next_turn(), session_key_ciphertext=key_ciphertext,
-                                                  token_in=ticker, amount_in=100, slippage_bps=500)
+    quoted = tools.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_in=100, slippage_bps=500)
     check("the sell quote says selling costs nothing", "selling it costs nothing" in quoted.get("details", ""),
           str(quoted.get("details")))
+    check("...counts nothing toward the limit and states no price for it",
+          quoted["charged_usd"] == 0 and quoted["usd_value"] is None, f'{quoted.get("charged_usd")} / {quoted.get("usd_value")}')
     receipt = confirm(quoted)
     check("selling it lands", receipt["status"] == 1)
     check("and charges nothing to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
@@ -1018,11 +1041,183 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     balances = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["balances"]
     check("the wallet read no longer shows it", all(b["address"] != token_address for b in balances))
     try:
-        tools.transfer_erc20.func(next_turn(), session_key_ciphertext=key_ciphertext, token=ticker,
+        tools.transfer_erc20.func(next_turn(), token=ticker,
                                   recipient="payee", amount=1)
         check("the assistant no longer recognises it", False, "it quoted a transfer")
     except ToolException as e:
         check("the assistant no longer recognises it", "Add token" in str(e), str(e)[:160])
+
+
+def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    The one swap tool and the two liquidity tools on a real chain, by every route they can take: a
+    fresh token with one TOKEN/WETH pool, as in [7b]. Every swap route is quoted and checked to have
+    reached its own router function -- the quote's action is the router call's own description --
+    and the routes never sent before are sent and read back from the chain. Both forms of adding
+    and of removing liquidity are sent: with the native asset (the default) and with WETH.
+
+    Also the refusals that need a real balance: sending more of the native asset than the wallet
+    holds, and sending nearly all of it, which leaves nothing for the fees.
+    """
+    print("\n[7c] one swap tool, one add and one remove: every route, and the balance refusals")
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    turn = itertools.count(2_000_000)
+
+    def next_turn() -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
+
+    def confirm(quoted: dict):
+        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
+
+    # A fresh token, the wallet holding 10,000 of it, and one TOKEN/WETH pool: 1,000,000 TOKEN
+    # against 1 ETH, so 1 TOKEN is worth 0.000001 ETH.
+    deployer = new_funded_account()
+    mock = api.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
+    factory = w3.eth.contract(abi=mock["abi"], bytecode=mock["bytecode"]["object"])
+    symbol = f"MS{int(time.time()) % 100_000}"
+    token_address = eoa_call(deployer, factory.constructor("Mitfah Swap Token", symbol, 18))["contractAddress"]
+    token = w3.eth.contract(address=token_address, abi=mock["abi"])
+    unit = 10**18
+    ticker = symbol.lower()
+    eoa_call(deployer, token.functions.mint(wallet, 10_000 * unit))
+    router = w3.eth.contract(address=get_router(CHAIN_ID), abi=router_abi)
+    eoa_call(deployer, token.functions.mint(deployer.address, 1_000_000 * unit))
+    eoa_call(deployer, token.functions.approve(router.address, 1_000_000 * unit))
+    eoa_call(deployer, router.functions.addLiquidityETH(
+        token_address, 1_000_000 * unit, 0, 0, deployer.address,
+        w3.eth.get_block("latest")["timestamp"] + 600,
+    ), value=w3.to_wei(1, "ether"))
+    r = c.post("/api/tokens/custom", headers=headers, json={"chain_id": CHAIN_ID, "address": token_address})
+    check("the token is added", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
+
+    weth = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth")), abi=ERC20_ABI)
+    weth_before = weth.functions.balanceOf(wallet).call()
+    check("wrapping 0.01 ETH lands", confirm(tools.wrap_eth.func(next_turn(), amount_eth=0.01))["status"] == 1)
+    check("...and the wallet holds the WETH", weth.functions.balanceOf(wallet).call() == weth_before + 10**16)
+
+    # Every route, by the router call it reached: exact in says "for at least", exact out "Swap up
+    # to ... for exactly", and the native side is "the native asset".
+    def route(action: str) -> tuple[str, str, str]:
+        exact = "in" if "for at least" in action else "out" if action.startswith("Swap up to") else "?"
+        spends = "native" if "of the native asset for" in action else "token"
+        gets = "native" if action.endswith("of the native asset") else "token"
+        return exact, spends, gets
+
+    routes = (
+        ("ETH for the token, exact in", dict(token_in="eth", token_out=ticker, amount_in=0.0001), ("in", "native", "token")),
+        ("ETH for the token, exact out", dict(token_in="eth", token_out=ticker, amount_out=100), ("out", "native", "token")),
+        ("the token for ETH, exact in", dict(token_in=ticker, token_out="eth", amount_in=100), ("in", "token", "native")),
+        ("the token for ETH, exact out", dict(token_in=ticker, token_out="eth", amount_out=0.0001), ("out", "token", "native")),
+        ("the token for WETH, exact in", dict(token_in=ticker, token_out="weth", amount_in=100), ("in", "token", "token")),
+        ("WETH for the token, exact out", dict(token_in="weth", token_out=ticker, amount_out=100), ("out", "token", "token")),
+    )
+    quoted = {}
+    for label, args, expected in routes:
+        quoted[label] = tools.swap.func(next_turn(), **args)
+        check(f"swap, {label}: quoted through its own router function",
+              route(quoted[label]["action"]) == expected, quoted[label]["action"])
+    check("a quote's action is the swap itself, without the approvals around it",
+          quoted["the token for ETH, exact out"]["action"].startswith("Swap up to")
+          and "Approve" not in quoted["the token for ETH, exact out"]["action"],
+          quoted["the token for ETH, exact out"]["action"])
+    check("an exact-out quote says what it should cost and the most it will pay",
+          all(part in quoted["ETH for the token, exact out"].get("details", "") for part in ("spent: about", "at most")),
+          str(quoted["ETH for the token, exact out"].get("details")))
+
+    # The routes [7b] never sent: each exact-out one, and token for token both ways.
+    held = token.functions.balanceOf(wallet).call()
+    check("buying exactly 100 of the token with ETH lands", confirm(quoted["ETH for the token, exact out"])["status"] == 1)
+    check("...and exactly 100 arrived", token.functions.balanceOf(wallet).call() == held + 100 * unit)
+    for label in ("ETH for the token, exact in", "the token for ETH, exact in"):
+        tools.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
+    # Quoted before the buy above moved the pool, so these are re-quoted at the price it left.
+    held = token.functions.balanceOf(wallet).call()
+    receipt = confirm(tools.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_out=0.0001))
+    check("selling the token for exactly 0.0001 ETH lands", receipt["status"] == 1)
+    check("...spending some of the token", token.functions.balanceOf(wallet).call() < held)
+    held, weth_held = token.functions.balanceOf(wallet).call(), weth.functions.balanceOf(wallet).call()
+    check("selling exactly 100 of the token for WETH lands",
+          confirm(tools.swap.func(next_turn(), token_in=ticker, token_out="weth", amount_in=100))["status"] == 1)
+    check("...100 left and WETH came back", token.functions.balanceOf(wallet).call() == held - 100 * unit
+          and weth.functions.balanceOf(wallet).call() > weth_held)
+    held, weth_held = token.functions.balanceOf(wallet).call(), weth.functions.balanceOf(wallet).call()
+    check("buying exactly 100 of the token with WETH lands",
+          confirm(tools.swap.func(next_turn(), token_in="weth", token_out=ticker, amount_out=100))["status"] == 1)
+    check("...100 arrived and WETH paid for it", token.functions.balanceOf(wallet).call() == held + 100 * unit
+          and weth.functions.balanceOf(wallet).call() < weth_held)
+    for label in ("the token for ETH, exact out", "the token for WETH, exact in", "WETH for the token, exact out"):
+        tools.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
+
+    # Liquidity: the native asset by default, WETH when named.
+    try:
+        tools.add_liquidity.func(next_turn(), token_a="eth", amount_a=0.001, token_b=ticker)
+        check("adding with the native amount fixed is refused", False, "it was quoted")
+    except ToolException as e:
+        check("adding with the native amount fixed is refused, asking for the token's amount first",
+              f"Name how much {ticker.upper()} to deposit first" in str(e), str(e)[:200])
+    quote = tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000)
+    check("adding liquidity pairs with the native asset by default", quote["action"].endswith("of the native asset"),
+          quote["action"])
+    check("...counting the ETH deposited, not the token, which has no price",
+          quote["charged_usd"] > 0 and quote["usd_value"] is None, f'{quote.get("charged_usd")} / {quote.get("usd_value")}')
+    held = token.functions.balanceOf(wallet).call()
+    check("...and it lands", confirm(quote)["status"] == 1)
+    lp_native = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
+    check("the wallet holds LP tokens for the pool, and the token went in",
+          lp_native > 0 and token.functions.balanceOf(wallet).call() == held - 1000 * unit, str(lp_native))
+    quote = tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000, token_b="weth")
+    check("naming WETH deposits WETH instead", "native asset" not in quote["action"], quote["action"])
+    weth_held = weth.functions.balanceOf(wallet).call()
+    check("...and it lands, paying in WETH", confirm(quote)["status"] == 1
+          and weth.functions.balanceOf(wallet).call() < weth_held)
+    lp = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker, token_b="weth")
+    check("...into the same pool, so the LP tokens add up", lp > lp_native, f"{lp} vs {lp_native}")
+
+    held, native_held = token.functions.balanceOf(wallet).call(), w3.eth.get_balance(wallet)
+    quote = tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6))
+    check("removing liquidity returns the native asset by default", "native asset" in quote["action"],
+          quote["action"])
+    check("...shows what should come back and the least it will accept",
+          all(part in quote.get("details", "") for part in ("returned: about", "at least")), str(quote.get("details")))
+    check("...and it lands, the token coming back", confirm(quote)["status"] == 1
+          and token.functions.balanceOf(wallet).call() > held)
+    weth_held = weth.functions.balanceOf(wallet).call()
+    quote = tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6), token_b="weth")
+    check("naming WETH takes WETH back instead", "native asset" not in quote["action"], quote["action"])
+    check("...and it lands, WETH coming back", confirm(quote)["status"] == 1
+          and weth.functions.balanceOf(wallet).call() > weth_held)
+    check("half the LP tokens are left", tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker) < lp)
+
+    # The native asset has to cover what is sent and the fees. Both refusals happen before anything
+    # is signed, so neither costs the wallet a thing. The limit is raised for them first: nearly all
+    # the ETH is worth more than the $1,234 set in [3], and that refusal would come first.
+    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    limit = read_spending_config(sh)["dailyLimitUsd"] // 10**18
+    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 100_000})
+    api_bundler = bundler.resolve_bundler(w3).address
+    sent_before = w3.eth.get_transaction_count(api_bundler)
+    balance = w3.eth.get_balance(wallet)
+    ticker_native = get_native_asset_ticker(CHAIN_ID)
+    try:
+        tools.send_eth.func(next_turn(), recipient="payee", amount_eth=balance / 10**18 + 1)
+        check("sending more than the wallet holds is refused", False, "it was quoted")
+    except ToolException as e:
+        check("sending more than the wallet holds is refused, with what it holds",
+              f"Not enough {ticker_native}: the wallet holds" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
+    fee = load_registry(user_id).functions.getFee().call()
+    try:
+        tools.send_eth.func(next_turn(), recipient="payee", amount_eth=(balance - fee // 2) / 10**18)
+        check("sending nearly all of it is refused", False, "it was quoted")
+    except ToolException as e:
+        check("sending nearly all of it is refused: too little left for the fees",
+              "leaves too little for the fees" in str(e), str(e)[:200])
+    pre = tools.preflight_check.func(next_turn(), token="eth", amount=balance / 10**18 + 1)
+    check("preflight says the wallet doesn't hold it", pre["enough_balance"] is False
+          and "the wallet holds" in pre.get("balance_short", ""), str(pre)[:200])
+    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": limit})
+    check("the limit is back as it was", read_spending_config(sh)["dailyLimitUsd"] == limit * 10**18)
 
 
 def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
@@ -1131,7 +1326,6 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
     """
     print("\n[9] the History tab: this run's transactions, with the hashes the chain knows")
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
-    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
     turn = itertools.count(1_000_000)
 
     def next_turn() -> SimpleNamespace:
@@ -1139,9 +1333,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
 
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
     deal_erc20(usdc, wallet, 10 * 10 ** w3.eth.contract(address=usdc, abi=ERC20_ABI).functions.decimals().call())
-    quoted = tools.transfer_erc20.func(
-        next_turn(), session_key_ciphertext=key_ciphertext, token="usdc", recipient="payee", amount=1
-    )
+    quoted = tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
     reply = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
     sent_hash = reply.split("`")[1]
     check("the reply reports a 0x-prefixed hash", sent_hash.startswith("0x") and len(sent_hash) == 66, sent_hash)
@@ -1216,6 +1408,7 @@ if __name__ == "__main__":
     test_contacts_are_owner_managed(client, auth_headers, owner)
     test_self_bundling(client, owner, auth_headers, deployed)
     test_custom_tokens(client, owner, auth_headers, deployed)
+    test_swaps_and_liquidity(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)
     test_transaction_history(client, owner, auth_headers, deployed)
 

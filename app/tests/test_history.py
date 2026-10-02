@@ -269,12 +269,17 @@ def test_owner_transactions_are_recorded_once_and_settled():
 # ── Recording the assistant's transactions ───────────────────────────────────
 
 
-def _patch_confirm(w3, broadcast):
-    """Stubs everything confirm_transaction calls, so only its recording is under test."""
+def _patch_confirm(w3, broadcast, budget_left):
+    """
+    Stubs everything confirm_transaction calls, so only its recording is under test.
+
+    `budget_left` is a dict whose "value" the fake wallet's getRemainingBudget returns -- or raises,
+    if it is an exception -- so a test can change it between sends.
+    """
     saved = {
         name: getattr(tools, name)
         for name in ("load_network_config", "_resolve_bundler", "load_session_handler", "load_entry_point",
-                     "_prepare_user_op", "_broadcast_user_op")
+                     "_prepare_user_op", "_broadcast_user_op", "_get_session_keys")
     }
     saved_take = quotes.take
     op_hash = {"n": 0}
@@ -285,11 +290,21 @@ def _patch_confirm(w3, broadcast):
 
     tools.load_network_config = lambda _user_id: (w3, CHAIN, NETWORK)
     tools._resolve_bundler = lambda _w3: "bundler"
-    tools.load_session_handler = lambda _user_id: SimpleNamespace(address=WALLET)
+    def remaining():
+        if isinstance(budget_left["value"], Exception):
+            raise budget_left["value"]
+        return budget_left["value"]
+
+    wallet = SimpleNamespace(
+        address=WALLET,
+        functions=SimpleNamespace(getRemainingBudget=lambda: SimpleNamespace(call=remaining)),
+    )
+    tools.load_session_handler = lambda _user_id: wallet
+    tools._get_session_keys = lambda _user_id: ("0xkey", "vault:v1:x")
     tools.load_entry_point = lambda _user_id: None
     tools._prepare_user_op = prepare
     tools._broadcast_user_op = broadcast
-    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", key_ciphertext="vault:v1:x", quote=None)
+    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None)
 
     def restore():
         for name, value in saved.items():
@@ -326,7 +341,8 @@ def test_assistant_sends_are_recorded_before_they_go():
             raise RuntimeError("handleOps outer transaction reverted")
         raise TimeoutError("not mined in time")
 
-    restore = _patch_confirm(w3, broadcast)
+    budget_left = {"value": 12345 * 10**16}   # $123.45
+    restore = _patch_confirm(w3, broadcast, budget_left)
     try:
         reply = tools.confirm_transaction.func(runtime, "q1")
         newest = db.get_transactions(user)[0]
@@ -336,6 +352,8 @@ def test_assistant_sends_are_recorded_before_they_go():
               and newest["mined_at"] == 1_790_000_123 and newest["source"] == "assistant", str(newest))
         check("described by the quote's code-written action", newest["action"] == "Transfer 5 USDC to 0x5A3…", newest["action"])
         check("the chat reply carries the same 0x-prefixed hash", "0x" + "22" * 32 in reply, reply)
+        check("...and what is left of the spending limit, so the agent needn't ask for it",
+              reply.endswith("Spending limit left this period: $123.45"), reply)
 
         outcome["next"] = "reverted"
         try:
@@ -381,6 +399,15 @@ def test_assistant_sends_are_recorded_before_they_go():
             tx_history.add_transaction = saved_add
         check("a history that can't be written never turns a sent payment into an error",
               reply.startswith("Sent —"), reply)
+
+        budget_left["value"] = RuntimeError("rpc down")
+        reply = tools.confirm_transaction.func(runtime, "q6")
+        check("a budget that can't be read never turns a sent payment into an error either",
+              reply.startswith("Sent —") and "Spending limit" not in reply, reply)
+        budget_left["value"] = -5 * 10**18
+        reply = tools.confirm_transaction.func(runtime, "q7")
+        check("a limit lowered below what was spent shows nothing left, not a negative figure",
+              reply.endswith("Spending limit left this period: $0.00"), reply)
     finally:
         restore()
 
@@ -813,7 +840,7 @@ def test_the_chat_starts_afresh_after_a_transaction():
             AIMessage(content="Sent."),
         ])
         smart_wallet_agent.chat(waiting_user, CHAIN, "yes", NETWORK)
-        pending = quotes.put(waiting_user, CHAIN, 1, "Transfer half to tim", [], "vault:v1:x", None, {})
+        pending = quotes.put(waiting_user, CHAIN, 1, "Transfer half to tim", [], None, {})
         try:
             smart_wallet_agent.chat(waiting_user, CHAIN, "yes", NETWORK)
             check("a quote still waiting for an answer keeps the conversation",
@@ -848,7 +875,7 @@ def test_deleting_the_chat():
         smart_wallet_agent.chat(me, CHAIN, "hi on sepolia", NETWORK)
         smart_wallet_agent.chat(me, BSC, "hi on bsc", BSC_NETWORK)
         smart_wallet_agent.chat(other, CHAIN, "theirs", NETWORK)
-        quote = quotes.put(me, CHAIN, 1, "Transfer 1 USDC to sam", [], "vault:v1:x", None, {})
+        quote = quotes.put(me, CHAIN, 1, "Transfer 1 USDC to sam", [], None, {})
         db.add_transaction(me, CHAIN, WALLET, "assistant", "kept", "confirmed", tx_hash=_hash(0x501))
 
         check("deleting needs a token", c.delete(f"/api/chat/history?chain_id={CHAIN}").status_code == 401)

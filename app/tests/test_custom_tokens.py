@@ -326,15 +326,23 @@ class FakeFunctions:
 
 
 class FakeToken:
+    """An ERC-20 with its decimals, of which the wallet holds plenty."""
+
     def __init__(self, address, decimals):
         self.address = address
-        self.functions = SimpleNamespace(decimals=lambda: SimpleNamespace(call=lambda: decimals))
+        self.functions = SimpleNamespace(
+            decimals=lambda: SimpleNamespace(call=lambda: decimals),
+            balanceOf=lambda _owner: SimpleNamespace(call=lambda: 10**30),
+        )
 
 
 def _with_tool_fakes(uid: int, watched: set[str]):
     """Points the tools at the fake chain for `uid`. Returns the fake SessionHandler's functions."""
     functions = FakeFunctions(watched)
-    handler = SimpleNamespace(functions=functions, address=WALLET)
+    handler = SimpleNamespace(
+        functions=functions, address=WALLET,
+        w3=SimpleNamespace(eth=SimpleNamespace(get_balance=lambda _address: 10**30)),
+    )
     decimals = {USDC: 6, USDT: 6, WETH: 18}
     tools.load_network_config = lambda _uid: (None, CHAIN, NETWORK)
     tools.load_session_handler = lambda _uid: handler
@@ -354,8 +362,8 @@ def test_tools_price_and_note_custom_tokens():
     runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
 
     listed = tools.get_supported_tokens.func(runtime)
-    check("get_supported_tokens splits listed and custom",
-          listed == {"listed": ["usdc", "usdt", "weth"], "custom": ["pepe"]}, str(listed))
+    check("get_supported_tokens names the native asset and splits listed and custom",
+          listed == {"native": "ETH", "listed": ["usdc", "usdt", "weth"], "custom": ["pepe"]}, str(listed))
 
     check("a custom ticker resolves in the tools", tools._token_address(uid, "PEPE") == PEPE)
     try:
@@ -372,9 +380,7 @@ def test_tools_price_and_note_custom_tokens():
         refused = str(e)
     check("get_price refuses a custom token instead of reverting", "no price" in refused, refused)
     check("…without asking the oracle", PEPE not in functions.priced)
-
-    check("check_spending_within_budget: sending a custom token always fits",
-          tools.check_spending_within_budget.func(runtime, "pepe", 10**9) is True)
+    check("get_price values an amount when given one", tools.get_price.func(runtime, "usdc", 25) == 25.0)
 
     pre = tools.preflight_check.func(runtime, "pepe", 1_000_000)
     check("preflight on a custom token: no USD value", pre["usd_value"] is None, str(pre))
@@ -415,25 +421,38 @@ class _StandInPackage:
 
 
 def _trading_calls(token: str) -> list[tuple[str, object, dict]]:
-    """Every tool that trades or sends through a token argument, with `token` in the slot under test."""
-    key = {"session_key_ciphertext": "ciphertext"}
+    """
+    Every way a tool trades or sends through a token argument, with `token` in the slot under test:
+    each of the six router functions `swap` picks between, and both forms of each liquidity tool.
+    """
     return [
-        ("transfer_erc20", tools.transfer_erc20, {**key, "token": token, "recipient": "payee", "amount": 1}),
-        ("swap_exact_tokens_for_tokens", tools.swap_exact_tokens_for_tokens,
-         {**key, "token_in": "usdc", "token_out": token, "amount_in": 1}),
-        ("swap_tokens_for_exact_tokens", tools.swap_tokens_for_exact_tokens,
-         {**key, "token_in": token, "token_out": "usdc", "amount_out": 1}),
-        ("swap_exact_tokens_for_ETH", tools.swap_exact_tokens_for_ETH, {**key, "token_in": token, "amount_in": 1}),
-        ("swap_tokens_for_exact_ETH", tools.swap_tokens_for_exact_ETH, {**key, "token_in": token, "amount_out_eth": 1}),
-        ("swap_exact_ETH_for_tokens", tools.swap_exact_ETH_for_tokens, {**key, "token_out": token, "eth_amount_in": 1}),
-        ("swap_ETH_for_exact_tokens", tools.swap_ETH_for_exact_tokens, {**key, "token_out": token, "amount_out": 1}),
-        ("add_liquidity", tools.add_liquidity, {**key, "token_a": "usdc", "amount_a": 1, "token_b": token}),
-        ("add_liquidity_eth", tools.add_liquidity_eth, {**key, "token": token, "amount_token": 1}),
-        ("remove_liquidity", tools.remove_liquidity, {**key, "token_a": token, "lp_amount": 1}),
-        ("remove_liquidity_eth", tools.remove_liquidity_eth, {**key, "token": token, "lp_amount": 1}),
-        ("is_derived_input_sufficient", tools.is_derived_input_sufficient,
-         {"token_in": token, "token_out": "usdc", "amount_out": 1}),
+        ("transfer_erc20", tools.transfer_erc20, {"token": token, "recipient": "payee", "amount": 1}),
+        ("swap, token for token, exact in", tools.swap, {"token_in": "usdc", "token_out": token, "amount_in": 1}),
+        ("swap, token for token, exact out", tools.swap, {"token_in": token, "token_out": "usdc", "amount_out": 1}),
+        ("swap, token for ETH, exact in", tools.swap, {"token_in": token, "token_out": "eth", "amount_in": 1}),
+        ("swap, token for ETH, exact out", tools.swap, {"token_in": token, "token_out": "eth", "amount_out": 1}),
+        ("swap, ETH for token, exact in", tools.swap, {"token_in": "eth", "token_out": token, "amount_in": 1}),
+        ("swap, ETH for token, exact out", tools.swap, {"token_in": "eth", "token_out": token, "amount_out": 1}),
+        ("add_liquidity with a token", tools.add_liquidity, {"token_a": "usdc", "amount_a": 1, "token_b": token}),
+        ("add_liquidity with ETH", tools.add_liquidity, {"token_a": token, "amount_a": 1}),
+        ("remove_liquidity for a token", tools.remove_liquidity, {"token_a": token, "lp_amount": 1, "token_b": "weth"}),
+        ("remove_liquidity for ETH", tools.remove_liquidity, {"token_a": token, "lp_amount": 1}),
     ]
+
+
+# Which router function each of _trading_calls' swap and liquidity shapes has to reach.
+_PACKAGE_FUNCTION = {
+    "swap, token for token, exact in": "swap_exact_tokens_for_tokens",
+    "swap, token for token, exact out": "swap_tokens_for_exact_tokens",
+    "swap, token for ETH, exact in": "swap_exact_tokens_for_eth",
+    "swap, token for ETH, exact out": "swap_tokens_for_exact_eth",
+    "swap, ETH for token, exact in": "swap_exact_eth_for_tokens",
+    "swap, ETH for token, exact out": "swap_eth_for_exact_tokens",
+    "add_liquidity with a token": "add_liquidity",
+    "add_liquidity with ETH": "add_liquidity_eth",
+    "remove_liquidity for a token": "remove_liquidity",
+    "remove_liquidity for ETH": "remove_liquidity_eth",
+}
 
 
 def test_tools_only_reach_tokens_the_owner_chose():
@@ -448,11 +467,11 @@ def test_tools_only_reach_tokens_the_owner_chose():
     tools.get_erc20_tools = tools.get_uniswap_tools = lambda _uid: _StandInPackage()
 
     def attempt(call) -> str:
-        """"reached" if the call got through to the package, else the refusal's text."""
+        """"reached <package tool>" if the call got through to the package, else the refusal's text."""
         try:
             call()
-        except _Reached:
-            return "reached"
+        except _Reached as reached:
+            return f"reached {reached.args[0]}"
         except ToolException as e:
             return str(e)
         return "returned without reaching the package"
@@ -460,8 +479,45 @@ def test_tools_only_reach_tokens_the_owner_chose():
     try:
         # Still reachable: listed tokens and the user's own, by ticker or by address.
         for token in ("usdt", USDT.lower(), "pepe", PEPE):
-            missed = [n for n, tool, kw in _trading_calls(token) if attempt(lambda: tool.func(runtime, **kw)) != "reached"]
+            missed = [n for n, tool, kw in _trading_calls(token)
+                      if not attempt(lambda: tool.func(runtime, **kw)).startswith("reached")]
             check(f"every trading tool still takes {token}", missed == [], str(missed))
+
+        # The merged tools pick the router function from what they were given.
+        wrong = {}
+        for name, tool, kwargs in _trading_calls("pepe"):
+            if name in _PACKAGE_FUNCTION:
+                outcome = attempt(lambda: tool.func(runtime, **kwargs))
+                if outcome != f"reached {_PACKAGE_FUNCTION[name]}":
+                    wrong[name] = outcome[:80]
+        check("each swap and liquidity shape reaches its own router function", wrong == {}, str(wrong))
+        outcome = attempt(lambda: tools.swap.func(runtime, token_in="bnb", token_out="pepe", amount_in=1))
+        check("'bnb' is the native asset too", outcome == "reached swap_exact_eth_for_tokens", outcome[:120])
+        outcome = attempt(lambda: tools.remove_liquidity.func(runtime, token_a="eth", lp_amount=1, token_b="pepe"))
+        check("a pool named native-first is still the native asset's", outcome == "reached remove_liquidity_eth",
+              outcome[:120])
+
+        # What the merged tools refuse before building anything.
+        for label, call, expected in (
+            ("a swap given both amounts",
+             lambda: tools.swap.func(runtime, token_in="eth", token_out="pepe", amount_in=1, amount_out=1),
+             "exactly one amount"),
+            ("a swap given neither amount",
+             lambda: tools.swap.func(runtime, token_in="eth", token_out="pepe"), "exactly one amount"),
+            ("a swap of ETH for WETH", lambda: tools.swap.func(runtime, token_in="eth", token_out="weth", amount_in=1),
+             "use wrap_eth"),
+            ("a swap of WETH for ETH", lambda: tools.swap.func(runtime, token_in="weth", token_out="eth", amount_in=1),
+             "isn't something the assistant can do"),
+            ("a pool of a token with itself",
+             lambda: tools.add_liquidity.func(runtime, token_a="usdc", amount_a=1, token_b="usdc"),
+             "two different tokens"),
+            ("liquidity with the native amount fixed",
+             lambda: tools.add_liquidity.func(runtime, token_a="eth", amount_a=1, token_b="pepe"),
+             "Name how much PEPE to deposit first"),
+        ):
+            outcome = attempt(call)
+            check(f"{label} is refused, saying why", expected in outcome and "Nothing was quoted" in outcome,
+                  outcome[:200])
 
         # SHIB is a real ERC-20 on the fake chain that this user never added.
         for name, tool, kwargs in _trading_calls(SHIB):
@@ -472,15 +528,14 @@ def test_tools_only_reach_tokens_the_owner_chose():
             ("preflight, as the token sent", lambda: tools.preflight_check.func(runtime, SHIB, 1)),
             ("preflight, as the token received", lambda: tools.preflight_check.func(runtime, "usdc", 1, SHIB, 1)),
             ("get_price", lambda: tools.get_price.func(runtime, SHIB)),
-            ("check_spending_within_budget", lambda: tools.check_spending_within_budget.func(runtime, SHIB, 1)),
         ):
             outcome = attempt(call)
             check(f"{label}: refuses it too", "not a token this wallet knows" in outcome, outcome[:160])
 
         with_slippage = [(n, t, kw) for n, t, kw in _trading_calls("pepe") if "slippage_bps" in t.args]
         check("every exported tool that takes a slippage is covered below",
-              {n for n, _, _ in with_slippage} == {t.name for t in tools.get_tools() if "slippage_bps" in t.args},
-              str(sorted(n for n, _, _ in with_slippage)))
+              {t.name for _, t, _ in with_slippage} == {t.name for t in tools.get_tools() if "slippage_bps" in t.args},
+              str(sorted({t.name for _, t, _ in with_slippage})))
         for name, tool, kwargs in with_slippage:
             outcomes = {
                 bps: attempt(lambda: tool.func(runtime, **kwargs, slippage_bps=bps))
@@ -488,9 +543,22 @@ def test_tools_only_reach_tokens_the_owner_chose():
             }
             check(f"{name}: refuses 1201 and -1 bps, takes 1200 (12%)",
                   "outside what this wallet allows" in outcomes[1201] and "outside" in outcomes[-1]
-                  and outcomes[1200] == "reached", str(outcomes)[:200])
+                  and outcomes[1200].startswith("reached"), str(outcomes)[:200])
     finally:
         tools.get_erc20_tools, tools.get_uniswap_tools = original
+
+
+def test_action_line_drops_approvals():
+    print("\n[8] a quote's action names the step the user agrees to, not the approvals around it")
+    approve = {"role": "approve", "description": "Approve the router to spend 100 of 0xA", "to": USDC}
+    reset = {"role": "approve_reset", "description": "Clear residual allowance", "to": USDC}
+    for role, step in (("swap", "Swap up to 100 of 0xA for exactly 1 of 0xB"),
+                       ("add_liquidity", "Add liquidity: 1 of 0xA and 0.1 of the native asset"),
+                       ("remove_liquidity", "Remove 0.5 LP tokens for 0xA/native asset"),
+                       ("action", "Transfer 1 of 0xA to 0xC")):
+        line = tools._action_of({"calls": [approve, {"role": role, "description": step, "to": WETH}, reset]})
+        check(f"a {role} plan: just its own step", line == step, line)
+    check("approvals alone are still described", "Approve" in tools._action_of({"calls": [approve]}))
 
 
 def test_ierc20_cache_follows_the_address():
@@ -618,6 +686,7 @@ if __name__ == "__main__":
         test_tools_price_and_note_custom_tokens()
         test_ierc20_cache_follows_the_address()
         test_tools_only_reach_tokens_the_owner_chose()
+        test_action_line_drops_approvals()
     finally:
         os.unlink(_tmp_db.name)
 

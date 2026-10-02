@@ -8,7 +8,9 @@ is exactly one place to fix a signing or nonce bug.
 """
 import secrets
 from dotenv import load_dotenv
+from eth_abi import encode as abi_encode
 from eth_account import Account
+from eth_utils import keccak
 from web3.contract import Contract
 from network_config import load_network_config
 from contracts import (
@@ -151,21 +153,51 @@ def current_session_nonce(user_id: int, session_handler: Contract, entry_point: 
     @param entry_point     Bound EntryPoint contract.
     @return                The nonce to build the next op with.
     """
+    return session_nonce_read(user_id, session_handler, entry_point)()
+
+
+def session_nonce_read(user_id: int, session_handler: Contract, entry_point: Contract):
+    """
+    The nonce read of current_session_nonce, ready to run but not yet run: a zero-argument call.
+
+    Split out so a caller can run it alongside other reads (see parallel.py). The module is
+    resolved here, on the caller's thread, because the first resolution reads the database.
+    """
     module = load_spending_limit_module(user_id=user_id)
     return entry_point.functions.getNonce(
         session_handler.address, session_key_nonce_key(module.address)
-    ).call()
+    ).call
+
+
+def build_execute_calldata(
+    user_id: int, executions: list[tuple[str, int, bytes]]
+) -> tuple[Contract, Contract, str]:
+    """
+    The bound SessionHandler and EntryPoint, and the SessionHandler.execute(mode, executionCalldata)
+    calldata that carries `executions`. Reads no nonce: the quote reads it alongside its other reads.
+
+    One call goes out as an ERC-7579 single execution. Anything longer is a batch, which is not an
+    optimisation -- it is the only way an approval can be granted and consumed without tripping
+    SpendingLimitModule's no-standing-approval rule, so [approve, spend, (reset)] lands atomically.
+
+    @param user_id     The application user ID.
+    @param executions  [(target_address, value_wei, calldata_bytes), ...], in order.
+    @return            (session_handler, entry_point, calldata_hex).
+    """
+    session_handler = load_session_handler(user_id=user_id)
+    if len(executions) == 1:
+        mode, execution_calldata = ERC7579_SINGLE_CALL_MODE, pack_execution_calldata(*executions[0])
+    else:
+        mode, execution_calldata = ERC7579_BATCH_CALL_MODE, encode_batch_execution_calldata(executions)
+    calldata = session_handler.encode_abi(abi_element_identifier="execute", args=[mode, execution_calldata])
+    return session_handler, load_entry_point(user_id=user_id), calldata
 
 
 def prepare_execute_call(
     user_id: int, target: str, value: int, data: bytes
 ) -> tuple[Contract, Contract, str, int]:
     """
-    Builds the shared inputs for a session-key UserOp, identical across both backends:
-    the bound SessionHandler and EntryPoint contracts, the ABI-encoded
-    SessionHandler.execute(mode, executionCalldata) calldata, and a nonce keyed to the
-    installed SpendingLimitModule (so the account routes validation to it). The caller
-    layers its own gas estimation and submission on top.
+    build_execute_calldata for one call, plus the session-key nonce, for the unattended path.
 
     @param user_id  The application user ID.
     @param target   The contract address SessionHandler will call.
@@ -173,57 +205,80 @@ def prepare_execute_call(
     @param data     ABI-encoded inner calldata to execute on the target.
     @return         (session_handler, entry_point, calldata_hex, nonce).
     """
-    session_handler = load_session_handler(user_id=user_id)
-
-    execution_calldata = pack_execution_calldata(target, value, data)
-    calldata = session_handler.encode_abi(
-        abi_element_identifier="execute",
-        args=[ERC7579_SINGLE_CALL_MODE, execution_calldata],
-    )
-
-    entry_point = load_entry_point(user_id=user_id)
-    nonce = current_session_nonce(user_id, session_handler, entry_point)
-
-    return session_handler, entry_point, calldata, nonce
+    session_handler, entry_point, calldata = build_execute_calldata(user_id, [(target, value, data)])
+    return session_handler, entry_point, calldata, current_session_nonce(user_id, session_handler, entry_point)
 
 
 def prepare_execute_batch_call(
     user_id: int, executions: list[tuple[str, int, bytes]]
 ) -> tuple[Contract, Contract, str, int]:
     """
-    Batch variant of prepare_execute_call: builds SessionHandler.execute(batchMode,
-    abi.encode(Execution[])) calldata for several sub-calls that must land atomically in ONE
-    transaction — the only way an approval can be granted and consumed without tripping
-    SpendingLimitModule's no-standing-approval rule.
+    Batch variant of prepare_execute_call: several sub-calls as ONE atomic execute(batchMode, ...).
 
     @param user_id     The application user ID.
     @param executions  List of (target_address, value_wei, calldata_bytes) triples, in order.
     @return            (session_handler, entry_point, calldata_hex, nonce).
     """
-    session_handler = load_session_handler(user_id=user_id)
+    session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
+    return session_handler, entry_point, calldata, current_session_nonce(user_id, session_handler, entry_point)
 
-    execution_calldata = encode_batch_execution_calldata(executions)
-    calldata = session_handler.encode_abi(
-        abi_element_identifier="execute",
-        args=[ERC7579_BATCH_CALL_MODE, execution_calldata],
+
+# (chain_id, EntryPoint address) -> whether hash_user_op's own hash has matched the EntryPoint's.
+# Missing until the first op on that chain is checked; False means "ask the EntryPoint every time".
+_local_hash_matches: dict[tuple[int, str], bool] = {}
+
+
+def hash_user_op(op: tuple, entry_point: Contract, chain_id: int) -> bytes:
+    """
+    The op's userOpHash -- what the session key signs and what its receipt is found by.
+
+    Computed here rather than asked of the EntryPoint: ERC-4337 v0.7 defines it as
+    keccak256(abi.encode(keccak256(UserOperationLib.encode(op)), entryPoint, chainId)), which is pure
+    arithmetic, and asking cost a round trip on every quote and every send. The first op on each
+    (chain, EntryPoint) is checked against EntryPoint.getUserOpHash. If they ever disagree -- a
+    different EntryPoint version hashes differently -- the EntryPoint is asked every time after.
+
+    @param op           A PackedUserOperation tuple (its signature is not part of the hash).
+    @param entry_point  Bound EntryPoint contract.
+    @param chain_id     The chain the op is for.
+    @return             The 32-byte hash.
+    """
+    key = (chain_id, entry_point.address)
+    if _local_hash_matches.get(key) is False:
+        return bytes(entry_point.functions.getUserOpHash(op).call())
+    local = _v07_user_op_hash(op, entry_point.address, chain_id)
+    if key not in _local_hash_matches:
+        remote = bytes(entry_point.functions.getUserOpHash(op).call())
+        _local_hash_matches[key] = remote == local
+        if remote != local:
+            print(f"[userop] EntryPoint {entry_point.address} hashes ops differently; asking it from now on")
+            return remote
+    return local
+
+
+def _v07_user_op_hash(op: tuple, entry_point_address: str, chain_id: int) -> bytes:
+    """EntryPoint v0.7's getUserOpHash, in Python. See UserOperationLib.encode and EntryPoint.getUserOpHash."""
+    sender, nonce, init_code, call_data, account_gas_limits, pre_verification_gas, gas_fees, paymaster_and_data, _ = op
+    packed = abi_encode(
+        ["address", "uint256", "bytes32", "bytes32", "bytes32", "uint256", "bytes32", "bytes32"],
+        [
+            sender, nonce, keccak(init_code), keccak(call_data), account_gas_limits,
+            pre_verification_gas, gas_fees, keccak(paymaster_and_data),
+        ],
     )
-
-    entry_point = load_entry_point(user_id=user_id)
-    nonce = current_session_nonce(user_id, session_handler, entry_point)
-
-    return session_handler, entry_point, calldata, nonce
+    return keccak(abi_encode(["bytes32", "address", "uint256"], [keccak(packed), entry_point_address, chain_id]))
 
 
 def create_signed_user_op(
-    user_id: int, user_op: tuple, entry_point: Contract, key_ciphertext: str
+    user_id: int, user_op: tuple, entry_point: Contract, key_ciphertext: str, user_op_hash: bytes | None = None
 ) -> tuple:
     """
     Signs a PackedUserOperation with a session key using EIP-191 message signing.
 
-    Fetches the userOpHash from the EntryPoint, wraps it in the Ethereum signed
-    message envelope via encode_defunct (matching toEthSignedMessageHash in
-    SessionHandler._rawSignatureValidation, the account's own UserOp signature check —
-    the module is not a validator), and returns the op with the signature attached.
+    Takes the userOpHash (hash_user_op), wraps it in the Ethereum signed message envelope via
+    encode_defunct (matching toEthSignedMessageHash in SessionHandler._validateUserOp, the account's
+    own UserOp signature check — the module is not a validator), and returns the op with the
+    signature attached.
 
     The raw private key is decrypted from Vault transiently and wiped from memory
     immediately after signing.
@@ -232,12 +287,14 @@ def create_signed_user_op(
     @param user_op        An unsigned PackedUserOperation tuple (empty signature field).
     @param entry_point    Bound EntryPoint contract.
     @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
+    @param user_op_hash   The op's hash, when the caller already has it; computed here otherwise.
     @return               A signed PackedUserOperation tuple ready for submission.
     """
     from eth_account.messages import encode_defunct
 
-    w3, _, _ = load_network_config(user_id)
-    user_op_hash = entry_point.functions.getUserOpHash(user_op).call()
+    w3, chain_id, _ = load_network_config(user_id)
+    if user_op_hash is None:
+        user_op_hash = hash_user_op(user_op, entry_point, chain_id)
     raw_key = decrypt_key(key_ciphertext)
     try:
         signed = w3.eth.account.sign_message(

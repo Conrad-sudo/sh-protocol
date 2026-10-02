@@ -159,7 +159,7 @@ def deploy_wallet(user_id: int, chain_name: str):
 
     # CREATE2 means the address exists as a prediction before the tx is sent, so the session key --
     # whose Vault ciphertext is stored under (user_id, wallet_address), the same key tools.py's
-    # get_session_keys resolves -- can be minted now and passed into the deploy itself.
+    # _get_session_keys resolves -- can be minted now and passed into the deploy itself.
     #
     # predictWalletAddress answers for the deployer's NEXT deploy: the factory salts with its own
     # per-owner deployCount, so this advances after each of OUR deploys and is untouched by anyone
@@ -295,7 +295,7 @@ def add_default_session(user_id: int):
     session_handler = load_session_handler(user_id=user_id)
 
     # One key per wallet per chain: keyed to (user_id, chain_id, wallet address), which is exactly
-    # how tools.get_session_keys resolves it, so every tool signs with this key on this chain.
+    # how tools._get_session_keys resolves it, so every tool signs with this key on this chain.
     # Held in pending until the grant mines below, so a failed transaction cannot strand the app
     # holding a key the wallet never authorized.
     session_key, session_key_ct = create_pending_session_key(user_id, chain_id, session_handler.address)
