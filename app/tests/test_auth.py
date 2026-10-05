@@ -27,13 +27,16 @@ db.DB_PATH = _tmp_db.name
 db.init_db()
 
 from fastapi.testclient import TestClient   # noqa: E402
+from eth_abi import encode as abi_encode    # noqa: E402
 from eth_account import Account             # noqa: E402
 from eth_account.messages import encode_defunct  # noqa: E402
+from eth_utils import keccak                # noqa: E402
 from web3 import Web3                       # noqa: E402
 
 import api                                  # noqa: E402
 import auth                                 # noqa: E402
 from constants import get_router            # noqa: E402
+from contract_errors import describe_revert_data  # noqa: E402
 
 # A checksummed address, used by the contacts tests to prove the API normalises what it stores.
 ADDR = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
@@ -389,6 +392,7 @@ def test_owner_actions_are_guarded():
         "/api/wallet/session/prepare": {"chain_id": 31337, "action": "remove"},
         "/api/wallet/trusted-spenders/prepare": {"chain_id": 31337, "spender": "0x000000000000000000000000000000000000dEaD", "action": "add"},
         "/api/wallet/max-op-gas-cost/prepare": {"chain_id": 31337, "max_cost_eth": "0.05"},
+        "/api/wallet/allowlist/prepare": {"chain_id": 31337, "action": "disable"},
         "/api/wallet/tx/confirm": {"chain_id": 31337, "tx_hash": "0x" + "11" * 32},
     }
 
@@ -424,6 +428,11 @@ def test_owner_actions_are_guarded():
         "a window past the uint48 ceiling": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 281_474_976_710_656}),
         "a zero gas ceiling": ("/api/wallet/max-op-gas-cost/prepare", {"chain_id": 31337, "max_cost_eth": "0"}),
         "an invalid session action": ("/api/wallet/session/prepare", {"chain_id": 31337, "action": "steal"}),
+        "an invalid allowlist action": ("/api/wallet/allowlist/prepare", {"chain_id": 31337, "action": "open"}),
+        "too many allowlist targets in one go": (
+            "/api/wallet/allowlist/prepare",
+            {"chain_id": 31337, "action": "add", "targets": ["0x000000000000000000000000000000000000dEaD"] * 65},
+        ),
     }
     for label, (path, body) in bad.items():
         r = c.post(path, headers=headers, json=body)
@@ -449,6 +458,41 @@ def test_router_removal_is_refused():
     )
     check("removing the router -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
     check("the refusal says why", "remove liquidity" in r.json().get("detail", ""), r.text[:160])
+
+
+def test_allowlist_requests_are_checked():
+    """
+    The allowlist endpoint refuses what the contract would only refuse later, before any RPC -- so
+    offline these answer 400 rather than reaching for a chain -- and the assistant is told, in
+    words, why a contract it called was refused.
+    """
+    print("\n[7d] the contract allowlist: requests checked up front, refusals explained")
+    c = make_client()
+    _, headers, _ = sign_in(c)
+    path = "/api/wallet/allowlist/prepare"
+
+    def refused(body: dict, why: str, label: str):
+        r = c.post(path, headers=headers, json={"chain_id": 11155111, **body})
+        check(f"{label} -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+        check(f"{label}: the refusal says why", why in r.json().get("detail", ""), r.text[:160])
+
+    refused({"action": "add", "targets": []}, "at least one address", "adding nothing")
+    refused({"action": "remove", "targets": [ADDR, "0x000000000000000000000000000000000000dEaD"]},
+            "one address at a time", "removing two at once")
+    refused({"action": "enable", "targets": ["0x123"]}, "Not a valid address", "a malformed address")
+    refused({"action": "add", "targets": ["0x" + "00" * 20]}, "zero address", "the zero address")
+
+    # GET /api/wallet/{chain_id}/allowlist: a token, and only the caller's own wallet.
+    check("reading the allowlist needs a token", c.get("/api/wallet/31337/allowlist").status_code == 401)
+    r = c.get("/api/wallet/31337/allowlist", headers=headers)
+    check("no wallet on that chain -> 404", r.status_code == 404, f"{r.status_code} {r.text[:120]}")
+
+    # What the assistant sees when the guard refuses a contract: the address, and what to do.
+    target = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+    data = keccak(text="SessionHandler_SessionRestrictedTarget(address)")[:4] + abi_encode(["address"], [target])
+    explained = describe_revert_data(data)
+    check("the refused contract is named", target in explained, explained)
+    check("the way out is named", "Controls -> Advanced" in explained and "allowlist" in explained, explained)
 
 
 def test_wrapped_native_always_counts():
@@ -897,6 +941,7 @@ if __name__ == "__main__":
         test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
         test_router_removal_is_refused()
+        test_allowlist_requests_are_checked()
         test_wrapped_native_always_counts()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()

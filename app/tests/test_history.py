@@ -304,7 +304,7 @@ def _patch_confirm(w3, broadcast, budget_left):
     tools.load_entry_point = lambda _user_id: None
     tools._prepare_user_op = prepare
     tools._broadcast_user_op = broadcast
-    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None)
+    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None, lp_pool=None)
 
     def restore():
         for name, value in saved.items():
@@ -409,6 +409,55 @@ def test_assistant_sends_are_recorded_before_they_go():
         check("a limit lowered below what was spent shows nothing left, not a negative figure",
               reply.endswith("Spending limit left this period: $0.00"), reply)
     finally:
+        restore()
+
+
+def test_deposits_put_their_pool_on_the_dashboard():
+    """
+    Confirming a liquidity deposit remembers its pool for the dashboard BEFORE the deposit goes out,
+    so one that outlives the wait still shows once it lands. Any other send remembers nothing, and a
+    pool that can't be saved never turns a sent deposit into an error.
+    """
+    print("\n[3b] a liquidity deposit puts its pool on the dashboard before it is sent")
+    user = _create()
+    runtime = SimpleNamespace(context=AgentContext(user_id=user, turn_id=2))
+    w3 = FakeW3()
+    w3.eth.blocks[101] = 1_790_000_123
+    landed = HexBytes(b"\x33" * 32)
+    seen = {}
+
+    def broadcast(_user_id, _prepared, _bundler):
+        seen["pools"] = db.get_lp_tokens(user, CHAIN)
+        return landed, {"status": 1, "transactionHash": landed, "blockNumber": 101}
+
+    weth = _addr(0x0E7E)
+    deposit = SimpleNamespace(action="Add liquidity: 100 of USDC and 0.04 of ETH", quote=None,
+                              lp_pool={"token_a": weth, "ticker_a": "eth", "token_b": USDC, "ticker_b": "usdc"})
+    restore = _patch_confirm(w3, broadcast, {"value": 10**18})
+    saved_save = tools._save_lp_token
+    try:
+        reply = tools.confirm_transaction.func(runtime, "q1")
+        check("a plain send remembers no pool", seen["pools"] == [] and db.get_lp_tokens(user, CHAIN) == [])
+
+        quotes.take = lambda *_args: deposit
+        reply = tools.confirm_transaction.func(runtime, "q2")
+        check("the deposit went out as usual", reply.startswith("Sent —"), reply)
+        check("its pool was saved before it was broadcast, in the pool's own order (lower address first)",
+              [(p["token0"], p["ticker0"], p["token1"], p["ticker1"]) for p in seen["pools"]]
+              == [(USDC, "usdc", weth, "eth")], str(seen["pools"]))
+        check("...with nothing read about it yet", seen["pools"][0]["pair"] is None, str(seen["pools"]))
+
+        tools.confirm_transaction.func(runtime, "q3")
+        check("a second deposit into the same pool keeps one row", len(db.get_lp_tokens(user, CHAIN)) == 1)
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("database is locked")
+
+        tools._save_lp_token = broken
+        reply = tools.confirm_transaction.func(runtime, "q4")
+        check("a pool that can't be saved never turns a sent deposit into an error", reply.startswith("Sent —"), reply)
+    finally:
+        tools._save_lp_token = saved_save
         restore()
 
 
@@ -909,6 +958,7 @@ if __name__ == "__main__":
         test_owner_transactions_are_described_from_their_calldata()
         test_owner_transactions_are_recorded_once_and_settled()
         test_assistant_sends_are_recorded_before_they_go()
+        test_deposits_put_their_pool_on_the_dashboard()
         test_pending_rows_are_settled_later()
         test_history_route_lists_only_your_own_newest_first()
         test_deposits_from_the_fund_drawer_are_listed()

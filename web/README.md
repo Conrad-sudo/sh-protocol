@@ -139,6 +139,12 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   the API refuses the removal otherwise. The page shares one `useOwnerAction` between the header
   actions and `BalancesCard`, so only one owner change is ever in flight.
 
+- **LP tokens.** After the assistant adds liquidity, the pool's LP tokens show as a row like
+  "ETH/USDC LP" (`lp: true`), with "≈ 40 ETH + 100,000 USDC" under the amount — what they hold in
+  the pool now (`underlying`). The row goes when the wallet holds none and comes back with the next
+  deposit, so it has no Remove link, and it isn't flagged "Not limited": the assistant can't send
+  it. The Withdraw drawer lists it like any token.
+
 - **WETH/WBNB always count.** `/api/tokens` flags the wrapped native token `always_counted`. The
   onboarding picker shows it ticked and locked ("ETH and WETH always count"); Controls lists it
   under "Always counts" with no Remove, or — on a wallet made before the rule — "Not counted yet"

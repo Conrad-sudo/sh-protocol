@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { WalletState } from '../api/types'
+import type { Allowlist, AllowlistEntry, WalletState } from '../api/types'
 import { routes } from '../routes'
 import { makeSession, makeWalletState, SEPOLIA, USDC, WETH } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, RpcError, setViewportWidth, TOKEN, WALLET } from '../test/utils'
@@ -26,11 +26,25 @@ const TOKENS = [
 const PENDING_KEY = `mitfah-pending-owner-tx:7:${SEPOLIA}`
 // Sepolia's exchange router, as /api/chains names it.
 const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+const REGISTRY = '0x8004000000000000000000000000000000000713'
+const ROUTER_ENTRY: AllowlistEntry = { address: ROUTER, label: 'Uniswap V2 router' }
+const USDC_ENTRY: AllowlistEntry = { address: USDC, label: 'USDC' }
+const REGISTRY_ENTRY: AllowlistEntry = { address: REGISTRY, label: 'ERC-8004 review registry' }
+/** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
+const ALLOWLIST_OFF: Allowlist = { enabled: false, targets: [], suggested: [ROUTER_ENTRY, USDC_ENTRY, REGISTRY_ENTRY] }
+
+/** A wallet whose contract allowlist is on, as GET /api/wallet reports it. */
+function walletWithAllowlistOn() {
+  const wallet = makeWalletState()
+  return makeWalletState({ limits: { ...wallet.limits, allowlist_enabled: true } })
+}
 
 interface ServerOptions {
   walletChains?: number[]
   /** GET /api/wallet answers in order; the last one repeats. */
   wallets?: WalletState[]
+  /** GET /api/wallet/{chain_id}/allowlist answers in order; the last one repeats. */
+  allowlists?: Allowlist[]
   /** A prepare endpoint that refuses, by path. */
   refuse?: Record<string, string>
   /** The wallet declines to send. */
@@ -53,6 +67,7 @@ interface Prepared {
 function stubServer({
   walletChains = [SEPOLIA],
   wallets = [makeWalletState()],
+  allowlists = [ALLOWLIST_OFF],
   refuse = {},
   rejectSend = false,
   walletPrompt = Promise.resolve(),
@@ -64,6 +79,7 @@ function stubServer({
   const sent: Record<string, string>[] = []
   const sentTo: string[] = []
   let walletReads = 0
+  let allowlistReads = 0
 
   vi.stubGlobal(
     'fetch',
@@ -97,6 +113,11 @@ function stubServer({
       if (/^\/api\/wallet\/\d+$/.test(url)) {
         const answer = wallets[Math.min(walletReads, wallets.length - 1)]
         walletReads += 1
+        return Promise.resolve(json(200, answer))
+      }
+      if (/^\/api\/wallet\/\d+\/allowlist$/.test(url)) {
+        const answer = allowlists[Math.min(allowlistReads, allowlists.length - 1)]
+        allowlistReads += 1
         return Promise.resolve(json(200, answer))
       }
       if (url.endsWith('/prepare')) {
@@ -541,6 +562,129 @@ describe('ControlsPage', () => {
       path: '/api/wallet/max-op-gas-cost/prepare',
       body: { chain_id: SEPOLIA, max_cost_eth: '0.05' },
     })
+  })
+
+  it('turns the contract allowlist on with what the assistant uses, in one signature', async () => {
+    const server = stubServer({
+      wallets: [makeWalletState(), walletWithAllowlistOn()],
+      allowlists: [ALLOWLIST_OFF, { enabled: true, targets: [ROUTER_ENTRY, REGISTRY_ENTRY], suggested: [USDC_ENTRY] }],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    // Everything the assistant uses comes ticked; leaving one off keeps it off the list.
+    const usdc = await within(row('Contract allowlist')).findByRole('checkbox', { name: /USDC/ })
+    expect(within(row('Contract allowlist')).getByText('Off')).toBeInTheDocument()
+    expect(usdc).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /Uniswap V2 router/ })).toBeChecked()
+    await user.click(usdc)
+    await user.click(within(row('Contract allowlist')).getByRole('button', { name: 'Turn on' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('The assistant will only be able to call these 2 contracts')
+    expect(dialog).toHaveTextContent('Uniswap V2 router')
+    expect(dialog).not.toHaveTextContent('USDC')
+    await user.click(within(dialog).getByRole('button', { name: 'Turn on' }))
+
+    expect(
+      await screen.findByText('Contract allowlist on. The assistant can only call the contracts listed.'),
+    ).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/allowlist/prepare',
+        body: { chain_id: SEPOLIA, action: 'enable', targets: [ROUTER, REGISTRY] },
+      },
+    ])
+    // Read again: on, with its two entries, and USDC still on offer.
+    expect(await within(row('Contract allowlist')).findByText('On')).toBeInTheDocument()
+    const listed = await screen.findByRole('list', { name: 'Allowed contracts' })
+    expect(within(listed).getAllByRole('listitem')).toHaveLength(2)
+    expect(screen.getByRole('checkbox', { name: /USDC/ })).not.toBeChecked()
+  })
+
+  it('while the allowlist is on, removes straight away but asks before allowing more or turning it off', async () => {
+    const server = stubServer({
+      wallets: [walletWithAllowlistOn()],
+      allowlists: [{ enabled: true, targets: [ROUTER_ENTRY, USDC_ENTRY], suggested: [REGISTRY_ENTRY] }],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    // Removing tightens, so nothing is asked.
+    await user.click(await screen.findByRole('button', { name: 'Remove USDC from the allowlist' }))
+    expect(await screen.findByText('USDC removed from the allowlist.')).toBeInTheDocument()
+    expect(server.prepared.at(-1)).toEqual({
+      path: '/api/wallet/allowlist/prepare',
+      body: { chain_id: SEPOLIA, action: 'remove', targets: [USDC] },
+    })
+
+    // Allowing more loosens it: nothing comes ticked, and it asks first.
+    const registry = within(row('Contract allowlist')).getByRole('checkbox', { name: /review registry/ })
+    expect(registry).not.toBeChecked()
+    await user.click(registry)
+    await user.click(screen.getByRole('button', { name: 'Allow selected' }))
+    let dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('ERC-8004 review registry')
+    await user.click(within(dialog).getByRole('button', { name: 'Allow' }))
+    expect(await screen.findByText('Added to the allowlist.')).toBeInTheDocument()
+    expect(server.prepared.at(-1)?.body).toEqual({ chain_id: SEPOLIA, action: 'add', targets: [REGISTRY] })
+
+    await user.click(within(row('Contract allowlist')).getByRole('button', { name: 'Turn off' }))
+    dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('able to call any contract again')
+    await user.click(within(dialog).getByRole('button', { name: 'Turn off' }))
+    expect(await screen.findByText('Contract allowlist off.')).toBeInTheDocument()
+    expect(server.prepared.at(-1)?.body).toEqual({ chain_id: SEPOLIA, action: 'disable', targets: [] })
+  })
+
+  it('checks a typed address, and warns before emptying an allowlist that is on', async () => {
+    const server = stubServer({
+      wallets: [walletWithAllowlistOn()],
+      allowlists: [{ enabled: true, targets: [ROUTER_ENTRY], suggested: [] }],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    const input = await screen.findByLabelText('Add a contract')
+    const add = within(row('Contract allowlist')).getByRole('button', { name: 'Add' })
+    await user.type(input, '0x123')
+    expect(screen.getByText('Enter a full address starting with 0x.')).toBeInTheDocument()
+    expect(add).toBeDisabled()
+    await user.clear(input)
+    // Lower case on purpose: the match must not depend on how the address is written.
+    await user.type(input, ROUTER.toLowerCase())
+    expect(screen.getByText('Already on the list.')).toBeInTheDocument()
+    await user.clear(input)
+    await user.type(input, makeWalletState().address)
+    expect(screen.getByText("That's this wallet's own address.")).toBeInTheDocument()
+    expect(add).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Remove Uniswap V2 router from the allowlist' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent("won't be able to call any contract until you add one or turn the list off")
+    await user.click(within(dialog).getByRole('button', { name: 'Remove it' }))
+    expect(await screen.findByText('Uniswap V2 router removed from the allowlist.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/allowlist/prepare', body: { chain_id: SEPOLIA, action: 'remove', targets: [ROUTER] } },
+    ])
+  })
+
+  it("shows an older wallet's allowlist state, but not a list it can't read", async () => {
+    stubServer({ wallets: [walletWithAllowlistOn()], allowlists: [{ enabled: true, targets: null, suggested: [] }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(await screen.findByText(/created before Mitfah could show its list/)).toBeInTheDocument()
+    expect(within(row('Contract allowlist')).getByText('On')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Add a contract')).toBeNull()
   })
 
   it('explains a change the wallet would refuse, before anything is signed', async () => {

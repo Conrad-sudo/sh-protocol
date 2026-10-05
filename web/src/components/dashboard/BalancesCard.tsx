@@ -32,6 +32,10 @@ interface BalancesCardProps {
  * Any token can be taken off the dashboard except the native token and its wrapped form (WETH,
  * WBNB), which always count. One that counts has to stop counting first, and the remove dialog walks
  * through that. A token the server could not read shows as such instead of hiding the rest.
+ *
+ * LP tokens from the assistant's liquidity deposits show while the wallet holds some, with what they
+ * hold in the pool. They come and go on their own, so they have no Remove link, and they aren't
+ * flagged "Not limited": the assistant can only take them out of the pool, never send them.
  */
 export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
   const queryClient = useQueryClient()
@@ -47,9 +51,10 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
   const watched = new Set(wallet.spending.watched_tokens.map(t => t.address.toLowerCase()))
   const counts = (balance: TokenBalance) =>
     balance.native || (balance.address !== null && watched.has(balance.address.toLowerCase()))
-  const removable = (balance: TokenBalance) => !balance.native && !balance.always_counted
-  const anyListedUnlimited = wallet.balances.some(b => !b.custom && !counts(b))
+  const removable = (balance: TokenBalance) => !balance.native && !balance.always_counted && !balance.lp
+  const anyListedUnlimited = wallet.balances.some(b => !b.custom && !b.lp && !counts(b))
   const anyCustom = wallet.balances.some(b => b.custom)
+  const anyLp = wallet.balances.some(b => b.lp)
 
   const notify = (type: 'success' | 'info' | 'error', text: string) =>
     toaster.push(
@@ -125,7 +130,7 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
                   <span className="mf-token">
                     <span title={balance.name ?? undefined}>{name}</span>
                     {balance.custom && <StatusTag>No price</StatusTag>}
-                    {!counts(balance) && <StatusTag tone="warning">Not limited</StatusTag>}
+                    {!counts(balance) && !balance.lp && <StatusTag tone="warning">Not limited</StatusTag>}
                     {removable(balance) && (
                       <Button
                         appearance="link"
@@ -152,6 +157,14 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
                       Couldn't read
                     </Text>
                   )}
+                  {balance.underlying && (
+                    <Text size="sm" muted>
+                      ≈{' '}
+                      {balance.underlying
+                        .map(share => `${formatTokenAmount(share.raw, share.decimals)} ${share.ticker.toUpperCase()}`)
+                        .join(' + ')}
+                    </Text>
+                  )}
                 </td>
               </tr>
             )
@@ -166,6 +179,11 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
       {anyCustom && (
         <Text size="sm" muted className={anyListedUnlimited ? 'mf-settings-note' : undefined}>
           Tokens marked "No price" can never count toward your limit: Mitfah has no price for them.
+        </Text>
+      )}
+      {anyLp && (
+        <Text size="sm" muted className={anyListedUnlimited || anyCustom ? 'mf-settings-note' : undefined}>
+          LP tokens are your share of an exchange pool. Under each is what it holds for you right now.
         </Text>
       )}
       <AddTokenModal

@@ -119,11 +119,26 @@ export interface TokenBalance {
   always_counted?: boolean
   /** A custom token's own name(), when it has a readable one. */
   name?: string | null
+  /**
+   * True for the LP tokens of an exchange pool the assistant deposited into, named like "eth/usdc lp".
+   * The row shows only while the wallet holds some. No price, and the assistant can't send it.
+   */
+  lp?: boolean
+  /** An LP row's share of each of the pool's tokens right now; null when the pool couldn't be read. */
+  underlying?: PoolShare[] | null
   decimals: number | null
   /** Integer string in the token's smallest unit. Display from this, never from `amount`. */
   raw: string | null
   amount: number | null
   error?: string
+}
+
+/** How much of one of a pool's tokens an LP row holds. */
+export interface PoolShare {
+  ticker: string
+  decimals: number
+  /** Integer string in the token's smallest unit. */
+  raw: string
 }
 
 /** GET /api/wallet/{chain_id} (get_wallet_state): everything the dashboard shows. */
@@ -192,6 +207,30 @@ export type OwnerAction =
   | { kind: 'session'; action: 'remove' }
   | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
   | { kind: 'max-gas'; maxCostEth: string }
+  /**
+   * The contract allowlist. `enable` lists `targets` and turns it on in one transaction (`targets` may
+   * be empty when the list already has entries); `remove` takes exactly one; `disable` ignores them.
+   */
+  | { kind: 'allowlist'; action: 'enable' | 'add' | 'remove' | 'disable'; targets: string[] }
+
+/** One contract on, or worth adding to, the wallet's contract allowlist. */
+export interface AllowlistEntry {
+  address: string
+  /** Mitfah's name for it ("USDC", "Uniswap V2 router", "sam (contact)"), or null when it has none. */
+  label: string | null
+}
+
+/**
+ * GET /api/wallet/{chain_id}/allowlist. While the list is on, the assistant can call only the
+ * contracts on it; a plain wallet address (no code) is never blocked.
+ */
+export interface Allowlist {
+  enabled: boolean
+  /** null for a wallet created before its list could be read back: only its on/off state is known. */
+  targets: AllowlistEntry[] | null
+  /** Contracts the assistant uses that aren't on the list yet, in the order worth offering them. */
+  suggested: AllowlistEntry[]
+}
 
 /**
  * POST /api/wallet/tx/confirm: 202 while the transaction is pending, 200 once it has mined. `seen` is

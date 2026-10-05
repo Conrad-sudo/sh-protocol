@@ -10,7 +10,7 @@ import { AmountInput } from '../AmountInput'
 import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
-import { StatusTag } from '../StatusTag'
+import { AllowlistRow } from './AllowlistRow'
 import { ControlRow } from './ControlRow'
 import type { ControlPanelProps } from './types'
 
@@ -104,13 +104,7 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
           <GasCapEditor key={wallet.limits.max_op_gas_cost_wei} {...props} ticker={chain?.native_ticker ?? 'ETH'} />
         </ControlRow>
 
-        <ControlRow
-          title="Contract allowlist"
-          status={
-            wallet.limits.allowlist_enabled ? <StatusTag tone="success">On</StatusTag> : <StatusTag tone="neutral">Off</StatusTag>
-          }
-          help="When on, the assistant may only call contracts on the wallet's list. It can't be changed here yet."
-        />
+        <AllowlistRow {...props} open={open} />
       </div>
     </GlassPanel>
   )

@@ -2,7 +2,8 @@
 Offline checks for tokens a user adds by address (custom tokens): the add-a-token rules, the API
 routes, how the assistant's tools resolve and price them, and that those tools refuse any token
 that is neither listed nor added, and any slippage over 12%. Also the dashboard list: which listed
-tokens show, adding one by address, and that one still counted can't be removed.
+tokens show, adding one by address, that one still counted can't be removed, and the LP tokens of
+the pools the assistant deposited into (which the contract allowlist suggests too).
 
 Everything runs against a throwaway database and a FAKE chain -- a dict of contracts answering raw
 eth_calls -- so it is safe to run anywhere. The real on-chain journey (deploy a token, add it, have
@@ -36,6 +37,7 @@ import api                                  # noqa: E402
 import contracts                            # noqa: E402
 import custom_tokens                        # noqa: E402
 import tools                                # noqa: E402
+from constants import get_router            # noqa: E402
 
 CHAIN = 11155111
 NETWORK = "sepolia-fork"
@@ -674,6 +676,206 @@ def test_dashboard_balances():
     check("balances are read", next(r for r in rows if r["ticker"] == "usdc")["raw"] == str(7 * 10**6), str(rows))
 
 
+def test_lp_balances():
+    print("\n[4e] LP tokens show while the wallet holds some, with what they hold, and go once it holds none")
+    uid = db.create_user()
+    db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+    factory, eth_pool, pepe_pool = _addr(0xFAC), _addr(0x9001), _addr(0x9002)
+    db.save_lp_token(uid, CHAIN, WETH, "eth", USDC, "usdc")    # held
+    db.save_lp_token(uid, CHAIN, USDC, "usdc", PEPE, "pepe")   # all taken out
+    db.save_lp_token(uid, CHAIN, SHIB, "shib", WETH, "eth")    # its pool doesn't exist (yet)
+    pairs = {frozenset((USDC, WETH)): eth_pool, frozenset((USDC, PEPE)): pepe_pool}
+    held = {eth_pool: 10 * 10**18, pepe_pool: 0}               # of 100 LP tokens in each pool
+    # In each pool's own order, lower address first: USDC then WETH, USDC then PEPE.
+    reserves = {eth_pool: [1_000_000 * 10**6, 400 * 10**18, 0], pepe_pool: [5 * 10**6, 5 * 10**18, 0]}
+    lookups, broken = [], set()
+
+    def value(v):
+        return SimpleNamespace(call=lambda *_a, **_k: v)
+
+    def get_pair(a, b):
+        lookups.append(frozenset((a, b)))
+        return value(pairs.get(frozenset((a, b)), "0x" + "0" * 40))
+
+    def get_reserves(pool):
+        def call(*_a, **_k):
+            if pool in broken:
+                raise ValueError("execution reverted")
+            return reserves[pool]
+        return SimpleNamespace(call=call)
+
+    def contract(address, abi):
+        if address == get_router(CHAIN):
+            return SimpleNamespace(functions=SimpleNamespace(factory=lambda: value(factory)))
+        if address == factory:
+            return SimpleNamespace(functions=SimpleNamespace(getPair=get_pair))
+        if address in held:
+            return SimpleNamespace(functions=SimpleNamespace(
+                balanceOf=lambda _owner: value(held[address]),
+                totalSupply=lambda: value(100 * 10**18),
+                getReserves=lambda: get_reserves(address),
+            ))
+        return SimpleNamespace(functions=SimpleNamespace(
+            decimals=lambda: FakeCall(address, DECIMALS, "uint8"),
+            balanceOf=lambda owner: FakeCall(address, BALANCE_OF + owner[2:].lower().rjust(64, "0"), "uint256"),
+        ))
+
+    w3 = SimpleNamespace(eth=SimpleNamespace(get_balance=lambda _a: 10**18, contract=contract))
+    api._v2_factories.clear()
+
+    def read() -> list[dict]:
+        return api._token_balances(w3, uid, CHAIN, WALLET)
+
+    rows = read()
+    check("the LP tokens come after the added tokens; an emptied pool and one that doesn't exist aren't shown",
+          [r["ticker"] for r in rows] == ["eth", "pepe", "eth/usdc lp"], str([r["ticker"] for r in rows]))
+    lp = rows[-1]
+    check("the row is the pool's own token, marked lp, never custom or counted",
+          lp["address"] == eth_pool and lp["lp"] and not lp["custom"] and not lp["always_counted"], str(lp))
+    check("...with the wallet's LP balance", lp["raw"] == str(10 * 10**18) and lp["decimals"] == 18, str(lp))
+    check("...and what that holds: a tenth of each reserve, the native asset's side first",
+          lp["underlying"] == [{"ticker": "eth", "decimals": 18, "raw": str(40 * 10**18)},
+                               {"ticker": "usdc", "decimals": 6, "raw": str(100_000 * 10**6)}], str(lp["underlying"]))
+    saved = {(p["token0"], p["token1"]): p for p in db.get_lp_tokens(uid, CHAIN)}
+    check("the pool's address and decimals were saved",
+          (saved[USDC, WETH]["pair"], saved[USDC, WETH]["decimals0"], saved[USDC, WETH]["decimals1"])
+          == (eth_pool, 6, 18), str(saved[USDC, WETH]))
+    check("...and the one with no pool yet stays unread", saved[WETH, SHIB]["pair"] is None, str(saved[WETH, SHIB]))
+
+    looked_up = len(lookups)
+    read()
+    check("a pool is looked up once: the next read asks only about the one that doesn't exist yet",
+          lookups[looked_up:] == [frozenset((SHIB, WETH))], str(lookups[looked_up:]))
+
+    broken.add(eth_pool)
+    lp = read()[-1]
+    check("a pool that can't be read says so instead of vanishing",
+          lp["ticker"] == "eth/usdc lp" and lp["raw"] is None and lp["underlying"] is None and lp["error"], str(lp))
+    broken.clear()
+
+    held[eth_pool] = 0
+    check("once the wallet holds none, the pool is gone from the list", not any(r.get("lp") for r in read()))
+    held[eth_pool] = 3
+    check("...and the few wei a rounded \"remove all\" leaves count as none", not any(r.get("lp") for r in read()))
+    held[eth_pool] = 10**18
+    check("...and the next deposit brings it back", read()[-1]["ticker"] == "eth/usdc lp")
+
+
+def test_allowlist_suggests_pools():
+    print("\n[4f] the contract allowlist suggests each pool the assistant deposited into, named like its dashboard row")
+    factory, eth_pool, pepe_pool = _addr(0xFAC), _addr(0x9001), _addr(0x9002)
+    pairs = {frozenset((USDC, WETH)): eth_pool, frozenset((USDC, PEPE)): pepe_pool}
+    listed: list[str] = []
+
+    def value(v):
+        return SimpleNamespace(call=lambda *_a, **_k: v)
+
+    def contract(address, abi):
+        if address == get_router(CHAIN):
+            return SimpleNamespace(functions=SimpleNamespace(factory=lambda: value(factory)))
+        if address == factory:
+            return SimpleNamespace(functions=SimpleNamespace(
+                getPair=lambda a, b: value(pairs.get(frozenset((a, b)), "0x" + "0" * 40))))
+        return SimpleNamespace(functions=SimpleNamespace(decimals=lambda: FakeCall(address, DECIMALS, "uint8")))
+
+    wallet = SimpleNamespace(address=WALLET, functions=SimpleNamespace(
+        sessionAllowlistEnabled=lambda: value(False),
+        getAllowedTargets=lambda: value(list(listed)),
+        REPUTATION_REGISTRY=lambda: value("0x" + "0" * 40),
+    ))
+    original = api._resolve_chain, api._load_wallet_for_chain
+    api._resolve_chain = lambda chain_id: (SimpleNamespace(eth=SimpleNamespace(contract=contract)), NETWORK)
+    api._load_wallet_for_chain = lambda _w3, user_id, chain_id: wallet
+    api._v2_factories.clear()
+    try:
+        c, headers, uid = _client_for()
+        db.save_wallet_address(uid, CHAIN, WALLET)
+        db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+        db.save_lp_token(uid, CHAIN, WETH, "eth", USDC, "usdc")
+        db.save_lp_token(uid, CHAIN, USDC, "usdc", PEPE, "pepe")
+        db.save_lp_token(uid, CHAIN, SHIB, "shib", WETH, "eth")    # its pool doesn't exist (yet)
+
+        r = c.get(f"/api/wallet/{CHAIN}/allowlist", headers=headers)
+        check("the allowlist read -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+        suggested = {s["address"]: s["label"] for s in r.json()["suggested"]}
+        check("each pool is suggested, named with the native asset's side first",
+              suggested.get(eth_pool) == "ETH/USDC pool" and suggested.get(pepe_pool) == "USDC/PEPE pool", str(suggested))
+        check("...after the router and the tokens",
+              list(suggested)[:3] == [Web3.to_checksum_address(get_router(CHAIN)), WETH, PEPE] and len(suggested) == 5,
+              str(list(suggested)))
+        saved = {(p["token0"], p["token1"]): p["pair"] for p in db.get_lp_tokens(uid, CHAIN)}
+        check("...its address read off the chain and saved, as the dashboard would",
+              saved[USDC, WETH] == eth_pool and saved[USDC, PEPE] == pepe_pool, str(saved))
+        check("...while one whose pool doesn't exist yet isn't suggested", saved[WETH, SHIB] is None, str(saved))
+
+        listed.append(eth_pool)
+        body = c.get(f"/api/wallet/{CHAIN}/allowlist", headers=headers).json()
+        check("a listed pool is named in the list and no longer suggested",
+              body["targets"] == [{"address": eth_pool, "label": "ETH/USDC pool"}]
+              and eth_pool not in {s["address"] for s in body["suggested"]}, str(body))
+    finally:
+        api._resolve_chain, api._load_wallet_for_chain = original
+
+
+def test_deposits_name_their_pool():
+    print("\n[9] a deposit's quote names its pool for the dashboard, which stays out of the assistant's reach")
+    uid = db.create_user()
+    db.save_user_network(uid, NETWORK)
+    db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+    db.save_contact(uid, "payee", _addr(0xFEE))
+    _with_tool_fakes(uid, watched={USDC, WETH})
+    runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
+    plan = {"calls": [], "summary": {
+        "amount_eth_desired": 0.1, "amount_token_min": 1, "amount_eth_min": 0.1,
+        "amount_b_desired": 1, "amount_a_min": 1, "amount_b_min": 1,
+        "expected_token": 1, "expected_eth": 0.1, "expected_a": 1, "expected_b": 1,
+    }}
+    pools = []
+
+    class Package:
+        def __getitem__(self, _name):
+            return SimpleNamespace(invoke=lambda _args: plan)
+
+    def quote(_runtime, _executions, _action, _legs=None, lp_pool=None):
+        pools.append(lp_pool)
+        return {}
+
+    original = tools.get_uniswap_tools, tools._quote_executions
+    tools.get_uniswap_tools, tools._quote_executions = lambda _uid: Package(), quote
+    try:
+        for label, kwargs, expected in (
+            ("a deposit with ETH", {"token_a": "usdc", "amount_a": 100},
+             {"token_a": USDC, "ticker_a": "usdc", "token_b": WETH, "ticker_b": "eth"}),
+            ("a deposit of WETH: the same pool, by the same name", {"token_a": "usdc", "amount_a": 100, "token_b": "weth"},
+             {"token_a": USDC, "ticker_a": "usdc", "token_b": WETH, "ticker_b": "eth"}),
+            ("a deposit of an added token, named by address", {"token_a": PEPE, "amount_a": 1, "token_b": "usdc"},
+             {"token_a": PEPE, "ticker_a": "pepe", "token_b": USDC, "ticker_b": "usdc"}),
+        ):
+            tools.add_liquidity.func(runtime, **kwargs)
+            check(f"{label}: its quote names the pool", pools[-1] == expected, str(pools[-1]))
+        tools.remove_liquidity.func(runtime, token_a="usdc", lp_amount=1)
+        check("a removal names none", pools[-1] is None, str(pools[-1]))
+    finally:
+        tools.get_uniswap_tools, tools._quote_executions = original
+
+    # On the dashboard, the pool's own token is still nothing the assistant can name or send: it has
+    # no price, so the spending limit would never count it leaving.
+    pool = _addr(0x9001)
+    db.save_lp_token(uid, CHAIN, USDC, "usdc", WETH, "eth")
+    db.set_lp_token_pair(uid, CHAIN, USDC, WETH, pool, 6, 18)
+    original = tools.get_erc20_tools
+    tools.get_erc20_tools = lambda _uid: _StandInPackage()
+    try:
+        tools.transfer_erc20.func(runtime, token=pool, recipient="payee", amount=1)
+        refused = "reached the package"
+    except ToolException as e:
+        refused = str(e)
+    finally:
+        tools.get_erc20_tools = original
+    check("the LP token on the dashboard still can't be sent by the assistant",
+          "not a token this wallet knows" in refused, refused[:160])
+
+
 if __name__ == "__main__":
     try:
         test_add_rules()
@@ -683,10 +885,13 @@ if __name__ == "__main__":
         test_dashboard_tokens()
         test_dashboard_api()
         test_dashboard_balances()
+        test_lp_balances()
+        test_allowlist_suggests_pools()
         test_tools_price_and_note_custom_tokens()
         test_ierc20_cache_follows_the_address()
         test_tools_only_reach_tokens_the_owner_chose()
         test_action_line_drops_approvals()
+        test_deposits_name_their_pool()
     finally:
         os.unlink(_tmp_db.name)
 

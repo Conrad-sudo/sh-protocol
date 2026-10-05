@@ -952,6 +952,197 @@ contract SessionGuardTest is Test {
         wallet.addAllowedTarget(address(0));
     }
 
+    /// @dev Turns the allowlist on with `target` as its only entry, through the one-call path.
+    function _enableAllowList(address target) internal {
+        address[] memory targets = new address[](1);
+        targets[0] = target;
+        vm.prank(owner);
+        wallet.enableAllowList(targets);
+    }
+
+    function _includes(address[] memory list, address item) internal pure returns (bool) {
+        for (uint256 i = 0; i < list.length; i++) {
+            if (list[i] == item) return true;
+        }
+        return false;
+    }
+
+    /// @notice The one-signature turn-on: the targets land and enforcement starts in the same call.
+    function test_enableAllowList_addsTargetsAndTurnsOnInOneCall() public {
+        address[] memory targets = new address[](2);
+        targets[0] = address(usdc);
+        targets[1] = address(dai);
+
+        vm.expectEmit(true, true, true, true, address(wallet));
+        emit SessionHandler.AllowedTargetAdded(address(usdc));
+        vm.expectEmit(true, true, true, true, address(wallet));
+        emit SessionHandler.AllowedTargetAdded(address(dai));
+        vm.expectEmit(true, true, true, true, address(wallet));
+        emit SessionHandler.SessionAllowlistToggled(true);
+
+        vm.prank(owner);
+        wallet.enableAllowList(targets);
+
+        assertTrue(wallet.sessionAllowlistEnabled(), "not turned on");
+        assertEq(wallet.allowedTargetCount(), 2);
+        assertTrue(wallet.sessionTargetAllowlist(address(usdc)) && wallet.sessionTargetAllowlist(address(dai)));
+    }
+
+    /// @notice The one-call path keeps {toggleAllowList}'s rule: it never enforces an empty list.
+    function test_enableAllowList_refusesToEnforceAnEmptyList() public {
+        vm.prank(owner);
+        vm.expectRevert(SessionHandler.SessionHandler_EmptyAllowlist.selector);
+        wallet.enableAllowList(new address[](0));
+
+        assertFalse(wallet.sessionAllowlistEnabled());
+    }
+
+    /// @notice With entries already listed, no new targets is a plain "turn on".
+    function test_enableAllowList_withNoTargetsTurnsOnAFilledList() public {
+        vm.startPrank(owner);
+        wallet.addAllowedTarget(address(usdc));
+        wallet.enableAllowList(new address[](0));
+        vm.stopPrank();
+
+        assertTrue(wallet.sessionAllowlistEnabled());
+        assertEq(wallet.allowedTargetCount(), 1);
+    }
+
+    /// @notice One bad entry fails the whole call: nothing is listed and the list stays off.
+    function test_enableAllowList_zeroTargetRevertsEverything() public {
+        address[] memory targets = new address[](2);
+        targets[0] = address(usdc);
+        targets[1] = address(0);
+
+        vm.prank(owner);
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidAllowedTarget.selector);
+        wallet.enableAllowList(targets);
+
+        assertEq(wallet.allowedTargetCount(), 0, "an entry landed despite the revert");
+        assertFalse(wallet.sessionAllowlistEnabled());
+    }
+
+    function test_enableAllowList_ownerOnly() public {
+        address[] memory targets = new address[](1);
+        targets[0] = address(usdc);
+
+        vm.prank(attacker);
+        vm.expectRevert();
+        wallet.enableAllowList(targets);
+
+        assertFalse(wallet.sessionAllowlistEnabled());
+        assertEq(wallet.allowedTargetCount(), 0);
+    }
+
+    /// @notice A session key cannot loosen its own restriction: switching the list off and listing a
+    ///         new target are owner calls on the account, which the guard keeps a key from reaching.
+    function test_allowlist_sessionKeyCannotLoosenIt() public {
+        _enableAllowList(address(usdc));
+
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.toggleAllowList, (false)));
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.addAllowedTarget, (address(dai))));
+
+        // handleOps absorbs the inner revert, so the state is what proves it.
+        assertTrue(wallet.sessionAllowlistEnabled(), "a session key switched the allowlist off");
+        assertFalse(wallet.sessionTargetAllowlist(address(dai)), "a session key listed a target");
+    }
+
+    /// @notice The list reads back whole, and stays right after removing an entry that is not last
+    ///         (the set moves its last entry into the freed position).
+    function test_getAllowedTargets_returnsTheWholeList() public {
+        address[] memory targets = new address[](3);
+        targets[0] = address(usdc);
+        targets[1] = address(dai);
+        targets[2] = address(oracle);
+
+        vm.startPrank(owner);
+        wallet.addAllowedTargets(targets);
+        wallet.removeAllowedTarget(address(usdc));
+        vm.stopPrank();
+
+        address[] memory listed = wallet.getAllowedTargets();
+        assertEq(listed.length, 2);
+        assertEq(listed.length, wallet.allowedTargetCount());
+        assertTrue(_includes(listed, address(dai)) && _includes(listed, address(oracle)), "an entry went missing");
+        assertFalse(_includes(listed, address(usdc)), "the removed entry is still listed");
+    }
+
+    /// @notice While the list is on, an address with no code needs no entry: native value sent to it
+    ///         goes through and is metered like any other outflow. This is what lets the assistant pay
+    ///         a contact without listing the contact.
+    function test_allowlist_plainAddressNeedsNoEntry() public {
+        _enableAllowList(address(usdc));
+        uint256 amount = 0.1 ether;
+
+        (PackedUserOperation memory userOp,,) =
+            sendPackedUserOp.generateSignedUserOp(address(wallet), config, kani, amount, "", sessionKey, sessionKeyPk);
+        _handleOps(userOp);
+
+        assertEq(kani.balance, amount, "the send to a plain address was blocked");
+        assertEq(wallet.getConfig().spentInWindow, oracle.getPrice(address(0), amount), "the send was not metered");
+    }
+
+    /// @notice The exemption is about CODE, not calldata: a bare value send to an unlisted contract is
+    ///         still refused, because receiving value runs its code.
+    function test_allowlist_plainSendToAnUnlistedContractIsRefused() public {
+        _enableAllowList(address(usdc));
+
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(dai))
+        );
+        wallet.execute(bytes32(0), _encodeSingle(address(dai), 0.1 ether, ""));
+    }
+
+    /// @notice An EIP-7702 delegated EOA runs code, so the allowlist treats it as a contract: its
+    ///         delegation designator is code, and the no-code exemption does not reach it.
+    function test_allowlist_delegatedEoaIsCheckedLikeAContract() public {
+        address delegated = makeAddr("delegated");
+        vm.etch(delegated, abi.encodePacked(hex"ef0100", address(usdc)));
+        assertEq(delegated.code.length, 23, "designator not in place");
+        _enableAllowList(address(dai));
+
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, delegated)
+        );
+        wallet.execute(bytes32(0), _encodeSingle(delegated, 0.1 ether, ""));
+    }
+
+    /**
+     * @notice Pins the KNOWN EDGE documented on {SessionHandler-_requireUnrestrictedTarget}: the guard
+     *         checks a batch's targets before any of them runs, so code that an EARLIER call in the
+     *         same batch deploys is called without being listed. In any later execution the same
+     *         address has code at the check, and is refused.
+     * @dev Harmless for what the list guards: the new contract acts as itself, so nothing it does
+     *      onward is recorded against the wallet. Kept as a test so that closing the edge, or widening
+     *      it, shows up here -- and the NatSpec and THREAT_MODEL §3.13 get updated with it.
+     */
+    function test_allowlist_knownEdge_codeDeployedEarlierInTheBatchIsNotRechecked() public {
+        RecorderFactory recorderFactory = new RecorderFactory();
+        bytes32 salt = keccak256("same-batch");
+        address recorder =
+            vm.computeCreate2Address(salt, keccak256(type(CallRecorder).creationCode), address(recorderFactory));
+        _enableAllowList(address(recorderFactory));
+
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution({
+            target: address(recorderFactory), value: 0, callData: abi.encodeCall(RecorderFactory.deploy, (salt))
+        });
+        execs[1] = Execution({target: recorder, value: 0, callData: abi.encodeCall(CallRecorder.ping, ())});
+
+        vm.prank(config.entryPoint);
+        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
+        assertEq(CallRecorder(recorder).lastCaller(), address(wallet), "the same-batch call did not happen");
+
+        // Now that it has code, the recorder is an unlisted contract like any other.
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, recorder)
+        );
+        wallet.execute(bytes32(0), _encodeSingle(recorder, 0, abi.encodeCall(CallRecorder.ping, ())));
+    }
+
     /*//////////////////////////////////////////////////////////////
               EXECUTOR MODULES (executeFromExecutor) -- the guard
     //////////////////////////////////////////////////////////////*/
@@ -1148,5 +1339,22 @@ contract SessionGuardTest is Test {
         );
 
         assertEq(wallet.getConfig().dailyLimitUsd, limitBefore, "cap was raised in try mode");
+    }
+}
+
+/// @dev Records who last called it, so a test can prove a call happened and in whose name it ran.
+contract CallRecorder {
+    address public lastCaller;
+
+    function ping() external {
+        lastCaller = msg.sender;
+    }
+}
+
+/// @dev Deploys a {CallRecorder} at a CREATE2 address the caller can predict -- the shape of a listed
+///      contract that hands a batch an address which had no code when the guard checked it.
+contract RecorderFactory {
+    function deploy(bytes32 salt) external returns (CallRecorder) {
+        return new CallRecorder{salt: salt}();
     }
 }

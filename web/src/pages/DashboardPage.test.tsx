@@ -526,6 +526,47 @@ describe('DashboardPage', () => {
     ])
   })
 
+  it('shows LP tokens with what they hold, and lets the owner withdraw them', async () => {
+    const POOL = '0x4444444444444444444444444444444444444444'
+    const lp = {
+      ticker: 'eth/usdc lp', address: POOL, native: false, custom: false, always_counted: false, lp: true,
+      decimals: 18, raw: '10000000000000000000', amount: 10,
+      underlying: [
+        { ticker: 'eth', decimals: 18, raw: '40000000000000000000' },
+        { ticker: 'usdc', decimals: 6, raw: '100000000000' },
+      ],
+    }
+    const { prepared } = stubServer({
+      wallets: { [SEPOLIA]: [makeWalletState({ balances: [...makeWalletState().balances, lp] })] },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    const row = (await screen.findByRole('rowheader', { name: 'ETH/USDC LP' })).closest('tr')!
+    expect(row).toHaveTextContent('10')
+    expect(row).toHaveTextContent('≈ 40 ETH + 100,000 USDC')
+    // It comes and goes with the deposits, and the assistant can't send it anywhere.
+    expect(row).not.toHaveTextContent('Not limited')
+    expect(within(row).queryByRole('button', { name: /^Remove/ })).toBeNull()
+    expect(
+      screen.getByText('LP tokens are your share of an exchange pool. Under each is what it holds for you right now.'),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Withdraw' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(within(drawer).getByRole('button', { name: 'Connect wallet' }))
+    await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+    await within(drawer).findByText('Owner connected')
+    await user.click(within(drawer).getByRole('combobox', { name: 'Token' }))
+    await user.click(await screen.findByRole('option', { name: 'ETH/USDC LP · 10 available' }))
+    await user.type(within(drawer).getByLabelText('Amount'), '4')
+    await user.click(within(drawer).getByRole('button', { name: 'Withdraw' }))
+    expect(await screen.findByText('Withdrew 4 ETH/USDC LP.')).toBeInTheDocument()
+    expect(prepared).toEqual([
+      { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: POOL, amount: '4', to: WALLET } },
+    ])
+  })
+
   it('removes a token the user added, after saying the tokens stay in the wallet', async () => {
     const PEPE = '0x6982508145454Ce325dDbE47a25d4ec3d2311933'
     const withPepe = makeWalletState({

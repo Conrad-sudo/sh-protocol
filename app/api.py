@@ -20,7 +20,7 @@ from decimal import Decimal
 from eth_utils import to_hex
 from hexbytes import HexBytes
 from web3 import Web3
-from web3.exceptions import TimeExhausted, TransactionNotFound
+from web3.exceptions import ContractLogicError, TimeExhausted, TransactionNotFound
 from web3.logs import DISCARD
 from constants import (
     CHAIN_ID_ANVIL,
@@ -49,6 +49,8 @@ from db import (
     add_dashboard_tokens,
     get_dashboard_tokens,
     remove_dashboard_token,
+    get_lp_tokens,
+    set_lp_token_pair,
     get_supported_token_by_address,
     resolve_token,
     save_wallet_address,
@@ -73,6 +75,7 @@ from userop import create_pending_session_key, reconcile_session_key
 from contracts import invalidate_cache, read_spending_config
 from contract_errors import name_revert
 from custom_tokens import CustomTokenError, inspect_custom_token
+from parallel import read_all, start_read
 import auth
 from auth import get_current_user
 from smart_wallet_agent import (
@@ -87,6 +90,7 @@ from smart_wallet_agent import (
 import tx_history
 
 from langchain_erc20 import ERC20_ABI
+from langchain_uniswap_v2.abis import factory_abi, pair_abi, router_abi
 from langchain_erc20.amounts import to_base_units
 
 from pydantic import BaseModel, Field
@@ -1707,7 +1711,8 @@ def _ticker_map(chain_id: int) -> dict[str, str]:
 def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[dict]:
     """
     Balances for `account` of the native token and the tokens on the user's dashboard: the listed
-    ones in dashboard_tokens, then the ones added by address.
+    ones in dashboard_tokens, then the ones added by address, then the LP tokens of the pools the
+    assistant deposited into (_lp_balances).
 
     Each token is fetched independently and a failure is reported per-token rather than raised: one
     token with no code (a stale row, a chain that moved a deployment) must not blank out the whole
@@ -1769,7 +1774,129 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
         except Exception as e:  # noqa: BLE001 -- reported per token, never fatal
             entry |= {"decimals": None, "raw": None, "amount": None, "error": _revert_reason(e)}
         balances.append(entry)
-    return balances
+    return balances + _lp_balances(w3, user_id, chain_id, account)
+
+
+# Every Uniswap V2 pair's LP token has 18 decimals, fixed in the pair contract -- PancakeSwap's too.
+_LP_DECIMALS = 18
+# A wallet holding less than 1/_LP_DUST of a pool holds none, as far as the dashboard goes. "Remove
+# all" passes the amount as a float, so it can leave a few wei behind -- at most ~2e-16 of what was
+# held, so always far below this. No real position is this small: in a $1B pool it is $0.001.
+_LP_DUST = 10**12
+# Each chain's V2 factory, read off its router once: a router's factory never changes.
+_v2_factories: dict[int, str] = {}
+
+
+def _v2_factory(w3: Web3, chain_id: int):
+    """
+    The V2 factory behind the router the wallets on `chain_id` trust -- found the way the assistant's
+    toolkit finds it (router.factory(), see toolkits.get_uniswap_tools), so both see the same pools.
+    """
+    if chain_id not in _v2_factories:
+        router = w3.eth.contract(address=get_router(chain_id), abi=router_abi)
+        _v2_factories[chain_id] = router.functions.factory().call()
+    return w3.eth.contract(address=_v2_factories[chain_id], abi=factory_abi)
+
+
+def _read_new_pools(w3: Web3, user_id: int, chain_id: int, pools: list[dict]):
+    """
+    Finds each pool's address and its two tokens' decimals, all at once, and saves them, so the
+    dashboard reads them only the first time it shows a pool. A pool with no address yet (the
+    deposit that would create it hasn't landed) is left for a later read.
+
+    @param pools  Rows of db.get_lp_tokens with no `pair` yet. Each is updated in place.
+    """
+    factory = _v2_factory(w3, chain_id)
+    reads = {}
+    for i, pool in enumerate(pools):
+        reads[i, "pair"] = factory.functions.getPair(pool["token0"], pool["token1"]).call
+        for side in ("0", "1"):
+            token = w3.eth.contract(address=pool["token" + side], abi=ERC20_ABI)
+            reads[i, "decimals" + side] = token.functions.decimals().call
+    found = read_all(reads)
+    for i, pool in enumerate(pools):
+        if int(found[i, "pair"], 16) == 0:
+            continue
+        pool |= {"pair": found[i, "pair"], "decimals0": found[i, "decimals0"], "decimals1": found[i, "decimals1"]}
+        set_lp_token_pair(
+            user_id, chain_id, pool["token0"], pool["token1"], pool["pair"], pool["decimals0"], pool["decimals1"]
+        )
+
+
+def _known_pools(w3: Web3, user_id: int, chain_id: int) -> list[dict]:
+    """
+    The pools the assistant deposited into (db.lp_tokens) whose address is known, reading it off the
+    chain the first time (_read_new_pools). One that can't be read, or doesn't exist yet, is left
+    out and tried again on the next read.
+    """
+    pools = get_lp_tokens(user_id, chain_id)
+    new = [pool for pool in pools if pool["pair"] is None]
+    if new:
+        try:
+            _read_new_pools(w3, user_id, chain_id, new)
+        except Exception as e:  # noqa: BLE001 -- tried again on the next read
+            print(f"Could not read the new pools for user {user_id} on chain {chain_id}: {e!r}")
+    return [pool for pool in pools if pool["pair"] is not None]
+
+
+def _lp_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[dict]:
+    """
+    The wallet's LP tokens: one row for each pool the assistant deposited into (db.lp_tokens) that
+    the wallet still holds some of. A pool it has taken everything out of isn't shown; the next
+    deposit brings it back.
+
+    `underlying` is what the LP tokens hold right now: the wallet's share of each of the pool's
+    tokens (balance x reserve / totalSupply), which is about what taking it all out would return.
+    A few wei left behind by a "remove all" count as nothing (_LP_DUST).
+    Rows are named like "eth/usdc lp", the native asset's side first, and `underlying` follows the
+    same order.
+
+    Three reads per pool, all at once, plus a round the first time a pool is shown (_read_new_pools).
+    A pool that can't be read is reported, like any other balance, never raised. An LP token has no
+    price and the assistant can't send one (tools._token_address), so it is neither `custom` nor
+    counted; `lp` marks it.
+    """
+    pools = _known_pools(w3, user_id, chain_id)
+    reads = {}
+    for pool in pools:
+        pair = w3.eth.contract(address=pool["pair"], abi=pair_abi)
+        reads[pool["pair"]] = [
+            start_read(read)
+            for read in (pair.functions.balanceOf(account).call, pair.functions.totalSupply().call,
+                         pair.functions.getReserves().call)
+        ]
+
+    native = get_native_asset_ticker(chain_id).lower()
+    rows = []
+    for pool in pools:
+        sides = [(pool["ticker0"], pool["decimals0"]), (pool["ticker1"], pool["decimals1"])]
+        order = (1, 0) if pool["ticker1"] == native else (0, 1)
+        entry = {
+            "ticker": "/".join(sides[i][0] for i in order) + " lp",
+            "address": pool["pair"],
+            "native": False,
+            "custom": False,
+            "always_counted": False,
+            "lp": True,
+        }
+        try:
+            balance, supply, (reserve0, reserve1, _) = (read.result() for read in reads[pool["pair"]])
+        except Exception as e:  # noqa: BLE001 -- reported per pool, never fatal
+            rows.append(entry | {"decimals": None, "raw": None, "amount": None, "underlying": None,
+                                 "error": _revert_reason(e)})
+            continue
+        if balance == 0 or balance * _LP_DUST < supply:
+            continue
+        held = (balance * reserve0 // supply, balance * reserve1 // supply)
+        rows.append(entry | {
+            "decimals": _LP_DECIMALS,
+            "raw": str(balance),
+            "amount": float(Decimal(balance) / Decimal(10**_LP_DECIMALS)),
+            "underlying": [
+                {"ticker": sides[i][0], "decimals": sides[i][1], "raw": str(held[i])} for i in order
+            ],
+        })
+    return rows
 
 
 def _show_counted_tokens(user_id: int, chain_id: int, watched: list[str]):
@@ -2367,3 +2494,186 @@ def prepare_max_op_gas_cost(req: MaxOpGasCostRequest, user_id: int = Depends(get
     max_wei = w3.to_wei(req.max_cost_eth, "ether")
     prepared = _prepare_owner_tx(w3, owner, wallet.functions.setMaxOpGasCost(max_wei), req.chain_id)
     return {**prepared, "max_cost_wei": str(max_wei)}
+
+
+# ── Contract allowlist ────────────────────────────────────────────────────────
+#
+# The wallet can confine its session key to a list of contracts (THREAT_MODEL §3.13), off by
+# default. While it is on, a call to an address with no code -- a contact's plain wallet -- still
+# goes through, and a call to any contract not on the list is refused. The list lives on chain
+# only: nothing here writes wallet.db, so /api/wallet/tx/confirm confirms these like any other
+# owner change.
+
+
+class AllowlistRequest(BaseModel):
+    """Body of POST /api/wallet/allowlist/prepare."""
+
+    chain_id: int
+    # enable:  list `targets` and turn the list on, in ONE transaction. `targets` may be empty when
+    #          the list already has entries.
+    # add:     list `targets`.
+    # remove:  unlist the one address in `targets` -- the contract removes one at a time.
+    # disable: turn the list off. Its entries stay, for turning it back on later.
+    action: str = Field(pattern="^(enable|add|remove|disable)$")
+    # Bounded so one transaction stays a sensible size: each new entry is two storage writes.
+    targets: list[str] = Field(default_factory=list, max_length=64)
+
+
+def _allowlist_targets(raw: list[str]) -> list[str]:
+    """
+    Checksums `raw` and drops repeats, keeping the order. Refuses anything that isn't an address,
+    and the zero address, before any RPC: the contract would refuse either later, less helpfully.
+    """
+    targets: list[str] = []
+    for value in raw:
+        try:
+            target = Web3.to_checksum_address(value)
+        except ValueError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Not a valid address: {value}")
+        if int(target, 16) == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "The zero address can't be listed.")
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+@app.post("/api/wallet/allowlist/prepare")
+def prepare_allowlist(req: AllowlistRequest, user_id: int = Depends(get_current_user)):
+    """
+    Builds the unsigned transaction for one change to the wallet's contract allowlist:
+    `enableAllowList(targets)`, `addAllowedTargets(targets)`, `removeAllowedTarget(target)` or
+    `toggleAllowList(false)`.
+
+    Turning the list on and removing an entry TIGHTEN what the assistant can reach; adding an entry
+    while the list is on, and turning it off, loosen it -- treat those as such in the UI. The
+    contract refuses to turn on an empty list, which the simulation reports before anything is signed.
+
+    @return  {"tx", "targets"}: the addresses as the transaction names them, checksummed.
+    """
+    owner = _require_owner(user_id)
+    targets = _allowlist_targets(req.targets)
+    # Before _resolve_chain, like the address checks: a request that can only be refused should not
+    # cost an RPC round trip.
+    if req.action == "add" and not targets:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name at least one address to add.")
+    if req.action == "remove" and len(targets) != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Remove one address at a time.")
+
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    if req.action in ("enable", "add") and wallet.address in targets:
+        # Harmless on chain -- the guard blocks the wallet's own address whatever the list says --
+        # but the list would then name a contract the assistant can never actually call.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That's this wallet's own address. The assistant can never call it, so it can't be listed.",
+        )
+    if req.action == "enable":
+        fn = wallet.functions.enableAllowList(targets)
+    elif req.action == "add":
+        fn = wallet.functions.addAllowedTargets(targets)
+    elif req.action == "remove":
+        fn = wallet.functions.removeAllowedTarget(targets[0])
+    else:
+        fn = wallet.functions.toggleAllowList(False)
+    return {**_prepare_owner_tx(w3, owner, fn, req.chain_id), "targets": targets}
+
+
+def _listed_targets(wallet) -> list[str] | None:
+    """
+    The wallet's allowlist entries, or None for a wallet created before the list could be read
+    back: its implementation has no getAllowedTargets, so the call reverts in the account's fallback.
+    A failure to reach the node is not that, and is raised.
+    """
+    try:
+        return [Web3.to_checksum_address(a) for a in wallet.functions.getAllowedTargets().call()]
+    except ContractLogicError:
+        return None
+
+
+@app.get("/api/wallet/{chain_id}/allowlist")
+def get_allowlist(chain_id: int, user_id: int = Depends(get_current_user)):
+    """
+    The wallet's contract allowlist, each entry named where Mitfah knows it, and the contracts worth
+    listing that aren't yet. Read only when Controls → Advanced is opened, so the dashboard's wallet
+    read doesn't pay for it.
+
+    `suggested` is what the assistant calls for this account, in this order: the exchange router,
+    the tokens on the dashboard (the wrapped native one included, then the ones added by address),
+    the pools it deposited into (taking liquidity out calls the pool's own LP token), the ERC-8004
+    review registry, and any contact whose address holds code. A contact with a plain wallet needs
+    no entry -- while the list is on, an address with no code is never blocked.
+
+    Not gated on _require_owner, like the wallet read: reading costs nothing.
+
+    @return  {"enabled", "targets": [{"address", "label"}] | null, "suggested": [{"address", "label"}]}.
+             `label` is null for an address Mitfah has no name for. `targets` is null for a wallet
+             created before its list could be read back: its on/off state still is.
+    @raises HTTPException 404 if this account has no wallet on `chain_id`.
+    """
+    # The wallet-row lookup first, as in get_wallet_state: no wallet here costs no RPC.
+    try:
+        get_wallet_address(user_id, chain_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"You have no wallet on chain {chain_id}.")
+
+    # The database next, on this thread (see parallel.py): every name, and the candidates in the
+    # order they are suggested.
+    named: dict[str, str] = {}
+    candidates: list[str] = []
+
+    def name(address: str, label: str, suggest: bool):
+        address = Web3.to_checksum_address(address)
+        named.setdefault(address, label)
+        if suggest and address not in candidates:
+            candidates.append(address)
+
+    router = _router_or_none(chain_id)
+    if router:
+        name(router, "PancakeSwap V2 router" if chain_id == CHAIN_ID_BSC else "Uniswap V2 router", True)
+    try:
+        listed_tokens = get_supported_tokens_by_chain_id(chain_id)
+    except ValueError:
+        listed_tokens = []
+    always = get_always_counted_ticker(chain_id)
+    on_dashboard = {t["ticker"] for t in get_dashboard_tokens(user_id, chain_id)} | {always}
+    for token in listed_tokens:
+        name(token["address"], token["ticker"].upper(), token["ticker"] in on_dashboard)
+    for token in get_custom_tokens(user_id, chain_id):
+        name(token["address"], token["ticker"].upper(), True)
+    contacts = get_all_contacts(user_id)
+
+    w3, _ = _resolve_chain(chain_id)
+    # Named like the pool's dashboard row, the native asset's side first: "ETH/USDC pool".
+    native = get_native_asset_ticker(chain_id).lower()
+    for pool in _known_pools(w3, user_id, chain_id):
+        sides = (pool["ticker0"], pool["ticker1"])
+        if pool["ticker1"] == native:
+            sides = sides[::-1]
+        name(pool["pair"], "/".join(side.upper() for side in sides) + " pool", True)
+    wallet = _load_wallet_for_chain(w3, user_id, chain_id)
+    reads = read_all({
+        "enabled": wallet.functions.sessionAllowlistEnabled().call,
+        "targets": lambda: _listed_targets(wallet),
+        "registry": wallet.functions.REPUTATION_REGISTRY().call,
+        **{
+            f"code:{contact['address']}": (lambda address=contact["address"]: w3.eth.get_code(address))
+            for contact in contacts
+        },
+    })
+
+    # Every network's config names one; the guard keeps a zero address -- which can't be listed --
+    # out of the suggestions should one ever not.
+    if int(reads["registry"], 16):
+        name(reads["registry"], "ERC-8004 review registry", True)
+    for contact in contacts:
+        # Only a contract needs an entry; a plain wallet is never blocked.
+        name(contact["address"], f"{contact['name']} (contact)", len(reads[f"code:{contact['address']}"]) > 0)
+
+    targets = reads["targets"]
+    listed = set(targets or [])
+    return {
+        "enabled": reads["enabled"],
+        "targets": None if targets is None else [{"address": a, "label": named.get(a)} for a in targets],
+        "suggested": [{"address": a, "label": named[a]} for a in candidates if a not in listed],
+    }

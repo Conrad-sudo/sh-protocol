@@ -359,6 +359,30 @@ def init_db():
             PRIMARY KEY (user_id, chain_id, ticker)
         );
 
+        -- The exchange pools (Uniswap V2, PancakeSwap on BSC) the assistant deposited into for each
+        -- user, per chain: the dashboard shows the wallet's LP tokens in each one while it holds
+        -- any, and nothing once it holds none. Saved when the user agrees to a deposit, before it is
+        -- sent (tools.confirm_transaction), so a send that lands late still shows. Kept apart from
+        -- custom_tokens on purpose: an LP token has no price, so the assistant must never be able to
+        -- name one (tools._token_address) -- this list is the dashboard's alone. token0/token1 are
+        -- the pool's tokens in the pool's own order (lower address first), so a pool is one row
+        -- whichever way round it was named; the wrapped native token's ticker is the native
+        -- asset's ("eth"), since that is what goes in and comes back. `pair` and the decimals are
+        -- read off the chain the first time the dashboard shows the pool (api._lp_balances).
+        CREATE TABLE IF NOT EXISTS lp_tokens (
+            user_id   INTEGER NOT NULL,
+            chain_id  INTEGER NOT NULL,
+            token0    TEXT NOT NULL,
+            token1    TEXT NOT NULL,
+            ticker0   TEXT NOT NULL,
+            ticker1   TEXT NOT NULL,
+            pair      TEXT,
+            decimals0 INTEGER,
+            decimals1 INTEGER,
+            added_at  INTEGER NOT NULL,
+            PRIMARY KEY (user_id, chain_id, token0, token1)
+        );
+
         CREATE TABLE IF NOT EXISTS chains (
             name      TEXT NOT NULL,
             chain_id  INTEGER NOT NULL,
@@ -1065,6 +1089,59 @@ def get_dashboard_tokens(user_id: int, chain_id: int) -> list[dict]:
         .fetchall()
     )
     return [{"ticker": row["ticker"], "address": row["address"]} for row in rows]
+
+
+# ── LP tokens ─────────────────────────────────────────────────────────────────
+
+
+def save_lp_token(user_id: int, chain_id: int, token_a: str, ticker_a: str, token_b: str, ticker_b: str):
+    """
+    Remembers a pool the assistant is depositing into, so the dashboard shows the LP tokens that
+    come back. A pool already remembered is left as it is, with what was read about it.
+
+    @param token_a, token_b    The pool's two tokens, checksummed, in either order.
+    @param ticker_a, ticker_b  How to name each on the dashboard, any case.
+    """
+    (token0, ticker0), (token1, ticker1) = sorted(
+        ((token_a, ticker_a), (token_b, ticker_b)), key=lambda token: int(token[0], 16)
+    )
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO lp_tokens (user_id, chain_id, token0, token1, ticker0, ticker1, added_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, chain_id, token0, token1, ticker0.lower(), ticker1.lower(), int(time.time())),
+    )
+    db.commit()
+
+
+def set_lp_token_pair(user_id: int, chain_id: int, token0: str, token1: str, pair: str, decimals0: int, decimals1: int):
+    """Saves what was read off the chain about a remembered pool: its address and its tokens' decimals."""
+    db = get_db()
+    db.execute(
+        "UPDATE lp_tokens SET pair = ?, decimals0 = ?, decimals1 = ? "
+        "WHERE user_id = ? AND chain_id = ? AND token0 = ? AND token1 = ?",
+        (pair, decimals0, decimals1, user_id, chain_id, token0, token1),
+    )
+    db.commit()
+
+
+def get_lp_tokens(user_id: int, chain_id: int) -> list[dict]:
+    """
+    The pools remembered for the user on `chain_id`, oldest first.
+
+    @return  [{"token0", "token1", "ticker0", "ticker1", "pair", "decimals0", "decimals1"}, ...];
+             `pair` and the decimals are None until the dashboard has read them.
+    """
+    rows = (
+        get_db()
+        .execute(
+            "SELECT token0, token1, ticker0, ticker1, pair, decimals0, decimals1 FROM lp_tokens "
+            "WHERE user_id = ? AND chain_id = ? ORDER BY added_at ASC, token0 ASC",
+            (user_id, chain_id),
+        )
+        .fetchall()
+    )
+    return [dict(row) for row in rows]
 
 
 # ── Contacts ──────────────────────────────────────────────────────────────────

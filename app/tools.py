@@ -11,6 +11,7 @@ from db import (
     get_contact as _get_contact,
     get_all_contacts as _get_all_contacts,
     resolve_token as _resolve_token,
+    save_lp_token as _save_lp_token,
 )
 import time
 from typing import NamedTuple
@@ -150,7 +151,9 @@ def _action_of(plan: dict) -> str:
     return "; ".join(described)
 
 
-def _quote_executions(runtime, executions: list, action: str, legs: list | None = None) -> dict:
+def _quote_executions(
+    runtime, executions: list, action: str, legs: list | None = None, lp_pool: dict | None = None
+) -> dict:
     """
     Checks a set of executions, prices them as one UserOperation, and parks it for the user to approve.
 
@@ -180,6 +183,8 @@ def _quote_executions(runtime, executions: list, action: str, legs: list | None 
                            spending limit will count and the USD value to show. None for a write
                            that moves nothing the limit could count (a registry write, removing
                            liquidity), which only needs the pause and the key checked.
+    @param lp_pool         A liquidity deposit's pool (see _lp_pool), for confirm_transaction to put
+                           on the dashboard. None for anything else.
     @return                The quote to show the user. NOTHING HAS BEEN SENT.
     @raises ToolException  If the wallet has no session key to sign with, is paused, its key is no
                            longer live, it doesn't hold what the transaction sends (or can't pay
@@ -236,6 +241,7 @@ def _quote_executions(runtime, executions: list, action: str, legs: list | None 
         calls=[{"to": to, "value": value} for to, value, _ in executions],
         quote=quote,
         cost=_transaction_cost(chain_id, quote, fee.result(), native_price),
+        lp_pool=lp_pool,
     )
 
     return {
@@ -262,19 +268,22 @@ def _quote_executions(runtime, executions: list, action: str, legs: list | None 
     }
 
 
-def _quote_plan(runtime, plan: dict, details: str = "", legs: list | None = None) -> dict:
+def _quote_plan(
+    runtime, plan: dict, details: str = "", legs: list | None = None, lp_pool: dict | None = None
+) -> dict:
     """Checks and prices a package execution plan and parks it for approval. See {_quote_executions}.
 
     @param details  Extra facts to put in front of the user before they approve -- the slippage
                     bounds a swap will accept, where its output goes. These used to be printed
                     beside the receipt, which was too late to be of any use.
     @param legs     What moves, for the spending-limit check. See {_quote_executions}.
+    @param lp_pool  A liquidity deposit's pool. See {_quote_executions}.
     """
     executions = [
         (Web3.to_checksum_address(call["to"]), call["value"], bytes.fromhex(call["data"][2:]))
         for call in plan["calls"]
     ]
-    quoted = _quote_executions(runtime, executions, _action_of(plan), legs)
+    quoted = _quote_executions(runtime, executions, _action_of(plan), legs, lp_pool)
     if details:
         quoted["details"] = details
     return quoted
@@ -710,6 +719,8 @@ def confirm_transaction(runtime: ToolRuntime[AgentContext], quote_id: str) -> st
     record = tx_history.start_assistant_tx(
         user_id, chain_id, session_handler.address, pending.action, prepared
     )
+    if pending.lp_pool:
+        _remember_lp_pool(user_id, chain_id, pending.lp_pool)
     try:
         tx_hash, receipt = _broadcast_user_op(user_id, prepared, bundler)
     except UserOpReverted as e:
@@ -730,6 +741,20 @@ def confirm_transaction(runtime: ToolRuntime[AgentContext], quote_id: str) -> st
         f"Sent — {pending.action}. Tx hash: `{Web3.to_hex(tx_hash)}`, Status: {receipt['status']}"
         f"{_budget_left(budget)}"
     )
+
+
+def _remember_lp_pool(user_id: int, chain_id: int, pool: dict) -> None:
+    """
+    Puts a liquidity deposit's pool on the dashboard, which then shows the LP tokens the wallet holds
+    in it (api._lp_balances). Saved BEFORE the deposit is sent, like the History row: one that
+    outlives the wait still shows once it lands, and one that never lands leaves a pool the wallet
+    holds nothing in, which the dashboard doesn't show. Never raises -- the deposit is going out,
+    and failing to remember its pool must not turn that into an error.
+    """
+    try:
+        _save_lp_token(user_id, chain_id, pool["token_a"], pool["ticker_a"], pool["token_b"], pool["ticker_b"])
+    except Exception as e:  # noqa: BLE001 -- the dashboard's list must never fail a send
+        print(f"[confirm_transaction] could not remember the pool for the dashboard: {type(e).__name__}")
 
 
 def _budget_left(budget) -> str:
@@ -853,6 +878,9 @@ def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
           - window_hours (float): the window's length, in hours.
           - watched_tokens (list): the ERC20 tickers that count toward the limit. The native asset
             (ETH/BNB) ALWAYS counts too and is not on this list; other tokens don't count.
+          - allowlist_enabled (bool): whether the owner has limited the assistant to a list of
+            contracts (web app, Controls → Advanced). While it is on, a transaction that calls a
+            contract not on the list is refused; sending to a plain wallet address is not affected.
     """
     return _get_wallet_status(runtime.context.user_id)
 
@@ -878,6 +906,7 @@ def _get_wallet_status(user_id: int) -> dict:
         "paused": wallet.paused().call,
         "active": wallet.isSessionActive(session_key).call,
         "expires_at": wallet.currentSessionValidUntil().call,
+        "allowlist": wallet.sessionAllowlistEnabled().call,
     })
     cfg = reads["config"]
 
@@ -892,6 +921,7 @@ def _get_wallet_status(user_id: int) -> dict:
         "remaining_usd": max(reads["remaining"], 0) / WEI_PER_ETH,
         "window_hours": cfg["windowDuration"] / 3600,
         "watched_tokens": _addresses_to_tickers(user_id, cfg["watchedTokens"]),
+        "allowlist_enabled": reads["allowlist"],
     }
 
 
@@ -1854,6 +1884,7 @@ def add_liquidity(
     The router approvals the deposit needs are granted and used up in the same transaction, so
     there is never a separate approval. Both deposits count toward the spending limit where it
     counts the token (the native asset always), because the LP tokens that come back have no price.
+    Once sent, the LP tokens show on the user's dashboard in the web app.
 
     Args:
         token_a: The token whose amount is fixed (e.g. "dai"). Not the native asset.
@@ -1878,12 +1909,13 @@ def add_liquidity(
             f"it, so the {native} amount can't be the one that is fixed. get_pool_quote shows how "
             f"much {native} an amount of {other} pairs with. Nothing was quoted."
         )
+    address_a, address_b = _resolve(user_id, token_a), _resolve(user_id, token_b)
     from_address = load_session_handler(user_id).address
     uniswap = get_uniswap_tools(user_id)
     if _is_native(token_b):
         plan = uniswap["add_liquidity_eth"].invoke(
             {
-                "token": _resolve(user_id, token_a),
+                "token": address_a,
                 "amount_token": amount_a,
                 "from_address": from_address,
                 "slippage_bps": _check_slippage(slippage_bps),
@@ -1896,8 +1928,8 @@ def add_liquidity(
     else:
         plan = uniswap["add_liquidity"].invoke(
             {
-                "token_a": _resolve(user_id, token_a),
-                "token_b": _resolve(user_id, token_b),
+                "token_a": address_a,
+                "token_b": address_b,
                 "amount_a": amount_a,
                 "from_address": from_address,
                 "slippage_bps": _check_slippage(slippage_bps),
@@ -1917,7 +1949,26 @@ def add_liquidity(
             f"slippage tolerance {slippage_bps / 100:g}%"
         ),
         legs=[(token_a, amount_a, SENT), (token_b, amount_b, SENT)],
+        lp_pool=_lp_pool(user_id, address_a, address_b),
     )
+
+
+def _lp_pool(user_id: int, address_a: str, address_b: str) -> dict:
+    """
+    The pool a deposit goes into, for confirm_transaction to put on the dashboard (db.save_lp_token).
+
+    Each token is named the way the user knows it, and the wrapped native token as the native asset
+    itself (ETH, BNB): that is what goes in and comes back out by default, and a deposit of WETH
+    lands in the same pool, so it gets the same name.
+
+    @param address_a, address_b  The pool's tokens, as _resolve returned them.
+    """
+    wrapped = _resolve(user_id, "eth")
+
+    def ticker(address: str) -> str:
+        return _token_label(user_id, "eth" if address == wrapped else address).lower()
+
+    return {"token_a": address_a, "ticker_a": ticker(address_a), "token_b": address_b, "ticker_b": ticker(address_b)}
 
 
 @tool

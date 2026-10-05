@@ -6,7 +6,7 @@ Shared by the two places a revert surfaces: api.py, whose owner endpoints simula
 before asking the user to sign it, and the agent, whose tools read the chain and send UserOps.
 """
 from eth_abi import decode
-from eth_utils import keccak
+from eth_utils import keccak, to_checksum_address
 
 from db import get_json
 
@@ -29,6 +29,21 @@ _ERROR_STRING_SELECTOR = bytes.fromhex("08c379a0")
 # EnforcedPause()) for a paused wallet. They surface when bundler.py estimates handleOps.
 _FAILED_OP_SELECTOR = keccak(text="FailedOp(uint256,string)")[:4]
 _FAILED_OP_WITH_REVERT_SELECTOR = keccak(text="FailedOpWithRevert(uint256,string,bytes)")[:4]
+
+# The wallet's guard refusing a call the session key may not make. Explained rather than just named:
+# with the owner's contract allowlist on, it is what any unlisted contract looks like, and the
+# signature alone doesn't say which contract it was or what the owner can do about it.
+_RESTRICTED_TARGET_SELECTOR = keccak(text="SessionHandler_SessionRestrictedTarget(address)")[:4]
+
+
+def _explain_restricted_target(target: str) -> str:
+    """Why the wallet refused to let the assistant call `target`, and what the owner can do."""
+    return (
+        f"the wallet won't let the assistant call {target}. With the wallet's contract allowlist on, "
+        f"the assistant can only call contracts on that list: the owner can add {target} in the web "
+        f"app (Controls -> Advanced), or turn the allowlist off there. (If the allowlist is off, "
+        f"{target} is one of the addresses the assistant may never call.)"
+    )
 
 
 def _error_selectors() -> dict[str, str]:
@@ -127,6 +142,11 @@ def describe_revert_data(data: bytes) -> str:
             _, reason, inner = decode(["uint256", "string", "bytes"], data[4:])
             return f"{reason}: {describe_revert_data(inner)}"
         except Exception:  # noqa: BLE001
+            pass
+    if data[:4] == _RESTRICTED_TARGET_SELECTOR:
+        try:
+            return _explain_restricted_target(to_checksum_address(decode(["address"], data[4:])[0]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
             pass
     if not data:
         return "no revert data"

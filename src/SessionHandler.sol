@@ -14,6 +14,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {ERC4337Utils} from "@openzeppelin/contracts/account/utils/draft-ERC4337Utils.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {SHOracle} from "./SHOracle.sol";
@@ -42,7 +43,8 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  * @dev A session key EXPIRES: {currentSessionValidUntil} is returned as the op's ERC-4337 validity
  *      window, so the EntryPoint refuses an expired key with `AA22 expired or not due`. It is still a
  *      bare signer within that window -- no per-key selector scope -- bounded by the spending cap
- *      (see {addSession}) and narrowed optionally by the owner-managed {sessionTargetAllowlist}.
+ *      (see {addSession}) and narrowed optionally by the owner-managed target allowlist (see
+ *      {enableAllowList}).
  * @dev The USD cap cannot see ETH spent as GAS (the prefund leaves before the hook's preCheck,
  *      refunds land in the EntryPoint deposit after postCheck). {maxOpGasCost} bounds it instead,
  *      and the EntryPoint is a restricted target so a key cannot withdraw the deposit.
@@ -65,6 +67,7 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  */
 contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     using SafeERC20 for IERC20;
+    using EnumerableSet for EnumerableSet.AddressSet;
 
     /*//////////////////////////////////////////////////////////////
                                     ERRORS
@@ -83,7 +86,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev Thrown when addSession is given a deadline further out than {MAX_SESSION_TTL}.
     error SessionHandler_SessionTtlTooLong(uint48 validUntil, uint48 maxTtl);
     /// @dev Thrown when a session-key (non-owner) execution targets the account's own admin surface
-    ///      (address(this) or the spending-limit module), which would let a key escape the cap.
+    ///      (address(this) or the spending-limit module) or the EntryPoint, which would let a key
+    ///      escape the cap -- or, while the allowlist is on, a contract that is not on it.
     error SessionHandler_SessionRestrictedTarget(address target);
     /// @dev Thrown when a session-key (non-owner) execution uses delegatecall, which runs arbitrary
     ///      code in the account's context and so could reach the admin surface regardless of target.
@@ -166,13 +170,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     // Storage below is ordered to pack. The inherited layout ends with a slot holding
     // AccountERC7579Hooked's `_hook` (20 bytes) and Pausable's `_paused` (1 byte); the first two
-    // variables fill that slot's remaining 11 bytes, and the next three share one slot. Every UserOp
+    // variables fill that slot's remaining 11 bytes, and the next two share one slot. Every UserOp
     // reads `_paused` and {maxOpGasCost}; a session-key execution also reads {SH_MODULE} and
     // {sessionAllowlistEnabled} -- two slots in all. `forge inspect SessionHandler storageLayout` shows
     // the assignment. Wallets are non-upgradeable clones, so a layout change only ever applies to a
     // new implementation, never to a wallet already deployed.
 
-    /// @notice Whether {sessionTargetAllowlist} is being enforced. See {toggleAllowList}.
+    /// @notice Whether the session-key target allowlist is being enforced. See {enableAllowList}.
     bool public sessionAllowlistEnabled;
     /// @notice Maximum total ETH (wei) one UserOp may cost this account, however it is paid.
     /// @dev Owner-settable because gas prices differ per chain and over time; a compile-time constant
@@ -190,15 +194,19 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Sequential id assigned by the factory. Bookkeeping only.
     /// @dev uint64 (~1.8e19 wallets), the same type as SHFactory's {SHFactory-totalWallets}.
     uint64 public WALLET_ID;
-    /// @dev Entry count for {sessionTargetAllowlist}; lets {toggleAllowList} refuse an empty one.
-    uint32 public allowedTargetCount;
 
-    /// @notice Targets a session key may call, when {sessionAllowlistEnabled} is true. OFF by default.
-    /// @dev Confines a key to a fixed set of venues — mainly to keep it away from protocols where the
+    /// @dev Targets a session key may call while {sessionAllowlistEnabled} is true. OFF by default.
+    ///      Confines a key to a fixed set of venues — mainly to keep it away from protocols where the
     ///      account can take on a LIABILITY, which the balance-diff meter never charges to the cap
-    ///      Address-granular, never selector-granular, so the account needs no
-    ///      ABI knowledge of what it calls.
-    mapping(address target => bool allowed) public sessionTargetAllowlist;
+    ///      (THREAT_MODEL §3.13). Address-granular, never selector-granular, so the account needs no
+    ///      ABI knowledge of what it calls. An address with no code passes whether listed or not; see
+    ///      {_requireUnrestrictedTarget}.
+    /// @dev A set rather than a bare mapping so {getAllowedTargets} can return the whole list: a
+    ///      mapping cannot be enumerated, and rebuilding one from events needs log ranges some RPC
+    ///      providers refuse. Membership is still one storage read, so the guard pays nothing extra.
+    ///      Two slots where the mapping took one, which moved {currentSession} from slot 8 to slot 9
+    ///      (app/bundler.py's CURRENT_SESSION_SLOT follows it).
+    EnumerableSet.AddressSet private _sessionTargets;
 
     /// @notice The ONE session key this wallet authorizes, or address(0) for none. The owner is
     ///         always authorized separately, in {_validateUserOp}.
@@ -361,8 +369,9 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      the account's USD spending cap around whatever runs here. For non-owner (session-key)
      *      executions, {_guardSessionExecution} additionally blocks any sub-call to the account's own
      *      admin surface, so a session key cannot uninstall the hook or raise the cap to escape it.
+            possibly add a address[] calledContracts
      */
-    function execute(bytes32 mode, bytes calldata executionCalldata)
+    function execute(bytes32 mode, bytes calldata executionCalldata) 
         public
         payable
         override
@@ -473,19 +482,32 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     }
 
     /*//////////////////////////////////////////////////////////////
-                    SESSION TARGET ALLOWLIST (owner-only)
+                  SESSION TARGET ALLOWLIST (owner-managed)
     //////////////////////////////////////////////////////////////*/
 
     /**
+     * @notice Adds `targets` to the allowlist and turns it on, in one transaction.
+     * @dev The one-signature way to start enforcing it. Without it an owner needs one transaction to
+     *      fill the list and a second to switch it on, since {toggleAllowList} refuses an empty list.
+     *      Which venues to pass is the caller's choice: the account never lists one by itself, for the
+     *      same reason {initialize} never trusts a router on its own (see the comment there).
+     *      Each entry follows {addAllowedTarget}'s rules. `targets` may be empty when the list already
+     *      holds entries, which makes this a plain "turn on".
+     * @param targets The contracts session keys may call. Each must not be address(0).
+     */
+    function enableAllowList(address[] calldata targets) external onlyOwner {
+        _addAllowedTargets(targets);
+        _setAllowlistEnabled(true);
+    }
+
+    /**
      * @notice Turns the session-key target allowlist on or off.
-     * @dev Refuses to enable an empty allowlist (it would reject every session execution). Disabling
+     * @dev Refuses to enable an empty allowlist (it would reject every call to a contract). Disabling
      *      is always allowed, so the owner can never be locked out of restoring service.
-     * @param enabled True to enforce {sessionTargetAllowlist}.
+     * @param enabled True to enforce the allowlist.
      */
     function toggleAllowList(bool enabled) external onlyOwner {
-        if (enabled && allowedTargetCount == 0) revert SessionHandler_EmptyAllowlist();
-        sessionAllowlistEnabled = enabled;
-        emit SessionAllowlistToggled(enabled);
+        _setAllowlistEnabled(enabled);
     }
 
     /**
@@ -494,11 +516,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @param target The contract a session key may call. Must not be address(0).
      */
     function addAllowedTarget(address target) external onlyOwner {
-        if (target == address(0)) revert SessionHandler_InvalidAllowedTarget();
-        if (sessionTargetAllowlist[target]) return;
-        sessionTargetAllowlist[target] = true;
-        allowedTargetCount++;
-        emit AllowedTargetAdded(target);
+        _addAllowedTarget(target);
     }
 
     /**
@@ -506,14 +524,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @param targets The contracts session keys may call. Each must not be address(0).
      */
     function addAllowedTargets(address[] calldata targets) external onlyOwner {
-        for (uint256 i = 0; i < targets.length; i++) {
-            address target = targets[i];
-            if (target == address(0)) revert SessionHandler_InvalidAllowedTarget();
-            if (sessionTargetAllowlist[target]) continue;
-            sessionTargetAllowlist[target] = true;
-            allowedTargetCount++;
-            emit AllowedTargetAdded(target);
-        }
+        _addAllowedTargets(targets);
     }
 
     /**
@@ -523,10 +534,47 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @param target The contract to remove.
      */
     function removeAllowedTarget(address target) external onlyOwner {
-        if (!sessionTargetAllowlist[target]) return;
-        delete sessionTargetAllowlist[target];
-        allowedTargetCount--;
-        emit AllowedTargetRemoved(target);
+        if (_sessionTargets.remove(target)) emit AllowedTargetRemoved(target);
+    }
+
+    /// @notice Whether `target` is on the allowlist.
+    /// @dev Membership only. While the list is on, an address with no code is callable without being
+    ///      listed, so `false` here does not by itself mean a call would be refused.
+    function sessionTargetAllowlist(address target) external view returns (bool) {
+        return _sessionTargets.contains(target);
+    }
+
+    /// @notice How many targets are on the allowlist.
+    function allowedTargetCount() external view returns (uint256) {
+        return _sessionTargets.length();
+    }
+
+    /// @notice Every target on the allowlist, in no particular order.
+    /// @dev Copies the whole list into memory, so it is meant for off-chain reads; a transaction calling
+    ///      it pays for every entry. A removal moves the last entry into the freed position, so the order
+    ///      is not stable either.
+    function getAllowedTargets() external view returns (address[] memory) {
+        return _sessionTargets.values();
+    }
+
+    /// @dev Shared by every path that lists a target, so all of them refuse address(0) and treat a
+    ///      target already listed as a silent no-op.
+    function _addAllowedTarget(address target) internal {
+        if (target == address(0)) revert SessionHandler_InvalidAllowedTarget();
+        if (_sessionTargets.add(target)) emit AllowedTargetAdded(target);
+    }
+
+    function _addAllowedTargets(address[] calldata targets) internal {
+        for (uint256 i = 0; i < targets.length; i++) {
+            _addAllowedTarget(targets[i]);
+        }
+    }
+
+    /// @dev Shared by {toggleAllowList} and {enableAllowList}, so neither can enforce an empty list.
+    function _setAllowlistEnabled(bool enabled) internal {
+        if (enabled && _sessionTargets.length() == 0) revert SessionHandler_EmptyAllowlist();
+        sessionAllowlistEnabled = enabled;
+        emit SessionAllowlistToggled(enabled);
     }
 
     /**
@@ -674,6 +722,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     function _validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, bytes calldata signature)
         internal
+        view
         override
         returns (uint256)
     {
@@ -705,8 +754,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      reaching the account's own admin surface. Such callers may act on external protocols under
      *      the USD cap, but must never be able to reconfigure or remove the cap itself, nor reach
      *      value the cap cannot see:
-     *        - single / batch: reverts if any sub-call targets a restricted address (see
-     *          {_requireUnrestrictedTarget}) or, when enabled, one outside {sessionTargetAllowlist};
+     *        - single / batch: reverts if any sub-call targets a restricted address or, while the
+     *          allowlist is on, a contract not on it (see {_requireUnrestrictedTarget});
      *        - delegatecall: reverts outright, since delegated code runs in this account's context
      *          and could reach the admin surface regardless of the encoded target.
      *
@@ -745,15 +794,30 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     /**
      * @dev Reverts if a session key may not call `target`: a permanent denylist (the account, the
-     *      module, the EntryPoint), plus {sessionTargetAllowlist} when enabled. The EntryPoint is on
-     *      the denylist because `withdrawTo` moves the account's 4337 deposit without changing
-     *      `account.balance`, so the hook would meter a $0 spend. See {_guardSessionExecution}.
+     *      module, the EntryPoint), plus, while the allowlist is on, any CONTRACT not on it. The
+     *      EntryPoint is on the denylist because `withdrawTo` moves the account's 4337 deposit without
+     *      changing `account.balance`, so the hook would meter a $0 spend. See {_guardSessionExecution}.
+     * @dev An address with no code passes the allowlist even when it is not listed. A call to it only
+     *      moves native value, which the hook meters like any other outflow; no code runs, so nothing
+     *      can record a debt against the account -- the thing the allowlist exists to stop
+     *      (THREAT_MODEL §3.13). Without this, every contact sent ETH would need an entry of its own.
+     *      Any code at all counts as a contract: an EIP-7702 delegated EOA (its 23-byte designator) and
+     *      Arbitrum's system contracts (a one-byte `0xfe` placeholder) are both checked against the
+     *      list. Plain precompiles hold no code and pass, but they only compute.
+     * @dev The code is read BEFORE the list. EXTCODESIZE warms the address, so the call that follows
+     *      costs ~2,500 gas less and the read nets ~100 gas; a plain address then skips the list's
+     *      cold storage read entirely.
+     * @dev KNOWN EDGE: {_guardSessionExecution} checks every target of a batch before any of them runs,
+     *      so an address that is empty at the check but gets code from an EARLIER call in the same
+     *      batch (a listed factory deploying to it) is called without being listed. Harmless for what
+     *      the list guards: the new code acts as itself, so nothing it does is recorded against this
+     *      account. Closing it would mean re-checking inside OpenZeppelin's execution loop.
      */
     function _requireUnrestrictedTarget(address target) internal view {
         if (target == address(this) || target == address(SH_MODULE) || target == ENTRY_POINT) {
             revert SessionHandler_SessionRestrictedTarget(target);
         }
-        if (sessionAllowlistEnabled && !sessionTargetAllowlist[target]) {
+        if (sessionAllowlistEnabled && target.code.length != 0 && !_sessionTargets.contains(target)) {
             revert SessionHandler_SessionRestrictedTarget(target);
         }
     }
@@ -910,11 +974,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         return msg.sender;
     }
 
-    function _msgData() internal view override(Context, ContextUpgradeable) returns (bytes calldata) {
+    function _msgData() internal pure override(Context, ContextUpgradeable) returns (bytes calldata) {
         return msg.data;
     }
 
-    function _contextSuffixLength() internal view override(Context, ContextUpgradeable) returns (uint256) {
+    function _contextSuffixLength() internal pure override(Context, ContextUpgradeable) returns (uint256) {
         return 0;
     }
 }

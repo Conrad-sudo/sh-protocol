@@ -61,6 +61,9 @@ class PendingTransaction:
     calls: list[dict]       # the executions, as {"to", "value", "data"}, for display and audit
     quote: UserOpQuote
     cost: dict              # the figures shown to the user; see tools._transaction_cost
+    # A liquidity deposit's pool, as {"token_a", "ticker_a", "token_b", "ticker_b"}: confirming
+    # puts it on the dashboard (db.save_lp_token). None for anything else.
+    lp_pool: dict | None = None
 
     @property
     def age(self) -> float:
@@ -87,6 +90,7 @@ def put(
     calls: list[dict],
     quote: UserOpQuote,
     cost: dict,
+    lp_pool: dict | None = None,
 ) -> PendingTransaction:
     """
     Parks a quoted transaction and returns it, with the id the user will confirm against.
@@ -107,6 +111,7 @@ def put(
         calls=calls,
         quote=quote,
         cost=cost,
+        lp_pool=lp_pool,
     )
     with _lock:
         _prune(now)

@@ -20,9 +20,11 @@ Run: make e2e-test [ARGS=arbitrum-fork]   (or: python app/tests/test_e2e_fork.py
 """
 import itertools
 import json
+import math
 import os
 import sys
 import time
+from decimal import Decimal
 from types import SimpleNamespace
 
 from dotenv import load_dotenv
@@ -51,7 +53,7 @@ from contracts import load_registry, read_spending_config  # noqa: E402
 from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
-from langchain_uniswap_v2.abis import router_abi      # noqa: E402
+from langchain_uniswap_v2.abis import factory_abi, pair_abi, router_abi  # noqa: E402
 import quotes                                         # noqa: E402
 from userop import prepare_execute_call               # noqa: E402
 from web3.logs import DISCARD                         # noqa: E402
@@ -555,6 +557,79 @@ def test_contacts_are_owner_managed(c: TestClient, headers: dict, acct):
           not (exported & {"save_contact", "delete_contact"}), str(sorted(exported)))
 
 
+def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    The contract allowlist end to end: the suggestions read, the list filled and turned on with one
+    signature, a listed token and a plain wallet still paid, an unlisted contract refused with the
+    reason in words, and the list emptied and turned off again for the steps that follow.
+
+    Quotes only: the quote's simulation runs the wallet's guard exactly as a send would, so nothing
+    needs to go out to prove what it lets through.
+    """
+    print("\n[7b] the contract allowlist: one signature to turn on, refusals the assistant can explain")
+    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    sh = w3.eth.contract(address=wallet, abi=abi)
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    turn = itertools.count(100_000)
+
+    def next_turn() -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
+
+    def read() -> dict:
+        r = c.get(f"/api/wallet/{CHAIN_ID}/allowlist", headers=headers)
+        assert r.status_code == 200, f"allowlist read failed: {r.status_code} {r.text[:250]}"
+        return r.json()
+
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    payee = next(x["address"] for x in c.get("/api/contacts", headers=headers).json()["contacts"]
+                 if x["name"] == "payee")
+    body = read()
+    suggested = {s["address"]: s["label"] for s in body["suggested"]}
+    check("the list starts off and empty", body["enabled"] is False and body["targets"] == [], str(body)[:200])
+    check("the exchange router is suggested", api._router_or_none(CHAIN_ID) in suggested, str(suggested))
+    check("USDC, on the dashboard, is suggested by name", suggested.get(usdc) == "USDC", str(suggested))
+    check("the review registry is suggested", sh.functions.REPUTATION_REGISTRY().call() in suggested)
+    check("a contact with a plain wallet is not", payee not in suggested)
+
+    owner_action(c, headers, acct, "/api/wallet/allowlist/prepare", {"action": "enable", "targets": [usdc]})
+    check("one signature turned the list on", sh.functions.sessionAllowlistEnabled().call() is True)
+    check("...with USDC as its one entry", sh.functions.getAllowedTargets().call() == [usdc])
+    body = read()
+    check("the read names the entry", body["targets"] == [{"address": usdc, "label": "USDC"}], str(body)[:200])
+    check("...and stops suggesting it", usdc not in {s["address"] for s in body["suggested"]})
+
+    quoted = tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
+    check("a listed token still quotes", "quote_id" in quoted, str(quoted)[:200])
+    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    quoted = tools.send_eth.func(next_turn(), recipient="payee", amount_eth=0.001)
+    check("a plain wallet needs no entry: sending it the native asset still quotes",
+          "quote_id" in quoted, str(quoted)[:200])
+    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+
+    # An unlisted contract. The wallet holds the token, so the balance check passes and the refusal
+    # is the guard's own.
+    link = Web3.to_checksum_address(get_token_address(CHAIN_ID, "link"))
+    deal_erc20(link, wallet, 10 * 10**18)
+    try:
+        tools.transfer_erc20.func(next_turn(), token="link", recipient="payee", amount=1)
+        check("an unlisted contract is refused", False, "it was quoted")
+    except ToolException as e:
+        check("an unlisted contract is refused, naming it", link in str(e), str(e)[:300])
+        check("...and saying what the owner can do", "Controls -> Advanced" in str(e), str(e)[:300])
+
+    # Emptied, the list stays on and blocks every contract -- it never reopens by itself -- and it
+    # can't be turned on again empty.
+    owner_action(c, headers, acct, "/api/wallet/allowlist/prepare", {"action": "remove", "targets": [usdc]})
+    check("the entry is gone", sh.functions.getAllowedTargets().call() == [])
+    check("...and the list is still on: it fails closed", sh.functions.sessionAllowlistEnabled().call() is True)
+    r = c.post("/api/wallet/allowlist/prepare", headers=headers,
+               json={"chain_id": CHAIN_ID, "action": "enable", "targets": []})
+    check("turning on an empty list is refused before signing",
+          r.status_code == 400 and "EmptyAllowlist" in r.text, f"{r.status_code} {r.text[:160]}")
+    owner_action(c, headers, acct, "/api/wallet/allowlist/prepare", {"action": "disable"})
+    check("the list is off again", sh.functions.sessionAllowlistEnabled().call() is False)
+
+
 def deal_erc20(token: str, holder: str, amount: int):
     """
     Sets `holder`'s balance of a standard ERC20 on the fork, by finding the token's balances mapping
@@ -1056,10 +1131,14 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     and the routes never sent before are sent and read back from the chain. Both forms of adding
     and of removing liquidity are sent: with the native asset (the default) and with WETH.
 
+    The dashboard follows the pool's LP tokens through it all: they show after the first deposit,
+    match the chain after every change, go when the owner withdraws them all, come back with the
+    next deposit, and go again when the assistant takes it all out.
+
     Also the refusals that need a real balance: sending more of the native asset than the wallet
     holds, and sending nearly all of it, which leaves nothing for the fees.
     """
-    print("\n[7c] one swap tool, one add and one remove: every route, and the balance refusals")
+    print("\n[7c] one swap tool, one add and one remove: every route, LP tokens on the dashboard, and the balance refusals")
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
     turn = itertools.count(2_000_000)
 
@@ -1149,7 +1228,31 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     for label in ("the token for ETH, exact out", "the token for WETH, exact in", "WETH for the token, exact out"):
         tools.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
 
-    # Liquidity: the native asset by default, WETH when named.
+    # Liquidity: the native asset by default, WETH when named. The dashboard's row for the pool is
+    # checked against the chain after each step.
+    native = get_native_asset_ticker(CHAIN_ID).lower()
+    v2_factory = w3.eth.contract(address=router.functions.factory().call(), abi=factory_abi)
+    pool = w3.eth.contract(address=v2_factory.functions.getPair(token_address, weth.address).call(), abi=pair_abi)
+
+    def lp_rows() -> list[dict]:
+        r = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers)
+        assert r.status_code == 200, f"wallet read failed: {r.status_code} {r.text[:250]}"
+        return [b for b in r.json()["balances"] if b.get("lp")]
+
+    def shows_pool(label: str):
+        rows = lp_rows()
+        balance, supply = pool.functions.balanceOf(wallet).call(), pool.functions.totalSupply().call()
+        reserves = dict(zip((pool.functions.token0().call(), pool.functions.token1().call()),
+                            pool.functions.getReserves().call()[:2]))
+        expected = {
+            "ticker": f"{native}/{ticker} lp", "address": pool.address, "raw": str(balance),
+            "underlying": [{"ticker": native, "decimals": 18, "raw": str(balance * reserves[weth.address] // supply)},
+                           {"ticker": ticker, "decimals": 18, "raw": str(balance * reserves[token_address] // supply)}],
+        }
+        check(label, len(rows) == 1 and {k: rows[0].get(k) for k in expected} == expected,
+              f"{rows} vs {expected}"[:400])
+
+    check("the dashboard shows no LP tokens before the first deposit", lp_rows() == [])
     try:
         tools.add_liquidity.func(next_turn(), token_a="eth", amount_a=0.001, token_b=ticker)
         check("adding with the native amount fixed is refused", False, "it was quoted")
@@ -1166,6 +1269,11 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     lp_native = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
     check("the wallet holds LP tokens for the pool, and the token went in",
           lp_native > 0 and token.functions.balanceOf(wallet).call() == held - 1000 * unit, str(lp_native))
+    shows_pool("the dashboard shows them, native side first, with what they hold in the pool")
+    r = c.get(f"/api/wallet/{CHAIN_ID}/allowlist", headers=headers)
+    suggested = {s["address"]: s["label"] for s in r.json()["suggested"]} if r.status_code == 200 else {}
+    check("...and the contract allowlist suggests the pool, which taking liquidity out calls",
+          suggested.get(pool.address) == f"{native.upper()}/{ticker.upper()} pool", f"{r.status_code} {suggested}"[:300])
     quote = tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000, token_b="weth")
     check("naming WETH deposits WETH instead", "native asset" not in quote["action"], quote["action"])
     weth_held = weth.functions.balanceOf(wallet).call()
@@ -1173,6 +1281,7 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
           and weth.functions.balanceOf(wallet).call() < weth_held)
     lp = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker, token_b="weth")
     check("...into the same pool, so the LP tokens add up", lp > lp_native, f"{lp} vs {lp_native}")
+    shows_pool("...and the dashboard has one row for the pool, with the new total")
 
     held, native_held = token.functions.balanceOf(wallet).call(), w3.eth.get_balance(wallet)
     quote = tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6))
@@ -1188,6 +1297,30 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     check("...and it lands, WETH coming back", confirm(quote)["status"] == 1
           and weth.functions.balanceOf(wallet).call() > weth_held)
     check("half the LP tokens are left", tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker) < lp)
+    shows_pool("...and the dashboard shows what is left")
+
+    held = pool.functions.balanceOf(wallet).call()
+    owner_action(c, headers, acct, "/api/wallet/withdraw/prepare",
+                 {"token": pool.address, "amount": str(Decimal(held) / Decimal(10**18)), "to": acct.address})
+    check("the owner can withdraw LP tokens like any other token", pool.functions.balanceOf(wallet).call() == 0
+          and pool.functions.balanceOf(acct.address).call() >= held)
+    check("...and with none left, the pool is gone from the dashboard", lp_rows() == [])
+    check("a new deposit lands", confirm(tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=500))["status"] == 1)
+    shows_pool("...and brings the pool back to the dashboard")
+
+    # "All of it", as the assistant asks for it: the balance it reads, in whole units. That passes
+    # through a float, which the package scales back up to a few wei more than the wallet holds
+    # (refused) or a few wei less (accepted, leaving them behind) -- about half the time each. The
+    # largest amount it accepts is what lands, and the few wei it leaves must not keep the row.
+    everything = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
+    held = pool.functions.balanceOf(wallet).call()
+    while int(Decimal(str(everything)) * 10**18) > held:
+        everything = math.nextafter(everything, 0)
+    check("the assistant taking it all out lands",
+          confirm(tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=everything))["status"] == 1)
+    check("...leaving at most a few wei", pool.functions.balanceOf(wallet).call() < 1000,
+          str(pool.functions.balanceOf(wallet).call()))
+    check("...which the dashboard counts as none: the pool is gone", lp_rows() == [])
 
     # The native asset has to cover what is sent and the fees. Both refusals happen before anything
     # is signed, so neither costs the wallet a thing. The limit is raised for them first: nearly all
@@ -1407,6 +1540,7 @@ if __name__ == "__main__":
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers, owner)
     test_self_bundling(client, owner, auth_headers, deployed)
+    test_allowlist(client, owner, auth_headers, deployed)
     test_custom_tokens(client, owner, auth_headers, deployed)
     test_swaps_and_liquidity(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)

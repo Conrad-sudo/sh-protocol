@@ -1,5 +1,6 @@
 import { ApiError, apiFetch } from './client'
 import type {
+  Allowlist,
   CustomToken,
   DeployConfirmResult,
   DeployPrepared,
@@ -62,6 +63,11 @@ export async function fetchWallet(chainId: number): Promise<WalletState | null> 
   }
 }
 
+/** The wallet's contract allowlist on `chainId`, each entry named, and the contracts worth adding. */
+export function fetchAllowlist(chainId: number) {
+  return apiFetch<Allowlist>(`/api/wallet/${chainId}/allowlist`)
+}
+
 /** The endpoint and body that prepare `action`. */
 function ownerActionRequest(chainId: number, action: OwnerAction): [string, object] {
   const chain_id = chainId
@@ -85,6 +91,8 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
       return ['/api/wallet/trusted-spenders/prepare', { chain_id, spender: action.spender, action: action.action }]
     case 'max-gas':
       return ['/api/wallet/max-op-gas-cost/prepare', { chain_id, max_cost_eth: action.maxCostEth }]
+    case 'allowlist':
+      return ['/api/wallet/allowlist/prepare', { chain_id, action: action.action, targets: action.targets }]
   }
 }
 

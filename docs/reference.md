@@ -14,7 +14,7 @@
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
-| `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
+| `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%; the dashboard's token list, LP tokens included, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
 | `make history-test` | The History tab and the short chat memory: how transactions are recorded, described, settled and listed, the history and delete-chat routes, and the conversation starting afresh after a send, against a fake chain and a scripted model (`app/tests/test_history.py`, offline) |
 | `make py-test` | All four offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork` etc.; on Arbitrum it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |

@@ -85,7 +85,7 @@ ENTRY_POINT_OVERHEAD_GAS = 20_000
 # key at a time, so there is no key to hash in. Never trusted blind -- the override is checked
 # against the live contract before the simulation is believed, so a layout change costs the quote
 # its precision and nothing else. Confirm with `forge inspect SessionHandler storageLayout`.
-CURRENT_SESSION_SLOT = 8
+CURRENT_SESSION_SLOT = 9
 
 # The deadline written into the override's packed slot. Any far-future timestamp works; it only has
 # to outlast the simulated op, and a uint48 cannot hold a value this side of the year 8 million.

@@ -11,18 +11,41 @@ const SEPOLIA = 11155111
 const ADDRESS = '0x2222222222222222222222222222222222222222'
 const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const TX_HASH = `0x${'9a'.repeat(32)}`
+// Sepolia's exchange router, and a review registry, as the allowlist read names them.
+const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+const REGISTRY = '0x8004000000000000000000000000000000000713'
+const ALLOWLIST_SUGGESTED = [
+  { address: ROUTER, label: 'Uniswap V2 router' },
+  { address: USDC, label: 'USDC' },
+  { address: REGISTRY, label: 'ERC-8004 review registry' },
+]
+/** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
+const ALLOWLIST_OFF = { enabled: false, targets: [], suggested: ALLOWLIST_SUGGESTED }
 
 interface Prepared {
   path: string
   body: Record<string, unknown>
 }
 
+interface AllowlistAnswers {
+  /** What GET /api/wallet/{chain_id}/allowlist answers. */
+  allowlist?: object
+  /** Replaces it once an owner transaction confirms. */
+  allowlistAfterConfirm?: object
+}
+
 /**
  * A signed-in owner with one wallet. `wallet` is what GET /api/wallet answers; `afterConfirm`
  * replaces it once an owner transaction confirms, as the chain would.
  */
-async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
+async function mockServer(
+  page: Page,
+  wallet: object,
+  afterConfirm?: object,
+  { allowlist = ALLOWLIST_OFF, allowlistAfterConfirm }: AllowlistAnswers = {},
+) {
   let current = wallet
+  let currentAllowlist = allowlist
   const prepared: Prepared[] = []
   const sent: { tx: WalletTx; chainId: number }[] = []
   const sessionConfirms: string[] = []
@@ -48,8 +71,10 @@ async function mockServer(page: Page, wallet: object, afterConfirm?: object) {
     }
     if (path === '/api/wallet/tx/confirm') {
       if (afterConfirm) current = afterConfirm
+      if (allowlistAfterConfirm) currentAllowlist = allowlistAfterConfirm
       return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH } })
     }
+    if (/^\/api\/wallet\/\d+\/allowlist$/.test(path)) return route.fulfill({ json: currentAllowlist })
     if (path === '/api/wallet/session/confirm') {
       sessionConfirms.push(path)
       if (afterConfirm) current = afterConfirm
@@ -142,6 +167,42 @@ test('changes that loosen a limit ask first', async ({ page }, testInfo) => {
   expect(prepared.map(p => p.body)).toEqual([
     { chain_id: SEPOLIA, daily_limit_usd: 500 },
     { chain_id: SEPOLIA, token: 'weth', action: 'add' },
+  ])
+})
+
+test('turning the contract allowlist on', async ({ page }, testInfo) => {
+  // Three full-page photos of the tallest page, which takes about 16s alone on a phone.
+  test.setTimeout(60_000)
+  const wallet = walletState(SEPOLIA, ADDRESS)
+  const on = { ...wallet, limits: { ...wallet.limits, allowlist_enabled: true } }
+  const { prepared } = await mockServer(page, wallet, on, {
+    allowlistAfterConfirm: { enabled: true, targets: ALLOWLIST_SUGGESTED, suggested: [] },
+  })
+  await page.goto('/controls')
+  await connectOwner(page)
+
+  await page.getByRole('button', { name: 'Advanced' }).click()
+  const row = page.locator('.mf-control-row').filter({ has: page.getByRole('heading', { name: 'Contract allowlist' }) })
+  // What the assistant uses comes ticked, so one signature keeps it all working.
+  await expect(row.getByRole('checkbox', { name: /USDC/ })).toBeChecked()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-allowlist-off')
+
+  await row.getByRole('button', { name: 'Turn on', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('The assistant will only be able to call these 3 contracts')
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-allowlist-confirm')
+  await confirm.getByRole('button', { name: 'Turn on', exact: true }).click()
+
+  await expect(page.getByText('Contract allowlist on. The assistant can only call the contracts listed.')).toBeVisible()
+  await expect(row.getByRole('list', { name: 'Allowed contracts' }).getByRole('listitem')).toHaveCount(3)
+  await expect(row.getByRole('button', { name: 'Turn off', exact: true })).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-allowlist-on')
+
+  expect(prepared.map(p => p.body)).toEqual([
+    { chain_id: SEPOLIA, action: 'enable', targets: [ROUTER, USDC, REGISTRY] },
   ])
 })
 

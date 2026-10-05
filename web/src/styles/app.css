@@ -2083,6 +2083,17 @@ main p a {
   min-height: 32px;
 }
 
+/* An allowlist entry names its contract as well as showing its address, which runs long on a phone:
+   the name wraps under itself instead of pushing Remove onto a line of its own. */
+.mf-allow-entry {
+  flex-wrap: nowrap;
+}
+
+.mf-allow-entry > .mf-token {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 /* The onboarding token picker. RSuite's inline CheckboxGroup is a flex row that never wraps, so a
    network with twenty tokens ran off the edge and the overflow was clipped. Equal columns wrap and
    line the tickers up: three on a phone, five at the step's full width. */

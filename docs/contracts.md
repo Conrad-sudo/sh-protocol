@@ -300,7 +300,7 @@ Session-key management and cap configuration are plain `onlyOwner`. Note that th
 
 One key rather than an allowlist is what keeps the wallet and whoever holds the key in step: a mapping cannot be enumerated, so nothing on chain could answer "which keys does this wallet trust?". `isSessionActive(key)` answers both halves at once, comparing with `<=` to match the EntryPoint exactly (an op is still valid in the second that equals the deadline).
 
-Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of target addresses via `sessionTargetAllowlist` (off by default). A key (with its deadline) and a trusted router are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
+Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of contracts via the target allowlist (off by default; an address with no code always passes). A key (with its deadline) and a trusted router are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
 
 **Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and `removeLiquidity`'s LP-token approval then fails until the owner grants a router. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
@@ -375,14 +375,17 @@ uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
 uint80 public maxOpGasCost;                     // up to ~1.2M ETH
 function setMaxOpGasCost(uint256 newMax) external onlyOwner;   // rejects 0 and > type(uint80).max
 
-// Optional session-key target allowlist (THREAT_MODEL 3.13), off by default
-mapping(address => bool) public sessionTargetAllowlist;
+// Optional session-key target allowlist (THREAT_MODEL 3.13), off by default. Confines calls to
+// listed CONTRACTS: while it is on, an address with no code passes whether listed or not.
 bool public sessionAllowlistEnabled;
-uint32 public allowedTargetCount;
+function enableAllowList(address[] calldata targets) external onlyOwner;  // add + turn on, one tx
 function toggleAllowList(bool enabled) external onlyOwner;      // refuses to enable while empty
 function addAllowedTarget(address target) external onlyOwner;
 function addAllowedTargets(address[] calldata targets) external onlyOwner;
 function removeAllowedTarget(address target) external onlyOwner;
+function sessionTargetAllowlist(address target) external view returns (bool);  // listed?
+function allowedTargetCount() external view returns (uint256);
+function getAllowedTargets() external view returns (address[] memory);  // whole list, any order
 
 event SessionAdded(address indexed sessionKey, uint48 validUntil);
 event SessionRemoved(address indexed sessionKey);
@@ -392,7 +395,7 @@ event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
 
-> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) and `allowedTargetCount` (`uint32`) share one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of six (mapping lookups aside). `forge inspect SessionHandler storageLayout` shows the assignment.
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts `currentSession` in slot 9 — `app/bundler.py`'s `CURRENT_SESSION_SLOT` must match. `forge inspect SessionHandler storageLayout` shows the assignment.
 
 > The account currently has **no validator module**, and `_validateUserOp` never consults one: the nonce key the app sends is irrelevant to who may sign. Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_validateUserOp` — this self-validation path is the only way UserOps are authenticated.
 

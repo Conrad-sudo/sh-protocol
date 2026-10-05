@@ -18,6 +18,6 @@ export interface ControlPanelProps {
   locked: boolean
   /** Makes a change straight away (it tightens, or is neutral). */
   start: (request: OwnerTxRequest) => void
-  /** Asks first (it loosens). */
+  /** Asks first (it loosens, or could stop the assistant working). */
   ask: (confirmation: Confirmation) => void
 }
