@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { Contact, Transaction } from '../api/types'
+import { SYNC_POLL_MS } from '../hooks/useTransactions'
 import { formatDateTime } from '../lib/format'
 import { routes } from '../routes'
 import { SEPOLIA } from '../test/fixtures'
@@ -41,10 +42,27 @@ interface ServerOptions {
   walletChains?: number[]
   /** GET /api/transactions fails this many times first. */
   failures?: number
+  /** The first reads of page one say a search for outside activity is running... */
+  syncingReads?: number
+  /** ...and once it stops, these have been found. */
+  found?: Transaction[]
 }
 
-/** A signed-in account whose History answers like app/api.py: newest first, paged, filterable. */
-function stubServer({ transactions = [], walletChains = [SEPOLIA, BSC, ARBITRUM], failures = 0 }: ServerOptions = {}) {
+/** Where a row sits in the server's order, as app/db.py sorts it: by time, then id. */
+const sortKey = (t: Transaction): [number, number] => [t.mined_at ?? t.created_at, t.id]
+const older = (a: [number, number], b: [number, number]) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])
+
+/**
+ * A signed-in account whose History answers like app/api.py: newest first by time, paged by a
+ * "<time>-<id>" cursor, filterable, and saying while a search for outside activity runs.
+ */
+function stubServer({
+  transactions = [],
+  walletChains = [SEPOLIA, BSC, ARBITRUM],
+  failures = 0,
+  syncingReads = 0,
+  found = [],
+}: ServerOptions = {}) {
   const reads: URLSearchParams[] = []
   vi.stubGlobal(
     'fetch',
@@ -60,14 +78,20 @@ function stubServer({ transactions = [], walletChains = [SEPOLIA, BSC, ARBITRUM]
         const chain = params.get('chain_id')
         const before = params.get('before')
         const limit = Number(params.get('limit'))
+        let syncing = false
+        if (before === null) {
+          syncing = syncingReads-- > 0
+          if (!syncing && found.length) transactions = [...transactions, ...found.splice(0)]
+        }
+        const cursor = before === null ? null : (before.split('-').map(Number) as [number, number])
         const rows = transactions
           .filter(t => chain === null || t.chain_id === Number(chain))
-          .filter(t => before === null || t.id < Number(before))
-          .sort((a, b) => b.id - a.id)
+          .filter(t => cursor === null || older(sortKey(t), cursor))
+          .sort((a, b) => (older(sortKey(a), sortKey(b)) ? 1 : -1))
         const page = rows.slice(0, limit)
-        return Promise.resolve(
-          json(200, { transactions: page, next_before: rows.length > limit ? page.at(-1)!.id : null }),
-        )
+        const last = page.at(-1)
+        const next = rows.length > limit && last ? sortKey(last).join('-') : null
+        return Promise.resolve(json(200, { transactions: page, next_before: next, syncing }))
       }
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
@@ -143,6 +167,60 @@ describe('HistoryPage', () => {
     expect(screen.getAllByRole('button', { name: 'Copy transaction hash' })).toHaveLength(3)
   })
 
+  it('marks what happened outside Mitfah, in its place in time', async () => {
+    stubServer({
+      transactions: [
+        tx(1),
+        // Recorded last (the highest id), but it happened between the other two.
+        tx(9, { source: 'outside', action: `Received 100 USDC from ${SAM.address}`, created_at: T0 + 9_000, mined_at: T0 + 90 }),
+        tx(2),
+      ],
+    })
+    await renderRoutes(routes, '/history')
+
+    const [newest, outside, oldest] = await rows()
+    expect(newest).toHaveTextContent('Transaction 2')
+    expect(outside).toHaveTextContent('Received 100 USDC from sam')
+    expect(outside).toHaveTextContent('Outside Mitfah')
+    expect(outside).not.toHaveTextContent('By you')
+    expect(oldest).toHaveTextContent('Transaction 1')
+  })
+
+  it('says while it checks for activity outside Mitfah, and looks again until it is done', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { reads } = stubServer({
+        transactions: [tx(1)],
+        syncingReads: 2,
+        found: [tx(5, { source: 'outside', action: 'Received 0.1 ETH from your owner address' })],
+      })
+      await renderRoutes(routes, '/history')
+
+      expect(await rows()).toHaveLength(1)
+      expect(screen.getByRole('status')).toHaveTextContent('Checking for activity outside Mitfah…')
+      await act(() => vi.advanceTimersByTimeAsync(SYNC_POLL_MS))
+      await act(() => vi.advanceTimersByTimeAsync(SYNC_POLL_MS))
+      await waitFor(async () => expect(await rows()).toHaveLength(2))
+      expect((await rows())[0]).toHaveTextContent('Outside Mitfah')
+      expect(screen.queryByText('Checking for activity outside Mitfah…')).toBeNull()
+
+      // Done, and nothing pending: no more reads.
+      const settled = reads.length
+      await act(() => vi.advanceTimersByTimeAsync(SYNC_POLL_MS * 6))
+      expect(reads.length).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('checks for outside activity with nothing listed yet', async () => {
+    stubServer({ syncingReads: 1 })
+    await renderRoutes(routes, '/history')
+
+    expect(await screen.findByRole('heading', { name: 'No transactions yet' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Checking for activity outside Mitfah…')
+  })
+
   it('names contacts and shortens other addresses in what a transaction did', async () => {
     stubServer({ transactions: [tx(1, { action: `Approve ${STRANGER} to spend 1 USDC; Transfer 1 USDC to ${SAM.address}` })] })
     await renderRoutes(routes, '/history')
@@ -179,7 +257,7 @@ describe('HistoryPage', () => {
     expect(await rows()).toHaveLength(25)
     await user.click(screen.getByRole('button', { name: 'Show older transactions' }))
     await waitFor(async () => expect(await rows()).toHaveLength(30))
-    expect(reads.at(-1)!.get('before')).toBe('6')
+    expect(reads.at(-1)!.get('before')).toBe(`${T0 + 6 * 60 + 12}-6`)
     expect(screen.queryByRole('button', { name: 'Show older transactions' })).toBeNull()
   })
 

@@ -461,9 +461,10 @@ def init_db():
 
         -- Every transaction made through Mitfah, for the History tab. Kept apart from the chat,
         -- which is cleared after each transaction, so a hash never lives only in a conversation.
-        -- `source` is 'assistant' (a UserOperation sent with the session key) or 'owner' (signed
-        -- by the user's own wallet in the browser). `action` is written by the server, never by
-        -- the model or the browser. An assistant row is written BEFORE its op is broadcast, keyed
+        -- `source` is 'assistant' (a UserOperation sent with the session key), 'owner' (signed
+        -- by the user's own wallet in the browser) or 'outside' (anything else that touched the
+        -- wallet, read from a block explorer). `action` is written by the server, never by the
+        -- model, the browser or the explorer. An assistant row is written BEFORE its op is broadcast, keyed
         -- by user_op_hash, so a send that outlives the wait is still here as 'pending' --
         -- op_nonce and from_block are what tx_history.settle_pending needs to finish it later.
         -- `status` is 'pending', 'confirmed', 'failed' (mined, reverted) or 'dropped' (never
@@ -490,6 +491,26 @@ def init_db():
             ON transactions (chain_id, user_op_hash) WHERE user_op_hash IS NOT NULL;
         CREATE UNIQUE INDEX IF NOT EXISTS transactions_by_owner_hash
             ON transactions (chain_id, tx_hash) WHERE source = 'owner';
+        -- 'outside' rows: activity on the wallet that didn't go through Mitfah, read from a block
+        -- explorer (tx_history.sync_outside). One per wallet and hash, so searching the same blocks
+        -- twice adds nothing. Per wallet, not per chain: when one user's assistant pays another
+        -- user, the payee still gets an outside row for the payer's transaction.
+        CREATE UNIQUE INDEX IF NOT EXISTS transactions_by_outside_hash
+            ON transactions (chain_id, wallet, tx_hash) WHERE source = 'outside';
+        -- The History tab lists by time, not by id: outside rows are recorded long after they mined.
+        CREATE INDEX IF NOT EXISTS transactions_by_user_time
+            ON transactions (user_id, COALESCE(mined_at, created_at), id);
+
+        -- How far the block-explorer search has got for each wallet: the block the next search
+        -- starts from (NULL until a search has finished a batch), and when the last one ran (a
+        -- wallet is searched at most once a minute).
+        CREATE TABLE IF NOT EXISTS history_sync (
+            chain_id   INTEGER NOT NULL,
+            wallet     TEXT NOT NULL,
+            next_block INTEGER,
+            synced_at  INTEGER NOT NULL,
+            PRIMARY KEY (chain_id, wallet)
+        );
 
 
 
@@ -1602,9 +1623,9 @@ def add_transaction(
     """
     Records a transaction for the History tab.
 
-    @param source  'assistant' or 'owner'.
+    @param source  'assistant', 'owner' or 'outside'.
     @param status  'pending', 'confirmed', 'failed' or 'dropped'.
-    @return        The new row's id, or None if this op or owner transaction is already recorded.
+    @return        The new row's id, or None if this op or transaction is already recorded.
     """
     db = get_db()
     cur = db.execute(
@@ -1616,8 +1637,11 @@ def add_transaction(
             None if op_nonce is None else str(op_nonce), from_block, int(time.time()), mined_at,
         ),
     )
+    row_id = cur.lastrowid if cur.rowcount else None
+    if row_id is not None and source != "outside" and tx_hash is not None:
+        _drop_outside_twin(db, row_id)
     db.commit()
-    return cur.lastrowid if cur.rowcount else None
+    return row_id
 
 
 def settle_transaction(
@@ -1634,8 +1658,25 @@ def settle_transaction(
         "mined_at = COALESCE(?, mined_at) WHERE id = ? AND status = 'pending'",
         (status, tx_hash, mined_at, tx_id),
     )
+    if cur.rowcount and tx_hash is not None:
+        _drop_outside_twin(db, tx_id)
     db.commit()
     return cur.rowcount > 0
+
+
+def _drop_outside_twin(db: sqlite3.Connection, tx_id: int):
+    """
+    Deletes the outside row for the same wallet and hash as Mitfah row `tx_id`, if there is one.
+
+    An explorer search can run while an assistant send is still pending, before its row knows its
+    hash. It then records the send as outside activity. Once the Mitfah row learns the hash, the
+    outside copy goes. Leaves the commit to the caller.
+    """
+    db.execute(
+        "DELETE FROM transactions WHERE source = 'outside' AND id != ? AND (chain_id, lower(wallet), tx_hash) = "
+        "(SELECT chain_id, lower(wallet), tx_hash FROM transactions WHERE id = ?)",
+        (tx_id, tx_id),
+    )
 
 
 def delete_transaction(tx_id: int):
@@ -1660,25 +1701,93 @@ def get_owner_transaction(user_id: int, chain_id: int, tx_hash: str) -> dict | N
 
 
 def get_transactions(
-    user_id: int, chain_id: int | None = None, before_id: int | None = None, limit: int = 50
+    user_id: int, chain_id: int | None = None, before: tuple[int, int] | None = None, limit: int = 50
 ) -> list[dict]:
     """
-    The user's transactions, newest first.
+    The user's transactions, newest first: by when they mined, or by when Mitfah recorded them
+    while they haven't. Not by id, since outside rows are recorded long after they mined.
 
-    @param chain_id   Only this chain's, or every chain's when None.
-    @param before_id  Only rows older than this id: the cursor for the next page.
+    @param chain_id  Only this chain's, or every chain's when None.
+    @param before    Only rows older than this (time, id): the cursor for the next page. See
+                     transaction_cursor.
     """
     query = f"SELECT {_TRANSACTION_COLUMNS} FROM transactions WHERE user_id = ?"
     params: list = [user_id]
     if chain_id is not None:
         query += " AND chain_id = ?"
         params.append(chain_id)
-    if before_id is not None:
-        query += " AND id < ?"
-        params.append(before_id)
-    query += " ORDER BY id DESC LIMIT ?"
+    if before is not None:
+        query += " AND (COALESCE(mined_at, created_at), id) < (?, ?)"
+        params.extend(before)
+    query += " ORDER BY COALESCE(mined_at, created_at) DESC, id DESC LIMIT ?"
     params.append(limit)
     return [dict(row) for row in get_db().execute(query, params).fetchall()]
+
+
+def transaction_cursor(row: dict) -> tuple[int, int]:
+    """Where a row sits in get_transactions' order: the `before` that starts the page after it."""
+    return (row["mined_at"] if row["mined_at"] is not None else row["created_at"], row["id"])
+
+
+def get_wallet_tx_hashes(chain_id: int, wallet: str) -> set[str]:
+    """Every transaction hash already recorded for this wallet, whatever its source."""
+    rows = (
+        get_db()
+        .execute(
+            "SELECT tx_hash FROM transactions WHERE chain_id = ? AND lower(wallet) = lower(?) AND tx_hash IS NOT NULL",
+            (chain_id, wallet),
+        )
+        .fetchall()
+    )
+    return {row["tx_hash"].lower() for row in rows}
+
+
+def get_first_wallet_tx_hash(chain_id: int, wallet: str) -> str | None:
+    """
+    The hash of the earliest Mitfah transaction recorded for this wallet: normally the one that
+    created it. Where a block-by-block search of its history can start.
+    """
+    row = (
+        get_db()
+        .execute(
+            "SELECT tx_hash FROM transactions WHERE chain_id = ? AND lower(wallet) = lower(?) "
+            "AND source != 'outside' AND tx_hash IS NOT NULL ORDER BY id ASC LIMIT 1",
+            (chain_id, wallet),
+        )
+        .fetchone()
+    )
+    return row["tx_hash"] if row else None
+
+
+def get_history_sync(chain_id: int, wallet: str) -> dict | None:
+    """
+    How far the explorer search has got for a wallet: {"next_block", "synced_at"}, or None if it
+    has never run. `next_block` is None until a search has finished a batch.
+    """
+    row = (
+        get_db()
+        .execute(
+            "SELECT next_block, synced_at FROM history_sync WHERE chain_id = ? AND wallet = ?",
+            (chain_id, Web3.to_checksum_address(wallet)),
+        )
+        .fetchone()
+    )
+    return dict(row) if row else None
+
+
+def save_history_sync(chain_id: int, wallet: str, next_block: int | None = None):
+    """
+    Saves where the next explorer search starts, and that one ran just now. With no `next_block`
+    it only marks the run (a search that failed) and keeps the saved start.
+    """
+    db = get_db()
+    db.execute(
+        "INSERT INTO history_sync (chain_id, wallet, next_block, synced_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (chain_id, wallet) DO UPDATE SET "
+        "next_block = COALESCE(?, next_block), synced_at = excluded.synced_at",
+        (chain_id, Web3.to_checksum_address(wallet), next_block, int(time.time()), next_block),
+    )
+    db.commit()
 
 
 def get_pending_transactions(user_id: int, limit: int) -> list[dict]:

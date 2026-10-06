@@ -16,7 +16,14 @@ import { formatDateTime, shortAddress } from '../lib/format'
 import { chainName, explorerName, explorerUrl } from '../wallet/chains'
 
 const TITLE = 'History'
-const DESCRIPTION = 'Every transaction made through Mitfah: what your assistant sent, here or on Telegram, and what you signed.'
+const DESCRIPTION =
+  'Every transaction on your Mitfah wallet: what your assistant sent, here or on Telegram, what you signed, and what happened outside Mitfah.'
+
+const SOURCE: Record<Transaction['source'], string> = {
+  assistant: 'By your assistant',
+  owner: 'By you',
+  outside: 'Outside Mitfah',
+}
 
 const STATUS: Record<Transaction['status'], { label: string; tone: StatusTone }> = {
   confirmed: { label: 'Confirmed', tone: 'success' },
@@ -43,6 +50,12 @@ export function HistoryPage() {
     contacts.data?.find(contact => contact.address.toLowerCase() === address.toLowerCase())?.name
 
   const transactions = history.data?.pages.flatMap(page => page.transactions)
+  const syncing = history.data?.pages[0]?.syncing === true
+  const checking = syncing && (
+    <Text size="sm" muted role="status">
+      Checking for activity outside Mitfah…
+    </Text>
+  )
 
   // A failed refresh keeps showing the list it already has.
   let body
@@ -51,10 +64,13 @@ export function HistoryPage() {
     body = <QueryError what="your transactions" error={history.error} onRetry={() => void history.refetch()} />
   } else if (transactions.length === 0) {
     body = (
-      <EmptyState icon={<HistoryIcon />} title="No transactions yet">
-        Payments your assistant makes, and changes you sign here, will be listed with their date, time and a link
-        to the network's explorer.
-      </EmptyState>
+      <>
+        <EmptyState icon={<HistoryIcon />} title="No transactions yet">
+          Payments your assistant makes, changes you sign here, and anything else that reaches your wallet will be
+          listed with their date, time and a link to the network's explorer.
+        </EmptyState>
+        {checking}
+      </>
     )
   } else {
     body = (
@@ -62,6 +78,7 @@ export function HistoryPage() {
         <h2 id="history-heading" className="mf-visually-hidden">
           Transactions
         </h2>
+        {checking}
         {/* The glass sits beside the list, not in it: a list may only hold its items. */}
         <div className="mf-tx-plate mf-glass-surface">
           <GlassLayer />
@@ -124,7 +141,7 @@ function TransactionRow({ tx, nameOf }: { tx: Transaction; nameOf: (address: str
         <span aria-hidden="true"> · </span>
         <span>{chainName(tx.chain_id)}</span>
         <span aria-hidden="true"> · </span>
-        <span>{tx.source === 'assistant' ? 'By your assistant' : 'By you'}</span>
+        <span>{SOURCE[tx.source]}</span>
       </p>
       <div className="mf-tx-status">
         <StatusTag tone={status.tone}>{status.label}</StatusTag>

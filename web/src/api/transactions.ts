@@ -5,10 +5,10 @@ import type { DepositConfirmResult, TransactionPage } from './types'
 export const TRANSACTIONS_PAGE_SIZE = 25
 
 /** A page of the account's transactions, newest first: every network's, or one network's. */
-export function fetchTransactions(chainId: number | null, before?: number) {
+export function fetchTransactions(chainId: number | null, before?: string) {
   const params = new URLSearchParams({ limit: String(TRANSACTIONS_PAGE_SIZE) })
   if (chainId !== null) params.set('chain_id', String(chainId))
-  if (before !== undefined) params.set('before', String(before))
+  if (before !== undefined) params.set('before', before)
   return apiFetch<TransactionPage>(`/api/transactions?${params}`)
 }
 

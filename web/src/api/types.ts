@@ -309,19 +309,22 @@ export interface ChatMessage {
   carried_over?: boolean
 }
 
-/** One transaction made through Mitfah, from GET /api/transactions. */
+/** One transaction on the account's wallets, from GET /api/transactions. */
 export interface Transaction {
   id: number
   chain_id: number
-  /** Who sent it: the assistant (from the web chat or Telegram), or the owner in the browser. */
-  source: 'assistant' | 'owner'
+  /**
+   * Who sent it: the assistant (from the web chat or Telegram), the owner in the browser, or
+   * someone or something outside Mitfah, as a block explorer reported it.
+   */
+  source: 'assistant' | 'owner' | 'outside'
   /** What it does, written by the server from the transaction itself. */
   action: string
   /** `dropped`: never mined, and now never will be. */
   status: 'pending' | 'confirmed' | 'failed' | 'dropped'
   /** Null only while an assistant transaction hasn't been seen on chain yet. */
   tx_hash: string | null
-  /** Unix seconds: when Mitfah recorded it. */
+  /** Unix seconds: when Mitfah recorded it (for an outside row, long after it mined). */
   created_at: number
   /** Unix seconds: when its block was mined. Null until then. */
   mined_at: number | null
@@ -330,5 +333,8 @@ export interface Transaction {
 /** GET /api/transactions: a page, newest first. `next_before` asks for the page after it. */
 export interface TransactionPage {
   transactions: Transaction[]
-  next_before: number | null
+  /** An opaque cursor ("<time>-<id>"). */
+  next_before: string | null
+  /** The first page only: a search for activity outside Mitfah is running, so read again soon. */
+  syncing: boolean
 }

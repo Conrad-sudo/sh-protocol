@@ -65,6 +65,7 @@ from db import (
     get_wallet_address,
     get_wallet_chains,
     get_transactions,
+    transaction_cursor,
     create_user,
     get_user_by_id,
     get_user_by_owner_addr,
@@ -578,7 +579,7 @@ def siwe_nonce(request: Request):
 
 
 @app.get("/api/auth/siwe/account")
-@limiter.limit("30/minute")
+@limiter.limit("15/minute")
 def siwe_account(request: Request, address: str = Query(max_length=64)):
     """
     Says whether an address already has an account, so the sign-in page can greet a returning user
@@ -931,34 +932,44 @@ def _transaction_json(row: dict) -> dict:
 @app.get("/api/transactions")
 def list_transactions(
     chain_id: int | None = None,
-    before: int | None = Query(default=None, ge=1),
+    before: str | None = Query(default=None, pattern=r"^\d{1,12}-\d{1,12}$"),
     limit: int = Query(default=50, ge=1, le=100),
     user_id: int = Depends(get_current_user),
 ):
     """
-    The History tab: every transaction made through Mitfah for this account, newest first -- what
-    the assistant sent, from the web or Telegram, and what the user signed in the browser.
+    The History tab: every transaction on this account's wallets, newest first -- what the
+    assistant sent, from the web or Telegram, what the user signed in the browser, and what
+    happened outside Mitfah.
 
     Reading the first page also settles transactions still pending, where it can: a send that
     outlived the wait, or an owner transaction whose page was closed before it mined. That reads
-    the chain, hence a plain `def`.
+    the chain, hence a plain `def`. It also starts a background search of the block explorers for
+    activity outside Mitfah (tx_history.start_outside_sync); the page never waits on it.
 
     @param chain_id  Only this chain's transactions; every chain's when omitted.
     @param before    The `next_before` of the previous page.
     @param limit     How many to return (1-100).
     @return          {"transactions": [{"id", "chain_id", "source", "action", "status", "tx_hash",
-                     "created_at", "mined_at"}, ...], "next_before": int | None}. Times are Unix
-                     seconds; `mined_at` is the block's.
+                     "created_at", "mined_at"}, ...], "next_before": str | None, "syncing": bool}.
+                     Times are Unix seconds; `mined_at` is the block's. `syncing` is true while an
+                     explorer search is running, so the tab reads again soon.
     """
     if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
+    syncing = False
     if before is None:
-        tx_history.settle_pending(user_id, functools.cache(_web3_or_none))
-    rows = get_transactions(user_id, chain_id, before, limit + 1)
+        web3_for = functools.cache(_web3_or_none)
+        tx_history.settle_pending(user_id, web3_for)
+        chains = [c for c in get_wallet_chains(user_id) if chain_id is None or c == chain_id]
+        wallets = {c: get_wallet_address(user_id, c) for c in chains if c in CHAIN_NAME_BY_ID}
+        syncing = tx_history.start_outside_sync(user_id, wallets, web3_for)
+    cursor = tuple(int(part) for part in before.split("-")) if before is not None else None
+    rows = get_transactions(user_id, chain_id, cursor, limit + 1)
     page = rows[:limit]
     return {
         "transactions": [_transaction_json(row) for row in page],
-        "next_before": page[-1]["id"] if len(rows) > limit else None,
+        "next_before": "-".join(map(str, transaction_cursor(page[-1]))) if len(rows) > limit else None,
+        "syncing": syncing,
     }
 
 

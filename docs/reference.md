@@ -16,7 +16,9 @@
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
 | `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%; the dashboard's token list, LP tokens included, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
 | `make history-test` | The History tab and the short chat memory: how transactions are recorded, described, settled and listed, the history and delete-chat routes, and the conversation starting afresh after a send, against a fake chain and a scripted model (`app/tests/test_history.py`, offline) |
-| `make py-test` | All four offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` |
+| `make explorers-test` | Reading activity outside Mitfah from Etherscan and NodeReal: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
+| `make explorers-live` | The same against the real services, read-only, with the keys in `.env` (`app/tests/check_explorers_live.py`; not part of `py-test`) |
+| `make py-test` | All six offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `explorers-test` + `speed-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork` etc.; on Arbitrum it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |
@@ -99,7 +101,8 @@ sh-protocol/
 │   ├── vault_signer.py
 │   ├── deploy_wallet.py
 │   ├── tools.py
-│   ├── tx_history.py                ← the History tab's record: every transaction made through Mitfah
+│   ├── tx_history.py                ← the History tab's record: every transaction on the wallet, Mitfah's and outside it
+│   ├── explorers.py                 ← activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC)
 │   ├── agent_context.py             ← (user_id, chain_id) injected into every tool
 │   ├── smart_wallet_agent.py
 │   ├── auth.py                      ← SIWE sign-in, JWTs, signed (EIP-712) contacts

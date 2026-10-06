@@ -20,7 +20,8 @@ app/
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
-├── tx_history.py          ← The History tab's record: every transaction made through Mitfah, kept apart from the chat
+├── tx_history.py          ← The History tab's record: every transaction on the wallet, Mitfah's and outside it, kept apart from the chat
+├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
@@ -36,6 +37,8 @@ app/
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
     ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
+    ├── test_explorers.py  ← Etherscan/NodeReal answers read, paged, retried; keys kept out of logs (make explorers-test)
+    ├── check_explorers_live.py ← The same against the real services, read-only, with .env's keys (make explorers-live)
     ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
@@ -165,17 +168,25 @@ CREATE TABLE user_network (user_id INTEGER PRIMARY KEY, chain_name TEXT NOT NULL
 CREATE TABLE supported_tokens (chain_id INTEGER NOT NULL, ticker TEXT NOT NULL, address TEXT NOT NULL,
     PRIMARY KEY (chain_id, ticker), UNIQUE (chain_id, address));  -- the tokens Mitfah lists (and the oracle prices), every chain
 
--- The History tab: every transaction made through Mitfah. See tx_history.py.
+-- The History tab: every transaction on the user's wallets. See tx_history.py.
 CREATE TABLE transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL,
     wallet TEXT NOT NULL,
-    source TEXT NOT NULL,                       -- 'assistant' (session-key UserOp) or 'owner' (signed in the browser)
-    action TEXT NOT NULL,                       -- written by the server, never by the model or the browser
+    source TEXT NOT NULL,                       -- 'assistant' (session-key UserOp), 'owner' (signed in the browser)
+                                                --   or 'outside' (anything else, read from a block explorer)
+    action TEXT NOT NULL,                       -- written by the server, never by the model, the browser or the explorer
     status TEXT NOT NULL,                       -- 'pending' | 'confirmed' | 'failed' | 'dropped'
     tx_hash TEXT,                               -- NULL only while an assistant op hasn't been seen on chain
     user_op_hash TEXT, op_nonce TEXT, from_block INTEGER,  -- assistant ops: how a late one is found and settled
     created_at INTEGER NOT NULL, mined_at INTEGER          -- mined_at: the block's timestamp
-);  -- unique per (chain_id, user_op_hash) and per owner (chain_id, tx_hash): the web confirms are polled
+);  -- unique per (chain_id, user_op_hash) and per owner (chain_id, tx_hash): the web confirms are polled;
+    -- unique per outside (chain_id, wallet, tx_hash); listed by COALESCE(mined_at, created_at), then id
+
+-- How far the explorer search has got for each wallet. See tx_history.sync_outside.
+CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL,
+    next_block INTEGER,                         -- where the next search starts; NULL until a batch finished
+    synced_at INTEGER NOT NULL,                 -- the last run: a wallet is searched at most once a minute
+    PRIMARY KEY (chain_id, wallet));
 ```
 
 > **Removed with the design overhaul:** the `sessions`, `erc20_selectors`, `uniswapv2_selectors`, and `reputation_registry_selectors` tables. `init_db()` issues `DROP TABLE IF EXISTS` on all four so `make db` migrates an existing `wallet.db`. Per-target session metadata and on-chain selector allowlists no longer exist — there's one global USD cap and one bare session key, both read on-chain.
@@ -589,9 +600,10 @@ The swaps' quotes carry the router's figures, so no `get_quote_*` first: the pac
 
 ## `tx_history.py`
 
-The History tab's record: every transaction made through Mitfah, with its hash, what it did, the
-network and when. It lives apart from the chat because the chat is cleared after every transaction
-(see Section 3), so a conversation can't be where a hash is kept.
+The History tab's record: every transaction on the user's wallets, with its hash, what it did, the
+network and when. That covers what Mitfah sent and what happened outside it. It lives apart from the
+chat because the chat is cleared after every transaction (see Section 3), so a conversation can't be
+where a hash is kept.
 
 ```python
 start_assistant_tx(user_id, chain_id, wallet, action, prepared) -> row id   # pending, BEFORE broadcast
@@ -601,6 +613,8 @@ record_owner_tx(w3, user_id, chain_id, wallet, tx_hash, receipt=None)    # owner
 record_deploy(w3, user_id, chain_id, wallet_address, tx_hash, receipt)
 describe_wallet_tx(w3, user_id, chain_id, wallet, tx) -> str             # "Withdraw 0.5 ETH to sam", from calldata
 settle_pending(user_id, web3_for)                                        # finishes rows left pending
+start_outside_sync(user_id, wallets, web3_for) -> bool                   # background explorer search; True while one runs
+sync_outside(user_id, chain_id, wallet, w3)                              # one wallet's search, batch by batch
 ```
 
 - **The assistant's sends are recorded before they go.** `tools.confirm_transaction` writes a
@@ -626,8 +640,39 @@ settle_pending(user_id, web3_for)                                        # finis
   one runs, the transaction is already on its way, and an exception would turn a payment that went
   through into one that looks failed — the outcome that leads a user to send it twice.
 
-Not covered: transfers into the wallet from outside Mitfah and anything done directly on chain.
-Those would need a block-explorer API or an indexer.
+- **Activity outside Mitfah** (`source = 'outside'`). Reading the first page also calls
+  `start_outside_sync`, which searches each wallet's activity in a background pool (two workers),
+  at most once a minute per wallet and never twice at once. The page doesn't wait: it answers
+  `syncing: true`, and the web app reads again every 5 seconds until that turns false.
+  `explorers.movements_since` asks Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo: free) or
+  NodeReal (BSC, which Etherscan charges for) for three kinds of record. A Mitfah wallet is a
+  contract and never sends a transaction itself, so it needs its plain transactions, its internal
+  ones, and its ERC-20 transfers. The movements are grouped by hash, one row per transaction, and the
+  cursor in `history_sync` is saved after every batch.
+  - **What is left out.** Anything this wallet already has a row for; failed movements; zero
+    amounts (address poisoning); tokens Mitfah doesn't know (only `supported_tokens`, the user's
+    custom tokens and their LP pools count, so airdrop spam stays out); and calls that moved
+    nothing, such as a stranger calling the wallet.
+  - **Wording.** A call the owner made on the wallet is worded from its calldata by
+    `describe_wallet_tx`, like the same action in the app. Anything else is worded from what moved:
+    "Received 100 USDC from 0x…", "Sent 0.5 ETH to 0x…", "Paid 0.0003 ETH in network fees" (native
+    sent to the wallet's EntryPoint). The ticker always comes from our own tables, never from the
+    explorer, whose token names are whatever the token's deployer chose.
+  - **Never twice.** A search can run while an assistant send is still pending, before its row
+    knows its hash. When a Mitfah row gets its hash (`db.add_transaction`, `db.settle_transaction`),
+    the outside row for the same wallet and hash is deleted. Outside rows are per wallet, so a
+    payment from one Mitfah user to another is still outside activity for the one who received it.
+  - **Where a search starts.** Etherscan searches by address, so a first search starts at block 0
+    and asks newest-first (Etherscan times out on a busy address asked oldest-first after a recent
+    block). A query timeout or rate limit is retried once. NodeReal searches at most 100,000 blocks
+    per call and has no "either side" filter, so it walks windows (two calls each, from and to the
+    wallet) from the block of the wallet's first Mitfah transaction, at most 100 windows a run. A
+    wallet the live chain doesn't know (one made on a fork) starts from the live head.
+  - **Keys.** Both services take the key in the URL, and a `requests` error carries the URL, so every
+    network error becomes an `ExplorerUnavailable` naming only the service, and any key in a
+    service's own text is masked. A failed search is logged as a warning and retried a minute later.
+  - **Forks.** The explorers see only the live chains, so a fork's own transactions never appear as
+    outside activity. Test this on a live network.
 
 ---
 
@@ -755,10 +800,12 @@ What it does that the bot cannot:
   searches: Alchemy's free tier at 10 blocks). Only the caller's own wallet qualifies: the owner
   check and the pending key that only `/api/deploy` for that account mints.
 
-- **The History tab.** Every transaction made through Mitfah, newest first, from
-  `GET /api/transactions` (paged by `before`, filterable by `chain_id`): what it did, the date and
-  time in the reader's time zone, the network, who sent it, its status, and its hash as a link to the
-  network's live block explorer. That includes forks, which link where the live network would. The
+- **The History tab.** Every transaction on the user's wallets, newest first by when it happened, from
+  `GET /api/transactions` (paged by the `before` cursor, `"<time>-<id>"`, filterable by `chain_id`):
+  what it did, the date and time in the reader's time zone, the network, who sent it ("By your
+  assistant", "By you" or "Outside Mitfah"), its status, and its hash as a link to the network's live
+  block explorer. While the server searches for outside activity it says "Checking for activity
+  outside Mitfah…" and reads again every 5 seconds. That includes forks, which link where the live network would. The
   Fund drawer follows its deposits through `POST /api/transactions/deposit`, which lists them. The
   Assistant page's "Clear chat" and Settings' "Delete all" call `DELETE /api/chat/history`.
 

@@ -11,6 +11,10 @@ where a transaction hash lives. Two kinds of row land in the `transactions` tabl
   - 'owner': a transaction the user's own wallet signed in the browser -- creating the wallet, the
     owner actions, deposits from the Fund drawer. Recorded when the app is handed its hash, and
     described from the transaction's own calldata, never from anything the browser says.
+  - 'outside': anything else that touched the wallet -- tokens somebody sent it, a call the owner
+    made from a block explorer. Read from Etherscan or NodeReal (explorers.py) in the background
+    when the History tab is read, and described from the amounts moved, never from the token names
+    an explorer reports.
 
 Every recording function here is best effort and never raises. By the time one runs, the
 transaction is already on its way, and an exception would turn a payment that went through into one
@@ -18,7 +22,10 @@ that looks failed -- the outcome that leads a user to send it twice.
 """
 import functools
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable
 
@@ -27,6 +34,7 @@ from web3 import Web3
 from web3.exceptions import TransactionNotFound
 from web3.logs import DISCARD
 
+import explorers
 from abi import ientry_point
 from bundler import find_user_op_receipt
 from constants import get_native_asset_ticker, get_router
@@ -35,10 +43,17 @@ from db import (
     delete_transaction,
     get_all_contacts,
     get_custom_tokens,
+    get_first_wallet_tx_hash,
+    get_history_sync,
+    get_json,
+    get_lp_tokens,
     get_owner_transaction,
     get_pending_transactions,
     get_supported_token_by_address,
+    get_supported_tokens_by_chain_id,
     get_user_by_id,
+    get_wallet_tx_hashes,
+    save_history_sync,
     settle_transaction,
 )
 
@@ -402,3 +417,230 @@ def _settle_assistant_row(w3: Web3, row: dict):
         )
     elif nonce_used:
         settle_transaction(row["id"], "dropped")
+
+
+# ── Activity outside Mitfah ───────────────────────────────────────────────────
+
+# How often a wallet's explorer search may run. Reading the History tab more often adds nothing.
+OUTSIDE_SYNC_EVERY_SECS = 60
+# Uniswap V2 pool tokens always have 18 decimals.
+_LP_DECIMALS = 18
+
+# Searches run here, never on the request thread: an explorer can take seconds, a first BSC search
+# minutes. Two at a time is plenty, since both services pace their calls anyway.
+_outside_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="outside-history")
+_outside_running: set[tuple[int, str]] = set()
+_outside_lock = threading.Lock()
+
+
+def start_outside_sync(user_id: int, wallets: dict[int, str], web3_for: Callable[[int], Web3 | None]) -> bool:
+    """
+    Starts searching for each wallet's activity outside Mitfah, in the background, so the History
+    tab never waits on an explorer. A wallet searched in the last minute, or being searched now,
+    isn't started again.
+
+    @param wallets   {chain_id: the user's wallet there}.
+    @param web3_for  A Web3 for a chain, or None: for token decimals and the wallet's EntryPoint.
+    @return          True while any of these wallets is being searched, so the tab looks again soon.
+    """
+    running = False
+    for chain_id, wallet in wallets.items():
+        if explorers.provider_for(chain_id) is None:
+            continue
+        wallet = Web3.to_checksum_address(wallet)
+        state = get_history_sync(chain_id, wallet)
+        with _outside_lock:
+            if (chain_id, wallet) in _outside_running:
+                running = True
+                continue
+            if state and time.time() - state["synced_at"] < OUTSIDE_SYNC_EVERY_SECS:
+                continue
+            _outside_running.add((chain_id, wallet))
+        running = True
+        _outside_pool.submit(_run_outside_sync, user_id, chain_id, wallet, web3_for)
+    return running
+
+
+def _run_outside_sync(user_id: int, chain_id: int, wallet: str, web3_for: Callable[[int], Web3 | None]):
+    try:
+        sync_outside(user_id, chain_id, wallet, web3_for(chain_id))
+    except explorers.ExplorerUnavailable as e:
+        log.warning("Could not read activity outside Mitfah for %s on chain %s: %s", wallet, chain_id, e)
+    except Exception:  # noqa: BLE001 -- a background search must never take the server down
+        log.exception("Could not read activity outside Mitfah for %s on chain %s", wallet, chain_id)
+    finally:
+        with _outside_lock:
+            _outside_running.discard((chain_id, wallet))
+
+
+def sync_outside(user_id: int, chain_id: int, wallet: str, w3: Web3 | None):
+    """
+    Records the wallet's activity that didn't go through Mitfah as 'outside' rows, from where the
+    last search stopped. The cursor is saved after every batch, so a search cut short (the server
+    restarting, the service failing) loses nothing and repeats little.
+
+    @param w3  For token decimals the explorer didn't give, and the wallet's EntryPoint. May be None.
+    @raises explorers.ExplorerUnavailable  When the service can't be used. The run is still marked,
+                                           so the wallet isn't searched again for a minute.
+    """
+    wallet = Web3.to_checksum_address(wallet)
+    try:
+        state = get_history_sync(chain_id, wallet)
+        start = state["next_block"] if state and state["next_block"] is not None else _first_block(chain_id, wallet)
+        context = _OutsideContext.build(user_id, chain_id, wallet, w3)
+        for movements, next_block in explorers.movements_since(chain_id, wallet, start):
+            _record_outside(context, movements)
+            save_history_sync(chain_id, wallet, next_block)
+    finally:
+        save_history_sync(chain_id, wallet)
+
+
+def _first_block(chain_id: int, wallet: str) -> int:
+    """
+    Where a wallet's first search starts. Etherscan searches by address, so the very first block
+    costs nothing extra. NodeReal searches block ranges, so it starts where the wallet was created:
+    the block of its first Mitfah transaction. A wallet with none on the live chain (one made on a
+    fork) has no live history, so it starts from now.
+    """
+    if explorers.provider_for(chain_id) != "nodereal":
+        return 0
+    tx_hash = get_first_wallet_tx_hash(chain_id, wallet)
+    block = explorers.transaction_block(chain_id, tx_hash) if tx_hash else None
+    return block if block is not None else explorers.latest_block(chain_id)
+
+
+@dataclass
+class _OutsideContext:
+    """What describing one wallet's outside activity needs, read once per search."""
+
+    user_id: int
+    chain_id: int
+    wallet: str
+    w3: Web3
+    wallet_contract: object
+    owner: str | None
+    entry_point: str | None
+    native: str
+    known_hashes: set[str]
+    # Lowercase address -> (TICKER, decimals or None). Only tokens Mitfah lists, the user's
+    # custom tokens and the user's pools. Anything else is airdrop spam, mostly, and stays out.
+    tokens: dict[str, tuple[str, int | None]]
+
+    @classmethod
+    def build(cls, user_id: int, chain_id: int, wallet: str, w3: Web3 | None) -> "_OutsideContext":
+        # A Web3 with no provider still decodes calldata; its reads fail, and every read here is optional.
+        w3 = w3 or Web3()
+        user = get_user_by_id(user_id) or {}
+        owner = Web3.to_checksum_address(user["owner_addr"]) if user.get("owner_addr") else None
+        try:
+            entry_point = Web3.to_checksum_address(
+                w3.eth.contract(address=wallet, abi=_ENTRY_POINT_OF_WALLET_ABI).functions.ENTRY_POINT().call()
+            )
+        except Exception:  # noqa: BLE001 -- only words the fee line; it reads as a send without it
+            entry_point = None
+        tokens: dict[str, tuple[str, int | None]] = {}
+        for token in get_supported_tokens_by_chain_id(chain_id):
+            tokens[token["address"].lower()] = (token["ticker"].upper(), None)
+        for token in get_custom_tokens(user_id, chain_id):
+            tokens[token["address"].lower()] = (token["ticker"].upper(), token["decimals"])
+        native = _native(chain_id)
+        for pool in get_lp_tokens(user_id, chain_id):
+            if pool["pair"]:
+                # Named as the dashboard names it (api._lp_balances): the native side first.
+                sides = [pool["ticker1"], pool["ticker0"]] if pool["ticker1"].upper() == native.upper() else [pool["ticker0"], pool["ticker1"]]
+                tokens[pool["pair"].lower()] = ("/".join(sides).upper() + " LP", _LP_DECIMALS)
+        return cls(
+            user_id=user_id,
+            chain_id=chain_id,
+            wallet=wallet,
+            w3=w3,
+            # Decoding calldata needs no node, so a provider-less Web3 does it, whatever `w3` is.
+            wallet_contract=Web3().eth.contract(address=wallet, abi=_session_handler_abi()),
+            owner=owner,
+            entry_point=entry_point,
+            native=native,
+            known_hashes=get_wallet_tx_hashes(chain_id, wallet),
+            tokens=tokens,
+        )
+
+
+@functools.cache
+def _session_handler_abi() -> list:
+    return get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+
+
+def _record_outside(context: _OutsideContext, movements: list[explorers.Movement]):
+    """One row per transaction that isn't already recorded for this wallet and moved something worth listing."""
+    by_hash: dict[str, list[explorers.Movement]] = {}
+    for movement in sorted(movements, key=lambda m: m.block):
+        by_hash.setdefault(movement.tx_hash, []).append(movement)
+    for tx_hash, moves in by_hash.items():
+        if tx_hash in context.known_hashes:
+            continue  # Mitfah's own, or recorded by an earlier search
+        action = describe_outside(context, [m for m in moves if m.succeeded])
+        if action is None:
+            continue
+        add_transaction(
+            context.user_id,
+            context.chain_id,
+            context.wallet,
+            "outside",
+            action,
+            "confirmed",
+            tx_hash=tx_hash,
+            mined_at=moves[0].mined_at,
+        )
+        context.known_hashes.add(tx_hash)
+
+
+def describe_outside(context: _OutsideContext, moves: list[explorers.Movement]) -> str | None:
+    """
+    What one outside transaction did to the wallet, in one line, or None if it's not worth listing.
+
+    A call the owner made on the wallet is worded from its calldata, like the same action taken in
+    the app. Anything else is worded from what moved: "Received 100 USDC from 0x...", "Sent 0.5 ETH
+    to 0x...". Not listed: failed movements, zero amounts, tokens Mitfah doesn't know, and
+    transactions that moved nothing, such as a stranger calling the wallet.
+    """
+    parts = [part for part in (_describe_movement(context, m) for m in moves) if part]
+    call = next((m for m in moves if m.direct_call), None)
+    if call is not None and context.owner is not None and call.sender == context.owner:
+        data = call.input if call.input is not None else explorers.transaction_input(context.chain_id, call.tx_hash)
+        if not data and call.amount == 0:
+            return " · ".join(parts) or None  # a bare zero-value send, such as a cancelled transaction
+        tx = {"to": context.wallet, "input": data, "value": call.amount}
+        described = describe_wallet_tx(context.w3, context.user_id, context.chain_id, context.wallet_contract, tx)
+        # "Call execute on your wallet" says less than what it moved.
+        if not (described.startswith("Call ") and parts):
+            return described
+    return " · ".join(parts) or None
+
+
+def _describe_movement(context: _OutsideContext, m: explorers.Movement) -> str | None:
+    if m.amount == 0:
+        return None
+    if m.token is None:
+        ticker, decimals = context.native, 18
+    else:
+        known = context.tokens.get(m.token.lower())
+        if known is None:
+            return None
+        ticker, decimals = known
+        if m.decimals is not None:
+            decimals = m.decimals
+        elif decimals is None:
+            decimals = _token(context.w3, context.user_id, context.chain_id, m.token)[1]
+    amount = f"{_amount(m.amount, decimals)} {ticker}" if decimals is not None else f"{m.amount} units of {ticker}"
+    if m.recipient == context.wallet and m.sender != context.wallet:
+        return f"Received {amount} from {_party(context, m.sender)}"
+    if m.sender == context.wallet and m.recipient != context.wallet:
+        if m.token is None and m.recipient == context.entry_point:
+            return f"Paid {amount} in network fees"
+        return f"Sent {amount} to {_party(context, m.recipient)}"
+    return None
+
+
+def _party(context: _OutsideContext, address: str) -> str:
+    """The other side of a movement: the owner by name, anyone else by full address, which the web
+    app names (as a contact) or shortens."""
+    return "your owner address" if address == context.owner else address

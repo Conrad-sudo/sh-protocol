@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN } from './helpers.ts'
 
 /*
- * The History tab — every transaction made through Mitfah — at real screen sizes, in both themes,
+ * The History tab — every transaction on the wallet, Mitfah's and outside it — at real screen sizes, in both themes,
  * against a mocked API that behaves like app/api.py. Sepolia is served from a local fork here, and
  * its hashes must still link to the live explorer.
  */
@@ -23,6 +23,8 @@ const hash = (n: number) => `0x${n.toString(16).padStart(2, '0').repeat(32)}`
 // What the fork e2e run actually recorded, long lines included: the assistant's descriptions carry
 // whole addresses and unrounded amounts.
 const TRANSACTIONS = [
+  // Read from the block explorer: something that reached the wallet outside Mitfah.
+  { id: 7, chain_id: SEPOLIA, source: 'outside', status: 'confirmed', tx_hash: hash(7), action: `Received 25 USDC from ${PAYEE}` },
   {
     id: 6, chain_id: SEPOLIA, source: 'assistant', status: 'confirmed', tx_hash: hash(6),
     action: `Approve 0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3 to spend 100.0 of ${TOKEN_ADDRESS}; Swap 100.0 of ${TOKEN_ADDRESS} for at least 9.4894769844675e-05 of the native asset`,
@@ -49,7 +51,7 @@ async function mockServer(page: Page) {
       case '/api/transactions': {
         const chain = url.searchParams.get('chain_id')
         const rows = TRANSACTIONS.filter(t => chain === null || t.chain_id === Number(chain))
-        return route.fulfill({ json: { transactions: rows, next_before: null } })
+        return route.fulfill({ json: { transactions: rows, next_before: null, syncing: false } })
       }
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
@@ -63,8 +65,10 @@ test('the history: every transaction, when it happened, and a link to the explor
 
   await expect(page.getByRole('heading', { name: 'History', level: 1 })).toBeVisible()
   const list = page.getByRole('list', { name: 'Transactions' })
-  await expect(list.getByRole('listitem')).toHaveCount(6)
-  await expect(list.getByRole('listitem').nth(1)).toContainText('Transfer 10.0 USDC to payee')
+  await expect(list.getByRole('listitem')).toHaveCount(7)
+  await expect(list.getByRole('listitem').nth(0)).toContainText('Received 25 USDC from payee')
+  await expect(list.getByRole('listitem').nth(0)).toContainText('Outside Mitfah')
+  await expect(list.getByRole('listitem').nth(2)).toContainText('Transfer 10.0 USDC to payee')
 
   // The fork's hashes link to the live explorer, as they will in production.
   const link = page.getByRole('link', { name: `View transaction ${hash(5)} on Etherscan` })
@@ -73,7 +77,7 @@ test('the history: every transaction, when it happened, and a link to the explor
     'href',
     `https://bscscan.com/tx/${hash(4)}`,
   )
-  await expect(list.getByRole('listitem').nth(3)).toContainText('Waiting for the network')
+  await expect(list.getByRole('listitem').nth(4)).toContainText('Waiting for the network')
 
   await expectTheme(page, testInfo)
   await expectNoSidewaysScroll(page)
@@ -81,7 +85,7 @@ test('the history: every transaction, when it happened, and a link to the explor
 
   // The network the app is showing (Sepolia, the first wallet) narrows the list to its own.
   await page.getByRole('radiogroup', { name: 'Networks to show' }).getByText('Sepolia').click()
-  await expect(list.getByRole('listitem')).toHaveCount(5)
+  await expect(list.getByRole('listitem')).toHaveCount(6)
   await expectNoSidewaysScroll(page)
 })
 

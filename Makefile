@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test speed-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test explorers-test explorers-live speed-test py-test e2e-test agent-smoke api
 
 
 
@@ -57,13 +57,22 @@ custom-tokens-test:
 history-test:
 	.venv/bin/python3 app/tests/test_history.py
 
+# Reading activity outside Mitfah from Etherscan and NodeReal: paging, block windows, rate limits,
+# and API keys kept out of errors and logs. Scripted answers, so offline.
+explorers-test:
+	.venv/bin/python3 app/tests/test_explorers.py
+
+# The same, against the real services: read-only, with the keys in .env. Not part of py-test.
+explorers-live:
+	.venv/bin/python3 app/tests/check_explorers_live.py
+
 # What keeps the assistant quick: the chain id asked once, independent reads run together, the
 # wallet checks every transaction tool runs itself, and a UserOp's hash worked out locally. Offline.
 speed-test:
 	.venv/bin/python3 app/tests/test_speed.py
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test speed-test
+py-test: identity-test auth-test custom-tokens-test history-test explorers-test speed-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia

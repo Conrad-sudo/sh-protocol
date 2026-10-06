@@ -9,10 +9,11 @@ chat reported -- is in test_e2e_fork.
 
 Run: make history-test   (or: python app/tests/test_history.py)
 """
+import logging
 import os
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 
 from checks import check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
@@ -39,6 +40,7 @@ from web3 import Web3                       # noqa: E402
 from web3.exceptions import TimeExhausted, TransactionNotFound  # noqa: E402
 
 import api                                  # noqa: E402
+import explorers                            # noqa: E402
 import quotes                               # noqa: E402
 import smart_wallet_agent                   # noqa: E402
 import tools                                # noqa: E402
@@ -577,8 +579,9 @@ def test_history_route_lists_only_your_own_newest_first():
         check("no further page", got["next_before"] is None, str(got["next_before"]))
 
         page = c.get("/api/transactions?limit=2", headers=headers).json()
+        last = page["transactions"][-1]
         check("a page stops at the limit and points at the next",
-              len(page["transactions"]) == 2 and page["next_before"] == page["transactions"][-1]["id"], str(page))
+              len(page["transactions"]) == 2 and page["next_before"] == f"{last['created_at']}-{last['id']}", str(page))
         rest = c.get(f"/api/transactions?limit=2&before={page['next_before']}", headers=headers).json()
         check("the next page carries on where it stopped",
               [t["action"] for t in rest["transactions"]] == ["mine 1", "mine 0"] and rest["next_before"] is None, str(rest))
@@ -953,6 +956,297 @@ def test_deleting_the_chat():
         smart_wallet_agent.agent = original
 
 
+# ── Activity outside Mitfah ──────────────────────────────────────────────────
+
+OUT_OWNER = _addr(0x0A8)
+SPAM = _addr(0x5BA3)        # a token Mitfah doesn't list: airdrop spam
+LP_PAIR = _addr(0x1B1B)
+
+
+def _move(n: int, *, sender: str, recipient: str, amount: int, token: str | None = None, decimals: int | None = None,
+          block: int = 100, direct_call: bool = False, input: bytes | None = None, succeeded: bool = True,
+          mined_at: int = 1_700_000_000) -> explorers.Movement:
+    return explorers.Movement(
+        tx_hash=_hash(n), block=block, mined_at=mined_at, sender=sender, recipient=recipient, token=token,
+        amount=amount, decimals=decimals, direct_call=direct_call, input=input, succeeded=succeeded,
+    )
+
+
+class FakeExplorer:
+    """Stands in for explorers.movements_since: scripted batches, and where each search started."""
+
+    def __init__(self, batches=(), error: Exception | None = None):
+        self.batches = list(batches)
+        self.error = error
+        self.starts: list[int] = []
+
+    def __call__(self, chain_id, wallet, from_block):
+        self.starts.append(from_block)
+        yield from self.batches
+        if self.error is not None:
+            raise self.error
+
+
+class _OutsideEth:
+    """Every wallet answers ENTRY_POINT; no token answers decimals."""
+
+    def contract(self, address, abi):
+        return SimpleNamespace(functions=SimpleNamespace(
+            ENTRY_POINT=lambda: _Call(ENTRY_POINT), decimals=lambda: _Call(Exception("no code"))))
+
+
+OUTSIDE_W3 = SimpleNamespace(eth=_OutsideEth())
+
+
+@contextmanager
+def _explorer(fake: FakeExplorer):
+    saved = explorers.movements_since
+    explorers.movements_since = fake
+    try:
+        yield
+    finally:
+        explorers.movements_since = saved
+
+
+def _outside(user: int, wallet: str) -> dict[str, str]:
+    """The wallet's outside rows: {hash: action}."""
+    return {r["tx_hash"]: r["action"] for r in db.get_transactions(user) if r["source"] == "outside" and r["wallet"] == wallet}
+
+
+def test_outside_activity_is_recorded_and_worded():
+    """
+    Activity that didn't go through Mitfah is listed from what it moved, in the History tab's words.
+    Spam and noise stay out: tokens Mitfah doesn't know, zero amounts (address poisoning), failed
+    movements, and calls that moved nothing. Searching the same blocks again adds nothing.
+    """
+    print("\n[11] outside activity: recorded once, worded from what moved, spam left out")
+    user = _create(OUT_OWNER)
+    wallet = _addr(0x0A7)
+    db.save_custom_token(user, CHAIN, PEPE, "pepe", "Pepe", 6)
+    db.save_lp_token(user, CHAIN, USDC, "usdc", ETH_SENTINEL, "eth")
+    pool = db.get_lp_tokens(user, CHAIN)[0]
+    db.set_lp_token_pair(user, CHAIN, pool["token0"], pool["token1"], LP_PAIR, 6, 18)
+    pause = bytes(HexBytes(WALLET_CONTRACT.encode_abi("pause", args=[])))
+    movements = [
+        _move(1, sender=SAM, recipient=wallet, amount=100_000_000, token=USDC, decimals=6),
+        _move(2, sender=STRANGER, recipient=wallet, amount=10**24, token=SPAM, decimals=18),
+        _move(3, sender=STRANGER, recipient=wallet, amount=0, token=USDC, decimals=6),
+        _move(4, sender=wallet, recipient=STRANGER, amount=0, token=USDC, decimals=6),
+        _move(5, sender=STRANGER, recipient=wallet, amount=0, direct_call=True, input=b"\x12\x34\x56\x78"),
+        _move(6, sender=OUT_OWNER, recipient=wallet, amount=0, direct_call=True, input=pause),
+        _move(7, sender=OUT_OWNER, recipient=wallet, amount=2 * 10**17, direct_call=True, input=b""),
+        # The owner's own UserOperation, sent from another app: the fee and the transfer, one line.
+        _move(8, sender=wallet, recipient=ENTRY_POINT, amount=3 * 10**14),
+        _move(8, sender=wallet, recipient=SAM, amount=5_000_000, token=USDC, decimals=6),
+        _move(9, sender=wallet, recipient=SAM, amount=10**18, succeeded=False),
+        # An owner call the app has no words for, which moved something: worded by what moved.
+        _move(10, sender=OUT_OWNER, recipient=wallet, amount=0, direct_call=True, input=b"\xde\xad\xbe\xef"),
+        _move(10, sender=wallet, recipient=SAM, amount=10**18),
+        _move(11, sender=STRANGER, recipient=wallet, amount=12_500_000, token=PEPE),
+        _move(12, sender=wallet, recipient=STRANGER, amount=5 * 10**17, token=LP_PAIR),
+        _move(13, sender=OUT_OWNER, recipient=wallet, amount=0, direct_call=True, input=b""),
+    ]
+    fake = FakeExplorer([(movements, 500)])
+    with _explorer(fake):
+        tx_history.sync_outside(user, CHAIN, wallet, OUTSIDE_W3)
+
+    expected = {
+        _hash(1): f"Received 100 USDC from {SAM}",
+        _hash(6): "Pause the wallet",
+        _hash(7): "Add 0.2 ETH to the wallet",
+        _hash(8): f"Paid 0.0003 ETH in network fees · Sent 5 USDC to {SAM}",
+        _hash(10): f"Sent 1 ETH to {SAM}",
+        _hash(11): f"Received 12.5 PEPE from {STRANGER}",
+        _hash(12): f"Sent 0.5 ETH/USDC LP to {STRANGER}",
+    }
+    got = _outside(user, wallet)
+    for tx_hash, action in expected.items():
+        check(f"listed as “{action}”", got.get(tx_hash) == action, str(got.get(tx_hash)))
+    check("nothing else: unknown tokens, zero amounts, failures, and calls that moved nothing are left out",
+          set(got) == set(expected), str(sorted(set(got) - set(expected))))
+    rows = [r for r in db.get_transactions(user) if r["source"] == "outside"]
+    check("each is confirmed, with the time its block was mined",
+          all(r["status"] == "confirmed" and r["mined_at"] == 1_700_000_000 for r in rows), str(rows[:1]))
+    check("where the next search starts is saved", db.get_history_sync(CHAIN, wallet)["next_block"] == 500,
+          str(db.get_history_sync(CHAIN, wallet)))
+
+    with _explorer(fake):
+        tx_history.sync_outside(user, CHAIN, wallet, OUTSIDE_W3)
+    check("the next search starts there", fake.starts == [0, 500], str(fake.starts))
+    check("searching the same blocks again adds nothing", len(_outside(user, wallet)) == len(expected),
+          str(len(_outside(user, wallet))))
+
+
+def test_outside_rows_never_repeat_mitfahs_own():
+    """
+    A transaction Mitfah already lists for this wallet is never listed again as outside activity,
+    even when the explorer search ran first. A payment between two Mitfah users is still outside
+    activity for the one who received it.
+    """
+    print("\n[12] outside activity: Mitfah's own transactions are never listed twice")
+    payer, payee = _create(_addr(0x0B1)), _create(_addr(0x0B2))
+    payer_wallet, payee_wallet = _addr(0x0B3), _addr(0x0B4)
+    paid = _hash(0xB00)
+    db.add_transaction(payer, CHAIN, payer_wallet, "assistant", "Send 1 USDC", "confirmed",
+                       tx_hash=paid, user_op_hash=_hash(0xB01))
+    payment = _move(0xB00, sender=payer_wallet, recipient=payee_wallet, amount=10**6, token=USDC, decimals=6)
+
+    with _explorer(FakeExplorer([([payment], 10)])):
+        tx_history.sync_outside(payer, CHAIN, payer_wallet, OUTSIDE_W3)
+        tx_history.sync_outside(payee, CHAIN, payee_wallet, OUTSIDE_W3)
+    check("the payer's own send is not listed again", _outside(payer, payer_wallet) == {}, str(_outside(payer, payer_wallet)))
+    check("the payee sees it as received", _outside(payee, payee_wallet) == {paid: f"Received 1 USDC from {payer_wallet}"},
+          str(_outside(payee, payee_wallet)))
+
+    # The search runs while an assistant send is still pending, before its row knows its hash.
+    pending = db.add_transaction(payer, CHAIN, payer_wallet, "assistant", "Send 2 USDC", "pending", user_op_hash=_hash(0xB02))
+    early, owner_early = _hash(0xB03), _hash(0xB04)
+    batch = [
+        _move(0xB03, sender=payer_wallet, recipient=payee_wallet, amount=2 * 10**6, token=USDC, decimals=6),
+        _move(0xB04, sender=STRANGER, recipient=payer_wallet, amount=10**17),
+    ]
+    with _explorer(FakeExplorer([(batch, 20)])):
+        tx_history.sync_outside(payer, CHAIN, payer_wallet, OUTSIDE_W3)
+        tx_history.sync_outside(payee, CHAIN, payee_wallet, OUTSIDE_W3)
+    check("before the send settles, the search lists it", set(_outside(payer, payer_wallet)) == {early, owner_early},
+          str(_outside(payer, payer_wallet)))
+    db.settle_transaction(pending, "confirmed", early, 1_700_000_100)
+    check("once it settles with that hash, the outside copy goes", set(_outside(payer, payer_wallet)) == {owner_early},
+          str(_outside(payer, payer_wallet)))
+    db.add_transaction(payer, CHAIN, payer_wallet, "owner", "Add 0.1 ETH to the wallet", "confirmed", tx_hash=owner_early)
+    check("an owner transaction recorded later replaces its outside copy too", _outside(payer, payer_wallet) == {},
+          str(_outside(payer, payer_wallet)))
+    check("the payee's rows are their own and stay", set(_outside(payee, payee_wallet)) == {paid, early},
+          str(_outside(payee, payee_wallet)))
+
+
+def test_outside_search_where_it_starts():
+    """Etherscan searches by address from block 0. A BSC search (NodeReal, by block range) starts
+    where the wallet was created, or from now for a wallet the live chain doesn't know."""
+    print("\n[13] outside activity: where a wallet's first search starts")
+    user = _create(_addr(0x0C1))
+    eth_wallet, bsc_wallet, fork_wallet = _addr(0x0C2), _addr(0x0C3), _addr(0x0C4)
+    db.add_transaction(user, BSC, bsc_wallet, "owner", "Create your Mitfah smart wallet", "confirmed", tx_hash=_hash(0xC00))
+    db.add_transaction(user, BSC, fork_wallet, "owner", "Create your Mitfah smart wallet", "confirmed", tx_hash=_hash(0xC01))
+    saved = explorers.transaction_block, explorers.latest_block
+    explorers.transaction_block = lambda _chain, tx_hash: 777 if tx_hash == _hash(0xC00) else None
+    explorers.latest_block = lambda _chain: 999
+    try:
+        for chain, wallet, start in ((CHAIN, eth_wallet, 0), (BSC, bsc_wallet, 777), (BSC, fork_wallet, 999)):
+            fake = FakeExplorer()
+            with _explorer(fake):
+                tx_history.sync_outside(user, chain, wallet, OUTSIDE_W3)
+            check(f"chain {chain}: the first search starts at block {start}", fake.starts == [start], str(fake.starts))
+    finally:
+        explorers.transaction_block, explorers.latest_block = saved
+
+
+class _HeldPool:
+    """Takes the background searches without running them, so a test can run them when it likes."""
+
+    def __init__(self):
+        self.jobs: list = []
+
+    def submit(self, fn, *args):
+        self.jobs.append((fn, args))
+
+    def run_all(self):
+        jobs, self.jobs = self.jobs, []
+        for fn, args in jobs:
+            fn(*args)
+
+
+def test_outside_searches_run_in_the_background_once_a_minute():
+    """Reading the History tab starts a search in the background, never twice at once for a wallet,
+    and at most once a minute. A failing explorer is logged without its key and tried a minute later."""
+    print("\n[14] outside activity: background searches, once a minute, failures logged safely")
+    user = _create(_addr(0x0D1))
+    wallet = _addr(0x0D2)
+    pool, saved_pool = _HeldPool(), tx_history._outside_pool
+    tx_history._outside_pool = pool
+    no_web3 = lambda _chain: None  # noqa: E731
+    try:
+        wallets = {CHAIN: wallet, 31337: wallet}  # anvil: no explorer covers it
+        check("a search starts, and the tab is told one is running",
+              tx_history.start_outside_sync(user, wallets, no_web3) is True and len(pool.jobs) == 1, str(pool.jobs))
+        check("a second read while it runs starts no second search",
+              tx_history.start_outside_sync(user, wallets, no_web3) is True and len(pool.jobs) == 1)
+        with _explorer(FakeExplorer([([_move(0xD00, sender=SAM, recipient=wallet, amount=10**17)], 30)])):
+            pool.run_all()
+        check("it records what it found", list(_outside(user, wallet).values()) == [f"Received 0.1 ETH from {SAM}"],
+              str(_outside(user, wallet)))
+        check("within the minute, nothing starts and nothing is running",
+              tx_history.start_outside_sync(user, wallets, no_web3) is False and pool.jobs == [])
+
+        db.get_db().execute("UPDATE history_sync SET synced_at = synced_at - 120 WHERE wallet = ?", (wallet,))
+        db.get_db().commit()
+        check("a minute later it searches again", tx_history.start_outside_sync(user, wallets, no_web3) is True
+              and len(pool.jobs) == 1)
+        os.environ["ETHERSCAN_API_KEY"] = "SECRET-KEY-123"
+        logged: list[str] = []
+        handler = _ListHandler(logged)
+        tx_history.log.addHandler(handler)
+        try:
+            with _explorer(FakeExplorer(error=explorers.ExplorerUnavailable("Etherscan: bad key SECRET-KEY-123"))):
+                pool.run_all()
+        finally:
+            tx_history.log.removeHandler(handler)
+        check("a failed search is logged", any("Etherscan" in line for line in logged), str(logged))
+        check("...without the key", not any("SECRET-KEY-123" in line for line in logged), str(logged))
+        check("...keeps the cursor it had", db.get_history_sync(CHAIN, wallet)["next_block"] == 30)
+        check("...and isn't tried again within the minute",
+              tx_history.start_outside_sync(user, wallets, no_web3) is False and pool.jobs == [])
+    finally:
+        tx_history._outside_pool = saved_pool
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self, lines: list[str]):
+        super().__init__()
+        self.lines = lines
+
+    def emit(self, record):
+        self.lines.append(self.format(record))
+
+
+def test_history_lists_by_time():
+    """Outside rows are recorded long after they mined, so the tab orders by time, not by id, and
+    its pages carry on from a (time, id) cursor. The first read says whether a search is running."""
+    print("\n[15] GET /api/transactions: newest first by time, paged by a (time, id) cursor")
+    c = make_client()
+    me, headers = _sign_up(c)
+    wallet = _addr(0x0E9)
+    db.add_transaction(me, CHAIN, wallet, "assistant", "sent today", "confirmed", tx_hash=_hash(0xE01), mined_at=1_700_000_300)
+    db.add_transaction(me, CHAIN, wallet, "outside", "received last week", "confirmed", tx_hash=_hash(0xE02), mined_at=1_700_000_100)
+    db.add_transaction(me, CHAIN, wallet, "outside", "received yesterday", "confirmed", tx_hash=_hash(0xE03), mined_at=1_700_000_200)
+    db.add_transaction(me, CHAIN, wallet, "assistant", "still pending", "pending", user_op_hash=_hash(0xE04))
+
+    pool, saved_pool, saved_web3 = _HeldPool(), tx_history._outside_pool, api._web3_or_none
+    tx_history._outside_pool = pool
+    api._web3_or_none = lambda _chain: None
+    try:
+        page = c.get("/api/transactions?limit=2", headers=headers).json()
+        check("newest first by time, the pending one on top",
+              [t["action"] for t in page["transactions"]] == ["still pending", "sent today"], str(page))
+        check("no wallet, so no search", page["syncing"] is False and pool.jobs == [], str(page))
+        rest = c.get(f"/api/transactions?limit=2&before={page['next_before']}", headers=headers).json()
+        check("the next page carries on by time",
+              [t["action"] for t in rest["transactions"]] == ["received yesterday", "received last week"]
+              and rest["next_before"] is None, str(rest))
+        check("an outside row says so", rest["transactions"][0]["source"] == "outside")
+        check("a malformed cursor -> 422", c.get("/api/transactions?before=12", headers=headers).status_code == 422)
+
+        db.save_wallet_address(me, CHAIN, wallet)
+        first = c.get("/api/transactions", headers=headers).json()
+        check("with a wallet, the first read starts a search and says so", first["syncing"] is True and len(pool.jobs) == 1,
+              str(first["syncing"]))
+        c.get(f"/api/transactions?before={page['next_before']}", headers=headers)
+        check("a later page starts none", len(pool.jobs) == 1)
+    finally:
+        tx_history._outside_pool, api._web3_or_none = saved_pool, saved_web3
+
+
+
 if __name__ == "__main__":
     try:
         test_owner_transactions_are_described_from_their_calldata()
@@ -966,6 +1260,11 @@ if __name__ == "__main__":
         test_deploy_confirm_says_whether_the_network_has_seen_it()
         test_the_chat_starts_afresh_after_a_transaction()
         test_deleting_the_chat()
+        test_outside_activity_is_recorded_and_worded()
+        test_outside_rows_never_repeat_mitfahs_own()
+        test_outside_search_where_it_starts()
+        test_outside_searches_run_in_the_background_once_a_minute()
+        test_history_lists_by_time()
     finally:
         os.unlink(_tmp_db.name)
     finish("All history checks passed.")

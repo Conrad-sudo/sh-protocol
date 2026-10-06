@@ -293,6 +293,14 @@ On-chain this is metered correctly and needs no new check: routing output away m
 - **A lost race is detected, not reported as a failure.** If our `handleOps` reverts or stalls, the op is looked up on chain by its hash; if someone else executed it, that transaction is returned. Without this the user would be told a transfer failed that had in fact gone through, and might retry it.
 **Residual risk:** The chain's RPC provider still sees the real signed op in that final estimate, and could land it first; the effect is the one above (the user's own action, executed once, and the bundler out the gas of its reverted transaction). BSC broadcasts to the public mempool, where the same can happen.
 
+### 4.4b What the Block Explorers Tell Us
+**Threat:** The History tab lists activity outside Mitfah from Etherscan's API and NodeReal (`app/explorers.py`, since 2026-10-06). Anyone can put data in front of those services that names a user's wallet. Airdropped tokens can carry a phishing site as their name. Zero-value `transferFrom` calls can fake transfers out of the wallet (address poisoning). Anyone can also send the wallet a call that moves nothing. Separately, both services take their API key in the URL.
+**Mitigation in place:**
+- **Nothing the explorer names is shown.** The ticker comes from Mitfah's own tables, and only for tokens Mitfah lists, the user's custom tokens and their LP pools. Every other token is left out. Zero amounts, failed movements and calls that moved nothing are dropped. The line is written by code (`tx_history.describe_outside`).
+- **The agent never reads it.** Outside rows live only in the `transactions` table, which the agent has no tool for, so none of this text reaches a model's context.
+- **Keys stay out of logs.** Every network error is replaced by an `ExplorerUnavailable` naming only the service, and any key in a service's reply is masked.
+**Residual risk:** The explorer is trusted for what moved. A wrong or compromised answer could list a transfer that never happened, or leave one out. Only the History tab is affected: balances, the spending cap and every transaction are read from the chain itself, and each row's hash links to the explorer to check.
+
 ---
 
 ### 4.5 Telegram as Attack Surface
