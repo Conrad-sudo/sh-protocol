@@ -94,6 +94,13 @@ def test_siwe_sign_in_and_refresh():
     other, _, _ = sign_in(c)
     check("another address is another account", other["user_id"] != body["user_id"], str(other))
 
+    r = c.get("/api/auth/siwe/account", params={"address": acct.address.lower()})
+    check("an address that signed in is registered, in any case", r.json() == {"registered": True}, r.text[:120])
+    r = c.get("/api/auth/siwe/account", params={"address": Account.create().address})
+    check("a new address is not", r.json() == {"registered": False}, r.text[:120])
+    r = c.get("/api/auth/siwe/account", params={"address": "not-an-address"})
+    check("a malformed address is refused", r.status_code == 422, f"{r.status_code} {r.text[:120]}")
+
     r = c.post("/api/auth/refresh")
     check("the cookie alone refreshes", r.status_code == 200, r.text[:160])
     check("refresh returns a new access token", "access_token" in r.json())
@@ -927,6 +934,8 @@ def test_rate_limit():
     check("repeated sign-in attempts eventually get 429", 429 in codes, f"codes: {codes}")
     codes = [c.get("/api/auth/siwe/nonce").status_code for _ in range(34)]
     check("so does asking for nonces without end", 429 in codes, f"codes: {codes}")
+    codes = [c.get("/api/auth/siwe/account", params={"address": ADDR}).status_code for _ in range(34)]
+    check("and asking which addresses have accounts", 429 in codes, f"codes: {codes}")
     api.limiter.enabled = False
 
 

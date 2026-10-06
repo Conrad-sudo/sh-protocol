@@ -185,7 +185,7 @@ describe('OnboardingPage', () => {
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
 
     // The prefund: 1 ETH by default on a local test network.
-    const fund = await step('Prefund your Mitfah wallet')
+    const fund = await step('Prefund your Mitfah smart wallet')
     expect(within(fund).getByLabelText('Amount to send now')).toHaveValue('1')
     await user.click(within(fund).getByRole('button', { name: 'Continue' }))
 
@@ -197,7 +197,7 @@ describe('OnboardingPage', () => {
     expect(summary("Assistant's access")).toHaveTextContent('30 days, renewable any time in Controls')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
 
-    expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
 
     expect(calls.deploy).toEqual([
@@ -246,7 +246,7 @@ describe('OnboardingPage', () => {
 
     // No wallet connection needed: the transaction is already out.
     expect(await step('Creating your wallet')).toBeInTheDocument()
-    expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
     expect(calls.confirm).toEqual([
       { chain_id: SEPOLIA, deployer: WALLET, tx_hash: TX_HASH, predicted_address: PREDICTED },
@@ -354,7 +354,7 @@ describe('OnboardingPage', () => {
     const limits = await step('How much may the assistant spend?')
     await within(limits).findByRole('checkbox', { name: 'WETH' })
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
-    await user.click(within(await step('Prefund your Mitfah wallet')).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
     const review = await step('Check the details')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
     expect(await within(review).findByText('Confirm the transaction in your wallet.')).toBeInTheDocument()
@@ -370,7 +370,7 @@ describe('OnboardingPage', () => {
 
     // Approved after all: that transaction creates the wallet, so it is followed to the end.
     approve()
-    expect(await screen.findByText('Your Mitfah wallet on Sepolia')).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
     expect(calls.sent).toHaveLength(1)
     expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()

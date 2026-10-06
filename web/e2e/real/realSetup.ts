@@ -131,12 +131,15 @@ export async function apiSignIn(request: APIRequestContext, account: PrivateKeyA
   return { Authorization: `Bearer ${access_token}` }
 }
 
-/** Signs in through the page with the installed wallet, then lands on `next`. */
+/**
+ * Signs in through the page with the installed wallet, then lands on `next`. The button says
+ * "Sign up" for an address the API doesn't know yet and "Sign in" for one it does.
+ */
 export async function signIn(page: Page, next: string) {
   await page.goto(`/login?next=${encodeURIComponent(next)}`)
   await page.getByRole('button', { name: 'Connect wallet' }).click()
   await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
-  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.getByRole('button', { name: /^Sign (in|up)$/ }).click()
   await page.waitForURL(url => url.pathname === next)
 }
 
@@ -149,7 +152,7 @@ export async function signInAndDeploy(page: Page, request: APIRequestContext, ow
   await expect(page.getByRole('heading', { name: 'Create your wallet' })).toBeVisible()
 
   await walkOnboarding(page)
-  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
+  await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
 
   // Signed in once: sign-in is rate limited, and the access token outlasts any one spec.
   let headers: Record<string, string> | undefined

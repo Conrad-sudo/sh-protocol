@@ -18,8 +18,8 @@ export function PrivacyPage() {
       <ul>
         <li>
           <strong>Account:</strong> the address of the browser wallet you sign in with, which also owns your Mitfah
-          wallets, and the address of each Mitfah wallet you created, per network. We don't ask for your name, email
-          address or a password.
+          smart wallets, and the address of each Mitfah smart wallet you created, per network. We don't ask for your
+          name, email address or a password.
         </li>
         <li>
           <strong>Assistant keys:</strong> the key the assistant uses to act for each wallet. It is stored encrypted, and
@@ -92,7 +92,7 @@ export function PrivacyPage() {
         <li>You can remove contacts, delete your chat history and unlink Telegram at any time in the app.</li>
         <li>
           To get a copy of your data, correct it, or delete your account, write to {CONTACT_EMAIL}. Deleting your account
-          doesn't delete your Mitfah wallet or its funds: they stay yours, and you can still withdraw them with your
+          doesn't delete your Mitfah smart wallet or its funds: they stay yours, and you can still withdraw them with your
           owner wallet.
         </li>
         <li>Depending on where you live, you may have further rights, such as complaining to a data protection authority.</li>

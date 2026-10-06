@@ -1,8 +1,8 @@
 import type { Chain } from 'viem'
-import { anvil, arbitrum, bsc, celo, mainnet, sepolia } from 'viem/chains'
+import { anvil, arbitrum, bsc, mainnet, sepolia } from 'viem/chains'
 
 /** Every chain the API can serve (app/api.py CHAIN_NAME_BY_ID). /api/chains says which are live. */
-export const SUPPORTED_CHAINS = [sepolia, mainnet, bsc, arbitrum, celo, anvil] as const
+export const SUPPORTED_CHAINS = [sepolia, mainnet, bsc, arbitrum, anvil] as const
 
 export type SupportedChainId = (typeof SUPPORTED_CHAINS)[number]['id']
 
@@ -17,6 +17,19 @@ export function isSupportedChainId(chainId: number): chainId is SupportedChainId
 export function chainName(chainId: number | undefined): string {
   if (chainId === undefined) return 'Unknown network'
   return chainById(chainId)?.name ?? `Chain ${chainId}`
+}
+
+/** Logos in public/chainlogos/, named by chain ID. Sepolia is Ethereum's test network, so it shares Ethereum's. */
+const CHAIN_LOGOS: Partial<Record<number, string>> = {
+  [mainnet.id]: '/chainlogos/1.svg',
+  [sepolia.id]: '/chainlogos/1.svg',
+  [bsc.id]: '/chainlogos/56.svg',
+  [arbitrum.id]: '/chainlogos/42161.svg',
+}
+
+/** The network's logo, or null for one that has none (a bare local node). */
+export function chainLogoUrl(chainId: number): string | null {
+  return CHAIN_LOGOS[chainId] ?? null
 }
 
 /**

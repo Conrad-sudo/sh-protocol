@@ -61,7 +61,7 @@ test('one sitting: sign in, create, fund, save a contact, pause, withdraw, reloa
   await expect(page.getByRole('heading', { name: 'Your contacts (1)' })).toBeVisible()
   await expect(page.getByText('neighbour')).toBeVisible()
   await nav.getByRole('link', { name: 'Dashboard', exact: true }).click()
-  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible()
 
   // 4. The emergency brake, signed by the owner's own wallet. A browser wallet forgets the site on
   // a reload, so it is connected again first — from inside the dialog, where the app asks for it.

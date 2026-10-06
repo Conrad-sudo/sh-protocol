@@ -1,5 +1,5 @@
 import { createConfig, http } from 'wagmi'
-import { anvil, arbitrum, bsc, celo, mainnet, sepolia } from 'wagmi/chains'
+import { anvil, arbitrum, bsc, mainnet, sepolia } from 'wagmi/chains'
 import { injected } from 'wagmi/connectors/injected'
 import { walletConnect } from 'wagmi/connectors/walletConnect'
 import { SUPPORTED_CHAINS } from './chains'
@@ -41,7 +41,6 @@ export const wagmiConfig = createConfig({
     [mainnet.id]: http(),
     [bsc.id]: http(),
     [arbitrum.id]: http(),
-    [celo.id]: http(),
     [anvil.id]: http(),
   },
   multiInjectedProviderDiscovery: true,

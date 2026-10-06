@@ -76,7 +76,7 @@ test('an active wallet', async ({ page }, testInfo) => {
   await mockServer(page, new Map([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]]))
   await page.goto('/dashboard')
 
-  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible()
   await expectTheme(page, testInfo)
   await expect(page.getByText('Active', { exact: true })).toBeVisible()
   await expect(page.getByText('Assistant on')).toBeVisible()
@@ -150,7 +150,7 @@ test('switching networks', async ({ page }, testInfo) => {
     ]),
   )
   await page.goto('/dashboard')
-  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible()
 
   await page.getByRole('button', { name: 'Network: Sepolia' }).click()
   await expect(page.getByRole('menuitem', { name: 'Add a network' })).toBeVisible()
@@ -158,7 +158,7 @@ test('switching networks', async ({ page }, testInfo) => {
   await snap(page, testInfo, 'network-menu')
 
   await page.getByRole('menuitem', { name: 'BNB Smart Chain' }).click()
-  await expect(page.getByText('Your Mitfah wallet on BNB Smart Chain')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on BNB Smart Chain')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Network: BNB Smart Chain' })).toBeVisible()
   await expect(page.getByText('Paused', { exact: true })).toBeVisible()
   expect(reads).toContain(BSC)
@@ -168,7 +168,7 @@ test('switching networks', async ({ page }, testInfo) => {
 
   // The choice survives a reload.
   await page.reload()
-  await expect(page.getByText('Your Mitfah wallet on BNB Smart Chain')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on BNB Smart Chain')).toBeVisible()
 })
 
 test('adding a token by its address', async ({ page }, testInfo) => {

@@ -32,8 +32,8 @@ export function TermsPage() {
       <h2>Your wallet and your limits</h2>
       <ul>
         <li>
-          Your browser wallet owns your Mitfah wallet. If you lose access to it, we can't recover your Mitfah wallet or
-          its funds for you.
+          Your browser wallet owns your Mitfah smart wallet. If you lose access to it, we can't recover your Mitfah
+          smart wallet or its funds for you.
         </li>
         <li>
           You choose the spending limit, the tokens it counts, the contacts the assistant may pay and the other
@@ -56,7 +56,7 @@ export function TermsPage() {
 
       <h2>Fees</h2>
       <p>
-        Each action the assistant takes pays the network fee and a small protocol fee from your Mitfah wallet. The
+        Each action the assistant takes pays the network fee and a small protocol fee from your Mitfah smart wallet. The
         protocol fee is a fixed amount of the network's own currency, so its dollar value moves with that
         currency's price, and it may change.
       </p>
@@ -82,7 +82,7 @@ export function TermsPage() {
       <h2>Ending your use</h2>
       <p>
         You can stop using Mitfah at any time. We may suspend or close accounts that break these terms. Your Mitfah
-        wallet stays yours either way, and you can still withdraw its funds with your owner wallet.
+        smart wallet stays yours either way, and you can still withdraw its funds with your owner wallet.
       </p>
 
       <h2>Changes</h2>

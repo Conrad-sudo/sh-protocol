@@ -31,7 +31,7 @@ const TRANSACTIONS = [
   { id: 4, chain_id: BSC, source: 'owner', status: 'failed', tx_hash: hash(4), action: 'Withdraw 0.5 BNB to your owner address' },
   { id: 3, chain_id: SEPOLIA, source: 'assistant', status: 'pending', tx_hash: null, action: `Transfer 1.0 USDC to ${PAYEE}` },
   { id: 2, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(2), action: 'Set the spending limit to $1,234' },
-  { id: 1, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(1), action: 'Create your Mitfah wallet' },
+  { id: 1, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(1), action: 'Create your Mitfah smart wallet' },
 ].map(t => ({ ...t, created_at: T0 + t.id * 600, mined_at: t.status === 'pending' ? null : T0 + t.id * 600 + 12 }))
 
 async function mockServer(page: Page) {

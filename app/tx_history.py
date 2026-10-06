@@ -195,7 +195,7 @@ def record_deploy(w3: Web3, user_id: int, chain_id: int, wallet_address: str, tx
         chain_id,
         wallet_address,
         "owner",
-        "Create your Mitfah wallet",
+        "Create your Mitfah smart wallet",
         status,
         tx_hash=_hex(tx_hash),
         mined_at=mined_at,

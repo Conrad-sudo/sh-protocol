@@ -37,7 +37,7 @@ export function ConnectDialog({ open, onClose }: { open: boolean; onClose: () =>
         <Modal.Title>Connect a wallet</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <Text muted>Choose the wallet that will own your Mitfah wallet.</Text>
+        <Text muted>Choose the wallet that will own your Mitfah smart wallet.</Text>
         {connectors.length === 0 ? (
           <Message type="info" showIcon className="mf-settings-note">
             No browser wallet found. Install one such as{' '}

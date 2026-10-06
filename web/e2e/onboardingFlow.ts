@@ -5,7 +5,7 @@ export const STEPS = {
   connect: 'Connect the wallet you signed in with',
   network: 'Where should your wallet live?',
   limits: 'How much may the assistant spend?',
-  fund: 'Prefund your Mitfah wallet',
+  fund: 'Prefund your Mitfah smart wallet',
   review: 'Check the details',
 } as const
 

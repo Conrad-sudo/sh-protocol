@@ -86,7 +86,7 @@ export function OnboardingPage() {
           ? `Your wallet is ready on ${chainName(result.chainId)}. You can now disconnect your browser wallet: the assistant works without it. Reconnect it when you want to change your limits or withdraw.`
           : 'Your wallet was created, but the assistant is not switched on yet. You can turn it on in Controls.'}
       </Message>,
-      { placement: 'topCenter', duration: 8000 },
+      { placement: 'topCenter', duration: 15_000 },
     )
     navigate('/dashboard', { replace: true })
   })
@@ -163,7 +163,7 @@ export function OnboardingPage() {
         <Text muted>
           {owner ? (
             <>
-              Your Mitfah wallet will be owned by <AddressText address={owner} />, so it signs the deploy. Connect it
+              Your Mitfah smart wallet will be owned by <AddressText address={owner} />, so it signs the deploy. Connect it
               to continue.
             </>
           ) : (
@@ -243,11 +243,11 @@ export function OnboardingPage() {
   } else if (step === 'fund') {
     const valid = isValidAmount(prefund)
     body = (
-      <StepBody title="Prefund your Mitfah wallet">
+      <StepBody title="Prefund your Mitfah smart wallet">
         <Text muted>
-          This is your Mitfah wallet's starting balance. Your assistant pays for everything from it — payments,
+          This is your Mitfah smart wallet's starting balance. Your assistant pays for everything from it — payments,
           swaps and every other transaction, plus their network fees — and never uses the funds in the wallet you
-          connected. It can only spend within your limit. You can add more any time.
+          connected. It can only spend within your limit. You can add more or withdraw any time.
         </Text>
         <Form fluid className="mf-auth-form">
           <Form.Group controlId="prefund">

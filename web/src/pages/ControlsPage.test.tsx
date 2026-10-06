@@ -832,7 +832,7 @@ describe('ControlsPage', () => {
     expect(await screen.findByText('Confirm in your wallet.')).toBeInTheDocument()
     await user.click(screen.getByRole('link', { name: 'Dashboard' }))
     await waitFor(() => expect(router.state.location.pathname).toBe('/dashboard'))
-    await screen.findByText(/^Your Mitfah wallet on/)
+    await screen.findByText(/^Your Mitfah smart wallet on/)
 
     approve()
     expect(await screen.findByText('Wallet paused. Nothing can go out until you unpause it.')).toBeInTheDocument()

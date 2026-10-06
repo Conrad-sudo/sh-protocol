@@ -69,7 +69,7 @@ export function useWalletView(): { wallet: WalletState; fallback: null } | { wal
             </LinkButton>
           }
         >
-          This account has no Mitfah wallet on this network yet.
+          This account has no Mitfah smart wallet on this network yet.
         </EmptyState>
       ),
     }

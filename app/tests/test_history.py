@@ -263,7 +263,7 @@ def test_owner_transactions_are_recorded_once_and_settled():
     tx_history.record_deploy(w3, user, CHAIN, WALLET, _hash(0x4), {"status": 1, "blockNumber": 7})
     deploys = [r for r in rows() if r["tx_hash"] == _hash(0x4)]
     check("a deploy is recorded once, even if confirmed twice",
-          len(deploys) == 1 and deploys[0]["action"] == "Create your Mitfah wallet", str(deploys))
+          len(deploys) == 1 and deploys[0]["action"] == "Create your Mitfah smart wallet", str(deploys))
 
 
 # ── Recording the assistant's transactions ───────────────────────────────────
@@ -789,7 +789,7 @@ def test_deploy_confirm_says_whether_the_network_has_seen_it():
         rows = db.get_transactions(me)
         check("listed under the hash that created it, found one block at a time",
               [(t["action"], t["tx_hash"], t["status"], t["mined_at"]) for t in rows]
-              == [("Create your Mitfah wallet", sped_up, "confirmed", 1_790_000_900)], str(rows))
+              == [("Create your Mitfah smart wallet", sped_up, "confirmed", 1_790_000_900)], str(rows))
 
         # Another account, on a node that can't read old state: still filed, just not listed.
         body, other_headers, other = sign_in(c)

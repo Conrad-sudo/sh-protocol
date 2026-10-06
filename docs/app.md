@@ -724,8 +724,10 @@ What it does that the bot cannot:
 
 - **Signing in is the wallet.** The user connects a browser wallet and signs a SIWE message for this
   site (`GET /api/auth/siwe/nonce`, then `POST /api/auth/siwe/login`); an address's first sign-in
-  creates its account. There is no email, password or Google sign-in, and `/signup` redirects to
-  `/login`. On a phone that means WalletConnect or the wallet app's own browser.
+  creates its account. Once the wallet connects, `GET /api/auth/siwe/account?address=` tells the
+  page whether the address has an account, so a returning user sees "Welcome back" and "Sign in"
+  and a new one sees "Sign up" with a note on what the address is for. There is no email, password
+  or Google sign-in, and `/signup` redirects to `/login`. On a phone that means WalletConnect or the wallet app's own browser.
 - **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
   is owned by a key the server has never seen. The API only prepares the transaction and records it
   once the network has it (`POST /api/deploy`, then `POST /api/deploy/confirm`).

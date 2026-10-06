@@ -16,7 +16,7 @@ export function OwnerAddressCard({ ownerAddr }: { ownerAddr: string | null }) {
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
           <Text weight="medium">Address</Text>
-          <Text muted size="sm">You sign in with it, and it owns your Mitfah wallets.</Text>
+          <Text muted size="sm">You sign in with it, and it owns your Mitfah smart wallets.</Text>
         </div>
         <div className="mf-settings-row-action">
           {ownerAddr ? (

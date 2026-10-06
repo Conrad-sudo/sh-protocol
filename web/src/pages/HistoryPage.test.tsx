@@ -92,7 +92,7 @@ describe('HistoryPage', () => {
   it("lists every transaction newest first, with its date, time, network and who sent it", async () => {
     stubServer({
       transactions: [
-        tx(1, { source: 'owner', action: 'Create your Mitfah wallet' }),
+        tx(1, { source: 'owner', action: 'Create your Mitfah smart wallet' }),
         tx(2, { chain_id: BSC, source: 'owner', action: 'Withdraw 0.5 BNB to your owner address', status: 'failed' }),
         tx(3, { action: `Transfer 5 USDC to ${SAM.address}` }),
       ],
@@ -113,7 +113,7 @@ describe('HistoryPage', () => {
     expect(middle).toHaveTextContent('BNB Smart Chain')
     expect(middle).toHaveTextContent('By you')
     expect(middle).toHaveTextContent('Failed')
-    expect(oldest).toHaveTextContent('Create your Mitfah wallet')
+    expect(oldest).toHaveTextContent('Create your Mitfah smart wallet')
   })
 
   it("links each hash to its network's live explorer, a local fork's included", async () => {

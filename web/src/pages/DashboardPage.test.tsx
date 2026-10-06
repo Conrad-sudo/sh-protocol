@@ -89,7 +89,7 @@ function stubServer({
   return { walletCalls, sent, prepared, requests }
 }
 
-const walletHeader = () => screen.findByText(/^Your Mitfah wallet on/)
+const walletHeader = () => screen.findByText(/^Your Mitfah smart wallet on/)
 const pendingKey = (chainId: number) => `mitfah-pending-owner-tx:7:${chainId}`
 
 /** Opens "Remove USDC?", connecting the owner wallet from it unless it already is. */
@@ -121,7 +121,7 @@ describe('DashboardPage', () => {
     stubServer()
     await renderRoutes(routes, '/dashboard')
 
-    expect(await walletHeader()).toHaveTextContent('Your Mitfah wallet on Sepolia')
+    expect(await walletHeader()).toHaveTextContent('Your Mitfah smart wallet on Sepolia')
     expect(screen.getByText('Active')).toBeInTheDocument()
     expect(screen.getByText('Assistant on')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'View on explorer' })).toHaveAttribute(
@@ -251,7 +251,7 @@ describe('DashboardPage', () => {
     expect(screen.queryByRole('menuitem', { name: /Ethereum/ })).toBeNull()
     await user.click(screen.getByRole('menuitem', { name: 'BNB Smart Chain' }))
 
-    expect(await screen.findByText('Your Mitfah wallet on BNB Smart Chain')).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah smart wallet on BNB Smart Chain')).toBeInTheDocument()
     expect(screen.getByText('Paused')).toBeInTheDocument()
     expect(walletCalls).toEqual([SEPOLIA, BSC])
     expect(localStorage.getItem('mitfah-chain:7')).toBe(String(BSC))
@@ -744,7 +744,7 @@ describe('DashboardPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
     await user.click(screen.getByRole('menuitem', { name: 'BNB Smart Chain' }))
-    expect(await screen.findByText('Your Mitfah wallet on BNB Smart Chain')).toBeInTheDocument()
+    expect(await screen.findByText('Your Mitfah smart wallet on BNB Smart Chain')).toBeInTheDocument()
     dialog = await openRemoveUsdc(user, { connect: false })
     expect(within(dialog).queryByText(/Waiting for/)).toBeNull()
     expect(within(dialog).getByRole('button', { name: 'Stop counting USDC' })).toBeEnabled()

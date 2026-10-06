@@ -4,7 +4,7 @@ import { render } from '@testing-library/react'
 import { createMemoryRouter, type RouteObject } from 'react-router'
 import { RouterProvider } from 'react-router/dom'
 import { createConfig, http, WagmiProvider } from 'wagmi'
-import { anvil, arbitrum, bsc, celo, mainnet, sepolia } from 'wagmi/chains'
+import { anvil, arbitrum, bsc, mainnet, sepolia } from 'wagmi/chains'
 import { mock, type MockParameters } from 'wagmi/connectors/mock'
 import { AuthProvider } from '../auth/AuthProvider'
 import { ChainProvider } from '../chain/ChainProvider'
@@ -52,7 +52,6 @@ export function makeWagmiConfig(features?: MockParameters['features']) {
       [mainnet.id]: http(),
       [bsc.id]: http(),
       [arbitrum.id]: http(),
-      [celo.id]: http(),
       [anvil.id]: http(),
     },
     storage: null,

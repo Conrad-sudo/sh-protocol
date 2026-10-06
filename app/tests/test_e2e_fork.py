@@ -1506,7 +1506,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
         check(f"the owner action “{expected}” is listed", expected in actions, str(actions))
     check("the withdrawal is listed with its amount",
           any(a.startswith("Withdraw 0.1 ETH to 0x") for a in actions), str(actions))
-    deploys = [t for t in listed if t["action"] == "Create your Mitfah wallet"]
+    deploys = [t for t in listed if t["action"] == "Create your Mitfah smart wallet"]
     check("the deploy is listed as confirmed, and the out-of-gas one as failed",
           sorted(t["status"] for t in deploys) == ["confirmed", "failed"], str(deploys))
     check("nothing is left pending", not [t for t in listed if t["status"] == "pending"],

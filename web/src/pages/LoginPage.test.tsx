@@ -9,15 +9,17 @@ const NONCE = 'f00dfeed1234abcd'
 const SIGNATURE = `0x${'ab'.repeat(65)}`
 
 /**
- * Signed out on load. The nonce endpoint answers NONCE, the mock wallet signs anything, and
- * `/api/auth/siwe/login` answers with `loginResponse`. Returns what was posted to it.
+ * Signed out on load. The nonce endpoint answers NONCE, the mock wallet signs anything, the address
+ * check answers `registered`, and `/api/auth/siwe/login` answers with `loginResponse`. Returns what
+ * was posted to it.
  */
-function stubApi(loginResponse: () => Response) {
+function stubApi(loginResponse: () => Response, { registered = true }: { registered?: boolean } = {}) {
   const logins: { message: string; signature: string; nonce: string }[] = []
   const fetch = vi.fn((url: string, init?: RequestInit) => {
     if (isRpc(url)) return Promise.resolve(answerRpc(init, { eth_sign: () => SIGNATURE }))
     if (url.endsWith('/api/auth/refresh')) return Promise.resolve(json(401, { detail: 'No refresh token' }))
     if (url.endsWith('/api/auth/siwe/nonce')) return Promise.resolve(json(200, { nonce: NONCE }))
+    if (url.endsWith(`/api/auth/siwe/account?address=${WALLET}`)) return Promise.resolve(json(200, { registered }))
     if (url.endsWith('/api/auth/siwe/login')) {
       logins.push(JSON.parse(String(init?.body)))
       return Promise.resolve(loginResponse())
@@ -31,11 +33,17 @@ function stubApi(loginResponse: () => Response) {
   return { fetch, logins }
 }
 
-/** Connects the mock wallet, then signs in with it. */
-async function connectAndSignIn() {
+/** Connects the mock wallet. */
+async function connect() {
   const user = userEvent.setup()
   await user.click(await screen.findByRole('button', { name: 'Connect wallet' }))
   await user.click(await screen.findByRole('button', { name: 'Mock Connector' }))
+  return user
+}
+
+/** Connects the mock wallet, then signs in with it as a returning address. */
+async function connectAndSignIn() {
+  const user = await connect()
   await user.click(await screen.findByRole('button', { name: 'Sign in' }))
 }
 
@@ -54,7 +62,7 @@ describe('LoginPage', () => {
     const router = await renderRoutes(routes, '/login')
 
     expect(await screen.findByRole('heading', { name: 'Sign in with your wallet' })).toBeInTheDocument()
-    expect(screen.getByText(/New here\? Signing in creates your account\./)).toBeInTheDocument()
+    expect(screen.getByText(/First time\? Signing in creates your account\./)).toBeInTheDocument()
     // Nothing about email, passwords or Google is left.
     expect(screen.queryByLabelText('Email')).toBeNull()
     expect(document.querySelector('.mf-google-button')).toBeNull()
@@ -71,6 +79,40 @@ describe('LoginPage', () => {
     expect(message).toMatch(new RegExp(`^${window.location.host} wants you to sign in with your Ethereum account:\n${WALLET}\n`))
     expect(message).toContain('Sign in to Mitfah with this wallet.')
     expect(message).toContain(`Nonce: ${NONCE}`)
+  })
+
+  it('greets a returning address and keeps the first-time notes out of the way', async () => {
+    stubApi(() => json(200, TOKEN))
+    await renderRoutes(routes, '/login')
+    await connect()
+
+    expect(await screen.findByText('Welcome back.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Sign in with your wallet' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign up' })).toBeNull()
+    expect(screen.queryByText(/to prove it's yours/)).toBeNull()
+    expect(screen.queryByText('This address is your Mitfah account.')).toBeNull()
+    // Once a wallet is connected, the line about which wallet to connect is gone.
+    expect(screen.queryByText(/First time\? Signing in creates your account\./)).toBeNull()
+  })
+
+  it('asks a new address to sign up, and explains what the address is for', async () => {
+    const { logins } = stubApi(() => json(200, TOKEN), { registered: false })
+    await renderRoutes(routes, '/login')
+    const user = await connect()
+
+    expect(await screen.findByText(/to prove it's yours\. Signing is free and doesn't move any funds\./)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Sign up with your wallet' })).toBeInTheDocument()
+    expect(screen.getByText('This address is your Mitfah account.')).toBeInTheDocument()
+    expect(screen.getByText(/the only address that can pause your smart wallet, change its limits or withdraw\./)).toBeInTheDocument()
+    expect(screen.queryByText(/can't recover your account/)).toBeNull()
+    expect(screen.queryByText('Welcome back.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
+    expect(screen.queryByText(/First time\? Signing in creates your account\./)).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Sign up' }))
+    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
+    expect(logins).toHaveLength(1)
   })
 
   it('says so when the signature is declined', async () => {

@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
 import { createSiweMessage } from 'viem/siwe'
 import { useConnection, useDisconnect, useSignMessage } from 'wagmi'
-import { Button, Message, Text } from 'rsuite'
-import { siweLogin, siweNonce } from '../api/auth'
+import { Button, Loader, Message, Text } from 'rsuite'
+import { siweAccount, siweLogin, siweNonce } from '../api/auth'
 import { useAuth } from '../auth/useAuth'
 import { AddressText } from '../components/AddressText'
 import { PageMeta } from '../components/PageMeta'
@@ -17,7 +17,8 @@ const STATEMENT = 'Sign in to Mitfah with this wallet.'
 
 /**
  * Signing in, which is done with the browser wallet alone: connect it, then sign a short message.
- * Signing is free and moves nothing. The first sign-in for an address creates its account. On
+ * Signing is free and moves nothing. The first sign-in for an address creates its account, so the
+ * page calls it signing up for an address the API doesn't know yet. On
  * success the session starts, and RedirectIfSignedIn (around this page) sends the user on to
  * `?next=` or the dashboard.
  *
@@ -28,14 +29,9 @@ export function LoginPage() {
     <WalletProvider>
       <PageMeta
         title="Sign in · Mitfah"
-        description="Sign in to Mitfah with your wallet to manage your Mitfah wallet, change its limits and talk to your assistant."
+        description="Sign in to Mitfah with your wallet to manage your Mitfah smart wallet, change its limits and talk to your assistant."
         path="/login"
       />
-      <h1 className="mf-auth-title">Sign in with your wallet</h1>
-      <Text muted>
-        Use the browser wallet that owns, or will own, your Mitfah wallet — such as MetaMask. New here? Signing in
-        creates your account.
-      </Text>
       <SignIn />
     </WalletProvider>
   )
@@ -47,6 +43,12 @@ function SignIn() {
   const { mutateAsync: signMessageAsync } = useSignMessage()
   const { signIn } = useAuth()
   const [connectOpen, setConnectOpen] = useState(false)
+  // A returning address signs in; a new one signs up. Asked again whenever the wallet switches account.
+  const account = useQuery({
+    queryKey: ['siwe-account', address],
+    queryFn: () => siweAccount(address!),
+    enabled: !!address,
+  })
 
   const submit = useMutation({
     mutationFn: async (account: Address) => {
@@ -70,9 +72,24 @@ function SignIn() {
     onSuccess: signIn,
   })
 
-  if (!isConnected || !address) {
+  const connected = isConnected && !!address
+  // If the check fails, the address is treated as new: the same signature signs in either way.
+  const returning = account.data?.registered === true
+  // "Sign in" until the check says the connected address is new.
+  const heading = (
+    <h1 className="mf-auth-title">
+      {connected && !account.isPending && !returning ? 'Sign up with your wallet' : 'Sign in with your wallet'}
+    </h1>
+  )
+
+  if (!connected) {
     return (
       <>
+        {heading}
+        <Text muted>
+          Use the browser wallet that owns, or will own, your Mitfah smart wallet — such as MetaMask. First time? Signing
+          in creates your account.
+        </Text>
         <Button appearance="primary" block size="lg" className="mf-step-action" onClick={() => setConnectOpen(true)}>
           Connect wallet
         </Button>
@@ -81,17 +98,37 @@ function SignIn() {
     )
   }
 
+  if (account.isPending) {
+    return (
+      <>
+        {heading}
+        <Loader className="mf-step-action" content="Checking this address…" />
+      </>
+    )
+  }
+
   return (
     <div className="mf-verify">
-      <Text>
-        Sign a message with <AddressText address={address} /> to prove it's yours. Signing is free and doesn't move any
-        funds.
-      </Text>
-      <Message type="info" showIcon className="mf-settings-note">
-        <strong>This address is your Mitfah account.</strong> It's how you sign in, and the only address that can pause
-        your wallet, change its limits or withdraw. If you lose access to it, Mitfah can't recover your account or your
-        wallet for you.
-      </Message>
+      {heading}
+      {returning ? (
+        <>
+          <Text weight="semibold">Welcome back.</Text>
+          <Text>
+            Sign a message with <AddressText address={address} />.
+          </Text>
+        </>
+      ) : (
+        <>
+          <Text>
+            Sign a message with <AddressText address={address} /> to prove it's yours. Signing is free and doesn't move
+            any funds.
+          </Text>
+          <Message type="info" showIcon className="mf-settings-note">
+            <strong>This address is your Mitfah account.</strong> It's how you sign in, and the only address that can
+            pause your smart wallet, change its limits or withdraw.
+          </Message>
+        </>
+      )}
       {submit.isError && (
         <Message type="error" showIcon className="mf-settings-note">
           {isUserRejection(submit.error) ? 'Cancelled — nothing was signed.' : errorText(submit.error)}
@@ -105,7 +142,7 @@ function SignIn() {
         loading={submit.isPending}
         onClick={() => submit.mutate(address)}
       >
-        Sign in
+        {returning ? 'Sign in' : 'Sign up'}
       </Button>
       <Text className="mf-auth-alt" muted>
         Not this address? Switch accounts in your wallet, or{' '}

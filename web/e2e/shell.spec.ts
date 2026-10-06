@@ -19,6 +19,8 @@ async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; m
           : route.fulfill({ status: 401, json: { detail: 'No refresh token' } })
       case '/api/auth/siwe/nonce':
         return route.fulfill({ json: { nonce: 'e2enonce1234abcd' } })
+      case '/api/auth/siwe/account':
+        return route.fulfill({ json: { registered: false } })
       case '/api/auth/siwe/login':
         session = true
         return route.fulfill({ json: TOKEN })
@@ -33,7 +35,7 @@ async function mockApi(page: Page, { signedIn, me = ME }: { signedIn: boolean; m
   })
 }
 
-test('signing in with the wallet returns you to the page you asked for', async ({ page }, testInfo) => {
+test('signing up with the wallet returns you to the page you asked for', async ({ page }, testInfo) => {
   await installFakeWallet(page, {
     address: OWNER,
     chainId: SEPOLIA,
@@ -54,9 +56,10 @@ test('signing in with the wallet returns you to the page you asked for', async (
   await page.getByRole('button', { name: 'Connect wallet' }).click()
   await page.getByRole('dialog').getByRole('button', { name: FAKE_WALLET_NAME }).click()
   await expect(page.getByText(/to prove it's yours/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Sign up with your wallet' })).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'login-connected')
-  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.getByRole('button', { name: 'Sign up' }).click()
 
   await expect(page).toHaveURL(/\/contacts$/)
   await expect(page.getByRole('heading', { name: 'Contacts' })).toBeVisible()
@@ -102,7 +105,7 @@ test('settings shows the address you sign in with', async ({ page }, testInfo) =
 
   const panel = page.locator('.rs-panel', { hasText: 'Your wallet' })
   await expect(panel.getByTitle(owner)).toContainText('0xf39F…2266')
-  await expect(panel.getByText('You sign in with it, and it owns your Mitfah wallets.')).toBeVisible()
+  await expect(panel.getByText('You sign in with it, and it owns your Mitfah smart wallets.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Copy address' })).toBeVisible()
   // Wallet sign-in is the only kind: nothing about email, passwords or Google.
   await expect(page.getByText('Sign-in methods')).toHaveCount(0)

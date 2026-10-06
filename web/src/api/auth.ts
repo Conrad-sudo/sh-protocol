@@ -6,6 +6,13 @@ export function siweNonce() {
   return apiFetch<{ nonce: string }>('/api/auth/siwe/nonce', { auth: false })
 }
 
+/** Whether an address already has an account: a returning user signs in, a new one signs up. */
+export function siweAccount(address: string) {
+  return apiFetch<{ registered: boolean }>(`/api/auth/siwe/account?address=${encodeURIComponent(address)}`, {
+    auth: false,
+  })
+}
+
 /**
  * Signs in with a signed SIWE message — the only way in. The first sign-in for an address creates
  * its account; the refresh token comes back as an httpOnly cookie.

@@ -2,7 +2,13 @@ import ArrowDownLineIcon from '@rsuite/icons/ArrowDownLine'
 import { useNavigate } from 'react-router'
 import { Button, Dropdown } from 'rsuite'
 import { useSelectedChain } from '../../chain/useSelectedChain'
-import { chainName } from '../../wallet/chains'
+import { chainLogoUrl, chainName } from '../../wallet/chains'
+
+/** Decorative: the network's name always sits beside it. */
+function ChainLogo({ chainId }: { chainId: number }) {
+  const src = chainLogoUrl(chainId)
+  return src ? <img className="mf-chain-logo" src={src} alt="" width={16} height={16} /> : null
+}
 
 /**
  * Which network the app is showing, among those the user has a wallet on, plus a way to create a
@@ -32,13 +38,17 @@ export function ChainSwitcher() {
         >
           <span className="mf-chain-dot" aria-hidden="true" />
           <span className="mf-chain-name">{chainName(chainId)}</span>
+          <ChainLogo chainId={chainId} />
         </Button>
       )}
     >
       {walletChains.map(id => (
         <Dropdown.Item key={id} active={id === chainId} onSelect={() => setChainId(id)}>
-          {chainName(id)}
-          {isFork(id) && <small className="mf-muted"> · local test network</small>}
+          <span className="mf-chain-option">
+            {chainName(id)}
+            <ChainLogo chainId={id} />
+            {isFork(id) && <small className="mf-muted">· local test network</small>}
+          </span>
         </Dropdown.Item>
       ))}
       {canAdd && <Dropdown.Separator />}

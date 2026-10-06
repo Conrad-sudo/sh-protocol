@@ -577,6 +577,26 @@ def siwe_nonce(request: Request):
     return {"nonce": auth.issue_siwe_nonce()}
 
 
+@app.get("/api/auth/siwe/account")
+@limiter.limit("30/minute")
+def siwe_account(request: Request, address: str = Query(max_length=64)):
+    """
+    Says whether an address already has an account, so the sign-in page can greet a returning user
+    and call the button "Sign up" for a new one. Sign-in itself does not depend on it.
+
+    Open to anyone: it reveals only whether an address has signed in to Mitfah before. Anyone with a
+    wallet already shows that on chain through deployWallet, and the rate limit keeps a sweep slow.
+
+    @param address  The connected wallet's address, any case.
+    @return         {"registered": bool}.
+    """
+    try:
+        owner = Web3.to_checksum_address(address)
+    except (ValueError, TypeError):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"'{address}' is not an Ethereum address")
+    return {"registered": get_user_by_owner_addr(owner) is not None}
+
+
 @app.post("/api/auth/siwe/login")
 @limiter.limit("10/minute")
 def siwe_login(request: Request, req: SiweLoginRequest, response: Response):

@@ -159,8 +159,8 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
         </>
       )}
       <Message type="warning" showIcon>
-        Check every character against the address {review.contact.name} gave you. Scam addresses often match only the
-        first and last few.
+        Please check {review.contact.name}'s address carefully and make sure all characters match. 
+        Scam addresses often match only the first and last few characters.
       </Message>
       {owner && <SignerBar owner={owner} />}
       {signerReady &&

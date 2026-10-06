@@ -140,7 +140,7 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
   await snap(page, testInfo, 'onboarding-creating')
 
   await expect(page).toHaveURL(/\/dashboard$/)
-  await expect(page.getByText('Your Mitfah wallet on Sepolia')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible()
   await expect(page.getByText(/^Your wallet is ready on Sepolia\. You can now disconnect your browser wallet/)).toBeVisible()
   await snap(page, testInfo, 'onboarding-done')
 
@@ -196,7 +196,7 @@ test('choosing a network the wallet is not on asks it to switch', async ({ page 
 
   await walkOnboarding(page, { network: /BNB Smart Chain/ })
 
-  await expect(page.getByText('Your Mitfah wallet on BNB Smart Chain')).toBeVisible()
+  await expect(page.getByText('Your Mitfah smart wallet on BNB Smart Chain')).toBeVisible()
   expect(recorded.deploy).toEqual([expect.objectContaining({ chain_id: 56 })])
   // Sent on the network the user picked, which the wallet was switched to on the way.
   expect(recorded.sent).toEqual([expect.objectContaining({ chainId: 56 })])

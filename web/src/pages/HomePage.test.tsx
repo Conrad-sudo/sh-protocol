@@ -48,9 +48,10 @@ describe('HomePage', () => {
     expect(getStarted).toHaveLength(2)
     for (const link of getStarted) expect(link).toHaveAttribute('href', '/login')
     expect(within(screen.getByRole('banner')).getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
-    for (const name of ['How it works', 'Built to keep your money safe', 'Also in Telegram', 'Questions']) {
+    for (const name of ['How it works', 'Built to keep your money safe', 'Also in Telegram', 'FAQs']) {
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
     }
+    expect(screen.getByText('What is Mitfah?')).toBeInTheDocument()
     expect(screen.getByText('Does Mitfah hold my money?')).toBeInTheDocument()
   })
 
@@ -69,7 +70,7 @@ describe('HomePage', () => {
     stubApi({ chains: () => json(500, { detail: 'boom' }) })
     await renderRoutes(routes, '/')
 
-    expect(await screen.findByRole('heading', { name: 'Questions' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'FAQs' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Networks' })).toBeNull()
   })
 

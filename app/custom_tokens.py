@@ -141,7 +141,7 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     if int(address, 16) == 0:
         raise CustomTokenError("That's the zero address, not a token.")
     if address == Web3.to_checksum_address(wallet_address):
-        raise CustomTokenError("That's your Mitfah wallet's own address, not a token.")
+        raise CustomTokenError("That's your Mitfah smart wallet's own address, not a token.")
 
     listed = get_supported_token_by_address(chain_id, address)
     if listed is not None:

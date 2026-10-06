@@ -24,7 +24,7 @@ export function WalletHeader({ wallet }: { wallet: WalletState }) {
       <div className="mf-wallet-header-row">
         <div className="mf-wallet-id">
           <Text size="sm" muted>
-            Your Mitfah wallet on {chainName(wallet.chain_id)}
+            Your Mitfah smart wallet on {chainName(wallet.chain_id)}
           </Text>
           <div className="mf-wallet-address">
             <AddressText address={wallet.address} />

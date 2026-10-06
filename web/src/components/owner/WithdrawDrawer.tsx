@@ -96,7 +96,7 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
       </Drawer.Header>
       <Drawer.Body>
         <Text muted>
-          Move funds out of your Mitfah wallet. Withdrawals don't count toward the spending limit
+          Move funds out of your Mitfah smart wallet. Withdrawals don't count toward the spending limit
           {wallet.paused ? ', and they work while the wallet is paused.' : '.'}
         </Text>
         <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />

@@ -19,7 +19,7 @@ import { chainName } from '../wallet/chains'
 const STEPS = [
   {
     title: 'Create your wallet',
-    body: 'Sign in with the browser wallet you already use — it is your account — and create a Mitfah wallet. Your browser wallet owns it.',
+    body: 'Sign in with the browser wallet you already use — it is your account — and create a Mitfah smart wallet. Your browser wallet owns it.',
   },
   {
     title: 'Set your limit',
@@ -51,7 +51,7 @@ const RULES: { icon: ReactNode; tries: string; wallet: string }[] = [
   {
     icon: <KeyIcon />,
     tries: 'Change your limit or rules',
-    wallet: 'Can’t. Only your browser wallet can, because it owns the Mitfah wallet.',
+    wallet: 'Can’t. Only your browser wallet can, because it owns the Mitfah smart wallet.',
   },
   {
     icon: <TimeIcon />,
@@ -66,6 +66,14 @@ const RULES: { icon: ReactNode; tries: string; wallet: string }[] = [
 ]
 
 const FAQ = [
+  {
+    q: 'What is Mitfah?',
+    a: 'A smart wallet with an AI assistant. Tell it what you want in plain words, like “swap 50 USDC for ETH” or “send 20 USDC to Sam”, and it does it on-chain for you, always within the limits you set. It’s built on the SessionHandler protocol.',
+  },
+  {
+    q: 'What is a smart wallet?',
+    a: 'A wallet that is a smart contract (a small program on the blockchain) instead of a single private key. Because it runs code, it can enforce rules on every payment, such as a daily spending limit, who it may pay, and a pause button. Your browser wallet owns it, so only you can change those rules.',
+  },
   {
     q: 'Does Mitfah hold my money?',
     a: 'No. Your money sits in a smart contract wallet that your own browser wallet owns. Mitfah never has your owner key, so it can’t take the funds or change your limits.',
@@ -84,7 +92,7 @@ const FAQ = [
   },
   {
     q: 'Which wallets can I connect?',
-    a: 'Any browser wallet, such as MetaMask, Rabby or Coinbase Wallet. You sign in with it, and it owns your Mitfah wallet. On a phone, open Mitfah in your wallet app’s browser.',
+    a: 'Any browser wallet, such as MetaMask, Rabby or Coinbase Wallet. You sign in with it, and it owns your Mitfah smart wallet. On a phone, open Mitfah in your wallet app’s browser.',
   },
   {
     q: 'Can I use it from Telegram?',
@@ -213,7 +221,7 @@ export function HomePage() {
       </section>
 
       <section className="mf-landing-section mf-faq" aria-labelledby="faq-heading">
-        <h2 id="faq-heading">Questions</h2>
+        <h2 id="faq-heading">FAQs</h2>
         {FAQ.map(item => (
           <details key={item.q} className="mf-faq-item" name="faq">
             <summary>{item.q}</summary>

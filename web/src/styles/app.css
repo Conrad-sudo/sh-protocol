@@ -1948,6 +1948,17 @@ main p a {
   background: var(--mf-green);
 }
 
+.mf-chain-logo {
+  flex: none;
+  display: block;
+}
+
+.mf-chain-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ── Controls ───────────────────────────────────────────────────────────── */
 
 .mf-control-row {
