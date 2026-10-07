@@ -66,7 +66,7 @@ with wagmi, like the signed-in app. On a phone, signing in needs WalletConnect
 | `SIWE_DOMAIN` | API | The site a sign-in message must name (`mitfah.com`). The check is what stops a phishing page replaying someone's signature to sign in as them. |
 | `COOKIE_SECURE` | API | `1` in production; `0` only for local http. |
 | `JWT_SECRET` | API | A long random string. |
-| `TELEGRAM_BOT_USERNAME` | API | Needed to mint Telegram deep links. |
+| `MITFAH_<STEM>_USERNAME` | API | Each network's Telegram bot username, no @ (stems `ETH`, `SEPOLIA`, `BSC`, `ARB`, `BASE`). Mints the link that opens a bot, and lists the bots in Settings and on the Assistant page. A network without one shows no bot. |
 | `VITE_WALLETCONNECT_PROJECT_ID` | build | A Reown project id. Empty means WalletConnect is dropped from the bundle entirely; with one, it is loaded on demand. Without it, a phone can sign in only from a wallet app's own browser. |
 
 **Hosting.** `dist/` is static. Serve `/terms` from `terms.html` and `/privacy` from

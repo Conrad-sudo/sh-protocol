@@ -34,7 +34,7 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  APPLICATIONS       web app  ·  Telegram bot  ·  CLI agent                  │
+│  APPLICATIONS       web app  ·  Telegram bots  ·  CLI agent                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  SERVICE LAYER      FastAPI  ·  accounts, wallet sign-in (SIWE)             │
 │                     wallet-signed contacts  ·  owner actions in-browser     │
@@ -146,7 +146,7 @@ Celo has partial scaffolding in the Python layer but no contract deployment path
 - Node 22.22+ — only for the web app in `web/`
 - An LLM API key — `ANTHROPIC_API_KEY` by default, or any other LangChain chat model
 - An Alchemy API key — for live Sepolia, the mainnet / BSC / Arbitrum / Base forks, and the History tab on Base
-- *(Optional)* A Telegram bot token from [@BotFather](https://t.me/BotFather) — only for `make bot`
+- *(Optional)* Telegram bots from [@BotFather](https://t.me/BotFather), one per network — only for `make bot`
 
 ## Clone and install
 
@@ -195,7 +195,7 @@ cd web && npm test && npm run e2e
 | Document | Contents |
 |---|---|
 | [docs/contracts.md](docs/contracts.md) | Every contract, the spending-limit design, the fee, the test suite |
-| [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bot |
+| [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bots |
 | [web/README.md](web/README.md) | The web app |
 | [docs/vault-security.md](docs/vault-security.md) | Environment variables, Vault setup, session-key security |
 | [docs/setup.md](docs/setup.md) | Local, fork and live deployments |

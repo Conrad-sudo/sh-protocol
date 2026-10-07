@@ -30,6 +30,8 @@ requests==2.32.5
 # Config + Telegram front end
 python-dotenv==1.2.1
 python-telegram-bot[job-queue]==22.6
+# Reads the assistant's Markdown so the bots can show it as Telegram formatting (telegram_format.py).
+markdown-it-py==4.2.0
 
 # Web API + auth. Sign-in is SIWE only, and both it and the signed contacts (EIP-712) are
 # verified with eth-account above, so there is no separate siwe package, password hasher or

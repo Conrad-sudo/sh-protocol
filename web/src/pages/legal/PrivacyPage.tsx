@@ -72,7 +72,7 @@ export function PrivacyPage() {
           blockchain node providers.
         </li>
         <li>
-          <strong>Telegram</strong>, only if you link it. Messages you send the bot pass through Telegram.
+          <strong>Telegram</strong>, only if you link it. Messages you send the bots pass through Telegram.
         </li>
         <li>
           <strong>WalletConnect</strong>, only if you connect a wallet with it.

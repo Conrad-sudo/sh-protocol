@@ -1,6 +1,71 @@
+import os
+
+from dotenv import load_dotenv
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
+from constants import (
+    CHAIN_ID_ANVIL,
+    CHAIN_ID_ARBITRUM,
+    CHAIN_ID_BASE,
+    CHAIN_ID_BSC,
+    CHAIN_ID_CELO,
+    CHAIN_ID_MAINNET,
+    CHAIN_ID_SEPOLIA,
+)
 from db import get_rpc_url, get_chain_id_from_name, get_user_network
+
+load_dotenv()
+
+# The API and the Telegram bots speak chain IDs: a browser wallet reports one (eth_chainId), and
+# each bot serves one. Everything downstream of them speaks chain NAMES: save_user_network stores
+# one, and load_network_config, contracts.py, tools.py and tx_sender all read it back. This map is
+# the only place the two meet.
+#
+# It cannot be a DB lookup. `chains` holds two rows per forkable network — sepolia AND sepolia-fork
+# both claim 11155111, with different RPCs (Alchemy vs 127.0.0.1:8545) — so get_chain_name_from_id
+# returns whichever row SQLite reaches first. Which of the pair is meant is a fact about where THIS
+# server runs, not something a browser can assert, so it is resolved here and never taken from the
+# request.
+CHAIN_NAME_BY_ID: dict[int, str] = {
+    CHAIN_ID_ANVIL: "anvil",
+    CHAIN_ID_MAINNET: "mainnet",
+    CHAIN_ID_SEPOLIA: "sepolia",
+    CHAIN_ID_BSC: "bsc",
+    CHAIN_ID_CELO: "celo",
+    CHAIN_ID_ARBITRUM: "arbitrum",
+    CHAIN_ID_BASE: "base",
+}
+# Chains whose live name has a local `-fork` twin. Anvil is absent: it is already local and has no
+# live counterpart to fork.
+FORKABLE_CHAIN_IDS = {
+    CHAIN_ID_MAINNET,
+    CHAIN_ID_SEPOLIA,
+    CHAIN_ID_BSC,
+    CHAIN_ID_CELO,
+    CHAIN_ID_ARBITRUM,
+    CHAIN_ID_BASE,
+}
+# Set APP_FORK_MODE=1 to point every forkable chain at its local anvil fork instead of the live RPC.
+# A deployment-wide switch, read once at import: a process serves forks or it serves live chains,
+# and a request must not be able to choose. The API and the Telegram bots read the same switch, so
+# a bot acts on the same network the web app shows for its chain.
+FORK_MODE = os.getenv("APP_FORK_MODE", "").lower() in ("1", "true", "yes")
+
+
+def network_name(chain_id: int) -> str:
+    """
+    This server's network name for `chain_id`: its `-fork` twin in fork mode. RPC-free.
+
+    @param chain_id  A chain ID.
+    @return          The network name, e.g. "base", or "base-fork" in fork mode.
+    @raises ValueError  For a chain this server does not serve.
+    """
+    chain_name = CHAIN_NAME_BY_ID.get(chain_id)
+    if chain_name is None:
+        raise ValueError(f"Unsupported chain ID: {chain_id}. Supported: {sorted(CHAIN_NAME_BY_ID)}")
+    if FORK_MODE and chain_id in FORKABLE_CHAIN_IDS:
+        chain_name = f"{chain_name}-fork"
+    return chain_name
 
 
 class _ChainIdOnceProvider(HTTPProvider):

@@ -35,6 +35,10 @@ interface ServerOptions {
   clearStatus?: number
   /** The network's exchange router; without one the assistant can't swap. */
   router?: string
+  /** Whether the account has linked Telegram. */
+  telegramLinked?: boolean
+  /** The username of the network's Telegram bot; it has none by default. */
+  telegramBot?: string
 }
 
 /** A signed-in account with a wallet on Sepolia and a chat that behaves like app/api.py. */
@@ -50,6 +54,8 @@ function stubServer({
   contacts = [SAM],
   clearStatus = 200,
   router,
+  telegramLinked = false,
+  telegramBot,
 }: ServerOptions = {}) {
   let thread = [...history]
   const posted: unknown[] = []
@@ -60,8 +66,14 @@ function stubServer({
     vi.fn((url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
-      if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
-      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS.map(c => ({ ...c, router })) }))
+      if (url === '/api/me') {
+        return Promise.resolve(
+          json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains, telegram_linked: telegramLinked }),
+        )
+      }
+      if (url === '/api/chains') {
+        return Promise.resolve(json(200, { chains: CHAINS.map(c => ({ ...c, router, telegram_bot: telegramBot ?? null })) }))
+      }
       if (url === `/api/tokens?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { tokens: TOKENS }))
       if (url === '/api/contacts') return Promise.resolve(json(200, { contacts }))
       if (url === `/api/wallet/${SEPOLIA}`) {
@@ -183,6 +195,29 @@ describe('AssistantPage', () => {
     expect(await within(aside).findByText('alex')).toBeInTheDocument()
     expect(within(aside).getByText('sam')).toBeInTheDocument()
     expect(within(aside).getByRole('link', { name: 'Manage contacts' })).toHaveAttribute('href', '/contacts')
+  })
+
+  it('opens the network’s Telegram bot once Telegram is linked', async () => {
+    stubServer({ telegramLinked: true, telegramBot: 'mitfah_sepolia_bot' })
+    await renderRoutes(routes, '/assistant')
+
+    const open = await screen.findByRole('link', { name: 'Open in Telegram' })
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_sepolia_bot')
+    expect(open).toHaveAttribute('target', '_blank')
+    expect(open).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('offers no Telegram link before Telegram is linked, or where the network has no bot', async () => {
+    const router = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+    for (const options of [{ telegramBot: 'mitfah_sepolia_bot' }, { telegramLinked: true }]) {
+      cleanup()
+      resetClientForTests()
+      stubServer({ ...options, router })
+      await renderRoutes(routes, '/assistant')
+      // The swap suggestion needs the network list too, so the link would be showing by now.
+      expect(await screen.findByRole('button', { name: 'Swap 1 ETH for USDC…' })).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Open in Telegram' })).not.toBeInTheDocument()
+    }
   })
 
   it('sends on Enter, shows the message at once, and waits for the reply', async () => {

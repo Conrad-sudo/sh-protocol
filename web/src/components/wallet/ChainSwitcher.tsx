@@ -5,7 +5,7 @@ import { useSelectedChain } from '../../chain/useSelectedChain'
 import { chainLogoUrl, chainName } from '../../wallet/chains'
 
 /** Decorative: the network's name always sits beside it. */
-function ChainLogo({ chainId }: { chainId: number }) {
+export function ChainLogo({ chainId }: { chainId: number }) {
   const src = chainLogoUrl(chainId)
   return src ? <img className="mf-chain-logo" src={src} alt="" width={16} height={16} /> : null
 }

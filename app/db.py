@@ -1454,6 +1454,31 @@ def unlink_telegram(user_id: int):
     db.commit()
 
 
+def get_telegram_chats_on_chain(chain_id: int) -> list[tuple[int, int]]:
+    """
+    Every linked Telegram chat whose account has a wallet on `chain_id`: who that chain's bot
+    checks on each day.
+
+    @param chain_id  The chain the bot serves.
+    @return          [(user_id, chat_id), ...], by user ID.
+    """
+    rows = (
+        get_db()
+        .execute(
+            """
+            SELECT u.id AS user_id, u.telegram_chat_id AS chat_id
+            FROM users u
+            JOIN session_handlers s ON s.user_id = u.id
+            WHERE s.chain_id = ? AND u.telegram_chat_id IS NOT NULL
+            ORDER BY u.id
+            """,
+            (chain_id,),
+        )
+        .fetchall()
+    )
+    return [(row["user_id"], row["chat_id"]) for row in rows]
+
+
 # ── Telegram link nonces ──────────────────────────────────────────────────────
 
 

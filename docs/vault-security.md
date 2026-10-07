@@ -10,7 +10,7 @@ Create a `.env` file in the project root:
 # Signing keys
 ANVIL_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 API_BUNDLER=your_api_bundler_private_key_here          # the API's bundler; also the fork + live-Sepolia deployer
-TELEGRAM_BUNDLER=your_telegram_bundler_private_key_here # the Telegram bot's bundler — must differ from API_BUNDLER
+TELEGRAM_BUNDLER=your_telegram_bundler_private_key_here # the Telegram bots' bundler — must differ from API_BUNDLER
 BSC_PRIVATE_KEY=your_bsc_deployer_private_key_here
 CELO_PRIVATE_KEY=your_celo_deployer_private_key_here
 
@@ -30,9 +30,20 @@ CELO_RPC_URL=https://celo-mainnet.g.alchemy.com/v2/your_alchemy_key
 
 # AI / bot credentials
 ANTHROPIC_API_KEY=your_anthropic_api_key_here   # default LLM; not needed if you swap in another provider
-TELEGRAM_TOKEN=your_telegram_bot_token_here     # optional — only for `make bot` (the Telegram front end)
-TELEGRAM_BOT_USERNAME=your_bot_username         # optional — no @; used to mint Telegram deep links
 APP_USER_ID=1                                   # which account the local harnesses run as (see setup.md)
+
+# Optional — the Telegram bots, one per network (`make bot`). A token per bot, from @BotFather, and
+# its username without the @ (for the web app's links). A network left out has no bot.
+MITFAH_ETH_API=your_ethereum_bot_token
+MITFAH_ETH_USERNAME=your_ethereum_bot_username
+MITFAH_SEPOLIA_API=your_sepolia_bot_token
+MITFAH_SEPOLIA_USERNAME=your_sepolia_bot_username
+MITFAH_BSC_API=your_bnb_smart_chain_bot_token
+MITFAH_BSC_USERNAME=your_bnb_smart_chain_bot_username
+MITFAH_ARB_API=your_arbitrum_bot_token
+MITFAH_ARB_USERNAME=your_arbitrum_bot_username
+MITFAH_BASE_API=your_base_bot_token
+MITFAH_BASE_USERNAME=your_base_bot_username
 
 # Web API (`make api`)
 JWT_SECRET=                                     # REQUIRED for the API; long random string, fails closed if unset
@@ -59,7 +70,7 @@ ALCHEMY_API_KEY=your_alchemy_key
 >
 > `ANVIL_PRIVATE_KEY` is Anvil's default account 0 key — public, and safe to use locally only. `ANVIL_BUNDLER` is no longer read: plain Anvil now bundles with `API_BUNDLER` / `TELEGRAM_BUNDLER` like every other network, and can be removed from `.env`.
 >
-> **The two bundler keys.** The app is its own bundler on every network (`bundler.py`), and each *process* signs `handleOps` with its own key: the API with `API_BUNDLER`, the Telegram bot with `TELEGRAM_BUNDLER`. They must differ — `tx_sender`'s nonce lock covers one process, so two processes sharing a key would hand out the same nonces and replace each other's transactions. Both must be plain EOAs with no code, and on a live chain both must hold enough of the native asset to keep fronting gas (the EntryPoint repays them per op; nothing tops them up automatically).
+> **The two bundler keys.** The app is its own bundler on every network (`bundler.py`), and each *process* signs `handleOps` with its own key: the API with `API_BUNDLER`, the Telegram bots (all in one process) with `TELEGRAM_BUNDLER`. They must differ — `tx_sender`'s nonce lock covers one process, so two processes sharing a key would hand out the same nonces and replace each other's transactions. Both must be plain EOAs with no code, and on a live chain both must hold enough of the native asset to keep fronting gas (the EntryPoint repays them per op; nothing tops them up automatically).
 >
 > `API_BUNDLER` and `BSC_PRIVATE_KEY` must be funded with real Sepolia ETH / BSC BNB before deployment. `API_BUNDLER` carries three roles at once: the live-Sepolia deployer/owner, the deployer on every fork, and the API's bundler. Collapsing the deployer and bundler into one key is acceptable on a testnet; on mainnet they must be separate, since the deployer is the protocol's admin root (see [THREAT_MODEL.md](../THREAT_MODEL.md)) and a bundler is an always-online hot key.
 >
@@ -73,7 +84,7 @@ ALCHEMY_API_KEY=your_alchemy_key
 >
 > `ETHERSCAN_API_KEY` is optional. If not set, deployment skips contract verification and prints a notice, and the History tab lists no activity from outside Mitfah on Ethereum, Sepolia, Arbitrum or Celo. `NODEREAL_API_KEY` does the same for BSC, and `ALCHEMY_API_KEY` for Base. Without them, the tab still lists everything Mitfah sent; the API logs a warning for the search it couldn't run.
 >
-> **`TELEGRAM_TOKEN` is optional — the whole Telegram layer is.** It is read only by `telebot.py` (`make bot`). The interactive CLI (`make agent`) never reads it, so you can run the full agent without a bot token or a Telegram account. `TELEGRAM_CHAT_ID` is still required even in CLI mode, but only as an integer user key (agent `thread_id` + DB key) — it does **not** have to be a real Telegram ID; any integer works, as long as it matches the one used at wallet deployment.
+> **The bot tokens are optional — the whole Telegram layer is.** `MITFAH_<STEM>_API` is read only by `telebot.py` (`make bot`), which starts a bot for each network that has one; `MITFAH_<STEM>_USERNAME` is read by the API, to mint the link that opens a bot and to list the bots in the web app. The interactive CLI (`make agent`) reads neither, so you can run the full agent without a bot or a Telegram account; it runs as `APP_USER_ID` (see [setup.md](setup.md)). On a live chain, `TELEGRAM_BUNDLER` must hold that chain's native coin for every network whose bot you run.
 >
 > **`ANTHROPIC_API_KEY` is only the default.** The agent uses Anthropic's Claude out of the box, but the LLM is not tied to Anthropic — swap in any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)), and this key is no longer needed. Some LLM provider is always required; Anthropic specifically is not.
 

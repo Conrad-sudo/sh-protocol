@@ -902,8 +902,8 @@ def _get_wallet_status(user_id: int) -> dict:
     """
     Returns the wallet's spending-limit, session-key and pause status.
 
-    The plain-function half of get_wallet_status. Also used by telebot's budget_alert job, which
-    runs on a timer with no agent and therefore no ToolRuntime.
+    The plain-function half of get_wallet_status. Also used by telebot's wallet checks, which run
+    on a timer with no agent and therefore no ToolRuntime.
 
     @param user_id  The application user ID.
     @return         The status dict documented on get_wallet_status.

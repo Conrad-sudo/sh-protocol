@@ -99,6 +99,8 @@ export interface Chain {
   rpc_url: string | null
   /** The exchange router every wallet here is deployed trusting, or null where there is none. */
   router: string | null
+  /** The username (no @) of this network's Telegram bot, or null where it has none. */
+  telegram_bot: string | null
 }
 
 /** One row of GET /api/wallet/{chain_id} `balances`. A token that could not be read has `error`. */

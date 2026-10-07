@@ -33,7 +33,6 @@ from checks import add_contact, check, finish, sign_in   # first: it puts app/ o
 
 load_dotenv()
 os.environ["COOKIE_SECURE"] = "0"
-os.environ.setdefault("TELEGRAM_BOT_USERNAME", "test_wallet_bot")
 
 from eth_account import Account                       # noqa: E402
 from eth_utils import keccak                          # noqa: E402

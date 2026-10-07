@@ -12,9 +12,9 @@ Before running any setup, make sure you have completed the one-time steps:
 
    `deploy_wallet.resolve_harness_user` reads it, and `smart_wallet_agent.main` uses the same resolution. If `APP_USER_ID` is unset it falls back to translating `TELEGRAM_CHAT_ID` through the `users` table — which is what keeps a pre-2026-09-10 setup working, since the migration created an account for your old chat id and recorded it as `users.telegram_chat_id`. A raw chat id is never used as a key any more, so an unlinked one is an error rather than a silent new account.
 
-   > **Telegram is optional.** Only the Telegram bot (`make bot`) needs a `TELEGRAM_TOKEN` (from [@BotFather](https://t.me/BotFather)), `TELEGRAM_BOT_USERNAME`, and a real Telegram account. The bot serves **only chats that have been linked** to an account through the web app's deep link (`POST /api/integrations/telegram/link`); an unlinked chat is refused. For the interactive CLI (`make agent`), skip all of it and just set `APP_USER_ID`.
+   > **Telegram is optional.** Only the Telegram bots (`make bot`) need bots from [@BotFather](https://t.me/BotFather) — one per network, with groups turned off — and a real Telegram account. Each bot's token goes in `MITFAH_<STEM>_API` and its username (no @) in `MITFAH_<STEM>_USERNAME`, with the stems `ETH`, `SEPOLIA`, `BSC`, `ARB` and `BASE`; a network left out simply has no bot. The bots serve **only private chats that have been linked** to an account through the web app's deep link (`POST /api/integrations/telegram/link`), and one link covers every bot; an unlinked chat is refused. For the interactive CLI (`make agent`), skip all of it and just set `APP_USER_ID`.
 
-4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). `TELEGRAM_BOT_USERNAME` is needed only to mint Telegram deep links, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a sign-in message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from replaying a victim's signature to sign in as them. Signing in with the wallet (SIWE) is the only way in: there is no email, password or Google sign-in.
+4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). The bots' usernames (`MITFAH_<STEM>_USERNAME`) are needed only to mint Telegram deep links and to list the bots in the web app, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a sign-in message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from replaying a victim's signature to sign in as them. Signing in with the wallet (SIWE) is the only way in: there is no email, password or Google sign-in.
    >
    > **The LLM provider is optional too.** The agent defaults to Anthropic's Claude (`ANTHROPIC_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
 
@@ -44,6 +44,8 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
    > **`ARGS` here must exactly match** the network you started in step 1 and deployed to in step 2 (`"anvil"`, `"mainnet-fork"`, `"sepolia-fork"`, `"sepolia"`, `"bsc-fork"`, or `"bsc"`) — `deploy_wallet.py`'s `deploy()` dispatcher passes it straight through to `network`. If it doesn't match, the script will look up the wrong factory address (or none at all) and fail. Omitting `ARGS` defaults to `"anvil"`, matching `make deploy`'s own no-`ARGS` default.
 
 6. **Start talking to it** — `make bot` (Telegram) or `make agent` (interactive CLI).
+
+   > **The Telegram bots follow `APP_FORK_MODE`, like the API.** Each bot acts on its own network, and with `APP_FORK_MODE=1` that is the network's local fork. A bot whose network isn't running (or answers as another chain) is left off with a message saying why, and the rest start — so on forks, start the forks you want first. Plain Anvil has no bot.
 
 > **Shortcut — `make setup-agent ARGS="<network>"`.** Runs steps 2, 4, 5, and 6 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Steps 1 (start the network) and 3 (Vault) are *not* part of this chain — start the network first (skip this for live deployments), and make sure Vault is already running and configured (it persists across redeploys, so you don't need to re-run `make vault` every time). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 5 above.
 >
@@ -114,13 +116,9 @@ Must be re-run (along with steps 1, 2, and 4) whenever Anvil is restarted — ch
 > make setup-agent
 > ```
 >
-> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below (not the Telegram bot in step 6). No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
+> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below. No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
 
-**Step 6 — Start the Telegram bot:**
-
-```bash
-make bot
-```
+**Step 6 — No Telegram here.** There is no Telegram bot for plain Anvil: the bots are per network, for Ethereum, Sepolia, BNB Smart Chain, Arbitrum One and Base (live or forked), so `make bot` has nothing to start. Talk to the agent through the interactive CLI below instead.
 
 **Step 7 — Chat:**
 
@@ -184,7 +182,7 @@ make deploy-wallet ARGS="mainnet-fork"
 **Step 6 — Start:**
 
 ```bash
-make bot      # Telegram bot
+make bot      # Telegram bots
 make agent    # Interactive CLI
 ```
 

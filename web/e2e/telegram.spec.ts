@@ -6,7 +6,15 @@ import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN } from '
  * "bot" is the test: it flips the account to linked, as the real bot does when Start is pressed.
  */
 
-const LINK = 'https://t.me/mitfah_bot?start=e2e-nonce'
+const LINK = 'https://t.me/mitfah_base_bot?start=e2e-nonce'
+const BASE = 8453
+const SEPOLIA = 11155111
+
+/** Networks the account has a wallet on, each with a bot of its own. */
+const CHAINS = [
+  { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
+  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
+].map(chain => ({ ...chain, fork: false, rpc_url: null, router: null }))
 
 async function mockApi(page: Page, { linked = false, notConfigured = false } = {}) {
   const server = { linked, unlinks: 0 }
@@ -16,7 +24,9 @@ async function mockApi(page: Page, { linked = false, notConfigured = false } = {
       case '/api/auth/refresh':
         return route.fulfill({ json: TOKEN })
       case '/api/me':
-        return route.fulfill({ json: { ...ME, telegram_linked: server.linked } })
+        return route.fulfill({ json: { ...ME, telegram_linked: server.linked, wallet_chains: [BASE, SEPOLIA] } })
+      case '/api/chains':
+        return route.fulfill({ json: { chains: CHAINS } })
       case '/api/integrations/telegram/link':
         if (method === 'DELETE') {
           server.unlinks++
@@ -24,7 +34,10 @@ async function mockApi(page: Page, { linked = false, notConfigured = false } = {
           return route.fulfill({ json: { status: 'unlinked' } })
         }
         if (notConfigured) {
-          return route.fulfill({ status: 500, json: { detail: 'TELEGRAM_BOT_USERNAME is not configured' } })
+          return route.fulfill({
+            status: 500,
+            json: { detail: 'Telegram is not configured: no MITFAH_<CHAIN>_USERNAME is set' },
+          })
         }
         return route.fulfill({ json: { url: LINK, nonce: 'e2e-nonce', expires_in: 600 } })
       default:
@@ -58,6 +71,9 @@ test('linking Telegram: link, wait, linked', async ({ page }, testInfo) => {
   await expect(card.getByText('Linked')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByText('Telegram linked. You can now chat with your assistant there.')).toBeVisible()
   await expect(open).toBeHidden()
+  // Once linked, each network's bot is a link away.
+  await expect(card.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
+  await expect(card.getByRole('link', { name: '@mitfah_sepolia_bot' })).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'settings-telegram-linked')
 

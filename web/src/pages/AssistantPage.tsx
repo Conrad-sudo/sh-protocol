@@ -8,6 +8,7 @@ import { ChatLog } from '../components/assistant/ChatLog'
 import { ClearChatButton } from '../components/assistant/ClearChatButton'
 import { Composer } from '../components/assistant/Composer'
 import { SuggestedPrompts } from '../components/assistant/SuggestedPrompts'
+import { TelegramBotLink } from '../components/assistant/TelegramBotLink'
 import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
 import { useChatHistory, useChatSend, type ChatSend } from '../hooks/useChat'
@@ -36,7 +37,14 @@ export function AssistantPage() {
             ? undefined
             : 'Ask about your wallet, or ask it to pay a contact or swap tokens. It can only spend within your limit.'
         }
-        actions={view.wallet && <ClearChatButton key={view.wallet.chain_id} chainId={view.wallet.chain_id} />}
+        actions={
+          view.wallet && (
+            <>
+              <TelegramBotLink chainId={view.wallet.chain_id} />
+              <ClearChatButton key={view.wallet.chain_id} chainId={view.wallet.chain_id} />
+            </>
+          )
+        }
       />
       {/* Keyed so a network switch starts with that network's conversation and an empty composer. */}
       {view.wallet ? <Chat key={view.wallet.chain_id} wallet={view.wallet} mode={mode} /> : view.fallback}

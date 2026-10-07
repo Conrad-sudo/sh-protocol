@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test py-test e2e-test agent-smoke api
 
 
 
@@ -81,8 +81,14 @@ speed-test:
 bundler-test:
 	.venv/bin/python3 app/tests/test_bundler.py
 
+# The Telegram bots: each acts on its own chain and only in private chats, one link covers them all,
+# replies keep their formatting (web app's rules) and are split to fit, and the daily check reaches
+# the right chats. Stand-ins for Telegram, the chain and the model, so offline.
+telebot-test:
+	.venv/bin/python3 app/tests/test_telebot.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
@@ -311,6 +317,11 @@ deploy-wallet: fund
 	.venv/bin/python3 app/deploy_wallet.py $(ARGS)
 
 
+# The Telegram bots: one for each chain whose MITFAH_<CHAIN>_API token is set, all in this one
+# process, each acting only on its own chain. A bot whose network doesn't answer as its chain is
+# left off, so on forks only the forks that are running get a bot. Run exactly ONE copy: Telegram
+# lets one process poll a bot (a second gets "Conflict" errors), and the bots share TELEGRAM_BUNDLER,
+# whose nonces are counted per process.
 bot:
 	.venv/bin/python3 app/telebot.py
 

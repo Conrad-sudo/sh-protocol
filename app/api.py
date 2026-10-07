@@ -23,19 +23,19 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError, TimeExhausted, TransactionNotFound
 from web3.logs import DISCARD
 from constants import (
-    CHAIN_ID_ANVIL,
-    CHAIN_ID_ARBITRUM,
-    CHAIN_ID_BASE,
     CHAIN_ID_BSC,
-    CHAIN_ID_CELO,
-    CHAIN_ID_MAINNET,
-    CHAIN_ID_SEPOLIA,
     ETH_SENTINEL,
     get_always_counted_ticker,
     get_native_asset_ticker,
     get_router,
 )
-from network_config import load_network_config_by_name
+from network_config import (
+    CHAIN_NAME_BY_ID,
+    FORK_MODE,
+    FORKABLE_CHAIN_IDS,
+    load_network_config_by_name,
+    network_name,
+)
 from db import (
     get_json,
     get_factory_address,
@@ -91,6 +91,7 @@ from smart_wallet_agent import (
     init_agent,
     open_checkpointer,
 )
+import telegram_bots
 import tx_history
 
 from langchain_erc20 import ERC20_ABI
@@ -108,8 +109,8 @@ async def lifespan(_app: FastAPI):
     """
     Opens the agent's checkpointer and builds the agent on startup, closing it on shutdown.
 
-    Exactly what telebot.py does in post_init/post_shutdown. Without it `agent` stays None and
-    every /api/chat request fails on the first attribute access.
+    Exactly what telebot.py does around its bots. Without it `agent` stays None and every
+    /api/chat request fails on the first attribute access.
     """
     await open_checkpointer()
     init_agent()
@@ -196,40 +197,6 @@ CONFIRM_POLL_TIMEOUT_SECS = 20
 # given never mined because the user's wallet replaced it. Searched by halving, so it costs about 20
 # reads; finding nothing only leaves that deploy out of the History tab.
 REPLACED_DEPLOY_LOOKBACK_BLOCKS = 1_000_000
-
-# The API speaks chain IDs, because that is what a browser wallet reports (eth_chainId) and what the
-# user is actually connected to. Everything downstream of it speaks chain NAMES: save_user_network
-# stores one, and load_network_config, contracts.py, tools.py and tx_sender all read it back. This
-# map is the only place the two meet.
-#
-# It cannot be a DB lookup. `chains` holds two rows per forkable network — sepolia AND sepolia-fork
-# both claim 11155111, with different RPCs (Alchemy vs 127.0.0.1:8545) — so get_chain_name_from_id
-# returns whichever row SQLite reaches first. Which of the pair is meant is a fact about where THIS
-# server runs, not something a browser can assert, so it is resolved here and never taken from the
-# request.
-CHAIN_NAME_BY_ID: dict[int, str] = {
-    CHAIN_ID_ANVIL: "anvil",
-    CHAIN_ID_MAINNET: "mainnet",
-    CHAIN_ID_SEPOLIA: "sepolia",
-    CHAIN_ID_BSC: "bsc",
-    CHAIN_ID_CELO: "celo",
-    CHAIN_ID_ARBITRUM: "arbitrum",
-    CHAIN_ID_BASE: "base",
-}
-# Chains whose live name has a local `-fork` twin. Anvil is absent: it is already local and has no
-# live counterpart to fork.
-FORKABLE_CHAIN_IDS = {
-    CHAIN_ID_MAINNET,
-    CHAIN_ID_SEPOLIA,
-    CHAIN_ID_BSC,
-    CHAIN_ID_CELO,
-    CHAIN_ID_ARBITRUM,
-    CHAIN_ID_BASE,
-}
-# Set APP_FORK_MODE=1 to point every forkable chain at its local anvil fork instead of the live RPC.
-# A deployment-wide switch, read once at import: a process serves forks or it serves live chains,
-# and a request must not be able to choose.
-FORK_MODE = os.getenv("APP_FORK_MODE", "").lower() in ("1", "true", "yes")
 
 
 class WatchedToken(BaseModel):
@@ -429,17 +396,13 @@ def _network_name(chain_id: int) -> str:
     """
     This server's network name for `chain_id` -- its `-fork` twin in fork mode -- or 400s. RPC-free.
 
-    See CHAIN_NAME_BY_ID for why the name is resolved here and never taken from the request.
+    See network_config.CHAIN_NAME_BY_ID for why the name is resolved here and never taken from the
+    request.
     """
-    chain_name = CHAIN_NAME_BY_ID.get(chain_id)
-    if chain_name is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unsupported chain ID: {chain_id}. Supported: {sorted(CHAIN_NAME_BY_ID)}",
-        )
-    if FORK_MODE and chain_id in FORKABLE_CHAIN_IDS:
-        chain_name = f"{chain_name}-fork"
-    return chain_name
+    try:
+        return network_name(chain_id)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 def _resolve_chain(chain_id: int) -> tuple[Web3, str]:
@@ -652,7 +615,7 @@ def me(user_id: int = Depends(get_current_user)):
 
 
 @app.post("/api/integrations/telegram/link")
-def telegram_link(user_id: int = Depends(get_current_user)):
+def telegram_link(chain_id: int | None = None, user_id: int = Depends(get_current_user)):
     """
     Mints a single-use deep link that binds the user's Telegram chat to this account.
 
@@ -661,12 +624,19 @@ def telegram_link(user_id: int = Depends(get_current_user)):
     and enumerable, so a form that accepted one would let anyone attach their Telegram to another
     person's wallet and spend against its cap.
 
+    Every chain has a bot of its own, and one link covers them all: the chat id is the same in each
+    (see telegram_bots). The link opens the bot of the network the page is on, so the first bot the
+    user meets is the one for the wallet they were looking at.
+
+    @param chain_id  The network the page is on. Without a bot there (or without a chain_id), the
+                     link opens the first bot that has a username.
     @return  {"url", "nonce", "expires_in"} — send the user to `url`.
     """
-    bot = os.getenv("TELEGRAM_BOT_USERNAME")
+    bot = telegram_bots.link_bot(chain_id)
     if not bot:
         raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "TELEGRAM_BOT_USERNAME is not configured"
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Telegram is not configured: no MITFAH_<CHAIN>_USERNAME is set",
         )
     nonce = secrets.token_urlsafe(24)
     save_telegram_link_nonce(nonce, user_id, int(time.time()) + auth.TELEGRAM_NONCE_TTL_SECS)
@@ -1104,14 +1074,16 @@ def list_chains():
     Public and RPC-free, like /api/tokens: it reads local tables and says nothing that is not
     already public on chain, apart from a fork's local node address.
 
-    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "rpc_url", "router"}, ...]},
-             by chain ID.
+    @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "rpc_url", "router",
+             "telegram_bot"}, ...]}, by chain ID.
              `fork` is true when this server points that chain at a local fork (APP_FORK_MODE).
              `rpc_url` is that fork's local node, for the user to set in their browser wallet — each
              fork runs on its own port. None on a live chain: its RPC may carry an API key.
              `router` is the exchange router every wallet on that chain is deployed trusting (see
              /api/deploy), or None where there is none; the Controls page keeps it off the
              removable list.
+             `telegram_bot` is the username (no @) of that chain's Telegram bot, or None where it
+             has none. Public anyway: anyone can find a bot in Telegram.
     """
     chains = []
     for chain_id, name in sorted(CHAIN_NAME_BY_ID.items()):
@@ -1131,6 +1103,7 @@ def list_chains():
             "fork": fork,
             "rpc_url": get_rpc_url(f"{name}-fork") if fork else None,
             "router": _router_or_none(chain_id),
+            "telegram_bot": telegram_bots.bot_username(chain_id),
         })
     return {"chains": chains}
 

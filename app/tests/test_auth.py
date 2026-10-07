@@ -19,8 +19,11 @@ _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-0123456789abcdef")
 os.environ["COOKIE_SECURE"] = "0"          # the test client speaks http
-os.environ["TELEGRAM_BOT_USERNAME"] = "test_wallet_bot"
 os.environ["SIWE_DOMAIN"] = "localhost:3000"   # explicit, so a SIWE_DOMAIN in .env cannot move it
+# Every chain's Telegram bot, set here so the bots in .env cannot move what the tests expect.
+TELEGRAM_BOT_ENV = {f"MITFAH_{stem}_USERNAME": f"test_{stem.lower()}_bot"
+                    for stem in ("ETH", "SEPOLIA", "BSC", "ARB", "BASE")}
+os.environ.update(TELEGRAM_BOT_ENV)
 
 import db                                   # noqa: E402
 db.DB_PATH = _tmp_db.name
@@ -325,9 +328,10 @@ def test_telegram_link_nonce():
     c = make_client()
     signed_in, headers, _ = sign_in(c)
 
-    r = c.post("/api/integrations/telegram/link", headers=headers)
+    r = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453})
     check("a link is minted", r.status_code == 200, r.text[:160])
-    check("it points at the bot", r.json()["url"].startswith("https://t.me/test_wallet_bot?start="))
+    check("it opens the bot of the network the page is on",
+          r.json()["url"].startswith("https://t.me/test_base_bot?start="), r.json()["url"])
     check("linking needs a token", c.post("/api/integrations/telegram/link").status_code == 401)
 
     nonce = r.json()["nonce"]
@@ -337,6 +341,26 @@ def test_telegram_link_nonce():
 
     # An unknown nonce cannot bind anything.
     check("an unknown nonce redeems to nothing", db.consume_telegram_link_nonce("made-up") is None)
+
+    # Any bot can finish a link, so a network without one, or no network, still gets one.
+    for label, params in (("a network without a bot", {"chain_id": 31337}), ("no network", {})):
+        r = c.post("/api/integrations/telegram/link", headers=headers, params=params)
+        check(f"{label} gets the first bot's link",
+              r.status_code == 200 and r.json()["url"].startswith("https://t.me/test_eth_bot?start="),
+              f"{r.status_code} {r.text[:160]}")
+
+    try:
+        os.environ["MITFAH_BASE_USERNAME"] = "@test_base_bot"
+        url = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453}).json()["url"]
+        check("an @ in .env is dropped from the link", url.startswith("https://t.me/test_base_bot?start="), url)
+
+        for name in TELEGRAM_BOT_ENV:
+            os.environ[name] = ""
+        r = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453})
+        check("with no bot configured, the server says so",
+              r.status_code == 500 and "not configured" in r.json()["detail"], f"{r.status_code} {r.text[:160]}")
+    finally:
+        os.environ.update(TELEGRAM_BOT_ENV)
 
 
 def test_bot_start_explains_a_chat_linked_elsewhere():
@@ -367,8 +391,11 @@ def test_bot_start_explains_a_chat_linked_elsewhere():
             replies.append(text)
 
         update = SimpleNamespace(message=SimpleNamespace(chat_id=chat_id, reply_text=reply_text))
-        job_queue = SimpleNamespace(get_jobs_by_name=lambda name: [], run_repeating=lambda *a, **k: None)
-        context = SimpleNamespace(args=[link["nonce"]], job_queue=job_queue)
+        context = SimpleNamespace(
+            args=[link["nonce"]],
+            job_queue=SimpleNamespace(run_once=lambda *a, **k: None),
+            bot_data={"chain_id": 11155111, "network": "sepolia"},
+        )
         asyncio.run(telebot.start(update, context))
         return link["nonce"], replies
 
@@ -924,6 +951,15 @@ def test_chains_lists_only_deployed_served_chains():
           == (fork_rpcs if api.FORK_MODE else dict.fromkeys(fork_rpcs)), str(chains))
     check("each carries the router its wallets trust",
           by_id[11155111]["router"] == Web3.to_checksum_address(get_router(11155111)), str(chains))
+    check("each carries its own Telegram bot",
+          by_id[11155111]["telegram_bot"] == "test_sepolia_bot" and by_id[56]["telegram_bot"] == "test_bsc_bot",
+          str(chains))
+    try:
+        os.environ["MITFAH_BSC_USERNAME"] = ""
+        bsc = next(x for x in make_client().get("/api/chains").json()["chains"] if x["chain_id"] == 56)
+        check("a network without a bot says so", bsc["telegram_bot"] is None, str(bsc))
+    finally:
+        os.environ.update(TELEGRAM_BOT_ENV)
 
 
 def test_rate_limit():

@@ -21,7 +21,8 @@
 | `make explorers-test` | Reading activity outside Mitfah from Etherscan, NodeReal and Alchemy: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
 | `make explorers-live` | The same against the real services, read-only, with the keys in `.env` (`app/tests/check_explorers_live.py`; not part of `py-test`) |
 | `make bundler-test` | What a UserOp pays for posting its data to Ethereum on the live L2s — Base's L1 fee and Arbitrum's L1 gas, as `preVerificationGas` — and that forks pay none (`app/tests/test_bundler.py`, offline) |
-| `make py-test` | All eight offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` |
+| `make telebot-test` | The Telegram bots: each acts on its own chain and only in private chats, one link covers them all, replies keep their formatting under the web app's rules and are split to fit, and the daily wallet check reaches the right chats (`app/tests/test_telebot.py`, offline) |
+| `make py-test` | All nine offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc.; on Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |
@@ -42,9 +43,9 @@
 | `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) and register its single session key |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
 | `make api` | Start the FastAPI server on port 8000 — what the web app in `web/` talks to |
-| `make bot` | Start the Telegram bot — **optional**; the only target that needs `TELEGRAM_TOKEN` and `python-telegram-bot` |
+| `make bot` | Start the Telegram bots, one per network with a `MITFAH_<STEM>_API` token, in one process — **optional**; the only target that needs those tokens and `python-telegram-bot`. Run exactly one copy |
 | `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
-| `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bot |
+| `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bots |
 | `make setup-test ARGS=<network>` | Same chain with no front end: `deploy` → `fund` → `db` → `deploy-wallet`, for running tests against a freshly deployed stack |
 
 > **There is no Celo fork-test target.** `make ubeswap-test` does not exist in the Makefile, and neither does the `test/fork/SHUbeswapV2Test.t.sol` it used to point at — Celo has no Solidity deployment path (see above), so both were removed rather than left failing. Adding Celo means adding the `HelperConfig`/`Constants` branch, the test file, and the target together.
@@ -111,7 +112,9 @@ sh-protocol/
 │   ├── smart_wallet_agent.py
 │   ├── auth.py                      ← SIWE sign-in, JWTs, signed (EIP-712) contacts
 │   ├── api.py                       ← FastAPI HTTP API for web/
-│   ├── telebot.py
+│   ├── telebot.py                   ← the Telegram bots: one per chain, all in one process
+│   ├── telegram_bots.py             ← each chain's bot token and username, from .env
+│   ├── telegram_format.py           ← the agent's Markdown as Telegram HTML
 │   ├── agent_card.json
 │   ├── abi.py                       ← IEntryPoint, IERC20Extended, IReputationRegistry, mocks
 │   ├── tests/                       ← Python test scripts, run through make (see above)
@@ -166,7 +169,8 @@ sh-protocol/
 | `langchain` | Tool definitions and agent framework |
 | `langchain-anthropic` | Default Claude LLM integration — swappable for any [LangChain-supported provider](https://python.langchain.com/docs/integrations/chat/) |
 | `langgraph` | Stateful agent execution with `AsyncSqliteSaver` checkpointer |
-| `python-telegram-bot[job-queue]` | Telegram Bot API client (v20 async) with APScheduler — only used by `make bot`; not needed for the CLI agent |
+| `python-telegram-bot[job-queue]` | Telegram Bot API client (v22 async) with APScheduler — only used by `make bot`; not needed for the CLI agent |
+| `markdown-it-py` | Parses the agent's Markdown so the Telegram bots can show it as Telegram formatting (`telegram_format.py`) |
 | `python-dotenv` | `.env` file loading |
 
 ### Infrastructure

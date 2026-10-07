@@ -304,11 +304,13 @@ On-chain this is metered correctly and needs no new check: routing output away m
 ---
 
 ### 4.5 Telegram as Attack Surface
-> Applies **only when the optional Telegram bot (`make bot`) is run.** The interactive CLI (`make agent`) has no Telegram exposure, so this surface disappears entirely in that mode.
+> Applies **only when the optional Telegram bots (`make bot`) are run.** The interactive CLI (`make agent`) has no Telegram exposure, so this surface disappears entirely in that mode.
 
 **Threat:** Telegram chat ids are enumerable and not secret by design, so they cannot themselves authorize anything. The bot previously took the chat id from an incoming message and used it *directly* as the account key, which meant any chat that reached the bot was served as though it were that account.
 
 **Mitigation in place:** A chat id is no longer an identity. `users.telegram_chat_id` binds a chat to an application account, and the binding is only ever created by the deep-link nonce flow: the web app mints a single-use, 10-minute nonce for the signed-in account, and the bot's `/start <nonce>` records the chat id **taken from the Telegram update**, never from anything a user typed. `telebot._resolve_user` translates chat → account on every handler, and a chat with no binding is refused outright. The column is `UNIQUE`, so one chat cannot be claimed by two accounts. Session keys remain encrypted, so signing for another user would additionally require their ciphertext and the AppRole credentials.
+
+There is one bot per chain, and one link covers them all: in a private chat the chat id is the same in every bot, and each bot still takes it from the update, so a link made through one bot grants nothing another bot's chat could not already prove. Each bot is tied to its chain when it is built (its `bot_data`), and every turn passes that chain to `chat()`, so nothing said in a chat can move a turn to another chain's wallet. The bots answer **private chats only** (`telebot.PRIVATE_MESSAGES`, on every handler): in a group, everyone in it could talk to the agent of whoever linked it, so a group gets no answer — not even to `/start`, which is what would link it. Groups are also turned off in BotFather, but the filter does not depend on that setting. Edited messages are ignored as well, so editing an old message never runs it again.
 
 **Residual risk:** Whoever controls the linked Telegram account can drive the wallet up to its USD cap without any further check — Telegram account security is outside this system. A user who loses control of that account should unlink it (`DELETE /api/integrations/telegram/link`). A leaked deep link is redeemable by whoever holds it until it expires or is used, which is why the TTL is short and redemption is single-use.
 

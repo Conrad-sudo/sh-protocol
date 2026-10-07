@@ -5,17 +5,35 @@ import { resetClientForTests } from '../../api/client'
 import { routes } from '../../routes'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN } from '../../test/utils'
 
+const SEPOLIA = 11155111
+const BSC = 56
+const BASE = 8453
+
+/** Three networks, each with a bot of its own, like a server with every MITFAH_<CHAIN>_USERNAME set. */
+const CHAINS = [
+  { chain_id: BSC, name: 'bsc', native_ticker: 'BNB', telegram_bot: 'mitfah_bsc_bot' },
+  { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
+  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
+].map(chain => ({ ...chain, fork: false, rpc_url: null, router: null }))
+
 interface ServerOptions {
   linked?: boolean
-  /** POST answers like a server with no TELEGRAM_BOT_USERNAME. */
+  /** The networks the account has a wallet on. */
+  walletChains?: number[]
+  /** POST answers like a server with no bot usernames set. */
   notConfigured?: boolean
   /** DELETE answers 500. */
   unlinkFails?: boolean
 }
 
 /** A signed-in account with the Telegram endpoints, behaving like app/api.py. */
-function stubServer({ linked = false, notConfigured = false, unlinkFails = false }: ServerOptions = {}) {
-  const server = { linked, links: 0, unlinks: 0, meCalls: 0 }
+function stubServer({
+  linked = false,
+  walletChains = [BASE],
+  notConfigured = false,
+  unlinkFails = false,
+}: ServerOptions = {}) {
+  const server = { linked, links: 0, unlinks: 0, meCalls: 0, linkUrls: [] as string[] }
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
@@ -23,16 +41,18 @@ function stubServer({ linked = false, notConfigured = false, unlinkFails = false
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') {
         server.meCalls++
-        return Promise.resolve(json(200, { ...ME, telegram_linked: server.linked }))
+        return Promise.resolve(json(200, { ...ME, telegram_linked: server.linked, wallet_chains: walletChains }))
       }
-      if (url === '/api/integrations/telegram/link' && method === 'POST') {
+      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
+      if (url.startsWith('/api/integrations/telegram/link') && method === 'POST') {
+        server.linkUrls.push(url)
         if (notConfigured) {
-          return Promise.resolve(json(500, { detail: 'TELEGRAM_BOT_USERNAME is not configured' }))
+          return Promise.resolve(json(500, { detail: 'Telegram is not configured: no MITFAH_<CHAIN>_USERNAME is set' }))
         }
         server.links++
         const nonce = `nonce-${server.links}`
         return Promise.resolve(
-          json(200, { url: `https://t.me/mitfah_bot?start=${nonce}`, nonce, expires_in: 600 }),
+          json(200, { url: `https://t.me/mitfah_base_bot?start=${nonce}`, nonce, expires_in: 600 }),
         )
       }
       if (url === '/api/integrations/telegram/link' && method === 'DELETE') {
@@ -73,13 +93,16 @@ describe('TelegramCard', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
     const open = await screen.findByRole('link', { name: 'Open Telegram' })
-    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_bot?start=nonce-1')
+    // The link opens the bot of the network the app is showing: the account's wallet, on Base.
+    expect(server.linkUrls).toEqual([`/api/integrations/telegram/link?chain_id=${BASE}`])
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_base_bot?start=nonce-1')
     expect(open).toHaveAttribute('target', '_blank')
     expect(open).toHaveAttribute('rel', 'noopener noreferrer')
     expect(screen.getByTitle('QR code of the Telegram link')).toBeInTheDocument()
     expect(screen.getByText('10:00')).toBeInTheDocument()
     expect(screen.getByText('Waiting for Telegram…')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Link Telegram' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Each network has its own bot/)).not.toBeInTheDocument()
 
     // Nothing happened in Telegram yet: still waiting after a few polls.
     const before = server.meCalls
@@ -93,6 +116,7 @@ describe('TelegramCard', () => {
     expect(await screen.findByText('Linked')).toBeInTheDocument()
     expect(screen.getByText('Telegram linked. You can now chat with your assistant there.')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Open Telegram' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
 
     // And polling stops.
     const after = server.meCalls
@@ -116,8 +140,25 @@ describe('TelegramCard', () => {
 
     await user.click(screen.getByRole('button', { name: 'Get a new link' }))
     const open = await screen.findByRole('link', { name: 'Open Telegram' })
-    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_bot?start=nonce-2')
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_base_bot?start=nonce-2')
     expect(screen.getByText('10:00')).toBeInTheDocument()
+  })
+
+  it('lists the bots of the networks the account has a wallet on, once linked', async () => {
+    stubServer({ linked: true, walletChains: [SEPOLIA, BASE] })
+    await setup()
+
+    const base = await screen.findByRole('link', { name: '@mitfah_base_bot' })
+    expect(base).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
+    expect(base).toHaveAttribute('target', '_blank')
+    expect(base).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(screen.getByRole('link', { name: '@mitfah_sepolia_bot' })).toHaveAttribute(
+      'href',
+      'https://t.me/mitfah_sepolia_bot',
+    )
+    expect(screen.getByText(/Each network has its own bot/)).toBeInTheDocument()
+    // No wallet on BNB Smart Chain, so no bot to open there.
+    expect(screen.queryByRole('link', { name: '@mitfah_bsc_bot' })).not.toBeInTheDocument()
   })
 
   it('says so when the server has no Telegram bot', async () => {
@@ -138,6 +179,7 @@ describe('TelegramCard', () => {
     expect(await screen.findByRole('button', { name: 'Link Telegram' })).toBeInTheDocument()
     expect(server.unlinks).toBe(1)
     expect(screen.queryByText('Linked')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '@mitfah_base_bot' })).not.toBeInTheDocument()
   })
 
   it('keeps the chat linked and says so when unlinking fails', async () => {

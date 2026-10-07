@@ -11,7 +11,7 @@ export function TermsPage() {
       updated="1 October 2026"
     >
       <p>
-        These terms cover your use of Mitfah (the website, the app and the Telegram bot). By creating an account you
+        These terms cover your use of Mitfah (the website, the app and the Telegram bots). By creating an account you
         agree to them. If you don't agree, please don't use Mitfah.
       </p>
 
