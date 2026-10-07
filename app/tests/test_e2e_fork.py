@@ -581,13 +581,19 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
         return r.json()
 
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    dai = Web3.to_checksum_address(get_token_address(CHAIN_ID, "dai"))
     payee = next(x["address"] for x in c.get("/api/contacts", headers=headers).json()["contacts"]
                  if x["name"] == "payee")
+    # Only the dashboard's tokens are suggested, and test_dashboard_tokens leaves USDC off it, so it
+    # goes on here, as an owner who pays in it would put it. Taken off again at the end.
+    r = c.post("/api/tokens/custom", headers=headers, json={"chain_id": CHAIN_ID, "address": usdc})
+    check("USDC goes on the dashboard", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
     body = read()
     suggested = {s["address"]: s["label"] for s in body["suggested"]}
     check("the list starts off and empty", body["enabled"] is False and body["targets"] == [], str(body)[:200])
     check("the exchange router is suggested", api._router_or_none(CHAIN_ID) in suggested, str(suggested))
     check("USDC, on the dashboard, is suggested by name", suggested.get(usdc) == "USDC", str(suggested))
+    check("a listed token that isn't on the dashboard is not", dai not in suggested, str(suggested))
     check("the review registry is suggested", sh.functions.REPUTATION_REGISTRY().call() in suggested)
     check("a contact with a plain wallet is not", payee not in suggested)
 
@@ -628,6 +634,8 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
           r.status_code == 400 and "EmptyAllowlist" in r.text, f"{r.status_code} {r.text[:160]}")
     owner_action(c, headers, acct, "/api/wallet/allowlist/prepare", {"action": "disable"})
     check("the list is off again", sh.functions.sessionAllowlistEnabled().call() is False)
+    r = c.delete(f"/api/tokens/custom/{CHAIN_ID}/{usdc}", headers=headers)
+    check("USDC comes off the dashboard again", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
 
 
 def deal_erc20(token: str, holder: str, amount: int):
