@@ -61,6 +61,10 @@ test('signing up with the wallet returns you to the page you asked for', async (
   await snap(page, testInfo, 'login-connected')
   await page.getByRole('button', { name: 'Sign up' }).click()
 
+  // The safe dial behind the card turns through its combination, and then the app opens.
+  await expect
+    .poll(() => page.locator('.mf-wallpaper .mf-safe-rotor').evaluate(dial => dial.getAnimations().length))
+    .toBeGreaterThan(0)
   await expect(page).toHaveURL(/\/contacts$/)
   await expect(page.getByRole('heading', { name: 'Contacts' })).toBeVisible()
 })

@@ -1,29 +1,29 @@
 // Draws the site wallpaper into public/brand/wallpaper-light.svg and wallpaper-dark.svg. Run with
 // `npm run wallpaper`.
 //
-// It is the logo's handle, blown up and turned inside out: the ring, with the crescent that breaks
-// it at the upper right and a gap at the lower left where the key's shaft crosses it, and the
-// circuit that fills it in the logo running outward instead, off the ring and on to the edges.
-// The middle is left empty, because that is where the page's text sits.
+// It is the circuit board round the safe dial: traces leaving the dial's outer edge and running
+// outward, off on to the edges. The dial itself is not in these files. It is drawn on the page
+// (src/components/brand/SafeDial.tsx), so that it can turn when someone signs in; its outer edge
+// is the bus ring the traces leave from. The middle is left empty, because that is where the
+// page's text sits.
 //
 // The page holds it still behind the content (a fixed layer, see .mf-wallpaper in app.css), so the
-// canvas is large enough to reach every edge of a big screen from wherever the ring is placed.
+// canvas is large enough to reach every edge of a big screen from wherever the dial is placed.
 //
-// Everything that looks 3D is drawn, not filtered: the metal is gradients, the bevels are offset
-// highlight and shadow strokes, and the night glow is wide, faint copies of the traces under a
-// bright core. A blur or lighting filter over a screen-sized fixed layer would be slow to paint,
-// and a drawn edge stays sharp at any pixel density. A seeded random number generator lays out
-// the traces, so every run writes the same files.
+// Everything that looks 3D is drawn, not filtered: the bevels are offset highlight and shadow
+// strokes, and the night glow is wide, faint copies of the traces under a bright core. A blur or
+// lighting filter over a screen-sized fixed layer would be slow to paint, and a drawn edge stays
+// sharp at any pixel density. A seeded random number generator lays out the traces, so every run
+// writes the same files.
 import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
-/** Canvas side. The ring sits in the middle, so CSS can place it by its centre. */
+/** Canvas side. The dial sits in the middle, so CSS can place it by its centre. */
 const SIZE = 2880
 const C = SIZE / 2
-/** The ring: its radius and the width of the metal band. */
+/** The middle of the dial's band, where the soft light round it is brightest. */
 const RING = 430
-const BAND = 11
-/** Where the first traces leave from: a thin second ring just outside the band. */
+/** Where the first traces leave from: the dial's outer edge (OUTER in SafeDial.tsx). */
 const BUS = 468
 /** Trace grid pitch. Parallel traces sit one pitch apart, as on a circuit board. */
 const PITCH = 14
@@ -32,7 +32,10 @@ const MARGIN = 70
 /** The traces are at full strength out to here, then thin out gently towards the edges. */
 const FULL = BUS + 180
 const FADE_END = 1500
-/** Arc left clear at the lower left, where the key's shaft leaves the ring in the logo (y points down). */
+/**
+ * Arc at the lower left that no trace leaves from (y points down): where the key's shaft crossed the
+ * ring in the logo this was first drawn from. Kept, so the traces keep their layout.
+ */
 const KEY_GAP = { from: 118, to: 152 }
 const SEED = 7
 
@@ -257,55 +260,16 @@ function pathOf({ start, cells }: Trace) {
   return `M${round(sx)} ${round(sy)}L${first.map(([x, y]) => `${x} ${y}`).join(' ')}`
 }
 
-/** The crescent that breaks the ring at the upper right in the logo: thick in the middle, fine at the ends. */
-function crescent(from: number, to: number, r: number, thickness: number) {
-  const p = (a: number, rr: number) => `${round(C + rr * Math.cos(deg(a)))} ${round(C + rr * Math.sin(deg(a)))}`
-  const half = r * Math.sin(deg((to - from) / 2))
-  const sagitta = r - Math.sqrt(r * r - half * half)
-  const inner = sagitta - thickness
-  const innerR = (inner * inner + half * half) / (2 * inner)
-  return `M${p(from, r)} A${r} ${r} 0 0 1 ${p(to, r)} A${round(innerR)} ${round(innerR)} 0 0 0 ${p(from, r)}Z`
-}
-
-/** An arc of a circle round the centre, `from` → `to` degrees clockwise. */
-function arc(r: number, from: number, to: number) {
-  const p = (a: number) => `${round(C + r * Math.cos(deg(a)))} ${round(C + r * Math.sin(deg(a)))}`
-  const large = to - from > 180 ? 1 : 0
-  return `M${p(from)} A${r} ${r} 0 ${large} 1 ${p(to)}`
-}
-
 interface Theme {
-  /** Stops of the ring's metal, light and dark bands in turn, as [offset, colour]. */
-  metal: [number, string][]
-  ringOpacity: number
-  /** Soft light round the ring. */
+  /** Soft light round the dial. */
   halo: [string, number]
-  /** The shadow the ring casts on the page, below it (light only). */
-  shadow?: [string, number]
-  /** Thin line along the band's inner edge. */
-  innerRim: [string, number]
-  bus: [string, number]
   traces: string
   pads: (traces: Trace[]) => string
   defs: string
 }
 
 const LIGHT: Theme = {
-  metal: [
-    [0, '#5d86b4'],
-    [0.16, '#0b2f59'],
-    [0.3, '#9dbfe3'],
-    [0.42, '#0a2a4c'],
-    [0.56, '#4f78a5'],
-    [0.7, '#061e3a'],
-    [0.84, '#b3cdea'],
-    [1, '#0b2f59'],
-  ],
-  ringOpacity: 0.9,
   halo: ['#0A8A5A', 0.04],
-  shadow: ['#062A4E', 0.2],
-  innerRim: ['#ffffff', 0.5],
-  bus: ['#062A4E', 0.22],
   defs: `<linearGradient id="steel" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="460" y2="320" spreadMethod="reflect">
 <stop offset="0" stop-color="#8395ab"/><stop offset="0.5" stop-color="#c8d2de"/><stop offset="1" stop-color="#6c7e95"/>
 </linearGradient>
@@ -343,20 +307,7 @@ const EMERALD = '#10B981'
 const EMERALD_BRIGHT = '#34D399'
 
 const DARK: Theme = {
-  metal: [
-    [0, '#dce8f5'],
-    [0.14, '#56789f'],
-    [0.28, '#0e2136'],
-    [0.4, '#a9c6e6'],
-    [0.55, '#213a58'],
-    [0.7, '#eef4fb'],
-    [0.85, '#35557a'],
-    [1, '#c9dcf0'],
-  ],
-  ringOpacity: 0.8,
   halo: [EMERALD, 0.15],
-  innerRim: [EMERALD_BRIGHT, 0.45],
-  bus: ['#7FB0E6', 0.2],
   defs: `<radialGradient id="glow">
 <stop offset="0" stop-color="${EMERALD_BRIGHT}" stop-opacity="0.55"/><stop offset="0.4" stop-color="${EMERALD}" stop-opacity="0.18"/><stop offset="1" stop-color="${EMERALD}" stop-opacity="0"/>
 </radialGradient>`,
@@ -397,13 +348,6 @@ function via([x, y]: [number, number], metal: string, light: string) {
 }
 
 function svg(traces: Trace[], theme: Theme) {
-  // The ring, open at the lower left where the key's shaft crosses it in the logo.
-  const ring = arc(RING, KEY_GAP.to - 6, KEY_GAP.from + 6 + 360)
-  const stops = (list: [number, string][]) =>
-    list.map(([o, c]) => `<stop offset="${o}" stop-color="${c}"/>`).join('')
-  const lo = C - RING - 40
-  const hi = C + RING + 40
-
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SIZE} ${SIZE}" width="${SIZE}" height="${SIZE}">
 <defs>
 <path id="traces" d="${traces.map(pathOf).join('')}"/>
@@ -420,44 +364,13 @@ function svg(traces: Trace[], theme: Theme) {
 <mask id="fade" maskUnits="userSpaceOnUse" x="0" y="0" width="${SIZE}" height="${SIZE}">
 <rect width="${SIZE}" height="${SIZE}" fill="url(#fadeGrad)"/>
 </mask>
-<linearGradient id="metal" gradientUnits="userSpaceOnUse" x1="${lo}" y1="${lo}" x2="${hi}" y2="${hi}">${stops(theme.metal)}</linearGradient>
-<linearGradient id="rimLight" gradientUnits="userSpaceOnUse" x1="${lo}" y1="${lo}" x2="${hi}" y2="${hi}">
-<stop offset="0" stop-color="#fff" stop-opacity="0.95"/><stop offset="0.45" stop-color="#fff" stop-opacity="0"/>
-</linearGradient>
-<linearGradient id="rimShade" gradientUnits="userSpaceOnUse" x1="${lo}" y1="${lo}" x2="${hi}" y2="${hi}">
-<stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.45"/>
-</linearGradient>
-<linearGradient id="innerRim" gradientUnits="userSpaceOnUse" x1="${lo}" y1="${lo}" x2="${hi}" y2="${hi}">
-<stop offset="0.4" stop-color="${theme.innerRim[0]}" stop-opacity="0"/><stop offset="1" stop-color="${theme.innerRim[0]}" stop-opacity="${theme.innerRim[1]}"/>
-</linearGradient>
-${
-  theme.shadow
-    ? `<radialGradient id="shadow" cx="${C}" cy="${C + 16}" r="${RING + 40}" gradientUnits="userSpaceOnUse">
-<stop offset="${round((RING - 22) / (RING + 40))}" stop-color="${theme.shadow[0]}" stop-opacity="0"/>
-<stop offset="${round(RING / (RING + 40))}" stop-color="${theme.shadow[0]}" stop-opacity="${theme.shadow[1]}"/>
-<stop offset="1" stop-color="${theme.shadow[0]}" stop-opacity="0"/>
-</radialGradient>`
-    : ''
-}
 ${theme.defs}
 </defs>
 <rect width="${SIZE}" height="${SIZE}" fill="url(#halo)"/>
-${theme.shadow ? `<circle cx="${C}" cy="${C + 16}" r="${RING + 40}" fill="url(#shadow)"/>` : ''}
 <g mask="url(#fade)" fill="none" stroke-linejoin="round" stroke-linecap="round">
 ${theme.traces}
 ${theme.pads(traces)}
 </g>
-<circle cx="${C}" cy="${C}" r="${BUS}" fill="none" stroke="${theme.bus[0]}" stroke-opacity="${theme.bus[1]}" stroke-width="1.4"/>
-<g fill="none" stroke-linecap="round" opacity="${theme.ringOpacity}">
-<path d="${ring}" stroke="url(#metal)" stroke-width="${BAND}"/>
-<path d="${ring}" stroke="url(#rimShade)" stroke-width="${BAND}"/>
-<path d="${arc(RING + BAND / 2 - 0.8, KEY_GAP.to - 6, KEY_GAP.from + 6 + 360)}" stroke="url(#rimLight)" stroke-width="1.2"/>
-<path d="${arc(RING - BAND / 2 + 0.8, KEY_GAP.to - 6, KEY_GAP.from + 6 + 360)}" stroke="url(#innerRim)" stroke-width="1.2"/>
-<path d="${arc(RING - 1, 200, 246)}" stroke="#fff" stroke-opacity="0.8" stroke-width="2.4"/>
-<path d="${arc(RING + 2, 30, 52)}" stroke="#fff" stroke-opacity="0.35" stroke-width="1.6"/>
-</g>
-<path d="${crescent(-72, -14, RING + 24, 8)}" fill="url(#metal)" opacity="${theme.ringOpacity}"/>
-<path d="${arc(RING + 24, -66, -30)}" fill="none" stroke="#fff" stroke-opacity="0.55" stroke-width="1" stroke-linecap="round"/>
 </svg>
 `
 }

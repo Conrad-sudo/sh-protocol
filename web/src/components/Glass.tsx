@@ -15,8 +15,11 @@ import { ThemeContext } from '../theme/ThemeContext'
  * after it paints on top (styles/app.css, "Liquid glass").
  */
 
-/** Corners, in px. `plate` is --mf-radius-plate in tokens.css. */
-const RADIUS = { plate: 28, capsule: 999 }
+/**
+ * Corners, in px. `plate` is --mf-radius-plate in tokens.css. The engine keeps a corner to half the
+ * shorter side, so `capsule` rounds a bar's ends and `disc` makes a square a circle.
+ */
+const RADIUS = { plate: 28, capsule: 999, disc: 999 }
 
 /** The plate colour (--mf-plate) in each theme, laid over the glass at 40%. */
 const TINT = { light: '250, 251, 252', dark: '13, 26, 43' }

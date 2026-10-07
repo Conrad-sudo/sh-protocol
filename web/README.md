@@ -31,7 +31,7 @@ the API, so the page and the API share an origin.
 | `npm run e2e` | Browser tests (Playwright) at desktop, tablet and phone sizes in both themes; the API is mocked, so no back end is needed. First run: `npx playwright install chromium` |
 | `npm run og` | Re-renders the social share image to `public/og.png` |
 | `npm run marks` | Rebuilds the light and dark logo marks from `scripts/brand/Key-logo.png` |
-| `npm run wallpaper` | Redraws the wallpaper (landing, sign-in, every signed-in page) to `public/brand/wallpaper-*.svg` |
+| `npm run wallpaper` | Redraws the wallpaper's circuit (landing, sign-in, every signed-in page) to `public/brand/wallpaper-*.svg`; the safe dial in its middle is drawn on the page |
 | `npm run lint` | Oxlint |
 | `npm run typecheck` | TypeScript only |
 
@@ -161,7 +161,7 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   `StatusTag`, not RSuite's coloured `Tag` (its white-on-colour text fails contrast). Use the
   `.mf-num` class for numbers that should line up.
 - `src/components/LimitDial.tsx` — the spending limit as a gauge (a `progressbar`), echoing the
-  wallpaper's ring. It is the one bold element wherever it appears: the landing page's demo
+  wallpaper's safe dial. It is the one bold element wherever it appears: the landing page's demo
   (`components/landing/LimitDemo.tsx`, a day played once in CSS and shown finished under reduced
   motion), the dashboard and the chat's side panel.
 - `src/theme/` — light/dark handling. `index.html` repeats the same rule in a small script so dark
@@ -183,19 +183,37 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   dark mark.
 - `scripts/wallpaper/` — `npm run wallpaper` draws the wallpaper behind the landing page, the
   sign-in card and every page of the signed-in app (`AppShell` renders it, so the glass
-  always has something to bend): the logo's ring as a polished metal band (with its
-  crescent, and a gap where the key's shaft would cross), and circuit traces running from it to
+  always has something to bend): circuit traces running from a safe dial in the middle out to
   every edge. Light mode has raised steel traces; dark mode has glowing emerald ones. The 3D and the
   glow are drawn, not filtered, so the files stay sharp and cheap to paint. A fixed seed lays out
   the traces, so a re-run writes the same files; change `SEED` for a different layout.
   `components/brand/Wallpaper.tsx` puts it on a page as a fixed layer, so the page scrolls over it;
-  its `place` picks where the ring sits, and `app.css` (the Wallpaper section) positions it by the
-  ring, which is the centre of the 2880px square. Text lying on the wallpaper gets a halo in the
-  page colour; the wallpaper is hidden for anyone asking for more contrast.
+  its `place` picks where the dial sits, and `app.css` (the Wallpaper section) positions it by the
+  dial, which is the centre of the 2880px square. On the sign-in page it shrinks to fit a short or
+  narrow window, so the whole dial shows (never below 2300px), and from 600px wide the sign-in card
+  is a glass disc filling the dial's face (`--mf-auth-dial` in `app.css`, Auth pages), its text
+  centred in a 340px column — sized so the tallest state (a new address's note plus an error) stays
+  inside the circle. Below 600px the form lies on the wallpaper with the dial low beneath it. Text
+  lying on the wallpaper gets a halo in the page colour; the wallpaper is hidden for anyone asking
+  for more contrast.
+- `src/components/brand/SafeDial.tsx` — the dial itself, drawn on the page rather than into the
+  image so it can turn: a fixed ring (the logo ring's navy metal) with the index at the top, round
+  a dial of 100 marks (longer every five and ten, no numbers), with a ridged grip on its inner
+  edge. Three stacked SVGs — under the dial, the dial, over it — so only the middle one turns (on
+  the GPU, no repaint) while the light and the index stay put. Its colours are `--mf-safe-*` in `app.css`
+  ("Safe dial"). Signing in turns it (`openSafe.ts`, called through `AuthLayout`'s outlet
+  context): left a full turn to mark 72, then right to 18, where it stays, and the index lights
+  green — about 1.5s, while the signed-in app's code loads. Only then does the session start;
+  `RedirectIfSignedIn` keeps the page up until the next one is ready and leaves through a view
+  transition (`data-safe="open"` on `<html>`): the sign-in page swells and fades with the app behind
+  it. Anyone asking for less motion skips the turn and gets the plain cross-fade; jsdom (no
+  `Element.animate`) skips it too, so unit tests don't wait. `public/og.png` was drawn from the old
+  ring and has not been redrawn.
 - `src/components/Glass.tsx` — the bars and cards are liquid glass, drawn by
   [quick-liquid](https://github.com/amarnath3003/quickLiquid): a lens bending the wallpaper through a
-  30px rim, a 12px frost, the plate colour at 40% and light on the edge, with 28px corners on plates
-  and capsules for the top bar, landing header, phone tab bar and budget strip. Only Chromium bends;
+  30px rim, a 12px frost, the plate colour at 40% and light on the edge, with 28px corners on plates,
+  capsules for the top bar, landing header, phone tab bar and budget strip, and a disc for the
+  sign-in card. Only Chromium bends;
   Safari and Firefox get the frost, tint and rim light. The glass is a layer (`GlassLayer`, an
   `aria-hidden` `.mf-glass`) placed as the FIRST child of a surface marked `mf-glass-surface`, behind
   the content rather than wrapped round it: the engine sets `overflow: hidden`, corners and a shadow

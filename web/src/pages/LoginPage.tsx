@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useOutletContext } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
 import { createSiweMessage } from 'viem/siwe'
@@ -10,6 +11,7 @@ import { AddressText } from '../components/AddressText'
 import { PageMeta } from '../components/PageMeta'
 import { ConnectDialog } from '../components/wallet/ConnectDialog'
 import { errorText, isUserRejection } from '../lib/tx'
+import type { AuthOutlet } from '../layouts/AuthLayout'
 import { WalletProvider } from '../wallet/WalletProvider'
 
 /** The message's purpose, as the wallet shows it. */
@@ -18,9 +20,10 @@ const STATEMENT = 'Sign in to Mitfah with this wallet.'
 /**
  * Signing in, which is done with the browser wallet alone: connect it, then sign a short message.
  * Signing is free and moves nothing. The first sign-in for an address creates its account, so the
- * page calls it signing up for an address the API doesn't know yet. On
- * success the session starts, and RedirectIfSignedIn (around this page) sends the user on to
- * `?next=` or the dashboard.
+ * page calls it signing up for an address the API doesn't know yet. Once the API accepts the
+ * signature, the safe dial behind the card turns through its combination and opens (AuthLayout);
+ * then the session starts, and RedirectIfSignedIn (around this page) sends the user on to `?next=`
+ * or the dashboard.
  *
  * Loaded on demand like the signed-in app, so wagmi stays out of the landing page's first load.
  */
@@ -42,13 +45,23 @@ function SignIn() {
   const { mutate: disconnect } = useDisconnect()
   const { mutateAsync: signMessageAsync } = useSignMessage()
   const { signIn } = useAuth()
+  const { openSafe } = useOutletContext<AuthOutlet>()
   const [connectOpen, setConnectOpen] = useState(false)
+  // Whether the address was a returning one, held from the signature on: starting the session
+  // empties the query cache, the address check below with it, and the page should stay as it was
+  // while it gives way to the next one.
+  const [held, setHeld] = useState<boolean>()
   // A returning address signs in; a new one signs up. Asked again whenever the wallet switches account.
   const account = useQuery({
     queryKey: ['siwe-account', address],
     queryFn: () => siweAccount(address!),
     enabled: !!address,
   })
+
+  const connected = isConnected && !!address
+  const checking = account.isPending && held === undefined
+  // If the check fails, the address is treated as new: the same signature signs in either way.
+  const returning = held ?? account.data?.registered === true
 
   const submit = useMutation({
     mutationFn: async (account: Address) => {
@@ -69,16 +82,20 @@ function SignIn() {
       const signature = await signMessageAsync({ message, account })
       return siweLogin({ message, signature, nonce })
     },
-    onSuccess: signIn,
+    onSuccess: async token => {
+      setHeld(returning)
+      // The signed-in app loads while the dial turns, so it's ready when the safe opens.
+      import('../layouts/AppRoute').catch(() => {})
+      import('./DashboardPage').catch(() => {})
+      await openSafe()
+      signIn(token)
+    },
   })
 
-  const connected = isConnected && !!address
-  // If the check fails, the address is treated as new: the same signature signs in either way.
-  const returning = account.data?.registered === true
   // "Sign in" until the check says the connected address is new.
   const heading = (
     <h1 className="mf-auth-title">
-      {connected && !account.isPending && !returning ? 'Sign up with your wallet' : 'Sign in with your wallet'}
+      {connected && !checking && !returning ? 'Sign up with your wallet' : 'Sign in with your wallet'}
     </h1>
   )
 
@@ -98,7 +115,7 @@ function SignIn() {
     )
   }
 
-  if (account.isPending) {
+  if (checking) {
     return (
       <>
         {heading}
@@ -139,7 +156,8 @@ function SignIn() {
         block
         size="lg"
         className="mf-step-action"
-        loading={submit.isPending}
+        // Still busy once signed in: the safe is opening, and the next page is on its way.
+        loading={submit.isPending || submit.isSuccess}
         onClick={() => submit.mutate(address)}
       >
         {returning ? 'Sign in' : 'Sign up'}

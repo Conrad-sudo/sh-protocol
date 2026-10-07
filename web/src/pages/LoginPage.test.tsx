@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen } from '@testing-library/react'
+import { cleanup, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import { answerRpc, isRpc, json, makeWagmiConfig, ME, renderRoutes, TOKEN, WALLET } from '../test/utils'
@@ -113,6 +113,54 @@ describe('LoginPage', () => {
     await user.click(screen.getByRole('button', { name: 'Sign up' }))
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
     expect(logins).toHaveLength(1)
+  })
+
+  it('turns the safe dial behind the card before the session starts', async () => {
+    stubApi(() => json(200, TOKEN), { registered: false })
+    // jsdom can't animate, so the dial's turn is stood in for: it ends when `open` is called.
+    let open!: () => void
+    const finished = new Promise<void>(resolve => (open = resolve))
+    const animate = vi.fn(() => ({ finished }))
+    Object.defineProperty(Element.prototype, 'animate', { configurable: true, value: animate })
+    try {
+      const router = await renderRoutes(routes, '/login')
+      const user = await connect()
+      await user.click(await screen.findByRole('button', { name: 'Sign up' }))
+
+      await waitFor(() => expect(animate).toHaveBeenCalled())
+      expect(animate.mock.contexts[0]).toBe(document.querySelector('.mf-wallpaper .mf-safe-rotor'))
+      // Signed, but still here: the page stays as it was, busy, until the safe has opened.
+      expect(router.state.location.pathname).toBe('/login')
+      expect(screen.getByRole('heading', { name: 'Sign up with your wallet' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Sign up' })).toHaveAttribute('data-loading', 'true')
+
+      open()
+      expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
+      expect(router.state.location.pathname).toBe('/dashboard')
+    } finally {
+      delete (Element.prototype as Partial<Element>).animate
+    }
+  })
+
+  it('leaves through the opening safe only after signing in here', async () => {
+    stubApi(() => json(200, TOKEN))
+    await renderRoutes(routes, '/login')
+    await connectAndSignIn()
+    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
+    // The view transition's styles hold for the change of page, and then go.
+    expect(document.documentElement.dataset.safe).toBe('open')
+    await waitFor(() => expect(document.documentElement.dataset.safe).toBeUndefined(), { timeout: 3_000 })
+    cleanup()
+
+    // Already signed in: straight on, with nothing to open.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => Promise.resolve(url.endsWith('/api/auth/refresh') ? json(200, TOKEN) : json(200, ME))),
+    )
+    resetClientForTests()
+    const router = await renderRoutes(routes, '/login')
+    await waitFor(() => expect(router.state.location.pathname).toBe('/dashboard'))
+    expect(document.documentElement.dataset.safe).toBeUndefined()
   })
 
   it('says so when the signature is declined', async () => {
