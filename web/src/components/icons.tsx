@@ -28,3 +28,21 @@ export function MoonIcon() {
     </svg>
   )
 }
+
+/** Something that came into the wallet: an arrow pointing down and in. */
+export function ArrowInIcon() {
+  return (
+    <svg {...common}>
+      <path d="M17 7 7 17M16 17H7V8" />
+    </svg>
+  )
+}
+
+/** Something that left the wallet: an arrow pointing up and out. */
+export function ArrowOutIcon() {
+  return (
+    <svg {...common}>
+      <path d="M7 17 17 7M8 7h9v9" />
+    </svg>
+  )
+}

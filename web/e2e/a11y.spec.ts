@@ -27,6 +27,19 @@ const HISTORY = [
   { role: 'user', text: 'how much can I still spend today?' },
   { role: 'assistant', text: 'You can still spend **$60** of your $100 limit.' },
 ]
+// One transaction in each of the History tab's groups.
+const T0 = Math.floor(Date.now() / 1000) - 3_600
+const TRANSACTIONS = [
+  { id: 3, direction: 'in', source: 'outside', status: 'confirmed', action: `Received 25 USDC from ${OWNER}` },
+  { id: 2, direction: 'out', source: 'assistant', status: 'pending', action: 'Transfer 1.0 USDC to sam' },
+  { id: 1, direction: 'none', source: 'owner', status: 'confirmed', action: 'Set the spending limit to $100' },
+].map(t => ({
+  ...t,
+  chain_id: SEPOLIA,
+  tx_hash: t.status === 'pending' ? null : `0x${String(t.id).repeat(64)}`,
+  created_at: T0 + t.id * 60,
+  mined_at: t.status === 'pending' ? null : T0 + t.id * 60,
+}))
 
 /** A signed-in account with a wallet, contacts and a short conversation. */
 async function mockServer(page: Page) {
@@ -60,6 +73,10 @@ async function mockServer(page: Page) {
         return route.fulfill({ json: { contacts: CONTACTS } })
       case '/api/chat/history':
         return route.fulfill({ json: { messages: HISTORY } })
+      case '/api/transactions':
+        return route.fulfill({ json: { transactions: TRANSACTIONS, next_before: null, syncing: false } })
+      case '/api/transactions/tokens':
+        return route.fulfill({ json: { tokens: ['ETH', 'USDC'] } })
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
@@ -92,7 +109,7 @@ async function scan(page: Page) {
 
 // /signup only redirects to /login now, so it isn't scanned on its own.
 const SIGNED_OUT = ['/', '/login', '/terms', '/privacy']
-const SIGNED_IN = ['/dashboard', '/assistant', '/contacts', '/controls', '/settings', '/onboarding']
+const SIGNED_IN = ['/dashboard', '/assistant', '/contacts', '/controls', '/history', '/settings', '/onboarding']
 
 for (const path of SIGNED_OUT) {
   test(`no serious accessibility problems on ${path}`, async ({ page }) => {
@@ -111,6 +128,20 @@ for (const path of SIGNED_IN) {
     expect(await scan(page)).toEqual([])
   })
 }
+
+test("no serious accessibility problems in the History tab's filters", async ({ page }) => {
+  await mockServer(page)
+  await page.goto('/history?token=USDC&min=5')
+  await expect(page.getByRole('list', { name: 'Filters in use' })).toBeVisible()
+  await page.getByRole('button', { name: /^Filter/ }).click()
+  const panel = page.getByRole('form', { name: 'Filter transactions' })
+  await panel.getByLabel('At most').fill('1')
+  await panel.getByLabel('Address or contact').fill('nobody')
+  await panel.getByRole('button', { name: 'Apply' }).click()
+  // Open, with its error messages showing.
+  await expect(panel.getByText('The lowest amount is more than the highest.')).toBeVisible()
+  expect(await scan(page)).toEqual([])
+})
 
 test('no serious accessibility problems in the add-token dialog', async ({ page }) => {
   await mockServer(page)

@@ -1,18 +1,32 @@
-import { useState } from 'react'
+import { type ReactElement, useId, useState } from 'react'
+import { useSearchParams } from 'react-router'
+import FunnelIcon from '@rsuite/icons/Funnel'
+import GearIcon from '@rsuite/icons/Gear'
 import HistoryIcon from '@rsuite/icons/History'
 import { Button, Placeholder, SegmentedControl, Text } from 'rsuite'
-import type { Transaction } from '../api/types'
+import type { Transaction, TransactionDirection } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { AddressText } from '../components/AddressText'
 import { CopyButton } from '../components/CopyButton'
 import { EmptyState } from '../components/EmptyState'
 import { GlassLayer } from '../components/Glass'
+import { FilterChips, FilterPanel } from '../components/history/HistoryFilters'
+import { ArrowInIcon, ArrowOutIcon } from '../components/icons'
 import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
 import { StatusTag, type StatusTone } from '../components/StatusTag'
 import { useContacts } from '../hooks/useContacts'
-import { useTransactions } from '../hooks/useTransactions'
+import { useTransactions, useTransactionTokens } from '../hooks/useTransactions'
 import { formatDateTime, shortAddress } from '../lib/format'
+import {
+  countFilters,
+  type HistoryGroup,
+  type HistoryView,
+  NO_FILTERS,
+  readView,
+  serverFilters,
+  writeView,
+} from '../lib/historyFilters'
 import { chainName, explorerName, explorerUrl } from '../wallet/chains'
 
 const TITLE = 'History'
@@ -32,22 +46,65 @@ const STATUS: Record<Transaction['status'], { label: string; tone: StatusTone }>
   dropped: { label: "Didn't go through", tone: 'neutral' },
 }
 
+const GROUPS: { label: string; value: HistoryGroup }[] = [
+  { label: 'All', value: 'all' },
+  { label: 'Incoming', value: 'in' },
+  { label: 'Outgoing', value: 'out' },
+  { label: 'Wallet changes', value: 'none' },
+]
+
+/** What an empty list says on each tab, when no filter is narrowing it. */
+const EMPTY: Record<Exclude<HistoryGroup, 'all'>, { title: string; body: string }> = {
+  in: { title: 'No incoming transactions yet', body: 'Money and tokens that reach your wallet will be listed here.' },
+  out: {
+    title: 'No outgoing transactions yet',
+    body: 'Payments, withdrawals, swaps and anything else that leaves your wallet will be listed here.',
+  },
+  none: {
+    title: 'No wallet changes yet',
+    body: 'Changes that move no money, like a new spending limit or pausing the wallet, will be listed here.',
+  },
+}
+
+const DIRECTION: Record<TransactionDirection, { label: string; icon: ReactElement }> = {
+  in: { label: 'Incoming', icon: <ArrowInIcon /> },
+  out: { label: 'Outgoing', icon: <ArrowOutIcon /> },
+  none: { label: 'Wallet change', icon: <GearIcon aria-hidden /> },
+}
+
 const ADDRESS = /(0x[0-9a-fA-F]{40})/
 
 /**
  * The account's transactions, newest first, each with its date and time and a link to the
  * network's block explorer. The lasting record of what happened: the chat is cleared after every
  * transaction, this list never is.
+ *
+ * Tabs split it into incoming, outgoing and wallet changes, and the Filter panel narrows it by date,
+ * amount, address and token. The server does the searching, so a filter covers every transaction,
+ * not just the pages loaded. Both live in the page's address, so a refresh keeps them.
  */
 export function HistoryPage() {
   const { chainId, walletChains } = useSelectedChain()
   const [scope, setScope] = useState<'all' | 'network'>('all')
   // Only worth offering with wallets on more than one network: with one, every transaction is on it.
   const canFilter = chainId !== null && walletChains.length > 1
-  const history = useTransactions(canFilter && scope === 'network' ? chainId : null)
+  const scopeChain = canFilter && scope === 'network' ? chainId : null
+  const [params, setParams] = useSearchParams()
+  const view = readView(params)
+  const [panelOpen, setPanelOpen] = useState(false)
+  const panelId = useId()
+  const history = useTransactions(scopeChain, serverFilters(view))
+  const tokens = useTransactionTokens(scopeChain)
   const contacts = useContacts()
   const nameOf = (address: string) =>
     contacts.data?.find(contact => contact.address.toLowerCase() === address.toLowerCase())?.name
+
+  const filters = countFilters(view)
+  const show = (next: HistoryView) => setParams(writeView(next), { replace: true })
+  const changeGroup = (group: HistoryGroup) =>
+    // A wallet change moves no money: an amount, address or token would match none of them.
+    show(group === 'none' ? { ...view, group, min: '', max: '', address: '', token: '' } : { ...view, group })
+  const clearFilters = () => show({ group: view.group, ...NO_FILTERS })
 
   const transactions = history.data?.pages.flatMap(page => page.transactions)
   const syncing = history.data?.pages[0]?.syncing === true
@@ -62,12 +119,23 @@ export function HistoryPage() {
   if (transactions === undefined && !history.isError) body = <Placeholder.Paragraph rows={5} active />
   else if (transactions === undefined) {
     body = <QueryError what="your transactions" error={history.error} onRetry={() => void history.refetch()} />
+  } else if (transactions.length === 0 && filters > 0) {
+    body = (
+      <EmptyState
+        icon={<FunnelIcon />}
+        title="No transactions match these filters"
+        action={<Button onClick={clearFilters}>Clear filters</Button>}
+      >
+        Try a wider date range, or fewer filters.
+      </EmptyState>
+    )
   } else if (transactions.length === 0) {
+    const empty = view.group === 'all' ? null : EMPTY[view.group]
     body = (
       <>
-        <EmptyState icon={<HistoryIcon />} title="No transactions yet">
-          Payments your assistant makes, changes you sign here, and anything else that reaches your wallet will be
-          listed with their date, time and a link to the network's explorer.
+        <EmptyState icon={<HistoryIcon />} title={empty?.title ?? 'No transactions yet'}>
+          {empty?.body ??
+            "Payments your assistant makes, changes you sign here, and anything else that reaches your wallet will be listed with their date, time and a link to the network's explorer."}
         </EmptyState>
         {checking}
       </>
@@ -110,18 +178,61 @@ export function HistoryPage() {
     <>
       <PageHeader title={TITLE} description={DESCRIPTION} />
       <div className="mf-dashboard">
-        {canFilter && (
+        <div className="mf-tx-toolbar">
           <SegmentedControl
-            aria-label="Networks to show"
-            className="mf-tx-scope"
-            data={[
-              { label: 'All networks', value: 'all' },
-              { label: chainName(chainId), value: 'network' },
-            ]}
-            value={scope}
-            onChange={value => setScope(value as 'all' | 'network')}
+            aria-label="Transactions to show"
+            className="mf-tx-groups"
+            data={GROUPS}
+            value={view.group}
+            onChange={value => changeGroup(value as HistoryGroup)}
+          />
+          {canFilter && (
+            <SegmentedControl
+              aria-label="Networks to show"
+              className="mf-tx-scope"
+              data={[
+                { label: 'All networks', value: 'all' },
+                { label: chainName(chainId), value: 'network' },
+              ]}
+              value={scope}
+              onChange={value => setScope(value as 'all' | 'network')}
+            />
+          )}
+          <Button
+            className="mf-tx-filter-button"
+            startIcon={<FunnelIcon />}
+            active={panelOpen}
+            aria-expanded={panelOpen}
+            aria-controls={panelOpen ? panelId : undefined}
+            onClick={() => setPanelOpen(open => !open)}
+          >
+            Filter
+            {filters > 0 && (
+              <>
+                {' '}
+                <span className="mf-visually-hidden">{`(${filters} on)`}</span>
+                <span className="mf-tx-filter-count" aria-hidden="true">
+                  {filters}
+                </span>
+              </>
+            )}
+          </Button>
+        </div>
+        {panelOpen && (
+          <FilterPanel
+            // Opened afresh from what is applied, and again whenever the tab changes what it offers.
+            key={view.group === 'none' ? 'changes' : 'money'}
+            id={panelId}
+            view={view}
+            contacts={contacts.data ?? []}
+            tokens={tokens.data?.tokens ?? []}
+            onApply={next => {
+              show(next)
+              setPanelOpen(false)
+            }}
           />
         )}
+        <FilterChips view={view} nameOf={nameOf} onChange={show} />
         {body}
       </div>
     </>
@@ -134,6 +245,7 @@ function TransactionRow({ tx, nameOf }: { tx: Transaction; nameOf: (address: str
   return (
     <li className="mf-tx" data-tx={tx.id}>
       <p className="mf-tx-action">
+        {tx.direction && <DirectionMark direction={tx.direction} />}
         <ActionText text={tx.action} nameOf={nameOf} />
       </p>
       <p className="mf-tx-meta">
@@ -150,6 +262,17 @@ function TransactionRow({ tx, nameOf }: { tx: Transaction; nameOf: (address: str
         <TxHash tx={tx} />
       </div>
     </li>
+  )
+}
+
+/** Which way it went: an arrow in, an arrow out, or a gear for a change that moved no money. */
+function DirectionMark({ direction }: { direction: TransactionDirection }) {
+  const { label, icon } = DIRECTION[direction]
+  return (
+    <span className="mf-tx-dir" data-direction={direction} title={label}>
+      {icon}
+      <span className="mf-visually-hidden">{`${label}: `}</span>
+    </span>
   )
 }
 

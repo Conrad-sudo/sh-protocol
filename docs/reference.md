@@ -17,10 +17,11 @@
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
 | `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%; the dashboard's token list, LP tokens included, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
 | `make history-test` | The History tab and the short chat memory: how transactions are recorded, described, settled and listed, the history and delete-chat routes, and the conversation starting afresh after a send, against a fake chain and a scripted model (`app/tests/test_history.py`, offline) |
+| `make movements-test` | What each transaction moved, for the History tab's filters: owner calldata, and the assistant's receipts (token Transfers, the op's executions, wrapped-native events, CELO counted once) (`app/tests/test_tx_movements.py`, offline) |
 | `make explorers-test` | Reading activity outside Mitfah from Etherscan, NodeReal and Alchemy: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
 | `make explorers-live` | The same against the real services, read-only, with the keys in `.env` (`app/tests/check_explorers_live.py`; not part of `py-test`) |
 | `make bundler-test` | What a UserOp pays for posting its data to Ethereum on the live L2s — Base's L1 fee and Arbitrum's L1 gas, as `preVerificationGas` — and that forks pay none (`app/tests/test_bundler.py`, offline) |
-| `make py-test` | All seven offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `explorers-test` + `speed-test` + `bundler-test` |
+| `make py-test` | All eight offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc.; on Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |

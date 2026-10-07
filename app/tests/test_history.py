@@ -11,6 +11,7 @@ Run: make history-test   (or: python app/tests/test_history.py)
 """
 import logging
 import os
+import sqlite3
 import tempfile
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -48,6 +49,8 @@ import tx_history                           # noqa: E402
 from agent_context import AgentContext      # noqa: E402
 from bundler import UserOpReverted          # noqa: E402
 from constants import get_router            # noqa: E402
+from test_tx_movements import bundle, transfer  # noqa: E402
+from tx_movements import IN, OUT, Moved     # noqa: E402
 
 CHAIN = 11155111
 NETWORK = "sepolia-fork"
@@ -306,7 +309,7 @@ def _patch_confirm(w3, broadcast, budget_left):
     tools.load_entry_point = lambda _user_id: None
     tools._prepare_user_op = prepare
     tools._broadcast_user_op = broadcast
-    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None, lp_pool=None)
+    quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None, lp_pool=None, direction="out")
 
     def restore():
         for name, value in saved.items():
@@ -353,6 +356,7 @@ def test_assistant_sends_are_recorded_before_they_go():
               newest["status"] == "confirmed" and newest["tx_hash"] == "0x" + "22" * 32
               and newest["mined_at"] == 1_790_000_123 and newest["source"] == "assistant", str(newest))
         check("described by the quote's code-written action", newest["action"] == "Transfer 5 USDC to 0x5A3…", newest["action"])
+        check("listed as outgoing from the start, by the quote's direction", newest["direction"] == "out", str(newest["direction"]))
         check("the chat reply carries the same 0x-prefixed hash", "0x" + "22" * 32 in reply, reply)
         check("...and what is left of the spending limit, so the agent needn't ask for it",
               reply.endswith("Spending limit left this period: $123.45"), reply)
@@ -433,7 +437,7 @@ def test_deposits_put_their_pool_on_the_dashboard():
         return landed, {"status": 1, "transactionHash": landed, "blockNumber": 101}
 
     weth = _addr(0x0E7E)
-    deposit = SimpleNamespace(action="Add liquidity: 100 of USDC and 0.04 of ETH", quote=None,
+    deposit = SimpleNamespace(action="Add liquidity: 100 of USDC and 0.04 of ETH", quote=None, direction="out",
                               lp_pool={"token_a": weth, "ticker_a": "eth", "token_b": USDC, "ticker_b": "usdc"})
     restore = _patch_confirm(w3, broadcast, {"value": 10**18})
     saved_save = tools._save_lp_token
@@ -574,7 +578,7 @@ def test_history_route_lists_only_your_own_newest_first():
               [t["action"] for t in got["transactions"]] == ["mine on bsc", "mine 2", "mine 1", "mine 0"],
               str([t["action"] for t in got["transactions"]]))
         check("each has what the tab shows, and nothing internal",
-              set(got["transactions"][0]) == {"id", "chain_id", "source", "action", "status", "tx_hash", "created_at", "mined_at"},
+              set(got["transactions"][0]) == {"id", "chain_id", "source", "action", "status", "tx_hash", "created_at", "mined_at", "direction"},
               str(got["transactions"][0]))
         check("no further page", got["next_before"] is None, str(got["next_before"]))
 
@@ -627,6 +631,7 @@ def test_deposits_from_the_fund_drawer_are_listed():
         rows = db.get_transactions(me)
         check("listed as pending until it mines, described from the transaction",
               len(rows) == 1 and rows[0]["status"] == "pending" and rows[0]["action"] == "Add 0.2 ETH to the wallet", str(rows))
+        check("...and as incoming, from its calldata", rows[0]["direction"] == "in", str(rows[0]["direction"]))
 
         r = post(elsewhere)
         check("a transaction to somebody else's address -> 400, and not listed",
@@ -1247,6 +1252,203 @@ def test_history_lists_by_time():
 
 
 
+# ── Filters: incoming, outgoing, dates, amounts, addresses, tokens ───────────
+
+
+def test_history_filters():
+    """
+    The History tab's groups and filters, searched on the server. The money filters must all hold
+    for ONE movement, and with a group chosen that movement must go that way.
+    """
+    print("\n[16] filters: in / out / changes, dates, amount, address, token -- the money ones on one movement")
+    c = make_client()
+    me, headers = _sign_up(c)
+    wallet, pair, router = _addr(0xF11), _addr(0xF12), _addr(0xF13)
+
+    def row(n: int, action: str, direction: str, moved: list, mined_at: int):
+        db.add_transaction(me, CHAIN, wallet, "assistant", action, "confirmed", tx_hash=_hash(0xF00 + n),
+                           mined_at=mined_at, direction=direction, movements=moved)
+
+    row(1, "received 100 USDC", "in", [Moved(IN, USDC, "USDC", 100_000_000, 6, SAM)], 1_700_100_000)
+    row(2, "sent 5 USDC", "out", [Moved(OUT, USDC, "USDC", 5_000_000, 6, SAM)], 1_700_200_000)
+    row(3, "sent 100 ETH", "out", [Moved(OUT, None, "ETH", 100 * 10**18, 18, STRANGER)], 1_700_300_000)
+    row(4, "swapped 100 USDC for 0.03 ETH", "out",
+        [Moved(OUT, USDC, "USDC", 100_000_000, 6, pair), Moved(IN, None, "ETH", 3 * 10**16, 18, router)], 1_700_400_000)
+    row(5, "paused", "none", [], 1_700_500_000)
+    db.add_transaction(me, CHAIN, wallet, "assistant", "sending", "pending", user_op_hash=_hash(0xF06), direction="out")
+
+    saved = api._web3_or_none
+    api._web3_or_none = lambda _chain: None
+    try:
+        def listed(query: str) -> list[str]:
+            r = c.get(f"/api/transactions?{query}", headers=headers)
+            return [t["action"] for t in r.json()["transactions"]] if r.status_code == 200 else [f"HTTP {r.status_code}"]
+
+        check("each row says its group", {t["action"]: t["direction"] for t in
+              c.get("/api/transactions", headers=headers).json()["transactions"]}["paused"] == "none")
+        check("incoming: only what came in", listed("direction=in") == ["received 100 USDC"], str(listed("direction=in")))
+        check("outgoing: sends and swaps, a pending send on top",
+              listed("direction=out") == ["sending", "swapped 100 USDC for 0.03 ETH", "sent 100 ETH", "sent 5 USDC"],
+              str(listed("direction=out")))
+        check("wallet changes: what moved nothing", listed("direction=none") == ["paused"], str(listed("direction=none")))
+
+        check("dates: from inclusive, to exclusive",
+              listed("since=1700200000&until=1700400000") == ["sent 100 ETH", "sent 5 USDC"],
+              str(listed("since=1700200000&until=1700400000")))
+        check("at least 100 of something",
+              listed("min_amount=100") == ["swapped 100 USDC for 0.03 ETH", "sent 100 ETH", "received 100 USDC"],
+              str(listed("min_amount=100")))
+        check("exactly 5", listed("min_amount=5&max_amount=5") == ["sent 5 USDC"], str(listed("min_amount=5&max_amount=5")))
+        check("exactly 0.03, in whole units", listed("min_amount=0.03&max_amount=0.03") == ["swapped 100 USDC for 0.03 ETH"],
+              str(listed("min_amount=0.03&max_amount=0.03")))
+        check("a token, any case",
+              listed("token=usdc") == ["swapped 100 USDC for 0.03 ETH", "sent 5 USDC", "received 100 USDC"],
+              str(listed("token=usdc")))
+        check("an address: the other side", listed(f"address={SAM.lower()}") == ["sent 5 USDC", "received 100 USDC"],
+              str(listed(f"address={SAM.lower()}")))
+        check("an address: or the token's contract",
+              listed(f"address={USDC}") == ["swapped 100 USDC for 0.03 ETH", "sent 5 USDC", "received 100 USDC"],
+              str(listed(f"address={USDC}")))
+        check("amount and token on ONE movement: the swap's 100 is USDC, not ETH",
+              listed("token=ETH&min_amount=100") == ["sent 100 ETH"], str(listed("token=ETH&min_amount=100")))
+        check("outgoing ETH: the swap's ETH came in, so it isn't",
+              listed("direction=out&token=ETH") == ["sent 100 ETH"], str(listed("direction=out&token=ETH")))
+
+        page = c.get("/api/transactions?token=usdc&limit=2", headers=headers).json()
+        rest = c.get(f"/api/transactions?token=usdc&limit=2&before={page['next_before']}", headers=headers).json()
+        check("a filtered list pages like the full one",
+              [t["action"] for t in page["transactions"]] == ["swapped 100 USDC for 0.03 ETH", "sent 5 USDC"]
+              and [t["action"] for t in rest["transactions"]] == ["received 100 USDC"] and rest["next_before"] is None,
+              f"{page} / {rest}")
+
+        tokens = c.get("/api/transactions/tokens", headers=headers)
+        check("the token filter offers what was moved", tokens.json() == {"tokens": ["ETH", "USDC"]}, tokens.text)
+        check("per chain", c.get(f"/api/transactions/tokens?chain_id={BSC}", headers=headers).json() == {"tokens": []})
+        check("tokens need a token", c.get("/api/transactions/tokens").status_code == 401)
+        for bad in ("direction=sideways", "address=0x12", "min_amount=-1", "since=-5", "token=" + "x" * 41):
+            check(f"{bad[:24]} -> 422", c.get(f"/api/transactions?{bad}", headers=headers).status_code == 422)
+    finally:
+        api._web3_or_none = saved
+
+
+def test_movements_are_read_after_a_transaction_settles():
+    """
+    A settled Mitfah transaction's movements are read the next time the History tab is read: an
+    owner call from its calldata, an assistant op from its receipt. A failed one keeps the group it
+    was recorded with and moved nothing; one the node no longer has is marked read and left alone.
+    """
+    print("\n[17] movements: read when the history is read, a few at a time, each row once")
+    owner = _addr(0x17E)
+    user = _create(owner)
+    w3 = FakeW3()
+    deposit, failed_withdraw, sent, failed_send, gone, pending = (_hash(0x1700 + n) for n in range(6))
+    w3.eth.txs[deposit] = {"to": WALLET, "from": owner, "input": HexBytes(b""), "value": 2 * 10**17}
+    w3.eth.txs[failed_withdraw] = {**_owner_tx("withdraw", [USDC, 5_000_000, SAM]), "from": owner}
+    usdc_transfer = Web3.keccak(text="transfer(address,uint256)")[:4] + SAM_AMOUNT
+    w3.eth.txs[sent] = bundle([(USDC, 0, usdc_transfer)])
+    w3.eth.receipts[sent] = {"status": 1, "logs": [transfer(USDC, WALLET, SAM, 5_000_000)]}
+    w3.eth.txs[failed_send] = bundle([(USDC, 0, usdc_transfer)])
+
+    def add(source, action, status, tx_hash, direction=None):
+        return db.add_transaction(user, CHAIN, WALLET, source, action, status, tx_hash=tx_hash, direction=direction)
+
+    ids = {
+        "deposit": add("owner", "Add 0.2 ETH to the wallet", "confirmed", deposit, "in"),
+        "failed_withdraw": add("owner", "Withdraw 5 USDC to sam", "failed", failed_withdraw, "out"),
+        "sent": db.add_transaction(user, CHAIN, WALLET, "assistant", "Transfer 5 USDC", "confirmed",
+                                   tx_hash=sent, user_op_hash=_hash(0x1710)),
+        "failed_send": db.add_transaction(user, CHAIN, WALLET, "assistant", "Transfer 5 USDC", "failed",
+                                          tx_hash=failed_send, user_op_hash=_hash(0x1711), direction="out"),
+        "gone": add("owner", "Add 1 ETH to the wallet", "confirmed", gone, "in"),
+        "pending": db.add_transaction(user, CHAIN, WALLET, "assistant", "Transfer 1 USDC", "pending",
+                                      user_op_hash=_hash(0x1712), direction="out"),
+    }
+
+    def state(name: str) -> tuple:
+        row = next(r for r in db.get_transactions(user) if r["id"] == ids[name])
+        return row["direction"], row["movements_read"], db.get_movements(ids[name])
+
+    saved_batch = tx_history.MOVEMENTS_BATCH
+    tx_history.MOVEMENTS_BATCH = 2
+    try:
+        tx_history.read_movements(user, lambda _chain: w3)
+        check("a few per read, newest first", state("gone")[1] == 1 and state("failed_send")[1] == 1
+              and state("sent")[1] == 0, f"{state('gone')} {state('failed_send')} {state('sent')}")
+    finally:
+        tx_history.MOVEMENTS_BATCH = saved_batch
+    tx_history.read_movements(user, lambda _chain: w3)
+
+    direction, _, moved = state("deposit")
+    check("a deposit: in, from the owner, 0.2 ETH",
+          direction == "in" and moved == [{"direction": "in", "token": None, "ticker": "ETH", "amount": str(2 * 10**17),
+                                           "amount_value": 0.2, "counterparty": owner}], str(moved))
+    check("a failed withdrawal: still outgoing, moved nothing", state("failed_withdraw")[0::2] == ("out", []),
+          str(state("failed_withdraw")))
+    direction, _, moved = state("sent")
+    check("an assistant send: out, read from its receipt",
+          direction == "out" and [(m["direction"], m["token"], m["amount"], m["counterparty"]) for m in moved]
+          == [("out", USDC, "5000000", SAM)], f"{direction} {moved}")
+    check("a failed send: still outgoing, moved nothing", state("failed_send")[0::2] == ("out", []), str(state("failed_send")))
+    check("one the node no longer has: marked read, its group kept", state("gone") == ("in", 1, []), str(state("gone")))
+    check("a pending one waits until it settles", state("pending")[:2] == ("out", 0), str(state("pending")))
+    check("nothing is read twice", db.get_unread_movement_rows(user, 50) == [], str(db.get_unread_movement_rows(user, 50)))
+
+
+SAM_AMOUNT = bytes(12) + bytes.fromhex(SAM[2:]) + (5_000_000).to_bytes(32, "big")
+
+
+def test_outside_rows_carry_their_movements():
+    print("\n[18] outside rows are recorded with what they moved, and their group")
+    owner = _addr(0x18E)
+    user = _create(owner)
+    wallet = _addr(0x0F7)
+    pause = bytes(HexBytes(WALLET_CONTRACT.encode_abi("pause", args=[])))
+    movements = [
+        _move(0x1801, sender=SAM, recipient=wallet, amount=100_000_000, token=USDC, decimals=6),
+        _move(0x1802, sender=wallet, recipient=SAM, amount=10**18),
+        _move(0x1803, sender=owner, recipient=wallet, amount=0, direct_call=True, input=pause),
+    ]
+    with _explorer(FakeExplorer([(movements, 500)])):
+        tx_history.sync_outside(user, CHAIN, wallet, OUTSIDE_W3)
+    rows = {r["tx_hash"]: r for r in db.get_transactions(user)}
+    received, sent, paused = rows[_hash(0x1801)], rows[_hash(0x1802)], rows[_hash(0x1803)]
+    check("received: in, with the USDC and who sent it",
+          received["direction"] == "in" and received["movements_read"] == 1
+          and [(m["ticker"], m["amount_value"], m["counterparty"]) for m in db.get_movements(received["id"])]
+          == [("USDC", 100.0, SAM)], str(db.get_movements(received["id"])))
+    check("sent: out", sent["direction"] == "out" and db.get_movements(sent["id"])[0]["counterparty"] == SAM)
+    check("a pause from the explorer: a wallet change", paused["direction"] == "none" and db.get_movements(paused["id"]) == [])
+
+
+def test_old_databases_are_migrated():
+    """A transactions table from before the filters gains its columns. Its outside rows are searched
+    for again, so they come back with their movements; Mitfah's own rows stay, to be read later."""
+    print("\n[19] an older database: columns added, outside rows searched for again, Mitfah's kept")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            chain_id INTEGER NOT NULL, wallet TEXT NOT NULL, source TEXT NOT NULL, action TEXT NOT NULL,
+            status TEXT NOT NULL, tx_hash TEXT, user_op_hash TEXT, op_nonce TEXT, from_block INTEGER,
+            created_at INTEGER NOT NULL, mined_at INTEGER);
+        CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL, next_block INTEGER,
+            synced_at INTEGER NOT NULL, PRIMARY KEY (chain_id, wallet));
+        INSERT INTO transactions (user_id, chain_id, wallet, source, action, status, created_at)
+            VALUES (1, 1, 'w', 'assistant', 'mine', 'confirmed', 1), (1, 1, 'w', 'outside', 'theirs', 'confirmed', 1);
+        INSERT INTO history_sync VALUES (1, 'w', 500, 1);
+    """)
+    db._migrate_transaction_direction(conn)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    rows = [dict(r) for r in conn.execute("SELECT source, direction, movements_read FROM transactions").fetchall()]
+    check("direction and movements_read added", {"direction", "movements_read"} <= set(cols), str(cols))
+    check("Mitfah's row kept, unread; the outside one gone",
+          rows == [{"source": "assistant", "direction": None, "movements_read": 0}], str(rows))
+    check("every explorer search starts over", conn.execute("SELECT COUNT(*) FROM history_sync").fetchone()[0] == 0)
+    db._migrate_transaction_direction(conn)
+    check("running it again changes nothing", conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 1)
+
+
+
 if __name__ == "__main__":
     try:
         test_owner_transactions_are_described_from_their_calldata()
@@ -1265,6 +1467,10 @@ if __name__ == "__main__":
         test_outside_search_where_it_starts()
         test_outside_searches_run_in_the_background_once_a_minute()
         test_history_lists_by_time()
+        test_history_filters()
+        test_movements_are_read_after_a_transaction_settles()
+        test_outside_rows_carry_their_movements()
+        test_old_databases_are_migrated()
     finally:
         os.unlink(_tmp_db.name)
     finish("All history checks passed.")

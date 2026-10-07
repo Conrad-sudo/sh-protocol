@@ -24,19 +24,24 @@ const hash = (n: number) => `0x${n.toString(16).padStart(2, '0').repeat(32)}`
 // whole addresses and unrounded amounts.
 const TRANSACTIONS = [
   // Read from the block explorer: something that reached the wallet outside Mitfah.
-  { id: 7, chain_id: SEPOLIA, source: 'outside', status: 'confirmed', tx_hash: hash(7), action: `Received 25 USDC from ${PAYEE}` },
+  { id: 7, chain_id: SEPOLIA, source: 'outside', status: 'confirmed', tx_hash: hash(7), direction: 'in', action: `Received 25 USDC from ${PAYEE}` },
   {
-    id: 6, chain_id: SEPOLIA, source: 'assistant', status: 'confirmed', tx_hash: hash(6),
+    id: 6, chain_id: SEPOLIA, source: 'assistant', status: 'confirmed', tx_hash: hash(6), direction: 'out',
     action: `Approve 0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3 to spend 100.0 of ${TOKEN_ADDRESS}; Swap 100.0 of ${TOKEN_ADDRESS} for at least 9.4894769844675e-05 of the native asset`,
   },
-  { id: 5, chain_id: SEPOLIA, source: 'assistant', status: 'confirmed', tx_hash: hash(5), action: `Transfer 10.0 USDC to ${PAYEE}` },
-  { id: 4, chain_id: BSC, source: 'owner', status: 'failed', tx_hash: hash(4), action: 'Withdraw 0.5 BNB to your owner address' },
-  { id: 3, chain_id: SEPOLIA, source: 'assistant', status: 'pending', tx_hash: null, action: `Transfer 1.0 USDC to ${PAYEE}` },
-  { id: 2, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(2), action: 'Set the spending limit to $1,234' },
-  { id: 1, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(1), action: 'Create your Mitfah smart wallet' },
+  { id: 5, chain_id: SEPOLIA, source: 'assistant', status: 'confirmed', tx_hash: hash(5), direction: 'out', action: `Transfer 10.0 USDC to ${PAYEE}` },
+  { id: 4, chain_id: BSC, source: 'owner', status: 'failed', tx_hash: hash(4), direction: 'out', action: 'Withdraw 0.5 BNB to your owner address' },
+  { id: 3, chain_id: SEPOLIA, source: 'assistant', status: 'pending', tx_hash: null, direction: 'out', action: `Transfer 1.0 USDC to ${PAYEE}` },
+  { id: 2, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(2), direction: 'none', action: 'Set the spending limit to $1,234' },
+  { id: 1, chain_id: SEPOLIA, source: 'owner', status: 'confirmed', tx_hash: hash(1), direction: 'none', action: 'Create your Mitfah smart wallet' },
 ].map(t => ({ ...t, created_at: T0 + t.id * 600, mined_at: t.status === 'pending' ? null : T0 + t.id * 600 + 12 }))
 
+/**
+ * Of the History tab's filters, the mock applies the group, and the token as a word in the action;
+ * the tests check the rest by what is asked for (`reads`).
+ */
 async function mockServer(page: Page) {
+  const reads: URLSearchParams[] = []
   await page.route(isApiUrl, route => {
     const url = new URL(route.request().url())
     switch (url.pathname) {
@@ -49,14 +54,22 @@ async function mockServer(page: Page) {
       case '/api/contacts':
         return route.fulfill({ json: { contacts: [{ name: 'payee', address: PAYEE }] } })
       case '/api/transactions': {
+        reads.push(url.searchParams)
         const chain = url.searchParams.get('chain_id')
+        const direction = url.searchParams.get('direction')
+        const token = url.searchParams.get('token')
         const rows = TRANSACTIONS.filter(t => chain === null || t.chain_id === Number(chain))
+          .filter(t => direction === null || t.direction === direction)
+          .filter(t => token === null || t.action.split(' ').includes(token))
         return route.fulfill({ json: { transactions: rows, next_before: null, syncing: false } })
       }
+      case '/api/transactions/tokens':
+        return route.fulfill({ json: { tokens: ['BNB', 'ETH', 'USDC'] } })
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
   })
+  return { reads }
 }
 
 test('the history: every transaction, when it happened, and a link to the explorer', async ({ page }, testInfo) => {
@@ -87,6 +100,55 @@ test('the history: every transaction, when it happened, and a link to the explor
   await page.getByRole('radiogroup', { name: 'Networks to show' }).getByText('Sepolia').click()
   await expect(list.getByRole('listitem')).toHaveCount(6)
   await expectNoSidewaysScroll(page)
+})
+
+test('the history splits into incoming and outgoing, and filters by date, amount, address and token', async ({ page }, testInfo) => {
+  const { reads } = await mockServer(page)
+  await page.goto('/history')
+  const list = page.getByRole('list', { name: 'Transactions' })
+  await expect(list.getByRole('listitem')).toHaveCount(7)
+  await expect(list.getByRole('listitem').nth(0).getByTitle('Incoming')).toBeVisible()
+
+  const groups = page.getByRole('radiogroup', { name: 'Transactions to show' })
+  await groups.getByText('Incoming').click()
+  await expect(list.getByRole('listitem')).toHaveCount(1)
+  await groups.getByText('Outgoing').click()
+  await expect(list.getByRole('listitem')).toHaveCount(4)
+  await expectNoSidewaysScroll(page)
+
+  await page.getByRole('button', { name: 'Filter' }).click()
+  const panel = page.getByRole('form', { name: 'Filter transactions' })
+  const yesterday = new Date(T0 * 1000)
+  const day = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+  await panel.getByLabel('From').fill(day)
+  await panel.getByLabel('At least').fill('10')
+  await panel.getByLabel('Address or contact').fill('payee')
+  await panel.getByRole('combobox', { name: 'Token' }).click()
+  await page.getByRole('option', { name: 'USDC' }).click()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'history-filters')
+
+  await panel.getByRole('button', { name: 'Apply' }).click()
+  await expect(panel).toBeHidden()
+  await expect(list.getByRole('listitem')).toHaveCount(2)
+  const read = reads.at(-1)!
+  expect(read.get('direction')).toBe('out')
+  expect(read.get('min_amount')).toBe('10')
+  expect(read.get('address')).toBe(PAYEE)
+  expect(read.get('token')).toBe('USDC')
+  expect(read.get('since')).not.toBeNull()
+  const chips = page.getByRole('list', { name: 'Filters in use' })
+  await expect(chips).toContainText('With payee')
+  await expect(page.getByRole('button', { name: 'Filter (4 on)' })).toBeVisible()
+  await expectTheme(page, testInfo)
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'history-filtered')
+
+  // A refresh keeps the tab and the filters.
+  await page.reload()
+  await expect(list.getByRole('listitem')).toHaveCount(2)
+  await chips.getByRole('button', { name: 'Clear all' }).click()
+  await expect(list.getByRole('listitem')).toHaveCount(4)
 })
 
 test('the History tab is in the navigation on every screen', async ({ page }) => {

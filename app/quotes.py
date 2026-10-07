@@ -64,6 +64,9 @@ class PendingTransaction:
     # A liquidity deposit's pool, as {"token_a", "ticker_a", "token_b", "ticker_b"}: confirming
     # puts it on the dashboard (db.save_lp_token). None for anything else.
     lp_pool: dict | None = None
+    # What it is meant to do, 'in' or 'out', for the History tab's groups while it is pending or if
+    # it fails (tx_history.start_assistant_tx). None when the quote can't say.
+    direction: str | None = None
 
     @property
     def age(self) -> float:
@@ -91,6 +94,7 @@ def put(
     quote: UserOpQuote,
     cost: dict,
     lp_pool: dict | None = None,
+    direction: str | None = None,
 ) -> PendingTransaction:
     """
     Parks a quoted transaction and returns it, with the id the user will confirm against.
@@ -112,6 +116,7 @@ def put(
         quote=quote,
         cost=cost,
         lp_pool=lp_pool,
+        direction=direction,
     )
     with _lock:
         _prune(now)

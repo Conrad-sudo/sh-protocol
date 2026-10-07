@@ -230,6 +230,7 @@
 .mf-rules-plate,
 .mf-contact-plate,
 .mf-tx-plate,
+.mf-tx-filters,
 .mf-budget-strip {
   position: relative;
 }
@@ -244,6 +245,7 @@
 .mf-rules-plate > .mf-rules,
 .mf-contact-plate > .mf-contact-list,
 .mf-tx-plate > .mf-tx-list,
+.mf-tx-filters > .mf-tx-filters-body,
 .mf-budget-strip > :not(.mf-glass),
 .mf-composer > :is(.rs-textarea, .mf-composer-send, .mf-composer-count) {
   position: relative;
@@ -2206,9 +2208,150 @@ main p a {
   gap: 12px;
 }
 
+/* The tabs, the network switch and the Filter button, wrapping onto a second line when narrow. */
+.mf-tx-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.mf-tx-groups,
 .mf-tx-scope {
-  align-self: flex-start;
   max-width: 100%;
+  overflow-x: auto;
+}
+
+.mf-tx-filter-button.rs-btn {
+  margin-left: auto;
+}
+
+.mf-tx-filter-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--rs-text-primary);
+  color: var(--rs-bg-card);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* The Filter panel: dates and amounts in pairs, then who and which token, then its two buttons. */
+.mf-tx-filters {
+  border-radius: var(--mf-radius-card);
+}
+
+.mf-tx-filters-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 28px;
+  padding: 22px 24px;
+}
+
+.mf-tx-filter-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.mf-tx-filter-pair > legend {
+  float: left;
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-tx-filter-pair > .mf-error-text {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.mf-tx-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mf-tx-filter-field > label {
+  font-weight: 560;
+}
+
+.mf-tx-filter-field > p {
+  margin: 0;
+}
+
+.mf-tx-filter-hint {
+  font-size: 13px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-tx-filters-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* The filters in use: removable pills under the toolbar. */
+.mf-tx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-tx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 12px;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 999px;
+  background: var(--rs-bg-card);
+  font-size: 13px;
+}
+
+.mf-tx-chip-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--rs-text-secondary);
+  cursor: pointer;
+}
+
+.mf-tx-chip-remove:hover {
+  background: var(--rs-bg-active);
+  color: var(--rs-text-primary);
+}
+
+/* Which way a transaction went, before what it did. */
+.mf-tx-dir {
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-right: 8px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-tx-dir[data-direction='in'] {
+  color: var(--rs-state-success);
 }
 
 /* One glass plate holding the list, ruled apart like the contacts. */
@@ -2274,6 +2417,15 @@ main p a {
 @media (max-width: 479px) {
   .mf-tx-list {
     padding: 4px 18px;
+  }
+
+  .mf-tx-filters-body {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 18px;
+  }
+
+  .mf-tx-filter-button.rs-btn {
+    margin-left: 0;
   }
 
   .mf-tx {

@@ -66,7 +66,9 @@ from db import (
     get_wallet_address,
     get_wallet_chains,
     get_transactions,
+    get_movement_tickers,
     transaction_cursor,
+    TransactionFilter,
     create_user,
     get_user_by_id,
     get_user_by_owner_addr,
@@ -929,6 +931,7 @@ def _transaction_json(row: dict) -> dict:
         "tx_hash": row["tx_hash"],
         "created_at": row["created_at"],
         "mined_at": row["mined_at"],
+        "direction": row["direction"],
     }
 
 
@@ -937,6 +940,13 @@ def list_transactions(
     chain_id: int | None = None,
     before: str | None = Query(default=None, pattern=r"^\d{1,12}-\d{1,12}$"),
     limit: int = Query(default=50, ge=1, le=100),
+    direction: str | None = Query(default=None, pattern=r"^(in|out|none)$"),
+    since: int | None = Query(default=None, ge=0),
+    until: int | None = Query(default=None, ge=0),
+    min_amount: float | None = Query(default=None, ge=0),
+    max_amount: float | None = Query(default=None, ge=0),
+    address: str | None = Query(default=None, pattern=r"^0x[0-9a-fA-F]{40}$"),
+    token: str | None = Query(default=None, min_length=1, max_length=40),
     user_id: int = Depends(get_current_user),
 ):
     """
@@ -945,17 +955,29 @@ def list_transactions(
     happened outside Mitfah.
 
     Reading the first page also settles transactions still pending, where it can: a send that
-    outlived the wait, or an owner transaction whose page was closed before it mined. That reads
-    the chain, hence a plain `def`. It also starts a background search of the block explorers for
-    activity outside Mitfah (tx_history.start_outside_sync); the page never waits on it.
+    outlived the wait, or an owner transaction whose page was closed before it mined. Then it
+    reads what a few settled transactions moved, for the filters (tx_history.read_movements). Both
+    read the chain, hence a plain `def`. It also starts a background search of the block explorers
+    for activity outside Mitfah (tx_history.start_outside_sync); the page never waits on it.
 
-    @param chain_id  Only this chain's transactions; every chain's when omitted.
-    @param before    The `next_before` of the previous page.
-    @param limit     How many to return (1-100).
-    @return          {"transactions": [{"id", "chain_id", "source", "action", "status", "tx_hash",
-                     "created_at", "mined_at"}, ...], "next_before": str | None, "syncing": bool}.
-                     Times are Unix seconds; `mined_at` is the block's. `syncing` is true while an
-                     explorer search is running, so the tab reads again soon.
+    @param chain_id    Only this chain's transactions; every chain's when omitted.
+    @param before      The `next_before` of the previous page, with the same filters.
+    @param limit       How many to return (1-100).
+    @param direction   'in' (the wallet only received), 'out' (something left it) or 'none'
+                       (nothing moved).
+    @param since       Only from this time on (Unix seconds, inclusive).
+    @param until       Only before this time (Unix seconds, exclusive).
+    @param min_amount  Only transactions that moved at least this much of a token, in whole units.
+    @param max_amount  ... at most this much.
+    @param address     ... to or from this address, or of the token at this address.
+    @param token       ... of the token with this ticker, any case, on any chain.
+                       The amount, address and token filters must all hold for one movement; with
+                       direction 'in' or 'out', it must also go that way. See db.TransactionFilter.
+    @return            {"transactions": [{"id", "chain_id", "source", "action", "status",
+                       "tx_hash", "created_at", "mined_at", "direction"}, ...],
+                       "next_before": str | None, "syncing": bool}. Times are Unix seconds;
+                       `mined_at` is the block's. `direction` is null while unknown. `syncing` is
+                       true while an explorer search is running, so the tab reads again soon.
     """
     if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
@@ -963,17 +985,41 @@ def list_transactions(
     if before is None:
         web3_for = functools.cache(_web3_or_none)
         tx_history.settle_pending(user_id, web3_for)
+        tx_history.read_movements(user_id, web3_for)
         chains = [c for c in get_wallet_chains(user_id) if chain_id is None or c == chain_id]
         wallets = {c: get_wallet_address(user_id, c) for c in chains if c in CHAIN_NAME_BY_ID}
         syncing = tx_history.start_outside_sync(user_id, wallets, web3_for)
     cursor = tuple(int(part) for part in before.split("-")) if before is not None else None
-    rows = get_transactions(user_id, chain_id, cursor, limit + 1)
+    where = TransactionFilter(
+        direction=direction,
+        since=since,
+        until=until,
+        min_amount=min_amount,
+        max_amount=max_amount,
+        address=address,
+        token=token,
+    )
+    rows = get_transactions(user_id, chain_id, cursor, limit + 1, where)
     page = rows[:limit]
     return {
         "transactions": [_transaction_json(row) for row in page],
         "next_before": "-".join(map(str, transaction_cursor(page[-1]))) if len(rows) > limit else None,
         "syncing": syncing,
     }
+
+
+@app.get("/api/transactions/tokens")
+def list_transaction_tokens(chain_id: int | None = None, user_id: int = Depends(get_current_user)):
+    """
+    The tickers this account's transactions have moved, A-Z: the History tab's token filter offers
+    these, so it never offers a token that would match nothing.
+
+    @param chain_id  Only this chain's; every chain's when omitted.
+    @return          {"tokens": ["ETH", "USDC", ...]}.
+    """
+    if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
+    return {"tokens": get_movement_tickers(user_id, chain_id)}
 
 
 @app.post("/api/transactions/deposit")

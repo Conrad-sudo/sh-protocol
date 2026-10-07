@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { Contact, Transaction } from '../api/types'
 import { SYNC_POLL_MS } from '../hooks/useTransactions'
 import { formatDateTime } from '../lib/format'
+import { startOfDay } from '../lib/historyFilters'
 import { routes } from '../routes'
 import { SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
@@ -33,6 +34,7 @@ function tx(id: number, fields: Partial<Transaction> = {}): Transaction {
     tx_hash: hash(id),
     created_at: T0 + id * 60,
     mined_at: T0 + id * 60 + 12,
+    direction: 'out',
     ...fields,
   }
 }
@@ -46,6 +48,8 @@ interface ServerOptions {
   syncingReads?: number
   /** ...and once it stops, these have been found. */
   found?: Transaction[]
+  /** What GET /api/transactions/tokens answers. */
+  tokens?: string[]
 }
 
 /** Where a row sits in the server's order, as app/db.py sorts it: by time, then id. */
@@ -54,7 +58,9 @@ const older = (a: [number, number], b: [number, number]) => a[0] < b[0] || (a[0]
 
 /**
  * A signed-in account whose History answers like app/api.py: newest first by time, paged by a
- * "<time>-<id>" cursor, filterable, and saying while a search for outside activity runs.
+ * "<time>-<id>" cursor, filterable, and saying while a search for outside activity runs. Of the
+ * History tab's filters it applies the group, and the token as a word in the action; the tests
+ * check the rest by what is asked for.
  */
 function stubServer({
   transactions = [],
@@ -62,6 +68,7 @@ function stubServer({
   failures = 0,
   syncingReads = 0,
   found = [],
+  tokens = [],
 }: ServerOptions = {}) {
   const reads: URLSearchParams[] = []
   vi.stubGlobal(
@@ -71,6 +78,7 @@ function stubServer({
       if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
       if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
       if (url === '/api/contacts') return Promise.resolve(json(200, { contacts: [SAM] }))
+      if (url.startsWith('/api/transactions/tokens')) return Promise.resolve(json(200, { tokens }))
       if (url.startsWith('/api/transactions?')) {
         const params = new URLSearchParams(url.slice(url.indexOf('?') + 1))
         reads.push(params)
@@ -84,8 +92,12 @@ function stubServer({
           if (!syncing && found.length) transactions = [...transactions, ...found.splice(0)]
         }
         const cursor = before === null ? null : (before.split('-').map(Number) as [number, number])
+        const direction = params.get('direction')
+        const token = params.get('token')
         const rows = transactions
           .filter(t => chain === null || t.chain_id === Number(chain))
+          .filter(t => direction === null || t.direction === direction)
+          .filter(t => token === null || t.action.split(' ').includes(token))
           .filter(t => cursor === null || older(sortKey(t), cursor))
           .sort((a, b) => (older(sortKey(a), sortKey(b)) ? 1 : -1))
         const page = rows.slice(0, limit)
@@ -280,6 +292,181 @@ describe('HistoryPage', () => {
 
     await rows()
     expect(screen.queryByRole('radiogroup', { name: 'Networks to show' })).toBeNull()
+  })
+
+  it('marks which way each transaction went', async () => {
+    stubServer({
+      transactions: [
+        tx(1, { direction: 'in', action: 'Received 1 USDC' }),
+        tx(2, { direction: 'out', action: 'Sent 1 USDC' }),
+        tx(3, { direction: 'none', action: 'Pause the wallet' }),
+        tx(4, { direction: null, action: 'Something still being read' }),
+      ],
+    })
+    await renderRoutes(routes, '/history')
+
+    const [unknown, change, sent, received] = await rows()
+    expect(within(received).getByTitle('Incoming')).toHaveTextContent('Incoming:')
+    expect(within(sent).getByTitle('Outgoing')).toBeInTheDocument()
+    expect(within(change).getByTitle('Wallet change')).toBeInTheDocument()
+    expect(unknown.querySelector('.mf-tx-dir')).toBeNull()
+  })
+
+  it('splits the list into incoming, outgoing and wallet changes', async () => {
+    const { reads } = stubServer({
+      transactions: [
+        tx(1, { direction: 'in', action: 'Received 1 USDC' }),
+        tx(2, { direction: 'out', action: 'Sent 1 USDC' }),
+        tx(3, { direction: 'none', action: 'Pause the wallet' }),
+      ],
+    })
+    const user = userEvent.setup()
+    const router = await renderRoutes(routes, '/history')
+
+    expect(await rows()).toHaveLength(3)
+    expect(reads[0].get('direction')).toBeNull()
+    const groups = screen.getByRole('radiogroup', { name: 'Transactions to show' })
+
+    await user.click(within(groups).getByRole('radio', { name: 'Incoming' }))
+    await waitFor(async () => expect(await rows()).toHaveLength(1))
+    expect((await rows())[0]).toHaveTextContent('Received 1 USDC')
+    expect(reads.at(-1)!.get('direction')).toBe('in')
+    // Kept in the page's address, so a refresh shows the same tab.
+    expect(router.state.location.search).toBe('?type=in')
+
+    await user.click(within(groups).getByRole('radio', { name: 'Outgoing' }))
+    await waitFor(async () => expect((await rows())[0]).toHaveTextContent('Sent 1 USDC'))
+    await user.click(within(groups).getByRole('radio', { name: 'Wallet changes' }))
+    await waitFor(async () => expect((await rows())[0]).toHaveTextContent('Pause the wallet'))
+    expect(reads.at(-1)!.get('direction')).toBe('none')
+  })
+
+  it('says when a tab has nothing yet', async () => {
+    stubServer({ transactions: [tx(1, { direction: 'out' })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/history')
+
+    await rows()
+    await user.click(screen.getByRole('radio', { name: 'Incoming' }))
+    expect(await screen.findByRole('heading', { name: 'No incoming transactions yet' })).toBeInTheDocument()
+  })
+
+  it('filters by date, amount, address and token, and shows each filter so it can be taken off', async () => {
+    const { reads } = stubServer({ transactions: [tx(1, { action: 'Sent 5 USDC' })], tokens: ['ETH', 'USDC'] })
+    const user = userEvent.setup()
+    const router = await renderRoutes(routes, '/history')
+    await rows()
+
+    const filter = screen.getByRole('button', { name: 'Filter' })
+    expect(filter).toHaveAttribute('aria-expanded', 'false')
+    await user.click(filter)
+    const panel = screen.getByRole('form', { name: 'Filter transactions' })
+    expect(filter).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.change(within(panel).getByLabelText('From'), { target: { value: '2026-10-01' } })
+    fireEvent.change(within(panel).getByLabelText('To'), { target: { value: '2026-10-03' } })
+    await user.type(within(panel).getByLabelText('At least'), '5')
+    await user.type(within(panel).getByLabelText('At most'), '10.5')
+    await user.type(within(panel).getByLabelText('Address or contact'), 'Sam')
+    await user.click(within(panel).getByRole('combobox', { name: 'Token' }))
+    await user.click(await screen.findByRole('option', { name: 'USDC' }))
+    await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+
+    await waitFor(() => expect(reads.at(-1)!.get('token')).toBe('USDC'))
+    const read = reads.at(-1)!
+    // Whole days in the reader's own time zone: from the start of the first to the end of the last.
+    expect(read.get('since')).toBe(String(startOfDay('2026-10-01')))
+    expect(read.get('until')).toBe(String(startOfDay('2026-10-04')))
+    expect(read.get('min_amount')).toBe('5')
+    expect(read.get('max_amount')).toBe('10.5')
+    // A contact's name is sent as their address.
+    expect(read.get('address')).toBe(SAM.address)
+    expect(screen.queryByRole('form', { name: 'Filter transactions' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Filter (6 on)' })).toBeInTheDocument()
+    expect(router.state.location.search).toContain('token=USDC')
+
+    const chips = screen.getByRole('list', { name: 'Filters in use' })
+    expect(chips).toHaveTextContent('From Oct 1, 2026')
+    expect(chips).toHaveTextContent('To Oct 3, 2026')
+    expect(chips).toHaveTextContent('At least 5')
+    expect(chips).toHaveTextContent('With sam')
+    await user.click(within(chips).getByRole('button', { name: 'Remove filter: USDC' }))
+    await waitFor(() => expect(reads.at(-1)!.get('token')).toBeNull())
+    expect(reads.at(-1)!.get('min_amount')).toBe('5')
+
+    await user.click(within(chips).getByRole('button', { name: 'Clear all' }))
+    await waitFor(() => expect(reads.at(-1)!.get('since')).toBeNull())
+    expect(screen.queryByRole('list', { name: 'Filters in use' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Filter' })).toBeInTheDocument()
+  })
+
+  it("explains what's wrong before filtering, and sends nothing until it's fixed", async () => {
+    const { reads } = stubServer({ transactions: [tx(1)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/history')
+    await rows()
+
+    await user.click(screen.getByRole('button', { name: 'Filter' }))
+    const panel = screen.getByRole('form', { name: 'Filter transactions' })
+    fireEvent.change(within(panel).getByLabelText('From'), { target: { value: '2026-10-05' } })
+    fireEvent.change(within(panel).getByLabelText('To'), { target: { value: '2026-10-01' } })
+    await user.type(within(panel).getByLabelText('At least'), '10')
+    await user.type(within(panel).getByLabelText('At most'), '2')
+    await user.type(within(panel).getByLabelText('Address or contact'), 'nobody')
+    const before = reads.length
+    await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+
+    expect(within(panel).getByText('The end date is before the start date.')).toBeInTheDocument()
+    expect(within(panel).getByText('The lowest amount is more than the highest.')).toBeInTheDocument()
+    expect(within(panel).getByText("Enter a full address starting with 0x, or one of your contacts' names.")).toBeInTheDocument()
+    expect(reads.length).toBe(before)
+
+    await user.clear(within(panel).getByLabelText('Address or contact'))
+    await user.type(within(panel).getByLabelText('Address or contact'), STRANGER)
+    expect(within(panel).queryByText(/one of your contacts' names/)).toBeNull()
+  })
+
+  it('says when nothing matches, and clears the filters on request', async () => {
+    const { reads } = stubServer({ transactions: [tx(1, { action: 'Sent 5 USDC' })], tokens: ['ETH', 'USDC'] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/history?token=ETH')
+
+    expect(await screen.findByRole('heading', { name: 'No transactions match these filters' })).toBeInTheDocument()
+    expect(reads[0].get('token')).toBe('ETH')
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(await rows()).toHaveLength(1)
+    expect(reads.at(-1)!.get('token')).toBeNull()
+  })
+
+  it('opens with the tab and filters in the address', async () => {
+    const { reads } = stubServer({ transactions: [tx(1, { action: 'Sent 5 USDC' })] })
+    await renderRoutes(routes, `/history?type=out&token=USDC&address=${SAM.address.toLowerCase()}&min=junk`)
+
+    await rows()
+    expect(reads[0].get('direction')).toBe('out')
+    expect(reads[0].get('token')).toBe('USDC')
+    expect(reads[0].get('address')).toBe(SAM.address)
+    // Something malformed in the address is left out rather than sent.
+    expect(reads[0].get('min_amount')).toBeNull()
+    expect(screen.getByRole('radio', { name: 'Outgoing' })).toBeChecked()
+    expect(screen.getByRole('list', { name: 'Filters in use' })).toHaveTextContent('With sam')
+  })
+
+  it('offers only dates on the wallet-changes tab, and drops the money filters there', async () => {
+    const { reads } = stubServer({ transactions: [tx(1, { direction: 'none', action: 'Pause the wallet' })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/history?token=USDC&from=2026-10-01')
+
+    await screen.findByRole('list', { name: 'Filters in use' })
+    await user.click(screen.getByRole('radio', { name: 'Wallet changes' }))
+    await waitFor(() => expect(reads.at(-1)!.get('direction')).toBe('none'))
+    expect(reads.at(-1)!.get('token')).toBeNull()
+    expect(reads.at(-1)!.get('since')).toBe(String(startOfDay('2026-10-01')))
+
+    await user.click(screen.getByRole('button', { name: /^Filter/ }))
+    const panel = screen.getByRole('form', { name: 'Filter transactions' })
+    expect(within(panel).getByLabelText('From')).toHaveValue('2026-10-01')
+    expect(within(panel).queryByLabelText('At least')).toBeNull()
+    expect(within(panel).queryByRole('combobox', { name: 'Token' })).toBeNull()
   })
 
   it('says when there is nothing yet', async () => {

@@ -242,6 +242,7 @@ def _quote_executions(
         quote=quote,
         cost=_transaction_cost(chain_id, quote, fee.result(), native_price),
         lp_pool=lp_pool,
+        direction=_intended_direction(native_value, legs),
     )
 
     return {
@@ -266,6 +267,18 @@ def _quote_executions(
             "turn, and never confirm a quote_id the user has not been shown."
         ),
     }
+
+
+def _intended_direction(native_value: int, legs: list | None) -> str | None:
+    """
+    The History tab's group for a quoted transaction, before anything has moved: 'out' if it sends
+    the native coin or a leg it sends, 'in' if it only receives, None if the quote can't say (it
+    has no legs). Once it confirms, its receipt decides (tx_history.read_movements).
+    """
+    directions = {direction for _, _, direction in legs or []}
+    if native_value or SENT in directions:
+        return "out"
+    return "in" if RECEIVED in directions else None
 
 
 def _quote_plan(
@@ -717,7 +730,7 @@ def confirm_transaction(runtime: ToolRuntime[AgentContext], quote_id: str) -> st
     # left to propagate) is then still listed, as pending, and settled there once it lands -- the
     # chat it was asked for in is cleared after every transaction, so it can't be the record.
     record = tx_history.start_assistant_tx(
-        user_id, chain_id, session_handler.address, pending.action, prepared
+        user_id, chain_id, session_handler.address, pending.action, prepared, pending.direction
     )
     if pending.lp_pool:
         _remember_lp_pool(user_id, chain_id, pending.lp_pool)

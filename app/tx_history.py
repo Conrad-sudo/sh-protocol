@@ -35,9 +35,10 @@ from web3.exceptions import TransactionNotFound
 from web3.logs import DISCARD
 
 import explorers
+import tx_movements
 from abi import ientry_point
 from bundler import find_user_op_receipt
-from constants import get_native_asset_ticker, get_router
+from constants import CHAIN_ID_CELO, get_native_asset_ticker, get_native_wrapped_ticker, get_router
 from db import (
     add_transaction,
     delete_transaction,
@@ -51,17 +52,23 @@ from db import (
     get_pending_transactions,
     get_supported_token_by_address,
     get_supported_tokens_by_chain_id,
+    get_unread_movement_rows,
     get_user_by_id,
     get_wallet_tx_hashes,
     save_history_sync,
+    save_movements,
     settle_transaction,
 )
+from tx_movements import Moved
 
 log = logging.getLogger(__name__)
 
 # Pending rows settled per read of the History tab. Each costs an RPC call or two, and there is
 # rarely more than one.
 SETTLE_BATCH = 10
+# Settled rows whose movements are read per read of the History tab. Each costs an RPC call or two;
+# normally only the transaction just made, but many once, for rows recorded before movements were.
+MOVEMENTS_BATCH = 10
 # How long an owner transaction may be unknown to the node before it counts as dropped: replaced by
 # a "speed up" in the browser wallet, or never mined at all.
 DROP_OWNER_TX_AFTER_SECS = 86_400
@@ -118,13 +125,18 @@ def _outcome(w3: Web3, receipt) -> tuple[str, int | None]:
 
 
 @_best_effort
-def start_assistant_tx(user_id: int, chain_id: int, wallet: str, action: str, prepared) -> int | None:
+def start_assistant_tx(
+    user_id: int, chain_id: int, wallet: str, action: str, prepared, direction: str | None = None
+) -> int | None:
     """
     Records a signed UserOperation as pending, just before it is broadcast.
 
-    @param action    The quote's description, written by code from the calldata (tools._action_of).
-    @param prepared  The bundler.PreparedUserOp about to be sent.
-    @return          The row's id, for finish_assistant_tx or discard_assistant_tx.
+    @param action     The quote's description, written by code from the calldata (tools._action_of).
+    @param prepared   The bundler.PreparedUserOp about to be sent.
+    @param direction  What it is meant to do, 'in' or 'out', from the quote; None if it can't say.
+                      A pending or failed send is listed in its group by this. Once it confirms,
+                      read_movements replaces it with what the receipt shows.
+    @return           The row's id, for finish_assistant_tx or discard_assistant_tx.
     """
     return add_transaction(
         user_id,
@@ -136,6 +148,7 @@ def start_assistant_tx(user_id: int, chain_id: int, wallet: str, action: str, pr
         user_op_hash=_hex(prepared.user_op_hash),
         op_nonce=prepared.op[1],
         from_block=prepared.from_block,
+        direction=direction,
     )
 
 
@@ -192,8 +205,11 @@ def record_owner_tx(w3: Web3, user_id: int, chain_id: int, wallet, tx_hash: str,
     if tx["to"] is None or Web3.to_checksum_address(tx["to"]) != wallet.address:
         return
     action = describe_wallet_tx(w3, user_id, chain_id, wallet, tx)
+    # Its group now, so it is listed there while pending; read_movements stores what it moved.
+    direction = tx_movements.direction_of(_owner_movements(w3, user_id, chain_id, wallet, tx))
     add_transaction(
-        user_id, chain_id, wallet.address, "owner", action, status, tx_hash=tx_hash, mined_at=mined_at
+        user_id, chain_id, wallet.address, "owner", action, status,
+        tx_hash=tx_hash, mined_at=mined_at, direction=direction,
     )
 
 
@@ -214,6 +230,7 @@ def record_deploy(w3: Web3, user_id: int, chain_id: int, wallet_address: str, tx
         status,
         tx_hash=_hex(tx_hash),
         mined_at=mined_at,
+        direction="none",
     )
 
 
@@ -419,6 +436,139 @@ def _settle_assistant_row(w3: Web3, row: dict):
         settle_transaction(row["id"], "dropped")
 
 
+# ── What each transaction moved ───────────────────────────────────────────────
+
+
+def read_movements(user_id: int, web3_for: Callable[[int], Web3 | None]):
+    """
+    Stores what the user's settled Mitfah transactions moved, for the History tab's filters, a few
+    rows per read of the tab, newest first. Run after settle_pending, so a send settled by that
+    read is read here too. Best effort, row by row, like settle_pending.
+
+    Outside rows never need this: they are recorded with their movements (_record_outside).
+
+    @param web3_for  A Web3 for a chain this server serves, or None for one it doesn't.
+    """
+    for row in get_unread_movement_rows(user_id, MOVEMENTS_BATCH):
+        try:
+            w3 = web3_for(row["chain_id"])
+            if w3 is None:
+                continue
+            _read_row_movements(w3, row)
+        except Exception:  # noqa: BLE001 -- e.g. an RPC that is down; try again next read
+            log.exception("Could not read what transaction %s moved", row["id"])
+
+
+def _read_row_movements(w3: Web3, row: dict):
+    """
+    What one row moved. An owner transaction is read from its calldata, an assistant op from its
+    receipt. One that never ran, or that the node no longer has (a fork restarted since), is
+    marked read with nothing, and keeps the group it was recorded with.
+    """
+    if row["source"] == "outside" or row["tx_hash"] is None or row["status"] == "dropped":
+        save_movements(row["id"], [], None)
+        return
+    try:
+        tx = w3.eth.get_transaction(row["tx_hash"])
+    except TransactionNotFound:
+        save_movements(row["id"], [], None)
+        return
+    user_id, chain_id = row["user_id"], row["chain_id"]
+    wallet = Web3.to_checksum_address(row["wallet"])
+
+    if row["source"] == "owner":
+        wallet_contract = Web3().eth.contract(address=wallet, abi=_session_handler_abi())
+        intended = _owner_movements(w3, user_id, chain_id, wallet_contract, tx)
+        # A failed call moved nothing, but is still listed with what it tried to do.
+        moved = intended if row["status"] == "confirmed" else []
+        save_movements(row["id"], moved, tx_movements.direction_of(intended))
+        return
+
+    if row["status"] != "confirmed":
+        save_movements(row["id"], [], None)  # a failed op moved nothing; it keeps its intended group
+        return
+    receipt = w3.eth.get_transaction_receipt(row["tx_hash"])
+    tokens = _TokenBook(w3, user_id, chain_id)
+    moved = tx_movements.assistant_movements(
+        wallet,
+        tx,
+        receipt,
+        tokens.info,
+        native=_native(chain_id),
+        wrapped=tokens.address_of(_wrapped_ticker(chain_id)),
+        router=_router(chain_id),
+        native_contract=tokens.address_of(_native(chain_id)) if chain_id == CHAIN_ID_CELO else None,
+    )
+    save_movements(row["id"], moved, tx_movements.direction_of(moved))
+
+
+def _owner_movements(w3: Web3, user_id: int, chain_id: int, wallet_contract, tx) -> list[Moved]:
+    return tx_movements.owner_movements(
+        wallet_contract, tx, _TokenBook(w3, user_id, chain_id).info, _native(chain_id)
+    )
+
+
+def _wrapped_ticker(chain_id: int) -> str | None:
+    try:
+        return get_native_wrapped_ticker(chain_id)
+    except ValueError:
+        return None
+
+
+def _router(chain_id: int) -> str | None:
+    try:
+        return get_router(chain_id)
+    except ValueError:
+        return None
+
+
+def _known_tokens(user_id: int, chain_id: int) -> dict[str, tuple[str, int | None]]:
+    """
+    Lowercase address -> (TICKER, decimals or None) for the tokens the user knows: the ones Mitfah
+    lists, their custom tokens and their pools. Anything else is airdrop spam, mostly, and stays
+    out of the History tab.
+    """
+    tokens: dict[str, tuple[str, int | None]] = {}
+    for token in get_supported_tokens_by_chain_id(chain_id):
+        tokens[token["address"].lower()] = (token["ticker"].upper(), None)
+    for token in get_custom_tokens(user_id, chain_id):
+        tokens[token["address"].lower()] = (token["ticker"].upper(), token["decimals"])
+    native = _native(chain_id)
+    for pool in get_lp_tokens(user_id, chain_id):
+        if pool["pair"]:
+            # Named as the dashboard names it (api._lp_balances): the native side first.
+            sides = [pool["ticker1"], pool["ticker0"]] if pool["ticker1"].upper() == native.upper() else [pool["ticker0"], pool["ticker1"]]
+            tokens[pool["pair"].lower()] = ("/".join(sides).upper() + " LP", _LP_DECIMALS)
+    return tokens
+
+
+class _TokenBook:
+    """The user's known tokens on one chain, with decimals read from the token when not stored."""
+
+    def __init__(self, w3: Web3, user_id: int, chain_id: int):
+        self._w3, self._user_id, self._chain_id = w3, user_id, chain_id
+        self._tokens = _known_tokens(user_id, chain_id)
+
+    def info(self, address: str) -> tuple[str, int | None] | None:
+        """(TICKER, decimals or None) for a known token, or None for one the user doesn't know."""
+        known = self._tokens.get(address.lower())
+        if known is None:
+            return None
+        ticker, decimals = known
+        if decimals is None:
+            decimals = _token(self._w3, self._user_id, self._chain_id, address)[1]
+            self._tokens[address.lower()] = (ticker, decimals)
+        return ticker, decimals
+
+    def address_of(self, ticker: str | None) -> str | None:
+        """A known token's address by its ticker, or None."""
+        if ticker is None:
+            return None
+        return next(
+            (Web3.to_checksum_address(a) for a, (t, _) in self._tokens.items() if t == ticker.upper()), None
+        )
+
+
 # ── Activity outside Mitfah ───────────────────────────────────────────────────
 
 # How often a wallet's explorer search may run. Reading the History tab more often adds nothing.
@@ -522,9 +672,7 @@ class _OutsideContext:
     entry_point: str | None
     native: str
     known_hashes: set[str]
-    # Lowercase address -> (TICKER, decimals or None). Only tokens Mitfah lists, the user's
-    # custom tokens and the user's pools. Anything else is airdrop spam, mostly, and stays out.
-    tokens: dict[str, tuple[str, int | None]]
+    tokens: dict[str, tuple[str, int | None]]  # see _known_tokens
 
     @classmethod
     def build(cls, user_id: int, chain_id: int, wallet: str, w3: Web3 | None) -> "_OutsideContext":
@@ -538,17 +686,6 @@ class _OutsideContext:
             )
         except Exception:  # noqa: BLE001 -- only words the fee line; it reads as a send without it
             entry_point = None
-        tokens: dict[str, tuple[str, int | None]] = {}
-        for token in get_supported_tokens_by_chain_id(chain_id):
-            tokens[token["address"].lower()] = (token["ticker"].upper(), None)
-        for token in get_custom_tokens(user_id, chain_id):
-            tokens[token["address"].lower()] = (token["ticker"].upper(), token["decimals"])
-        native = _native(chain_id)
-        for pool in get_lp_tokens(user_id, chain_id):
-            if pool["pair"]:
-                # Named as the dashboard names it (api._lp_balances): the native side first.
-                sides = [pool["ticker1"], pool["ticker0"]] if pool["ticker1"].upper() == native.upper() else [pool["ticker0"], pool["ticker1"]]
-                tokens[pool["pair"].lower()] = ("/".join(sides).upper() + " LP", _LP_DECIMALS)
         return cls(
             user_id=user_id,
             chain_id=chain_id,
@@ -558,9 +695,9 @@ class _OutsideContext:
             wallet_contract=Web3().eth.contract(address=wallet, abi=_session_handler_abi()),
             owner=owner,
             entry_point=entry_point,
-            native=native,
+            native=_native(chain_id),
             known_hashes=get_wallet_tx_hashes(chain_id, wallet),
-            tokens=tokens,
+            tokens=_known_tokens(user_id, chain_id),
         )
 
 
@@ -577,9 +714,11 @@ def _record_outside(context: _OutsideContext, movements: list[explorers.Movement
     for tx_hash, moves in by_hash.items():
         if tx_hash in context.known_hashes:
             continue  # Mitfah's own, or recorded by an earlier search
-        action = describe_outside(context, [m for m in moves if m.succeeded])
+        succeeded = [m for m in moves if m.succeeded]
+        action = describe_outside(context, succeeded)
         if action is None:
             continue
+        moved = outside_movements(context, succeeded)
         add_transaction(
             context.user_id,
             context.chain_id,
@@ -589,6 +728,8 @@ def _record_outside(context: _OutsideContext, movements: list[explorers.Movement
             "confirmed",
             tx_hash=tx_hash,
             mined_at=moves[0].mined_at,
+            direction=tx_movements.direction_of(moved),
+            movements=moved,
         )
         context.known_hashes.add(tx_hash)
 
@@ -616,7 +757,13 @@ def describe_outside(context: _OutsideContext, moves: list[explorers.Movement]) 
     return " · ".join(parts) or None
 
 
-def _describe_movement(context: _OutsideContext, m: explorers.Movement) -> str | None:
+def outside_movements(context: _OutsideContext, moves: list[explorers.Movement]) -> list[Moved]:
+    """What an outside transaction moved, for the History tab's filters: the movements its sentence lists."""
+    return [moved for moved in (_moved(context, m) for m in moves) if moved is not None]
+
+
+def _moved(context: _OutsideContext, m: explorers.Movement) -> Moved | None:
+    """One explorer movement as an amount into or out of the wallet, or None if it isn't listed."""
     if m.amount == 0:
         return None
     if m.token is None:
@@ -630,14 +777,26 @@ def _describe_movement(context: _OutsideContext, m: explorers.Movement) -> str |
             decimals = m.decimals
         elif decimals is None:
             decimals = _token(context.w3, context.user_id, context.chain_id, m.token)[1]
-    amount = f"{_amount(m.amount, decimals)} {ticker}" if decimals is not None else f"{m.amount} units of {ticker}"
     if m.recipient == context.wallet and m.sender != context.wallet:
-        return f"Received {amount} from {_party(context, m.sender)}"
+        return Moved(tx_movements.IN, m.token, ticker, m.amount, decimals, m.sender)
     if m.sender == context.wallet and m.recipient != context.wallet:
-        if m.token is None and m.recipient == context.entry_point:
-            return f"Paid {amount} in network fees"
-        return f"Sent {amount} to {_party(context, m.recipient)}"
+        return Moved(tx_movements.OUT, m.token, ticker, m.amount, decimals, m.recipient)
     return None
+
+
+def _describe_movement(context: _OutsideContext, m: explorers.Movement) -> str | None:
+    moved = _moved(context, m)
+    if moved is None:
+        return None
+    if moved.decimals is not None:
+        amount = f"{_amount(moved.amount, moved.decimals)} {moved.ticker}"
+    else:
+        amount = f"{moved.amount} units of {moved.ticker}"
+    if moved.direction == tx_movements.IN:
+        return f"Received {amount} from {_party(context, m.sender)}"
+    if m.token is None and m.recipient == context.entry_point:
+        return f"Paid {amount} in network fees"
+    return f"Sent {amount} to {_party(context, m.recipient)}"
 
 
 def _party(context: _OutsideContext, address: str) -> str:

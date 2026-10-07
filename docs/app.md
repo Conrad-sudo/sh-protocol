@@ -21,6 +21,7 @@ app/
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
 ├── tx_history.py          ← The History tab's record: every transaction on the wallet, Mitfah's and outside it, kept apart from the chat
+├── tx_movements.py        ← What each transaction moved in or out of the wallet, for the History tab's filters
 ├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── tools.py               ← LangChain tool wrappers for the AI agent
@@ -37,6 +38,7 @@ app/
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
     ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
+    ├── test_tx_movements.py ← What a transaction moved: owner calldata, assistant receipts (make movements-test)
     ├── test_explorers.py  ← Etherscan/NodeReal/Alchemy answers read, paged, retried; keys kept out of logs (make explorers-test)
     ├── check_explorers_live.py ← The same against the real services, read-only, with .env's keys (make explorers-live)
     ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
@@ -180,9 +182,22 @@ CREATE TABLE transactions (
     status TEXT NOT NULL,                       -- 'pending' | 'confirmed' | 'failed' | 'dropped'
     tx_hash TEXT,                               -- NULL only while an assistant op hasn't been seen on chain
     user_op_hash TEXT, op_nonce TEXT, from_block INTEGER,  -- assistant ops: how a late one is found and settled
-    created_at INTEGER NOT NULL, mined_at INTEGER          -- mined_at: the block's timestamp
+    created_at INTEGER NOT NULL, mined_at INTEGER,         -- mined_at: the block's timestamp
+    direction TEXT,                             -- the tab's group: 'in' | 'out' | 'none'; NULL while unknown
+    movements_read INTEGER NOT NULL DEFAULT 0   -- 1 once its transaction_movements were read (even if none)
 );  -- unique per (chain_id, user_op_hash) and per owner (chain_id, tx_hash): the web confirms are polled;
     -- unique per outside (chain_id, wallet, tx_hash); listed by COALESCE(mined_at, created_at), then id
+
+-- What each transaction moved in or out of the wallet: the History tab's filters search these. See tx_movements.py.
+CREATE TABLE transaction_movements (
+    tx_id INTEGER NOT NULL,                     -- transactions.id; deleted with it, in code
+    direction TEXT NOT NULL,                    -- 'in' | 'out'
+    token TEXT,                                 -- the ERC-20's address; NULL for the native coin
+    ticker TEXT NOT NULL,
+    amount TEXT NOT NULL,                       -- exact, in base units
+    amount_value REAL NOT NULL,                 -- the same in whole units, for the amount filter
+    counterparty TEXT                           -- the other side; NULL for a mint or burn
+);
 
 -- How far the explorer search has got for each wallet. See tx_history.sync_outside.
 CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL,
@@ -609,13 +624,14 @@ chat because the chat is cleared after every transaction (see Section 3), so a c
 where a hash is kept.
 
 ```python
-start_assistant_tx(user_id, chain_id, wallet, action, prepared) -> row id   # pending, BEFORE broadcast
+start_assistant_tx(user_id, chain_id, wallet, action, prepared, direction=None) -> row id   # pending, BEFORE broadcast
 finish_assistant_tx(row_id, w3, receipt, succeeded)                      # the executing tx's hash + block time
 discard_assistant_tx(row_id)                                             # never executed: nothing to list
 record_owner_tx(w3, user_id, chain_id, wallet, tx_hash, receipt=None)    # owner actions and deposits; idempotent
 record_deploy(w3, user_id, chain_id, wallet_address, tx_hash, receipt)
 describe_wallet_tx(w3, user_id, chain_id, wallet, tx) -> str             # "Withdraw 0.5 ETH to sam", from calldata
 settle_pending(user_id, web3_for)                                        # finishes rows left pending
+read_movements(user_id, web3_for)                                        # what settled rows moved, for the filters
 start_outside_sync(user_id, wallets, web3_for) -> bool                   # background explorer search; True while one runs
 sync_outside(user_id, chain_id, wallet, w3)                              # one wallet's search, batch by batch
 ```
@@ -639,6 +655,33 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
   search so this op's own late execution can't pass for another's. An owner transaction is settled
   from its receipt, and is `dropped` once the node hasn't known it for a day (a "speed up" in the
   browser wallet replaces it under a new hash).
+- **What each transaction moved** (`transaction_movements`, `tx_movements.py`, 2026-10-06). The
+  History tab's tabs and filters search these, never the row's sentence. Each kind of row is read
+  from where its truth is. An **outside** row is written with the explorer movements its sentence
+  lists. An **owner** row from its calldata: a plain deposit is *in* from the sender,
+  `withdraw(token, amount, to)` is *out* to `to`, nothing else moves money. An **assistant** op from
+  its receipt: token `Transfer` logs touching the wallet (exact, with the other side); the native
+  coin that left from the op's own executions, decoded from the bundle's `handleOps` calldata; the
+  native coin that came back from the wrapped token's `Withdrawal` (or burn) by the wallet, or by
+  the router when the router call's `to` is the wallet. On Celo the native coin is also an ERC-20,
+  so its `Transfer` logs are the native movements and the executions aren't counted again. Fees are
+  never movements. Unknown tokens are left out, as for outside rows.
+  - **The group** (`direction`): *out* if anything left the wallet (sends, withdrawals, swaps,
+    liquidity, wraps), *in* if it only received, *none* if nothing moved (settings, approvals,
+    reviews, the wallet's creation). An assistant send is recorded with its *intended* group from
+    the quote (`tools._intended_direction`: a SENT leg or native value → out, only RECEIVED → in),
+    and an owner one from its calldata, so pending and failed rows sit in the right tab. A failed
+    row keeps that group and moved nothing.
+  - **When.** Reading the first page runs `read_movements` after `settle_pending`: up to
+    `MOVEMENTS_BATCH` (10) settled, unread rows, newest first, one or two RPC calls each. A row the
+    node no longer has (a restarted fork) is marked read with nothing, keeping its group. Rows from
+    before 2026-10-06 are read the same way; `init_db`'s migration deletes the old outside rows and
+    clears `history_sync`, so the explorer search writes them again with their movements.
+  - **Filtering** (`db.TransactionFilter`): the group, a date range, and the money filters —
+    amount range, address (the other side or the token's contract), ticker (any case, any chain).
+    The money filters must all hold for ONE movement (one `EXISTS`), so "100 USDC to Sandy" can't
+    match 100 ETH to Sandy plus 5 USDC to someone else; with the group in or out, that movement must
+    also go that way.
 - **Best effort, always.** Every recording function logs and swallows its own errors. By the time
   one runs, the transaction is already on its way, and an exception would turn a payment that went
   through into one that looks failed — the outcome that leads a user to send it twice.
@@ -811,7 +854,15 @@ What it does that the bot cannot:
   `GET /api/transactions` (paged by the `before` cursor, `"<time>-<id>"`, filterable by `chain_id`):
   what it did, the date and time in the reader's time zone, the network, who sent it ("By your
   assistant", "By you" or "Outside Mitfah"), its status, and its hash as a link to the network's live
-  block explorer. While the server searches for outside activity it says "Checking for activity
+  block explorer. Tabs split it into **All · Incoming · Outgoing · Wallet changes** (`direction`),
+  and each row carries an arrow in, an arrow out or a gear. The **Filter** button opens a panel
+  (`components/history/HistoryFilters.tsx`): a date range (whole days in the reader's time zone),
+  an amount range, an address or a contact's name (sent as the address), and a token picked from
+  `GET /api/transactions/tokens` (only tickers the account has moved). Nothing is searched until
+  Apply; mistakes are named from the first Apply on. On Wallet changes only the dates apply, and
+  switching there drops the money filters. Filters in use show as removable chips. The tab and the
+  filters live in the page's address (`?type=out&from=2026-10-01&token=USDC`, `lib/historyFilters.ts`),
+  so a refresh keeps them; anything malformed there is ignored. While the server searches for outside activity it says "Checking for activity
   outside Mitfah…" and reads again every 5 seconds. That includes forks, which link where the live network would. The
   Fund drawer follows its deposits through `POST /api/transactions/deposit`, which lists them. The
   Assistant page's "Clear chat" and Settings' "Delete all" call `DELETE /api/chat/history`.

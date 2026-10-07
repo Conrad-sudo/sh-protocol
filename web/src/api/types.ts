@@ -328,6 +328,35 @@ export interface Transaction {
   created_at: number
   /** Unix seconds: when its block was mined. Null until then. */
   mined_at: number | null
+  /** Its group in the History tab. Null while the server doesn't know yet. */
+  direction: TransactionDirection | null
+}
+
+/** The History tab's groups: the wallet only received, something left it, or nothing moved. */
+export type TransactionDirection = 'in' | 'out' | 'none'
+
+/**
+ * GET /api/transactions' filters; each one given must hold. The amount, address and token must all
+ * hold for one movement of a transaction, going the `direction` way when that is 'in' or 'out'.
+ */
+export interface TransactionFilters {
+  direction?: TransactionDirection
+  /** Unix seconds, inclusive. */
+  since?: number
+  /** Unix seconds, exclusive. */
+  until?: number
+  /** Whole units of whichever token moved, as typed. */
+  min_amount?: string
+  max_amount?: string
+  /** The other side, or the token's contract. */
+  address?: string
+  /** A ticker, any case, on any network. */
+  token?: string
+}
+
+/** GET /api/transactions/tokens: the tickers the account's transactions have moved, A-Z. */
+export interface TransactionTokens {
+  tokens: string[]
 }
 
 /** GET /api/transactions: a page, newest first. `next_before` asks for the page after it. */

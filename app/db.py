@@ -5,6 +5,8 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from decimal import Decimal
 from web3 import Web3
 from constants import (
     CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BASE, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
@@ -248,6 +250,27 @@ def _migrate_token_tables(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_transaction_direction(db: sqlite3.Connection):
+    """
+    Adds `direction` and `movements_read` to a transactions table that predates the History tab's
+    filters. Mitfah's own rows get their movements read later, a few per read of the tab
+    (tx_history.read_movements). Outside rows are deleted, and every wallet's explorer search
+    starts over: they are copies of explorer data, and the search writes them again with their
+    movements.
+
+    MUST run after the transactions and history_sync tables exist.
+    """
+    cols = [r[1] for r in db.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "direction" in cols:
+        return
+    db.execute("ALTER TABLE transactions ADD COLUMN direction TEXT")
+    db.execute("ALTER TABLE transactions ADD COLUMN movements_read INTEGER NOT NULL DEFAULT 0")
+    outside = db.execute("DELETE FROM transactions WHERE source = 'outside'").rowcount
+    db.execute("DELETE FROM history_sync")
+    db.commit()
+    print(f"Added transaction directions; {outside} outside row(s) will be searched for again.")
+
+
 def init_db():
     """
     Creates all tables if they do not already exist, migrating any that predate the per-chain
@@ -468,7 +491,10 @@ def init_db():
         -- by user_op_hash, so a send that outlives the wait is still here as 'pending' --
         -- op_nonce and from_block are what tx_history.settle_pending needs to finish it later.
         -- `status` is 'pending', 'confirmed', 'failed' (mined, reverted) or 'dropped' (never
-        -- mined, and now never will be). `mined_at` is the block's timestamp.
+        -- mined, and now never will be). `mined_at` is the block's timestamp. `direction` is the
+        -- History tab's group: 'in' (the wallet only received), 'out' (something left it) or
+        -- 'none' (nothing moved), NULL while unknown. `movements_read` is 1 once its
+        -- transaction_movements have been read, even if it moved nothing.
         CREATE TABLE IF NOT EXISTS transactions (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id      INTEGER NOT NULL,
@@ -482,7 +508,9 @@ def init_db():
             op_nonce     TEXT,
             from_block   INTEGER,
             created_at   INTEGER NOT NULL,
-            mined_at     INTEGER
+            mined_at     INTEGER,
+            direction    TEXT,
+            movements_read INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS transactions_by_user ON transactions (user_id, id);
         -- One row per op, and per owner transaction: the web confirms are polled, so the same
@@ -501,6 +529,22 @@ def init_db():
         CREATE INDEX IF NOT EXISTS transactions_by_user_time
             ON transactions (user_id, COALESCE(mined_at, created_at), id);
 
+        -- What each transaction moved into or out of the wallet, for the History tab's filters
+        -- (tx_movements.py). `direction` is 'in' or 'out'; `token` is NULL for the native coin;
+        -- `amount` is exact, in base units, and `amount_value` the same in whole units, for range
+        -- filters; `counterparty` is the other side, NULL for a mint or burn. Deleting a
+        -- transaction deletes its movements in code: foreign keys are off on these connections.
+        CREATE TABLE IF NOT EXISTS transaction_movements (
+            tx_id        INTEGER NOT NULL,
+            direction    TEXT NOT NULL,
+            token        TEXT,
+            ticker       TEXT NOT NULL,
+            amount       TEXT NOT NULL,
+            amount_value REAL NOT NULL,
+            counterparty TEXT
+        );
+        CREATE INDEX IF NOT EXISTS transaction_movements_by_tx ON transaction_movements (tx_id);
+
         -- How far the block-explorer search has got for each wallet: the block the next search
         -- starts from (NULL until a search has finished a batch), and when the last one ran (a
         -- wallet is searched at most once a minute).
@@ -518,6 +562,7 @@ def init_db():
     db.commit()
     # After the schema, because it writes into supported_tokens.
     _migrate_token_tables(db)
+    _migrate_transaction_direction(db)
 
 
 def _replace_supported_tokens(db: sqlite3.Connection, chain_id: int, tokens: dict[str, str]):
@@ -1602,7 +1647,7 @@ def consume_contact_nonce(nonce: str, user_id: int, name: str, address: str, ttl
 
 _TRANSACTION_COLUMNS = (
     "id, user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash, op_nonce, "
-    "from_block, created_at, mined_at"
+    "from_block, created_at, mined_at, direction, movements_read"
 )
 
 
@@ -1619,25 +1664,33 @@ def add_transaction(
     op_nonce: int | None = None,
     from_block: int | None = None,
     mined_at: int | None = None,
+    direction: str | None = None,
+    movements: list | None = None,
 ) -> int | None:
     """
     Records a transaction for the History tab.
 
-    @param source  'assistant', 'owner' or 'outside'.
-    @param status  'pending', 'confirmed', 'failed' or 'dropped'.
-    @return        The new row's id, or None if this op or transaction is already recorded.
+    @param source     'assistant', 'owner' or 'outside'.
+    @param status     'pending', 'confirmed', 'failed' or 'dropped'.
+    @param direction  'in', 'out' or 'none', when already known; see save_movements.
+    @param movements  What it moved (tx_movements.Moved), when already known. The row is then
+                      marked read, so tx_history.read_movements leaves it alone.
+    @return           The new row's id, or None if this op or transaction is already recorded.
     """
     db = get_db()
     cur = db.execute(
         "INSERT OR IGNORE INTO transactions (user_id, chain_id, wallet, source, action, status, "
-        "tx_hash, user_op_hash, op_nonce, from_block, created_at, mined_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "tx_hash, user_op_hash, op_nonce, from_block, created_at, mined_at, direction) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash,
             None if op_nonce is None else str(op_nonce), from_block, int(time.time()), mined_at,
+            direction,
         ),
     )
     row_id = cur.lastrowid if cur.rowcount else None
+    if row_id is not None and movements is not None:
+        _write_movements(db, row_id, movements, direction)
     if row_id is not None and source != "outside" and tx_hash is not None:
         _drop_outside_twin(db, row_id)
     db.commit()
@@ -1672,18 +1725,101 @@ def _drop_outside_twin(db: sqlite3.Connection, tx_id: int):
     hash. It then records the send as outside activity. Once the Mitfah row learns the hash, the
     outside copy goes. Leaves the commit to the caller.
     """
-    db.execute(
-        "DELETE FROM transactions WHERE source = 'outside' AND id != ? AND (chain_id, lower(wallet), tx_hash) = "
-        "(SELECT chain_id, lower(wallet), tx_hash FROM transactions WHERE id = ?)",
-        (tx_id, tx_id),
-    )
+    twins = [
+        row["id"]
+        for row in db.execute(
+            "SELECT id FROM transactions WHERE source = 'outside' AND id != ? AND (chain_id, lower(wallet), tx_hash) = "
+            "(SELECT chain_id, lower(wallet), tx_hash FROM transactions WHERE id = ?)",
+            (tx_id, tx_id),
+        ).fetchall()
+    ]
+    for twin in twins:
+        db.execute("DELETE FROM transaction_movements WHERE tx_id = ?", (twin,))
+        db.execute("DELETE FROM transactions WHERE id = ?", (twin,))
 
 
 def delete_transaction(tx_id: int):
     """Removes a row recorded for something that never reached the chain."""
     db = get_db()
+    db.execute("DELETE FROM transaction_movements WHERE tx_id = ?", (tx_id,))
     db.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
     db.commit()
+
+
+def save_movements(tx_id: int, movements: list, direction: str | None):
+    """
+    Stores what a transaction moved, replacing anything stored before, and marks it read.
+
+    @param movements  tx_movements.Moved items. Empty when it moved nothing, or when what it moved
+                      can't be known (the node no longer has it).
+    @param direction  The History tab's group: 'in', 'out' or 'none'. None keeps the row's own
+                      (the intended one an assistant send was recorded with).
+    """
+    db = get_db()
+    _write_movements(db, tx_id, movements, direction)
+    db.commit()
+
+
+def _write_movements(db: sqlite3.Connection, tx_id: int, movements: list, direction: str | None):
+    """save_movements without the commit."""
+    db.execute("DELETE FROM transaction_movements WHERE tx_id = ?", (tx_id,))
+    db.executemany(
+        "INSERT INTO transaction_movements (tx_id, direction, token, ticker, amount, amount_value, counterparty) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                tx_id, m.direction, m.token, m.ticker, str(m.amount),
+                # Decimals that couldn't be read leave the amount in base units, as the row says it.
+                float(Decimal(m.amount) / (Decimal(10) ** (m.decimals or 0))), m.counterparty,
+            )
+            for m in movements
+        ],
+    )
+    db.execute(
+        "UPDATE transactions SET movements_read = 1, direction = COALESCE(?, direction) WHERE id = ?",
+        (direction, tx_id),
+    )
+
+
+def get_unread_movement_rows(user_id: int, limit: int) -> list[dict]:
+    """The user's newest settled rows whose movements haven't been read yet, up to `limit`."""
+    rows = (
+        get_db()
+        .execute(
+            f"SELECT {_TRANSACTION_COLUMNS} FROM transactions "
+            "WHERE user_id = ? AND movements_read = 0 AND status != 'pending' ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        )
+        .fetchall()
+    )
+    return [dict(row) for row in rows]
+
+
+def get_movements(tx_id: int) -> list[dict]:
+    """What a transaction moved, as stored by save_movements."""
+    rows = (
+        get_db()
+        .execute(
+            "SELECT direction, token, ticker, amount, amount_value, counterparty "
+            "FROM transaction_movements WHERE tx_id = ? ORDER BY rowid",
+            (tx_id,),
+        )
+        .fetchall()
+    )
+    return [dict(row) for row in rows]
+
+
+def get_movement_tickers(user_id: int, chain_id: int | None = None) -> list[str]:
+    """Every ticker the user's transactions have moved, A-Z."""
+    query = (
+        "SELECT DISTINCT m.ticker AS ticker FROM transaction_movements m "
+        "JOIN transactions t ON t.id = m.tx_id WHERE t.user_id = ?"
+    )
+    params: list = [user_id]
+    if chain_id is not None:
+        query += " AND t.chain_id = ?"
+        params.append(chain_id)
+    return [row["ticker"] for row in get_db().execute(query + " ORDER BY upper(ticker)", params).fetchall()]
 
 
 def get_owner_transaction(user_id: int, chain_id: int, tx_hash: str) -> dict | None:
@@ -1700,8 +1836,31 @@ def get_owner_transaction(user_id: int, chain_id: int, tx_hash: str) -> dict | N
     return dict(row) if row else None
 
 
+@dataclass(frozen=True)
+class TransactionFilter:
+    """
+    The History tab's filters. Every field is optional; the ones given must all hold.
+
+    The money fields (amounts, address, token) must all hold for ONE movement of the transaction,
+    so "100 USDC to Sandy" can't match 100 ETH to Sandy and 5 USDC to someone else. With direction
+    'in' or 'out', that movement must also go that way: outgoing USDC is the USDC that left.
+    """
+
+    direction: str | None = None     # 'in', 'out' or 'none'
+    since: int | None = None         # Unix seconds, inclusive
+    until: int | None = None         # Unix seconds, exclusive
+    min_amount: float | None = None  # whole units
+    max_amount: float | None = None
+    address: str | None = None       # the other side, or the token's contract
+    token: str | None = None         # a ticker, any case
+
+
 def get_transactions(
-    user_id: int, chain_id: int | None = None, before: tuple[int, int] | None = None, limit: int = 50
+    user_id: int,
+    chain_id: int | None = None,
+    before: tuple[int, int] | None = None,
+    limit: int = 50,
+    where: TransactionFilter = TransactionFilter(),
 ) -> list[dict]:
     """
     The user's transactions, newest first: by when they mined, or by when Mitfah recorded them
@@ -1710,12 +1869,48 @@ def get_transactions(
     @param chain_id  Only this chain's, or every chain's when None.
     @param before    Only rows older than this (time, id): the cursor for the next page. See
                      transaction_cursor.
+    @param where     The History tab's filters.
     """
     query = f"SELECT {_TRANSACTION_COLUMNS} FROM transactions WHERE user_id = ?"
     params: list = [user_id]
     if chain_id is not None:
         query += " AND chain_id = ?"
         params.append(chain_id)
+    if where.direction is not None:
+        query += " AND direction = ?"
+        params.append(where.direction)
+    if where.since is not None:
+        query += " AND COALESCE(mined_at, created_at) >= ?"
+        params.append(where.since)
+    if where.until is not None:
+        query += " AND COALESCE(mined_at, created_at) < ?"
+        params.append(where.until)
+
+    moved: list[str] = []
+    moved_params: list = []
+    if where.min_amount is not None:
+        moved.append("m.amount_value >= ?")
+        moved_params.append(where.min_amount)
+    if where.max_amount is not None:
+        moved.append("m.amount_value <= ?")
+        moved_params.append(where.max_amount)
+    if where.address is not None:
+        moved.append("(lower(m.counterparty) = lower(?) OR lower(m.token) = lower(?))")
+        moved_params.extend([where.address, where.address])
+    if where.token is not None:
+        moved.append("upper(m.ticker) = upper(?)")
+        moved_params.append(where.token)
+    if moved:
+        if where.direction in ("in", "out"):
+            moved.append("m.direction = ?")
+            moved_params.append(where.direction)
+        query += (
+            " AND EXISTS (SELECT 1 FROM transaction_movements m WHERE m.tx_id = transactions.id AND "
+            + " AND ".join(moved)
+            + ")"
+        )
+        params.extend(moved_params)
+
     if before is not None:
         query += " AND (COALESCE(mined_at, created_at), id) < (?, ?)"
         params.extend(before)
