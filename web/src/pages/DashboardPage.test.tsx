@@ -618,6 +618,22 @@ describe('DashboardPage', () => {
     expect(requests).toEqual([{ route: `DELETE /api/tokens/custom/${SEPOLIA}/${PEPE}`, body: undefined }])
   })
 
+  it('keeps the add and remove dialogs apart when both have been opened', async () => {
+    stubServer()
+    const errors = vi.spyOn(console, 'error')
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add token' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Remove USDC from your dashboard' }))
+    expect(await screen.findByRole('alertdialog', { name: 'Remove USDC?' })).toBeInTheDocument()
+    // Both dialogs once: React would warn here if they shared a key.
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
+    errors.mockRestore()
+  })
+
   it('adds a token Mitfah lists and counts it toward the limit', async () => {
     const USDT = '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'
     const usdt = { chain_id: SEPOLIA, address: USDT, ticker: 'usdt', symbol: 'USDT', name: 'Tether USD', decimals: 6, balance_raw: '0', listed: true }

@@ -187,7 +187,8 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
         </Text>
       )}
       <AddTokenModal
-        key={addKey}
+        // Prefixed: the two dialogs are siblings, and both counters reach the same numbers.
+        key={`add-${addKey}`}
         open={addOpen}
         onClose={() => setAddOpen(false)}
         wallet={wallet}
@@ -198,7 +199,7 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
       />
       {toRemove && (
         <RemoveTokenModal
-          key={removeKey}
+          key={`remove-${removeKey}`}
           open={removeOpen}
           token={toRemove}
           counts={counts(toRemove)}
