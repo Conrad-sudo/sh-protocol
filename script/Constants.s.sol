@@ -8,6 +8,7 @@ uint256 constant MAINNET_CHAIN_ID = 1;
 uint256 constant SEPOLIA_CHAIN_ID = 11155111;
 uint256 constant BSC_CHAIN_ID = 56;
 uint256 constant ARB_CHAIN_ID=42161;
+uint256 constant BASE_CHAIN_ID = 8453;
 uint256 constant LOCAL_CHAIN_ID = 31337;
 
 /*//////////////////////////////////////////////////////////////
@@ -50,6 +51,7 @@ address constant ARB_UNISWAP_V2_FACTORY=0xf1D7CC64Fb4452F05c498126312eBE29f30Fbc
 
 
 // ─── Base Uniswap ──────────────────────────────────────────────────────────────────
+// The router sits at the same address as Arbitrum's; the factory differs (router.factory() on Base).
 address constant BASE_UNISWAP_V2_ROUTER=0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24;
 address constant BASE_UNISWAP_V2_FACTORY=0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
 
@@ -214,6 +216,48 @@ address constant ARB_CAKE_USD_PRICE_FEED = 0x256654437f1ADA8057684b18d742eFD1403
 // SHOracle.SEQUENCER_GRACE_PERIOD of it coming back — price feeds are published through the
 // sequencer, so an outage freezes them all without making any of them look stale.
 address constant ARB_SEQUENCER_UPTIME_FEED = 0xFdB631F5EE196F0ed6FAa767959853A9F217697D;
+
+
+/*//////////////////////////////////////////////////////////////
+                              BASE
+//////////////////////////////////////////////////////////////*/
+
+// Base (chain id 8453), Coinbase's OP Stack L2. Every address below was read back on-chain: tokens
+// answered symbol()/name()/decimals() as expected and each feed answered description() with the pair
+// named in its constant. Only tokens with both a credible Base deployment and a Chainlink USD feed on
+// Base are here; what is left out, and why, is in getBaseConfig.
+
+// ─── Base Tokens ──────────────────────────────────────────────────────────────
+address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913; // native Circle USDC, not the bridged USDbC
+address constant BASE_DAI = 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb; // Base's standard bridge: remoteToken() is MNT_DAI
+address constant BASE_USDT = 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2; // standard bridge (remoteToken() is MNT_USDT), not Stargate's USD₮0
+address constant BASE_WETH = 0x4200000000000000000000000000000000000006; // OP Stack predeploy (WETH9)
+address constant BASE_AAVE = 0x63706e401c06ac8513145b7687A14804d17f814b; // standard bridge: remoteToken() is MNT_AAVE
+address constant BASE_LINK = 0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196; // Chainlink's own Base deployment
+address constant BASE_WBTC = 0x0555E30da8f98308EdB960aa94C0Db47230d2B9c; // BitGo's WBTC, bridged over LayerZero
+address constant BASE_COMP = 0x9e1028F5F1D5eDE59748FFceE5532509976840E0; // standard bridge: remoteToken() is MNT_COMP
+address constant BASE_YFI = 0x9EaF8C1E34F05a589EDa6BAfdF391Cf6Ad3CB239; // standard bridge: remoteToken() is MNT_YFI
+
+// ─── Base Price Feeds (Chainlink) ─────────────────────────────────────────────
+// Canonical proxies only, with one wrinkle. Chainlink's reference data lists no bare `eth-usd` on
+// Base any more: ETH/USD now runs on a shared SVR aggregator, and the long-standing public proxy used
+// here is listed as the `secondaryProxyAddress` of the `eth-usd-shared-svr-2` entry. It and that
+// entry's own proxy answer aggregator() with the same contract, so they report identical rounds. The
+// separate `-svr` proxies and the 18-decimal `-shared-svr` ones are not used.
+address constant BASE_ETH_USD_PRICE_FEED = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
+address constant BASE_USDC_USD_PRICE_FEED = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
+address constant BASE_DAI_USD_PRICE_FEED = 0x591e79239a7d679378eC8c847e5038150364C78F;
+address constant BASE_USDT_USD_PRICE_FEED = 0xf19d560eB8d2ADf07BD6D13ed03e1D11215721F9;
+address constant BASE_AAVE_USD_PRICE_FEED = 0x3d6774EF702A10b20FCa8Ed40FC022f7E4938e07;
+address constant BASE_LINK_USD_PRICE_FEED = 0x17CAb8FE31E32f08326e5E27412894e49B0f9D65;
+address constant BASE_WBTC_USD_PRICE_FEED = 0xCCADC697c55bbB68dc5bCdf8d3CBe83CdD4E071E; // WBTC/USD itself, not BTC/USD
+address constant BASE_COMP_USD_PRICE_FEED = 0x9DDa783DE64A9d1A60c49ca761EbE528C35BA428;
+address constant BASE_YFI_USD_PRICE_FEED = 0xD40e758b5eC80820B68DFC302fc5Ce1239083548;
+
+// ─── Base L2 Sequencer Uptime Feed ────────────────────────────────────────────
+// Same contract and meaning as ARB_SEQUENCER_UPTIME_FEED: 0 while the sequencer is up, 1 while it is
+// down, `startedAt` marking when that status began.
+address constant BASE_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
 
 
 

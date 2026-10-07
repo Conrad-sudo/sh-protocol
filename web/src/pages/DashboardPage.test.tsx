@@ -14,11 +14,13 @@ vi.mock('../lib/tx', async importOriginal => ({
 }))
 
 const BSC = 56
+const BASE = 8453
 const TX_HASH = `0x${'34'.repeat(32)}`
 const CHAINS = [
   { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false },
   { chain_id: BSC, name: 'bsc', native_ticker: 'BNB', fork: false },
   { chain_id: 1, name: 'mainnet', native_ticker: 'ETH', fork: false },
+  { chain_id: BASE, name: 'base', native_ticker: 'ETH', fork: false },
 ]
 
 type WalletAnswer = WalletState | { status: number; detail: string }
@@ -259,6 +261,23 @@ describe('DashboardPage', () => {
     await user.click(screen.getByRole('button', { name: 'Network: BNB Smart Chain' }))
     await user.click(screen.getByRole('menuitem', { name: 'Add a network' }))
     await waitFor(() => expect(router.state.location.pathname).toBe('/wallets/new'))
+  })
+
+  it('shows a wallet on Base by its name and logo, like every network', async () => {
+    const { walletCalls } = stubServer({ walletChains: [SEPOLIA, BASE] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    expect(await walletHeader()).toHaveTextContent('on Sepolia')
+    await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
+    const base = screen.getByRole('menuitem', { name: 'Base' })
+    expect(base.querySelector('img')?.getAttribute('src')).toBe('/chainlogos/8453.svg')
+    await user.click(base)
+
+    expect(await screen.findByText('Your Mitfah smart wallet on Base')).toBeInTheDocument()
+    expect(walletCalls).toEqual([SEPOLIA, BASE])
+    const toggle = screen.getByRole('button', { name: 'Network: Base' })
+    expect(toggle.querySelector('img')?.getAttribute('src')).toBe('/chainlogos/8453.svg')
   })
 
   it('funds the wallet from the connected browser wallet, and lists the deposit in the history', async () => {

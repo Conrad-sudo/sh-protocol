@@ -64,12 +64,16 @@ DEFAULT_WATCHED_TICKERS = {
     # and is a reasonable fourth if you want the chain's own token metered.
     "arbitrum": ["weth", "usdc", "dai"],
     "arbitrum-fork": ["weth", "usdc", "dai"],
+    # Base pays gas in ETH too, and SHOracle prices all three there (BASE_ETH_USD/BASE_USDC_USD/
+    # BASE_DAI_USD in Constants.s.sol).
+    "base": ["weth", "usdc", "dai"],
+    "base-fork": ["weth", "usdc", "dai"],
     # Celo intentionally omitted: HelperConfig.s.sol has no Celo NetworkConfig, so a Celo deploy
     # falls back to mainnet config anyway. Add a Celo watched list here only once Celo is wired up.
 }
 
 # Maps a chain_name to the env var holding its deployer private key. Every fork of a real chain
-# (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork) and live Sepolia share
+# (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork, base-fork) and live Sepolia share
 # API_BUNDLER -- the API process's bundler key, which is also this deployer -- rather than the
 # Anvil default burner key: forking inherits that chain's real on-chain state, and the well-known
 # Anvil/Hardhat accounts have been EIP-7702-delegated to drainer contracts on real
@@ -86,11 +90,13 @@ LIVE_PRIVATE_KEY_ENV = {
     "bsc": "BSC_PRIVATE_KEY",
     "celo": "CELO_PRIVATE_KEY",
     "arbitrum": "ARBITRUM_PRIVATE_KEY",
+    "base": "BASE_PRIVATE_KEY",
     "mainnet-fork": "API_BUNDLER",
     "sepolia-fork": "API_BUNDLER",
     "bsc-fork": "API_BUNDLER",
     "celo-fork": "API_BUNDLER",
     "arbitrum-fork": "API_BUNDLER",
+    "base-fork": "API_BUNDLER",
 }
 
 
@@ -386,7 +392,7 @@ def deploy(user_id: int, network: str):
     SHFactory.deployWallet() on the given network.
 
     Supported networks: "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork",
-    "arbitrum-fork", "sepolia", "bsc", "celo". Each one must already have the shared protocol
+    "arbitrum-fork", "base-fork", "sepolia", "bsc", "celo". Each one must already have the shared protocol
     infrastructure deployed (see
     deploy_wallet()). "sepolia" and "bsc" are live networks — API_BUNDLER /
     BSC_PRIVATE_KEY must be set and funded with real ETH/BNB before deploying (see
@@ -402,7 +408,7 @@ def deploy(user_id: int, network: str):
     @raises ValueError  If network is not one of the supported values.
     """
     if network in (
-        "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork", "arbitrum-fork",
+        "anvil", "mainnet-fork", "sepolia-fork", "bsc-fork", "celo-fork", "arbitrum-fork", "base-fork",
         "sepolia", "bsc", "celo",
     ):
         deploy_wallet(user_id, network)

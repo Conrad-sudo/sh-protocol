@@ -74,7 +74,7 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
 
 - **Prices can pause for a while.** Any transaction that moves the native asset or a metered
   token, and any price lookup, fails while price data can't be
-  trusted. `PriceOracle_SequencerDown` means the network (e.g. Arbitrum) is having an outage;
+  trusted. `PriceOracle_SequencerDown` means the network (e.g. Arbitrum or Base) is having an outage;
   `PriceOracle_SequencerGracePeriod` means it has just recovered, and prices stay paused until it
   has been running for an hour; `PriceOracle_StalePrice` means a price feed hasn't updated
   recently. None of these is a problem with the user's wallet or funds, and the owner can still
@@ -93,9 +93,9 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
   swap itself, call `swap` directly instead: its quote already carries the router's figures.
 
 - **"eth" means the chain's native asset; the wrapped token has its own ticker.** In every token
-  argument, "eth" (or "bnb") is the native asset — ETH on Ethereum/Sepolia/Arbitrum, BNB on BSC —
+  argument, "eth" (or "bnb") is the native asset — ETH on Ethereum/Sepolia/Arbitrum/Base, BNB on BSC —
   and `add_liquidity`/`remove_liquidity` default to it. The wrapped token is `"weth"` on
-  Ethereum/Sepolia/Arbitrum and `"wbnb"` on BSC: pass it only when the user means the wrapped
+  Ethereum/Sepolia/Arbitrum/Base and `"wbnb"` on BSC: pass it only when the user means the wrapped
   token itself. `get_supported_tokens()` names both the native asset and the listed tokens if
   you're unsure.
 

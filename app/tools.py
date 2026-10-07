@@ -1030,7 +1030,7 @@ def send_eth(
     runtime: ToolRuntime[AgentContext], recipient: str, amount_eth: float
 ):
     """
-    Sends the chain's native gas asset (ETH on Ethereum, Sepolia and Arbitrum, BNB on BSC) to a
+    Sends the chain's native gas asset (ETH on Ethereum, Sepolia, Arbitrum and Base, BNB on BSC) to a
     named contact. This works identically on every supported network — "eth" in the
     tool/parameter names is a generic internal label, not a claim that the network is Ethereum.
     Never refuse this request just because the network isn't Ethereum: the quote's `action` names

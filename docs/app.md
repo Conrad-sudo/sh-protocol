@@ -21,7 +21,7 @@ app/
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
 ├── quotes.py              ← Pending transactions: priced, unsigned, awaiting the user's confirmation
 ├── tx_history.py          ← The History tab's record: every transaction on the wallet, Mitfah's and outside it, kept apart from the chat
-├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC)
+├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── tools.py               ← LangChain tool wrappers for the AI agent
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
@@ -37,9 +37,10 @@ app/
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
     ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
-    ├── test_explorers.py  ← Etherscan/NodeReal answers read, paged, retried; keys kept out of logs (make explorers-test)
+    ├── test_explorers.py  ← Etherscan/NodeReal/Alchemy answers read, paged, retried; keys kept out of logs (make explorers-test)
     ├── check_explorers_live.py ← The same against the real services, read-only, with .env's keys (make explorers-live)
     ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
+    ├── test_bundler.py    ← The L1 data charge in preVerificationGas: Base's fee, Arbitrum's gas, none on forks; fake node (make bundler-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
@@ -81,6 +82,7 @@ CHAIN_ID_SEPOLIA    = 11155111
 CHAIN_ID_BSC        = 56
 CHAIN_ID_CELO       = 42220
 CHAIN_ID_ARBITRUM   = 42161
+CHAIN_ID_BASE       = 8453
 WEI_PER_ETH         = 10**18
 ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 
@@ -90,7 +92,7 @@ ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 # off that router. See toolkits.py.
 ```
 
-`NATIVE_WRAPPED_TICKER` maps each chain ID to its wrapped-native ticker — `"weth"` on Ethereum/Sepolia/Anvil/Arbitrum (Arbitrum's gas asset is ETH too), `"wbnb"` on BSC, `"celo"` on Celo. `get_native_wrapped_ticker(chain_id)` and `get_native_asset_ticker(chain_id)` resolve these, raising `ValueError` for unconfigured chains.
+`NATIVE_WRAPPED_TICKER` maps each chain ID to its wrapped-native ticker — `"weth"` on Ethereum/Sepolia/Anvil/Arbitrum/Base (both L2s pay gas in ETH), `"wbnb"` on BSC, `"celo"` on Celo. `get_native_wrapped_ticker(chain_id)` and `get_native_asset_ticker(chain_id)` resolve these, raising `ValueError` for unconfigured chains.
 
 **The wrapped native token always counts.** `get_always_counted_ticker(chain_id)` names it (WETH, WBNB; `None` on Celo, where `celo` *is* the native asset and watching it would count every movement twice). Mitfah treats it like the native asset it wraps, which the contract always meters: `GET /api/tokens` flags it `always_counted: true` (the web picker shows it ticked and locked), `POST /api/deploy` adds it to `watched_tokens` whatever the request picked, and `POST /api/wallet/watched-tokens/prepare` refuses to remove it (400). This is app policy, not a contract rule — the owner can still call `removeWatchedToken` on the wallet directly, and a wallet deployed before the rule may not watch it (Controls offers a one-click "Count it").
 
@@ -193,7 +195,7 @@ CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL,
 
 > **Replaced 2026-09-30:** the six per-network tables (`anvil_tokens`, `mainnet_tokens`, `sepolia_tokens`, `bsc_tokens`, `celo_tokens`, `arbitrum_tokens`) became the one `supported_tokens` table, keyed by chain ID. `init_db()` moves their rows across and drops them. A fork shares its parent's rows because it shares its chain ID.
 
-**Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum token addresses are static: one dict per chain in `seed_data.SUPPORTED_TOKENS`, keyed by chain ID. `make db` makes each chain's rows match its dict **exactly** — a token deleted from `seed_data.py` is deleted from `wallet.db` too. The Arbitrum set is exactly the tokens `HelperConfig.getArbConfig` prices, and every address matches the corresponding `ARB_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of anvil's rows, and it replaces them outright too (left alone when there is no broadcast).
+**Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum/Base token addresses are static: one dict per chain in `seed_data.SUPPORTED_TOKENS`, keyed by chain ID. `make db` makes each chain's rows match its dict **exactly** — a token deleted from `seed_data.py` is deleted from `wallet.db` too. The Arbitrum and Base sets are exactly the tokens `HelperConfig.getArbConfig` / `getBaseConfig` price, and every address matches the corresponding `ARB_*` / `BASE_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of anvil's rows, and it replaces them outright too (left alone when there is no broadcast).
 
 **Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through (the owner's withdraw endpoint relies on that). The agent's tools add one rule on top, in `tools._token_address`: an address is accepted only for a listed or added token, so the chat can never trade or send a token the owner didn't choose (THREAT_MODEL §4.2). It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bot's process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
 
@@ -343,7 +345,7 @@ disagree. (Signing used to ask for the same hash twice.)
 **UserOp lifecycle:**
 1. Build `SessionHandler.execute(mode, executionCalldata)` — single-call (`pack_execution_calldata`) or batch (`encode_batch_execution_calldata`) — and fetch a nonce keyed via `session_key_nonce_key()`.
 2. **Estimate without the session key.** Execution gas: `execute()` estimated `from` the EntryPoint's address, exactly as `handleOps` will call it — no op, no signature. It walks the session-key path (admin guard, protocol fee, the spending-limit hook with every price read), so an op that would fail is refused here, *by name*, before anything is signed or paid. Validation gas: `validateUserOp()` estimated the same way, signed by a **throwaway key** the wallet never authorized — it fails the signature check without reverting, at the same cost as the real key. All estimates run against the `pending` block, whose timestamp is the next block's, so a price feed that goes stale before the op lands fails the estimate too.
-3. `preVerificationGas` = 21,000 + the handleOps calldata (4 gas per zero byte, 16 per non-zero) + a fixed 20,000 for handleOps' own bookkeeping, plus the Ethereum data fee on live Arbitrum (from NodeInterface). The fee cap is clamped under the wallet's `maxOpGasCost`.
+3. `preVerificationGas` = 21,000 + the handleOps calldata (4 gas per zero byte, 16 per non-zero) + a fixed 20,000 for handleOps' own bookkeeping, plus the Ethereum data fee on the live L2s: Arbitrum's in gas (from NodeInterface), Base's in wei (from the `GasPriceOracle` predeploy's `getL1Fee`, priced over an unsigned EIP-1559 envelope around the calldata and turned into gas at base fee + tip). Against real Base `handleOps` receipts that repays 1.20–1.22× the L1 fee charged, the `L1_GAS_BUFFER` cushion. The fee cap is clamped under the wallet's `maxOpGasCost`.
 4. **Simulate the whole bundle, still without the session key.** The op is signed by the same throwaway key — over the op's *real* `userOpHash`, or validation fails on the signature — and `handleOps` is estimated with a **state override** writing the throwaway key *and a far-future deadline* into the wallet's packed `currentSession` slot (`CURRENT_SESSION_SLOT`). Both halves matter: the wallet returns the deadline as the op's ERC-4337 validity window, so a key written with a zero deadline would simulate as expired and the whole bundle would fail `AA22` instead of being priced. It is a plain slot, not a mapping base — the wallet authorizes one key at a time, so there is no key to hash in. The override lives only inside that one call, so the op being simulated is executable by nobody. It catches everything a real submission would hit and measures what the transaction burns. The slot is verified against the live contract first (one `eth_call` of `isSessionActive` under the override, which checks *both* halves); if the node refuses overrides or the layout has moved, the outer gas falls back to the sum of the parts and the quote loses only precision.
 
    This is where a quote stops. Two figures come out of it, and they are different on purpose:
@@ -361,7 +363,7 @@ disagree. (Signing used to ask for the same hash twice.)
 8. If our transaction reverted or stalled, look the op up on chain by its hash: the signature does not cover the beneficiary, so someone else may have landed it first. The user's action then *has* happened, and that transaction is returned instead of a failure the user might retry.
 9. Surface an inner-call revert from `UserOperationRevertReason`, named via `contract_errors`.
 
-Two gaps remain. **Celo** is now an OP-stack L2, and any L1 data fee it charges the outer transaction is *not* priced into `preVerificationGas` — the bundler would absorb it, so watch its balance there before relying on it. **Forks** charge no L1 fee at all, so Arbitrum's L1 pricing is only exercised on the live chain.
+Two gaps remain. **Celo** is now an OP-stack L2, and any L1 data fee it charges the outer transaction is *not* priced into `preVerificationGas` — the bundler would absorb it, so watch its balance there before relying on it. **Forks** charge no L1 fee at all, so Arbitrum's and Base's L1 pricing is only exercised on the live chains (`make bundler-test` covers it offline against a fake node).
 
 ---
 
@@ -439,6 +441,7 @@ DEFAULT_WATCHED_TICKERS = {                 # tokens metered against the cap, pe
     "sepolia": ["weth", "usdc", "link"], "sepolia-fork": ["weth", "usdc", "link"],
     "bsc": ["wbnb", "usdc", "usdt"], "bsc-fork": ["wbnb", "usdc", "usdt"],
     "arbitrum": ["weth", "usdc", "dai"], "arbitrum-fork": ["weth", "usdc", "dai"],
+    "base": ["weth", "usdc", "dai"], "base-fork": ["weth", "usdc", "dai"],
     # Celo omitted — no Solidity NetworkConfig yet
 }
 ```
@@ -644,8 +647,8 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
   `start_outside_sync`, which searches each wallet's activity in a background pool (two workers),
   at most once a minute per wallet and never twice at once. The page doesn't wait: it answers
   `syncing: true`, and the web app reads again every 5 seconds until that turns false.
-  `explorers.movements_since` asks Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo: free) or
-  NodeReal (BSC, which Etherscan charges for) for three kinds of record. A Mitfah wallet is a
+  `explorers.movements_since` asks Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo: free),
+  NodeReal (BSC) or Alchemy (Base) — Etherscan charges for those two — for three kinds of record. A Mitfah wallet is a
   contract and never sends a transaction itself, so it needs its plain transactions, its internal
   ones, and its ERC-20 transfers. The movements are grouped by hash, one row per transaction, and the
   cursor in `history_sync` is saved after every batch.
@@ -667,8 +670,12 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
     block). A query timeout or rate limit is retried once. NodeReal searches at most 100,000 blocks
     per call and has no "either side" filter, so it walks windows (two calls each, from and to the
     wallet) from the block of the wallet's first Mitfah transaction, at most 100 windows a run. A
-    wallet the live chain doesn't know (one made on a fork) starts from the live head.
-  - **Keys.** Both services take the key in the URL, and a `requests` error carries the URL, so every
+    wallet the live chain doesn't know (one made on a fork) starts from the live head. Alchemy's
+    `alchemy_getAssetTransfers` (the search NodeReal's copies) searches by address over any range,
+    so it starts at block 0 like Etherscan, but also needs two calls, from and to the wallet. It
+    lists no transfer from a failed transaction, so everything it returns succeeded.
+  - **Keys.** Every service takes its key in the URL (`ETHERSCAN_API_KEY`, `NODEREAL_API_KEY`,
+    `ALCHEMY_API_KEY`), and a `requests` error carries the URL, so every
     network error becomes an `ExplorerUnavailable` naming only the service, and any key in a
     service's own text is masked. A failed search is logged as a warning and retried a minute later.
   - **Forks.** The explorers see only the live chains, so a fork's own transactions never appear as

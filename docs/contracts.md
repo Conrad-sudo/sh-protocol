@@ -30,7 +30,7 @@ src/
 script/
 ├── DeploySHProtocol.s.sol     ← Deployment entry point (SHTreasury → SHOracle → agent → SHRegistry → setRegistry → module → setSpendingLimitModule → SHFactory → setFactory)
 ├── Constants.s.sol            ← Chain IDs, canonical addresses, per-network token/Chainlink-feed addresses, Anvil mock prices
-├── HelperConfig.s.sol         ← Chain-specific configuration resolver (Mainnet, Sepolia, BSC, Arbitrum, Anvil)
+├── HelperConfig.s.sol         ← Chain-specific configuration resolver (Mainnet, Sepolia, BSC, Arbitrum, Base, Anvil)
 └── SendPackedUserOp.s.sol     ← ERC-7579 UserOp construction and signing helper (single + batch)
 
 test/
@@ -43,7 +43,8 @@ test/
 │   ├── SHUniswapV2Test.t.sol           ← Mainnet-fork instance (WETH→DAI)
 │   ├── SHSepoliaUniswapV2Test.t.sol    ← Sepolia-fork instance (WETH→USDC)
 │   ├── SHPancakeswapV2Test.t.sol       ← BSC-fork instance (USDT→WBNB→LINK)
-│   └── SHArbitrumUniswapV2Test.t.sol   ← Arbitrum-fork instance (WETH→USDC) + L2 sequencer-gate tests
+│   ├── SHArbitrumUniswapV2Test.t.sol   ← Arbitrum-fork instance (WETH→USDC) + L2 sequencer-gate tests
+│   └── SHBaseUniswapV2Test.t.sol       ← Base-fork instance (WETH→USDC) + L2 sequencer-gate tests
 └── invariant/
     ├── InvariantSH.t.sol  ← Stateful invariant tests (8 invariants)
     └── SHHandler.sol      ← Action handler for fuzzing, with a ghost metering model
@@ -522,11 +523,14 @@ Session-key calls to the Reputation Registry (`giveFeedback`) work without any s
 | Ethereum Sepolia | 11155111 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | none (`address(0)`) |
 | BSC | 56 | `ENTRYPOINT_V07` (canonical) | PancakeSwap V2 | none (`address(0)`) |
 | Arbitrum One | 42161 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | `ARB_SEQUENCER_UPTIME_FEED` |
+| Base | 8453 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | `BASE_SEQUENCER_UPTIME_FEED` |
 | Anvil (local) | 31337 | Freshly deployed, cached per session | none (`address(0)`) | none (`address(0)`) |
 
-`getConfigByChainId` **reverts with `HelperConfig__InvalidChainId`** on an unrecognised chain ID, rather than silently handing back mainnet's token and feed addresses — which would be wrong for that chain. For Anvil, `HelperConfig` deploys a fresh `EntryPoint`, `MockV3Aggregator` feeds seeded with approximate real-world prices, and the ERC-8004 mocks (all inside `vm.startBroadcast`, so the mock token addresses land on-chain and are recoverable from the broadcast file). Sepolia uses a wide 72h heartbeat across the board (its Chainlink nodes update far less often than mainnet's — an accepted testnet characteristic). The mainnet/BSC/Arbitrum deployer resolves from `MAINNET_DEPLOYER_ADDRESS`, falling back to a deterministic placeholder for fork tests — export the real one before a live deployment.
+`getConfigByChainId` **reverts with `HelperConfig__InvalidChainId`** on an unrecognised chain ID, rather than silently handing back mainnet's token and feed addresses — which would be wrong for that chain. For Anvil, `HelperConfig` deploys a fresh `EntryPoint`, `MockV3Aggregator` feeds seeded with approximate real-world prices, and the ERC-8004 mocks (all inside `vm.startBroadcast`, so the mock token addresses land on-chain and are recoverable from the broadcast file). Sepolia uses a wide 72h heartbeat across the board (its Chainlink nodes update far less often than mainnet's — an accepted testnet characteristic). The mainnet/BSC/Arbitrum/Base deployer resolves from `MAINNET_DEPLOYER_ADDRESS`, falling back to a deterministic placeholder for fork tests — export the real one before a live deployment.
 
 **Arbitrum coverage.** 16 of the ~21 tokens carry both an official Arbitrum deployment and a Chainlink USD feed. The rest are zeroed **in pairs** — token *and* feed together — because `DeploySHProtocol` pairs the arrays positionally and `SHOracle` reads a zero token as the native-ETH sentinel, so a zero token beside a live feed would silently repoint native pricing at it. ENS, SAND and IMX have no Arbitrum feed; BNB, AVAX and wTAO have feeds but no credible token deployment on the chain.
+
+**Base coverage.** 9 tokens carry both a credible Base deployment and a Chainlink USD feed: USDC (Circle's native one, not the bridged USDbC), DAI, USDT (the standard-bridge one, not Stargate's USD₮0), WETH, AAVE, LINK, WBTC, COMP and YFI. The rest are zeroed in pairs, as on Arbitrum: 1INCH, CRV, SAND, SUSHI, UNI, CAKE and TAO are deployed on Base but have no feed there; APE, ARB, ENS and IMX have neither; BNB and AVAX have feeds but no credible token. Two choices differ from the other chains. WBTC is priced by Base's own WBTC/USD feed, not BTC/USD, so a depegged WBTC is never valued at the BTC price (net-value metering would let a swap into it offset real spending). And Chainlink's reference data no longer lists a bare `eth-usd` on Base: ETH/USD runs on a shared SVR aggregator, and `BASE_ETH_USD_PRICE_FEED` is its long-standing public proxy, which reads that same aggregator (checked with `aggregator()`).
 
 ---
 
@@ -622,6 +626,7 @@ make mainnet-uniswap-test    # Uniswap V2, mainnet fork
 make sepolia-uniswap-test    # Uniswap V2, Sepolia fork  (make sepolia-test is an alias)
 make pancakeswap-test        # PancakeSwap V2, BSC fork
 make arbitrum-uniswap-test   # Uniswap V2, Arbitrum One fork (+ the live sequencer gate)
+make base-uniswap-test       # Uniswap V2, Base fork (+ the live sequencer gate)
 
 # Deploy shared protocol infrastructure
 forge script script/DeploySHProtocol.s.sol \

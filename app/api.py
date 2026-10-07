@@ -25,6 +25,7 @@ from web3.logs import DISCARD
 from constants import (
     CHAIN_ID_ANVIL,
     CHAIN_ID_ARBITRUM,
+    CHAIN_ID_BASE,
     CHAIN_ID_BSC,
     CHAIN_ID_CELO,
     CHAIN_ID_MAINNET,
@@ -211,6 +212,7 @@ CHAIN_NAME_BY_ID: dict[int, str] = {
     CHAIN_ID_BSC: "bsc",
     CHAIN_ID_CELO: "celo",
     CHAIN_ID_ARBITRUM: "arbitrum",
+    CHAIN_ID_BASE: "base",
 }
 # Chains whose live name has a local `-fork` twin. Anvil is absent: it is already local and has no
 # live counterpart to fork.
@@ -220,6 +222,7 @@ FORKABLE_CHAIN_IDS = {
     CHAIN_ID_BSC,
     CHAIN_ID_CELO,
     CHAIN_ID_ARBITRUM,
+    CHAIN_ID_BASE,
 }
 # Set APP_FORK_MODE=1 to point every forkable chain at its local anvil fork instead of the live RPC.
 # A deployment-wide switch, read once at import: a process serves forks or it serves live chains,

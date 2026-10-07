@@ -24,6 +24,8 @@ MAINNET_PRIVATE_RPC_URL=https://rpc.flashbots.net/fast
 MAINNET_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/your_alchemy_key
 SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/your_alchemy_key
 BSC_RPC_URL=https://bnb-mainnet.g.alchemy.com/v2/your_alchemy_key
+ARB_RPC_URL=https://arb-mainnet.g.alchemy.com/v2/your_alchemy_key
+BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/your_alchemy_key
 CELO_RPC_URL=https://celo-mainnet.g.alchemy.com/v2/your_alchemy_key
 
 # AI / bot credentials
@@ -49,6 +51,8 @@ VAULT_SECRET_ID_ACCESSOR=
 ETHERSCAN_API_KEY=your_etherscan_api_key_here
 # Optional — the History tab's activity outside Mitfah on BSC (Etherscan's free tier excludes BSC)
 NODEREAL_API_KEY=your_nodereal_api_key_here
+# Optional — the same on Base, which Etherscan's free tier excludes too (the key in BASE_RPC_URL)
+ALCHEMY_API_KEY=your_alchemy_key
 ```
 
 > `SEPOLIA_ACCOUNT` is the public Ethereum address corresponding to `API_BUNDLER` (which was called `SEPOLIA_PRIVATE_KEY` until 2026-09-22). It is used by `HelperConfig.s.sol` as the deployer account on live Sepolia. Load it via `vm.envAddress("SEPOLIA_ACCOUNT")` — do not hardcode it. Mainnet/BSC use a separate placeholder key (`MAINNET_DEPLOYER_PK`) hardcoded in `HelperConfig.s.sol` — **replace it with a real funded key before broadcasting a live mainnet or BSC deployment.**
@@ -59,7 +63,7 @@ NODEREAL_API_KEY=your_nodereal_api_key_here
 >
 > `API_BUNDLER` and `BSC_PRIVATE_KEY` must be funded with real Sepolia ETH / BSC BNB before deployment. `API_BUNDLER` carries three roles at once: the live-Sepolia deployer/owner, the deployer on every fork, and the API's bundler. Collapsing the deployer and bundler into one key is acceptable on a testnet; on mainnet they must be separate, since the deployer is the protocol's admin root (see [THREAT_MODEL.md](../THREAT_MODEL.md)) and a bundler is an always-online hot key.
 >
-> `FORK_DEPLOYER_PK` / `FORK_DEPLOYER_ADDRESS` are **no longer used** and can be removed from `.env`. Every fork network (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork) now uses `SEPOLIA_ACCOUNT` / `API_BUNDLER` for all three roles at once: the `--sender`/`--private-key` broadcasting `DeploySHProtocol.s.sol` (see the Makefile), the deployer/owner key `deploy_wallet.py` signs with, and the API's bundler key for the outer `handleOps` transaction. `HelperConfig.s.sol` resolves `config.account` to the same address, so it also owns `SHTreasury`.
+> `FORK_DEPLOYER_PK` / `FORK_DEPLOYER_ADDRESS` are **no longer used** and can be removed from `.env`. Every fork network (mainnet-fork, sepolia-fork, bsc-fork, celo-fork, arbitrum-fork, base-fork) now uses `SEPOLIA_ACCOUNT` / `API_BUNDLER` for all three roles at once: the `--sender`/`--private-key` broadcasting `DeploySHProtocol.s.sol` (see the Makefile), the deployer/owner key `deploy_wallet.py` signs with, and the API's bundler key for the outer `handleOps` transaction. `HelperConfig.s.sol` resolves `config.account` to the same address, so it also owns `SHTreasury`.
 >
 > That address inherits the forked chain's **real** balance, which is zero on mainnet-fork and bsc-fork, so `make fund` sets it to 100 ETH via `anvil_setBalance` — and does the same for `TELEGRAM_BUNDLER`'s address, derived from the key. It is a prerequisite of both `deploy` and `deploy-wallet`, and self-skips on any network without a local node, so there is no separate bundler-funding step.
 >
@@ -67,7 +71,7 @@ NODEREAL_API_KEY=your_nodereal_api_key_here
 >
 > On live mainnet the bundler broadcasts through a private RPC (`MAINNET_PRIVATE_RPC_URL`, default Flashbots Protect) so its transactions never sit in the public mempool, where a bot could lift the UserOp out and land it first. Reads and estimates still go to `MAINNET_RPC_URL`, which the app now uses for live mainnet too.
 >
-> `ETHERSCAN_API_KEY` is optional. If not set, deployment skips contract verification and prints a notice, and the History tab lists no activity from outside Mitfah on Ethereum, Sepolia, Arbitrum or Celo. `NODEREAL_API_KEY` does the same for BSC. Without either, the tab still lists everything Mitfah sent; the API logs a warning for the search it couldn't run.
+> `ETHERSCAN_API_KEY` is optional. If not set, deployment skips contract verification and prints a notice, and the History tab lists no activity from outside Mitfah on Ethereum, Sepolia, Arbitrum or Celo. `NODEREAL_API_KEY` does the same for BSC, and `ALCHEMY_API_KEY` for Base. Without them, the tab still lists everything Mitfah sent; the API logs a warning for the search it couldn't run.
 >
 > **`TELEGRAM_TOKEN` is optional — the whole Telegram layer is.** It is read only by `telebot.py` (`make bot`). The interactive CLI (`make agent`) never reads it, so you can run the full agent without a bot token or a Telegram account. `TELEGRAM_CHAT_ID` is still required even in CLI mode, but only as an integer user key (agent `thread_id` + DB key) — it does **not** have to be a real Telegram ID; any integer works, as long as it matches the one used at wallet deployment.
 >

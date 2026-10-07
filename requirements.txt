@@ -1,6 +1,9 @@
 # Blockchain interface
 web3==7.14.1
 eth-account==0.13.7
+# Already installed with eth-account; named because bundler.py encodes the unsigned transaction an
+# OP Stack chain's L1 fee is priced from.
+rlp==4.1.0
 
 # ERC20, Uniswap V2 and ERC-8004 registry calldata construction. All three return
 # account-agnostic execution plans (lists of (to, value, data) calls) that app/tools.py

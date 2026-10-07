@@ -7,14 +7,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from web3 import Web3
 from constants import (
-    CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
+    CHAIN_ID_ANVIL, CHAIN_ID_ARBITRUM, CHAIN_ID_BASE, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET,
     CHAIN_ID_SEPOLIA,
 )
 from seed_data import CHAINS, SEEDS, SUPPORTED_TOKENS
 
 CHAIN_IDs=[
     CHAIN_ID_ANVIL, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_BSC, CHAIN_ID_CELO,
-    CHAIN_ID_ARBITRUM,
+    CHAIN_ID_ARBITRUM, CHAIN_ID_BASE,
 ]
 
 DB_PATH = "./app/wallet.db"

@@ -12,7 +12,7 @@ where a transaction hash lives. Two kinds of row land in the `transactions` tabl
     owner actions, deposits from the Fund drawer. Recorded when the app is handed its hash, and
     described from the transaction's own calldata, never from anything the browser says.
   - 'outside': anything else that touched the wallet -- tokens somebody sent it, a call the owner
-    made from a block explorer. Read from Etherscan or NodeReal (explorers.py) in the background
+    made from a block explorer. Read from Etherscan, NodeReal or Alchemy (explorers.py) in the background
     when the History tab is read, and described from the amounts moved, never from the token names
     an explorer reports.
 
@@ -497,8 +497,8 @@ def sync_outside(user_id: int, chain_id: int, wallet: str, w3: Web3 | None):
 
 def _first_block(chain_id: int, wallet: str) -> int:
     """
-    Where a wallet's first search starts. Etherscan searches by address, so the very first block
-    costs nothing extra. NodeReal searches block ranges, so it starts where the wallet was created:
+    Where a wallet's first search starts. Etherscan and Alchemy search by address, so the very first
+    block costs nothing extra. NodeReal searches block ranges, so it starts where the wallet was created:
     the block of its first Mitfah transaction. A wallet with none on the live chain (one made on a
     fork) has no live history, so it starts from now.
     """

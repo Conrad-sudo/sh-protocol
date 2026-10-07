@@ -11,15 +11,17 @@
 | `make sepolia-uniswap-test` | Run Uniswap V2 fork tests against `SEPOLIA_RPC_URL` (`test/fork/SHSepoliaUniswapV2Test.t.sol`) |
 | `make pancakeswap-test` | Run PancakeSwap V2 fork tests against `BSC_RPC_URL` |
 | `make arbitrum-uniswap-test` | Run Uniswap V2 fork tests against `ARB_RPC_URL` (`test/fork/SHArbitrumUniswapV2Test.t.sol`) |
+| `make base-uniswap-test` | Run Uniswap V2 fork tests against `BASE_RPC_URL` (`test/fork/SHBaseUniswapV2Test.t.sol`) |
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
 | `make custom-tokens-test` | Tokens a user adds by address: the add rules, the routes, how the tools price and name them, and that the tools refuse tokens nobody added and slippage over 12%; the dashboard's token list, LP tokens included, against a fake chain (`app/tests/test_custom_tokens.py`, offline) |
 | `make history-test` | The History tab and the short chat memory: how transactions are recorded, described, settled and listed, the history and delete-chat routes, and the conversation starting afresh after a send, against a fake chain and a scripted model (`app/tests/test_history.py`, offline) |
-| `make explorers-test` | Reading activity outside Mitfah from Etherscan and NodeReal: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
+| `make explorers-test` | Reading activity outside Mitfah from Etherscan, NodeReal and Alchemy: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
 | `make explorers-live` | The same against the real services, read-only, with the keys in `.env` (`app/tests/check_explorers_live.py`; not part of `py-test`) |
-| `make py-test` | All six offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `explorers-test` + `speed-test` |
-| `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork` etc.; on Arbitrum it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
+| `make bundler-test` | What a UserOp pays for posting its data to Ethereum on the live L2s — Base's L1 fee and Arbitrum's L1 gas, as `preVerificationGas` — and that forks pay none (`app/tests/test_bundler.py`, offline) |
+| `make py-test` | All seven offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `explorers-test` + `speed-test` + `bundler-test` |
+| `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc.; on Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
 | `make snapshot` | Generate gas snapshot |
 | `make clean` | Remove build artifacts |
@@ -31,6 +33,7 @@
 | `make bsc-fork` | Start a BSC fork at the latest block, on port 8546, and fund both bundlers |
 | `make celo-fork` | Start a Celo fork at the latest block, on port 8545, and fund both bundlers (no Solidity deployment path yet — see [docs/app.md](app.md)) |
 | `make arb-fork` | Start an Arbitrum One fork at the latest block, on port 8548, and fund both bundlers (the app calls this network `arbitrum-fork`) |
+| `make base-fork` | Start a Base fork at the latest block, on port 8549, and fund both bundlers |
 | `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` (the `API_BUNDLER` address) and on the `TELEGRAM_BUNDLER` address via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. Every fork target runs it as soon as the fork starts, and it is a prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
 | `make vault` | Configure Vault and refresh `.env` credentials |
@@ -102,7 +105,7 @@ sh-protocol/
 │   ├── deploy_wallet.py
 │   ├── tools.py
 │   ├── tx_history.py                ← the History tab's record: every transaction on the wallet, Mitfah's and outside it
-│   ├── explorers.py                 ← activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC)
+│   ├── explorers.py                 ← activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 │   ├── agent_context.py             ← (user_id, chain_id) injected into every tool
 │   ├── smart_wallet_agent.py
 │   ├── auth.py                      ← SIWE sign-in, JWTs, signed (EIP-712) contacts

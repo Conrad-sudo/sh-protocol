@@ -145,6 +145,7 @@ abstract contract SHForkTestBase is Test {
         if (block.chainid == SEPOLIA_CHAIN_ID) return SPO_UNISWAP_V2_ROUTER_02;
         if (block.chainid == BSC_CHAIN_ID) return PANCAKE_V2_ROUTER_02;
         if (block.chainid == ARB_CHAIN_ID) return ARB_UNISWAP_V2_ROUTER;
+        if (block.chainid == BASE_CHAIN_ID) return BASE_UNISWAP_V2_ROUTER;
         revert("no router constant for this chain");
     }
 

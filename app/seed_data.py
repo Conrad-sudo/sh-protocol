@@ -16,7 +16,9 @@ import os
 from dotenv import load_dotenv
 from langchain_erc20 import KNOWN_NETWORKS as ERC20_NETWORKS
 
-from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA
+from constants import (
+    CHAIN_ID_ARBITRUM, CHAIN_ID_BASE, CHAIN_ID_BSC, CHAIN_ID_CELO, CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA,
+)
 
 load_dotenv()
 
@@ -58,6 +60,8 @@ CHAINS = {
     "arbitrum": 42161,
     "arbitrum-fork": 42161,
     "arbitrum-goerli": 421613,  # retired with Goerli
+    "base": 8453,
+    "base-fork": 8453,
     "avalanche": 43114,
     "fuji": 43113,
     "bsc": 56,
@@ -99,6 +103,8 @@ RPCS = {
     "arbitrum": "https://arb1.arbitrum.io/rpc",
     "arbitrum-fork": "http://127.0.0.1:8548",  # `make arb-fork`
     "arbitrum-goerli": "https://goerli-rollup.arbitrum.io/rpc",
+    "base": os.getenv("BASE_RPC_URL") or "https://mainnet.base.org",
+    "base-fork": "http://127.0.0.1:8549",  # `make base-fork`
     "avalanche": "https://api.avax.network/ext/bc/C/rpc",
     "fuji": "https://api.avax-test.network/ext/bc/C/rpc",
     "bsc": "https://bsc-dataseed.binance.org",
@@ -195,6 +201,21 @@ ARBITRUM_TOKENS = {
     "cake": "0x1b896893dfc86bb67Cf57767298b9073D2c1bA2c",  # PancakeSwap's own Arbitrum deployment
 }
 
+# The same rule for Base: every address is the one in Constants.s.sol's BASE_* block, re-verified on
+# Base (symbol()/decimals() as expected, EIP-55 checksummed), and the set is exactly the tokens
+# SHOracle prices there (see HelperConfig.getBaseConfig).
+BASE_TOKENS = {
+    "weth": _wrapped_native(8453),
+    "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # native Circle USDC, not the bridged USDbC
+    "dai": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+    "usdt": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",  # Base's standard bridge, not Stargate's USD₮0
+    "aave": "0x63706e401c06ac8513145b7687A14804d17f814b",
+    "link": "0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196",
+    "wbtc": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",  # BitGo's WBTC, bridged over LayerZero
+    "comp": "0x9e1028F5F1D5eDE59748FFceE5532509976840E0",
+    "yfi": "0x9EaF8C1E34F05a589EDa6BAfdF391Cf6Ad3CB239",
+}
+
 CELO_TOKENS = {
     "celo": "0x471EcE3750Da237f93B8E339c536989b8978a438",
     "usdc": "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
@@ -222,4 +243,5 @@ SUPPORTED_TOKENS = {
     CHAIN_ID_BSC: BSC_TOKENS,
     CHAIN_ID_CELO: CELO_TOKENS,
     CHAIN_ID_ARBITRUM: ARBITRUM_TOKENS,
+    CHAIN_ID_BASE: BASE_TOKENS,
 }

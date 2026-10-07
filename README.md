@@ -52,7 +52,8 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  SHARED CONTRACTS   SHTreasury · SHRegistry · SHOracle · SHFactory          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  CHAINS             Ethereum · Arbitrum · BNB Chain · Sepolia · Anvil       │
+│  CHAINS             Ethereum · Arbitrum · Base · BNB Chain                  │
+│                     Sepolia · Anvil                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -128,6 +129,7 @@ The owner key never leaves the user's browser wallet — deploying and every own
 |---|---|---|---|
 | Ethereum mainnet | 1 | Uniswap V2 | fork-tested |
 | Arbitrum One | 42161 | Uniswap V2 | fork-tested, with L2 sequencer check |
+| Base | 8453 | Uniswap V2 | fork-tested, with L2 sequencer check |
 | BNB Chain | 56 | PancakeSwap V2 | fork-tested, live deploy path |
 | Sepolia | 11155111 | Uniswap V2 | live testnet + fork |
 | Anvil | 31337 | mocks | local |
@@ -143,7 +145,7 @@ Celo has partial scaffolding in the Python layer but no contract deployment path
 - Python 3.12+
 - Node 22.22+ — only for the web app in `web/`
 - An LLM API key — `ANTHROPIC_API_KEY` by default, or any other LangChain chat model
-- An Alchemy API key — for live Sepolia and the mainnet / BSC / Arbitrum forks
+- An Alchemy API key — for live Sepolia, the mainnet / BSC / Arbitrum / Base forks, and the History tab on Base
 - *(Optional)* A Telegram bot token from [@BotFather](https://t.me/BotFather) — only for `make bot`
 
 ## Clone and install
@@ -181,7 +183,7 @@ To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run d
 ```bash
 forge test                  # unit, invariant and fork suites
 make py-test                # identity, auth and custom-token tests
-make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork for Arbitrum)
+make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork, ARGS=base-fork, ...)
 make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
 ```

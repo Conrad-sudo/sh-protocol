@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test explorers-test explorers-live speed-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test explorers-test explorers-live speed-test bundler-test py-test e2e-test agent-smoke api
 
 
 
@@ -57,8 +57,8 @@ custom-tokens-test:
 history-test:
 	.venv/bin/python3 app/tests/test_history.py
 
-# Reading activity outside Mitfah from Etherscan and NodeReal: paging, block windows, rate limits,
-# and API keys kept out of errors and logs. Scripted answers, so offline.
+# Reading activity outside Mitfah from Etherscan, NodeReal and Alchemy: paging, block windows, rate
+# limits, and API keys kept out of errors and logs. Scripted answers, so offline.
 explorers-test:
 	.venv/bin/python3 app/tests/test_explorers.py
 
@@ -71,11 +71,16 @@ explorers-live:
 speed-test:
 	.venv/bin/python3 app/tests/test_speed.py
 
+# What a UserOp pays for posting its data to Ethereum on the live L2s (Base's L1 fee, Arbitrum's L1
+# gas), as preVerificationGas, and that forks pay none. A fake node, so offline.
+bundler-test:
+	.venv/bin/python3 app/tests/test_bundler.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test explorers-test speed-test
+py-test: identity-test auth-test custom-tokens-test history-test explorers-test speed-test bundler-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
-# eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum). Sepolia
+# eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
 # unless ARGS names another fork, e.g. `make e2e-test ARGS=arbitrum-fork`. Needs `make vault`, that
 # fork running and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.
 e2e-test:
@@ -101,6 +106,9 @@ pancakeswap-test:
 arbitrum-uniswap-test:
 	forge test --match-path test/fork/SHArbitrumUniswapV2Test.t.sol --fork-url $(ARB_RPC_URL) -vvvv
 
+base-uniswap-test:
+	forge test --match-path test/fork/SHBaseUniswapV2Test.t.sol --fork-url $(BASE_RPC_URL) -vvvv
+
 # SHSepoliaTest.t.sol was folded into the shared fork base (identity/reputation checks now run
 # on every network), so sepolia-test is an alias of sepolia-uniswap-test.
 sepolia-test: sepolia-uniswap-test
@@ -125,6 +133,7 @@ FORK_PORT_sepolia-fork  := 8545
 FORK_PORT_bsc-fork      := 8546
 FORK_PORT_mainnet-fork  := 8547
 FORK_PORT_arbitrum-fork := 8548
+FORK_PORT_base-fork     := 8549
 FORK_PORT_celo-fork     := 8545
 # The target's short name, so ARGS=arb-fork can never fall through to 8545 (the Sepolia fork's port).
 FORK_PORT_arb-fork      := $(FORK_PORT_arbitrum-fork)
@@ -185,6 +194,9 @@ arb-fork:
 # ("arbitrum-fork" in the chains/rpcs tables and deploy_wallet.LIVE_PRIVATE_KEY_ENV). Every other
 # fork target already matches its network name; `arb-fork` predates the app-side wiring.
 arbitrum-fork: arb-fork
+
+base-fork:
+	$(call start_fork,$(BASE_RPC_URL),base-fork)
 
 celo-fork:
 	$(call start_fork,$(CELO_RPC_URL),celo-fork)
@@ -333,5 +345,6 @@ wipe-db:
 clear-broadcast:
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/31337/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/42161/*
+	rm -rf ./broadcast/DeploySHProtocol.s.sol/8453/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/11155111/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/1/*

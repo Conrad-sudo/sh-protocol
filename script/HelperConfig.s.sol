@@ -29,6 +29,7 @@ import "./Constants.s.sol";
  *      │ Mainnet + others    │ any        │ ENTRYPOINT_V07 (canonical)                   │
  *      │ BSC                 │ 56         │ ENTRYPOINT_V07 (canonical)                   │
  *      │ Arbitrum One        │ 42161      │ ENTRYPOINT_V07 (canonical)                   │
+ *      │ Base                │ 8453       │ ENTRYPOINT_V07 (canonical)                   │
  *      │ Anvil (local)       │ 31337      │ Freshly deployed EntryPoint (cached)         │
  *      └─────────────────────┴────────────┴──────────────────────────────────────────────┘
  *
@@ -96,8 +97,9 @@ contract HelperConfig is Script {
      * @param wavaxUsdPriceFeed  Chainlink AVAX/USD price feed address. address(0) on Sepolia.
      * @param wavaxHeartbeat     Chainlink AVAX/USD feed heartbeat in seconds (mainnet: 86400)
      * @param sequencerUptimeFeed Chainlink L2 Sequencer Uptime Feed for this chain, consumed by
-     *                   {SHOracle}. address(0) on every chain that has no sequencer (Ethereum
-     *                   mainnet, Sepolia, BSC, Anvil), which disables the check there.
+     *                   {SHOracle}. Set on the L2s (Arbitrum, Base); address(0) on every chain that
+     *                   has no sequencer (Ethereum mainnet, Sepolia, BSC, Anvil), which disables the
+     *                   check there.
      * @param imx                Immutable X (IMX) ERC-20 token address. address(0) on Sepolia.
      * @param imxUsdPriceFeed    Chainlink IMX/USD price feed address. address(0) on Sepolia.
      * @param imxHeartbeat       Chainlink IMX/USD feed heartbeat in seconds (mainnet: 86400)
@@ -269,6 +271,8 @@ contract HelperConfig is Script {
             return getBscConfig();
         } else if (chainId == ARB_CHAIN_ID) {
             return getArbConfig();
+        } else if (chainId == BASE_CHAIN_ID) {
+            return getBaseConfig();
         } else {
             revert HelperConfig__InvalidChainId();
         }
@@ -634,6 +638,106 @@ contract HelperConfig is Script {
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
             cakeHeartbeat: HEARTBEAT_1H
+        });
+    }
+
+    /**
+     * @notice Returns the Base mainnet configuration
+     * @dev Base is an OP Stack L2 whose native gas token is ETH, so `ethUsdPriceFeed` prices the
+     *      native asset here exactly as it does on Ethereum mainnet and Arbitrum.
+     *
+     *      As on Arbitrum, every zero below zeroes the token AND its feed together, which keeps the
+     *      positional pairing in DeploySHProtocol safe (see getArbConfig). Three reasons produce one:
+     *        - No Chainlink USD feed on Base: 1INCH, CRV, SAND, SUSHI, UNI, CAKE and TAO all have
+     *          Base deployments, but an unpriced token is unusable to the spending-limit hook.
+     *        - Neither a feed nor a listed deployment: APE, ARB, ENS, IMX.
+     *        - A feed, but no credible token: BNB and AVAX. Neither appears on CoinGecko's Base list
+     *          or the Superchain token list, so there is nothing safe to point the feed at.
+     *
+     *      WBTC is priced by Base's own WBTC/USD feed rather than BTC/USD. Net-value metering credits
+     *      what comes in against what goes out, so a feed that kept valuing a depegged WBTC at the
+     *      BTC price would let a swap into it offset real spending; pricing the token itself does not.
+     * @return config NetworkConfig for Base
+     */
+    function getBaseConfig() internal view returns (NetworkConfig memory) {
+        return NetworkConfig({
+            entryPoint: ENTRYPOINT_V07,
+            account: sepoliaAccount,
+            identityRegistry: MNT_IDENTITY_REGISTRY,
+            reputationRegistry: MNT_REPUTATION_REGISTRY,
+            sequencerUptimeFeed: BASE_SEQUENCER_UPTIME_FEED,
+            // Stablecoins
+            usdc: BASE_USDC,
+            dai: BASE_DAI,
+            usdt: BASE_USDT,
+            // ERC-20 tokens
+            weth: BASE_WETH,
+            aave: BASE_AAVE,
+            link: BASE_LINK,
+            oneinch: address(0), // No 1INCH/USD feed on Base
+            ape: address(0), // No APE/USD feed or listed deployment on Base
+            arb: address(0), // No ARB/USD feed or listed deployment on Base
+            wbnb: address(0), // No credible BNB deployment on Base
+            wbtc: BASE_WBTC,
+            comp: BASE_COMP,
+            crv: address(0), // No CRV/USD feed on Base
+            ens: address(0), // No ENS/USD feed or listed deployment on Base
+            sand: address(0), // No SAND/USD feed on Base
+            sushi: address(0), // No SUSHI/USD feed on Base
+            wtao: address(0), // No TAO/USD feed on Base
+            uni: address(0), // No UNI/USD feed on Base
+            yfi: BASE_YFI,
+            wavax: address(0), // No credible WAVAX deployment on Base
+            imx: address(0), // No IMX/USD feed or listed deployment on Base
+            cake: address(0), // No CAKE/USD feed on Base
+            // Chainlink price feeds
+            ethUsdPriceFeed: BASE_ETH_USD_PRICE_FEED,
+            usdcUsdPriceFeed: BASE_USDC_USD_PRICE_FEED,
+            daiUsdPriceFeed: BASE_DAI_USD_PRICE_FEED,
+            usdtUsdPriceFeed: BASE_USDT_USD_PRICE_FEED,
+            aaveUsdPriceFeed: BASE_AAVE_USD_PRICE_FEED,
+            linkUsdPriceFeed: BASE_LINK_USD_PRICE_FEED,
+            oneinchUsdPriceFeed: address(0),
+            apeUsdPriceFeed: address(0),
+            arbUsdPriceFeed: address(0),
+            bnbUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wbnb token
+            btcUsdPriceFeed: BASE_WBTC_USD_PRICE_FEED, // WBTC/USD, not BTC/USD (see above)
+            compUsdPriceFeed: BASE_COMP_USD_PRICE_FEED,
+            crvUsdPriceFeed: address(0),
+            ensUsdPriceFeed: address(0),
+            sandUsdPriceFeed: address(0),
+            sushiUsdPriceFeed: address(0),
+            wtaoUsdPriceFeed: address(0),
+            uniUsdPriceFeed: address(0),
+            yfiUsdPriceFeed: BASE_YFI_USD_PRICE_FEED,
+            wavaxUsdPriceFeed: address(0), // Feed exists, but zeroed to match the absent wavax token
+            imxUsdPriceFeed: address(0),
+            cakeUsdPriceFeed: address(0),
+            // Heartbeats — each rounded UP to the nearest bucket from the feed's published heartbeat
+            // in Chainlink's Base reference data. ETH/USD and WBTC/USD publish 1200s, so both sit
+            // inside HEARTBEAT_1H; every other feed here publishes 86400s.
+            ethHeartbeat: HEARTBEAT_1H,
+            usdcHeartbeat: HEARTBEAT_24H,
+            daiHeartbeat: HEARTBEAT_24H,
+            usdtHeartbeat: HEARTBEAT_24H,
+            aaveHeartbeat: HEARTBEAT_24H,
+            linkHeartbeat: HEARTBEAT_24H,
+            oneinchHeartbeat: HEARTBEAT_24H,
+            apeHeartbeat: HEARTBEAT_24H,
+            arbHeartbeat: HEARTBEAT_24H,
+            bnbHeartbeat: HEARTBEAT_24H,
+            btcHeartbeat: HEARTBEAT_1H,
+            compHeartbeat: HEARTBEAT_24H,
+            crvHeartbeat: HEARTBEAT_24H,
+            ensHeartbeat: HEARTBEAT_24H,
+            sandHeartbeat: HEARTBEAT_24H,
+            sushiHeartbeat: HEARTBEAT_24H,
+            wtaoHeartbeat: HEARTBEAT_24H,
+            uniHeartbeat: HEARTBEAT_24H,
+            yfiHeartbeat: HEARTBEAT_24H,
+            wavaxHeartbeat: HEARTBEAT_24H,
+            imxHeartbeat: HEARTBEAT_24H,
+            cakeHeartbeat: HEARTBEAT_24H
         });
     }
 

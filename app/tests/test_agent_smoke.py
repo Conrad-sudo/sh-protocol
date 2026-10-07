@@ -39,7 +39,7 @@ from langchain_core.messages import AIMessage, HumanMessage   # noqa: E402
 
 import smart_wallet_agent as swa                   # noqa: E402
 from agent_context import AgentContext             # noqa: E402
-from constants import CHAIN_ID_ARBITRUM            # noqa: E402
+from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BASE  # noqa: E402
 from deploy_wallet import resolve_harness_user     # noqa: E402
 from network_config import load_network_config     # noqa: E402
 from db import acting_network                       # noqa: E402
@@ -47,8 +47,9 @@ from db import acting_network                       # noqa: E402
 TRACE_PATH = os.getenv("AGENT_TRACE_PATH", "/tmp/agent_smoke_traces.json")
 
 # What the swap scenario buys: LINK, unless the chain's Uniswap V2 LINK pool is too thin to trade.
-# Arbitrum's is empty (V2 is thin there; most volume is on V3), so it buys USDC, its deepest V2 pair.
-SWAP_TOKEN = {CHAIN_ID_ARBITRUM: "USDC"}
+# Arbitrum's and Base's are empty (V2 is thin on both; most volume is on V3 and, on Base, Aerodrome),
+# so there it buys USDC, the deepest V2 pair on each.
+SWAP_TOKEN = {CHAIN_ID_ARBITRUM: "USDC", CHAIN_ID_BASE: "USDC"}
 
 # Tools whose work a transaction tool now does itself before it quotes, so calling one first only
 # costs the user a model call. See the slower-than-needed notes at the end of a run.

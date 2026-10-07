@@ -1,7 +1,7 @@
 """
 A read-only check of explorers.py against the REAL services, with the keys in .env: it reads a busy
-public address's recent activity on Sepolia and Arbitrum (Etherscan) and BSC (NodeReal), and checks
-that the answers read into sensible movements. Confirms the offline fixtures in test_explorers.py
+public address's recent activity on Sepolia and Arbitrum (Etherscan), BSC (NodeReal) and Base
+(Alchemy), and checks that the answers read into sensible movements. Confirms the offline fixtures in test_explorers.py
 match what the services actually send.
 
 Sends nothing to any chain. Uses a few dozen calls of each service's free allowance.
@@ -24,6 +24,7 @@ CASES = [
     (11155111, "Sepolia, the Uniswap v2 router Mitfah uses", "0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3", 5_000),
     (42161, "Arbitrum, Circle's USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 200),
     (56, "BSC, PancakeSwap's v2 router", "0x10ED43C718714eb63d5aA57B78B54704E256024E", 400),
+    (8453, "Base, the Uniswap v2 router Mitfah uses", "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24", 200),
 ]
 
 
@@ -38,6 +39,15 @@ def _etherscan_head(chain_id: int) -> int:
     return int(body["result"], 16)
 
 
+def _head(chain_id: int) -> int:
+    provider = explorers.provider_for(chain_id)
+    if provider == "etherscan":
+        return _etherscan_head(chain_id)
+    if provider == "alchemy":
+        return int(explorers._alchemy_rpc(explorers._alchemy_url(chain_id), "eth_blockNumber", []), 16)
+    return explorers.latest_block(chain_id)
+
+
 def _show(m: explorers.Movement) -> str:
     what = "native" if m.token is None else f"token {m.token[:10]}… ({m.decimals} decimals)"
     kind = "direct call" if m.direct_call else "transfer"
@@ -47,7 +57,7 @@ def _show(m: explorers.Movement) -> str:
 
 def check_chain(chain_id: int, label: str, address: str, blocks: int):
     print(f"\n[{label}] ({explorers.provider_for(chain_id)}), the last {blocks} blocks")
-    head = _etherscan_head(chain_id) if explorers.provider_for(chain_id) == "etherscan" else explorers.latest_block(chain_id)
+    head = _head(chain_id)
     start = head - blocks
     began = time.monotonic()
     batches = list(explorers.movements_since(chain_id, address, start))
@@ -80,6 +90,11 @@ def check_chain(chain_id: int, label: str, address: str, blocks: int):
         check("NodeReal: a transaction's block is read", block == sample.block, f"{block} != {sample.block}")
         data = explorers.transaction_input(chain_id, sample.tx_hash)
         check("NodeReal: a transaction's calldata is read", isinstance(data, bytes))
+
+    direct = next((m for m in movements if m.direct_call), None)
+    if explorers.provider_for(chain_id) == "alchemy" and direct is not None:
+        data = explorers.transaction_input(chain_id, direct.tx_hash)
+        check("Alchemy: a direct call's calldata is read", isinstance(data, bytes) and len(data) >= 4, data[:8].hex())
 
 
 if __name__ == "__main__":

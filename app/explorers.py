@@ -1,14 +1,14 @@
 """
 The services the History tab reads activity from outside Mitfah: Etherscan's API for most chains,
-and NodeReal for BSC, since Etherscan charges for BSC. Nothing here knows about users or the
-database. tx_history.sync_outside decides what is worth a row.
+NodeReal for BSC and Alchemy for Base, since Etherscan charges for both. Nothing here knows about
+users or the database. tx_history.sync_outside decides what is worth a row.
 
 A Mitfah wallet is a contract, so it never sends a transaction of its own. What it pays out shows
 up as an internal transaction or a token transfer inside somebody else's transaction. Each service
 is therefore asked for three kinds of record (plain transactions, internal ones and ERC-20
 transfers), and they come back as one flat list of Movements.
 
-Both services take their key in the URL, and a `requests` error carries the URL. Every network
+Every service takes its key in the URL, and a `requests` error carries the URL. Every network
 error is therefore replaced by an ExplorerUnavailable that names only the service, so a key never
 reaches a log.
 """
@@ -16,13 +16,15 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Iterator
+from datetime import datetime
+from typing import Callable, Iterator
 
 import requests
 from web3 import Web3
 
 from constants import (
     CHAIN_ID_ARBITRUM,
+    CHAIN_ID_BASE,
     CHAIN_ID_BSC,
     CHAIN_ID_CELO,
     CHAIN_ID_MAINNET,
@@ -30,7 +32,7 @@ from constants import (
 )
 
 ETHERSCAN_URL = "https://api.etherscan.io/v2/api"
-# Chains Etherscan's free tier serves. BSC is not one of them.
+# Chains Etherscan's free tier serves. BSC and Base are not among them.
 ETHERSCAN_CHAINS = {CHAIN_ID_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_ARBITRUM, CHAIN_ID_CELO}
 ETHERSCAN_ACTIONS = ("txlist", "txlistinternal", "tokentx")
 # Records per Etherscan page. A full page means there may be more, below its oldest block.
@@ -46,9 +48,15 @@ NODEREAL_LAG = 50
 NODEREAL_PAGE = 1000
 NODEREAL_CATEGORIES = ["external", "internal", "20"]
 
+# Alchemy's alchemy_getAssetTransfers, the search NodeReal's is modelled on. It covers Base with all
+# three record kinds, internal transfers included, and searches any block range in one call.
+ALCHEMY_URLS = {CHAIN_ID_BASE: "https://base-mainnet.g.alchemy.com/v2/{key}"}
+ALCHEMY_PAGE = 1000
+ALCHEMY_CATEGORIES = ["external", "internal", "erc20"]
+
 # Longer than Etherscan's own query timeout (about 20s), so its "Query Timeout" answer arrives.
 TIMEOUT_SECS = 30
-KEY_NAMES = ("ETHERSCAN_API_KEY", "NODEREAL_API_KEY")
+KEY_NAMES = ("ETHERSCAN_API_KEY", "NODEREAL_API_KEY", "ALCHEMY_API_KEY")
 
 
 class ExplorerUnavailable(Exception):
@@ -111,6 +119,9 @@ class _Pace:
 _etherscan_pace = _Pace(4)
 # NodeReal's free plan allows 150 compute units a second, and one nr_getAssetTransfers costs 250.
 _nodereal_pace = _Pace(0.5)
+# Alchemy's free tier allows a few hundred compute units a second; one alchemy_getAssetTransfers
+# costs 120, so 2 a second leaves room for the app's other calls on the same key.
+_alchemy_pace = _Pace(2)
 
 
 def provider_for(chain_id: int) -> str | None:
@@ -119,6 +130,8 @@ def provider_for(chain_id: int) -> str | None:
         return "etherscan"
     if chain_id in NODEREAL_URLS:
         return "nodereal"
+    if chain_id in ALCHEMY_URLS:
+        return "alchemy"
     return None
 
 
@@ -127,8 +140,8 @@ def movements_since(chain_id: int, wallet: str, from_block: int) -> Iterator[tup
     Every movement into or out of `wallet` from `from_block` on, a batch at a time.
 
     Yields (movements, next_from_block) per batch. Each batch is complete up to that cursor, so the
-    caller can save the cursor after recording each batch. Etherscan answers in one batch. NodeReal
-    yields one batch per 100,000-block window and stops after NODEREAL_MAX_WINDOWS.
+    caller can save the cursor after recording each batch. Etherscan and Alchemy answer in one batch.
+    NodeReal yields one batch per 100,000-block window and stops after NODEREAL_MAX_WINDOWS.
 
     @raises ExplorerUnavailable  On a missing key or any failed call. Batches already yielded stand.
     """
@@ -138,6 +151,8 @@ def movements_since(chain_id: int, wallet: str, from_block: int) -> Iterator[tup
         yield _etherscan(chain_id, wallet, from_block)
     elif provider == "nodereal":
         yield from _nodereal(chain_id, wallet, from_block)
+    elif provider == "alchemy":
+        yield _alchemy(chain_id, wallet, from_block)
 
 
 def transaction_block(chain_id: int, tx_hash: str) -> int | None:
@@ -155,10 +170,13 @@ def latest_block(chain_id: int) -> int:
 
 
 def transaction_input(chain_id: int, tx_hash: str) -> bytes:
-    """A transaction's calldata. Only needed for NodeReal, whose transfer list leaves it out."""
-    tx = _nodereal_rpc(_nodereal_url(chain_id), "eth_getTransactionByHash", [tx_hash])
+    """A transaction's calldata. Only needed for NodeReal and Alchemy, whose transfer lists leave it out."""
+    if provider_for(chain_id) == "alchemy":
+        service, tx = "Alchemy", _alchemy_rpc(_alchemy_url(chain_id), "eth_getTransactionByHash", [tx_hash])
+    else:
+        service, tx = "NodeReal", _nodereal_rpc(_nodereal_url(chain_id), "eth_getTransactionByHash", [tx_hash])
     if tx is None:
-        raise ExplorerUnavailable("NodeReal does not know the transaction")
+        raise ExplorerUnavailable(f"{service} does not know the transaction")
     return _bytes(tx.get("input"))
 
 
@@ -285,17 +303,9 @@ def _nodereal_window(url: str, wallet: str, start: int, stop: int, side: str) ->
         "excludeZeroValue": False,
         "maxCount": hex(NODEREAL_PAGE),
     }
-    movements: list[Movement] = []
-    seen_keys: set[str] = set()
-    while True:
-        result = _nodereal_rpc(url, "nr_getAssetTransfers", [params]) or {}
-        transfers = result.get("transfers") or []
-        movements += [m for m in (_from_nodereal(wallet, t) for t in transfers) if m]
-        page_key = result.get("pageKey") or result.get("PageKey")
-        if not transfers or not page_key or page_key in seen_keys:
-            return movements
-        seen_keys.add(page_key)
-        params = params | {"pageKey": page_key}
+    return _transfer_pages(
+        lambda p: _nodereal_rpc(url, "nr_getAssetTransfers", [p]), params, lambda t: _from_nodereal(wallet, t)
+    )
 
 
 def _from_nodereal(wallet: str, t: dict) -> Movement | None:
@@ -328,23 +338,115 @@ def _nodereal_url(chain_id: int) -> str:
 
 
 def _nodereal_rpc(url: str, method: str, params: list):
+    return _json_rpc("NodeReal", _nodereal_pace, url, method, params)
+
+
+# ── Alchemy ───────────────────────────────────────────────────────────────────
+
+
+def _alchemy(chain_id: int, wallet: str, from_block: int) -> tuple[list[Movement], int]:
+    """
+    All three record kinds from `from_block` to the head, in one batch: Alchemy searches by address
+    over any range, so unlike NodeReal there are no windows. Like NodeReal it can't match an address
+    on either side at once, so it takes two searches, transfers from the wallet and to it.
+
+    Alchemy leaves out every transfer of a transaction that failed, so each movement it returns
+    succeeded. The cursor is the highest block seen, searched again next time as with Etherscan, so
+    a record indexed after this search isn't skipped. The caller drops the repeats.
+    """
+    url = _alchemy_url(chain_id)
+    movements: list[Movement] = []
+    for side in ("fromAddress", "toAddress"):
+        params = {
+            "category": ALCHEMY_CATEGORIES,
+            "fromBlock": hex(from_block),
+            "toBlock": "latest",
+            side: wallet,
+            "order": "asc",
+            "excludeZeroValue": False,
+            "withMetadata": True,  # the block's time
+            "maxCount": hex(ALCHEMY_PAGE),
+        }
+        movements += _transfer_pages(
+            lambda p: _alchemy_rpc(url, "alchemy_getAssetTransfers", [p]), params, lambda t: _from_alchemy(wallet, t)
+        )
+    return movements, max([from_block, *(m.block for m in movements)])
+
+
+def _from_alchemy(wallet: str, t: dict) -> Movement | None:
+    if not t.get("to"):
+        return None  # a contract creation: nothing moved
+    category = t.get("category")
+    sender = Web3.to_checksum_address(t["from"])
+    recipient = Web3.to_checksum_address(t["to"])
+    is_token = category == "erc20"
+    # `value` is a float already divided by the decimals; rawContract holds the exact base units.
+    raw = t.get("rawContract") or {}
+    return Movement(
+        tx_hash=t["hash"].lower(),
+        block=_int(t["blockNum"]),
+        mined_at=_iso_time((t.get("metadata") or {}).get("blockTimestamp")),
+        sender=sender,
+        recipient=recipient,
+        token=Web3.to_checksum_address(raw["address"]) if is_token else None,
+        amount=_int(raw.get("value") or 0),
+        decimals=_int(raw["decimal"]) if is_token and raw.get("decimal") not in (None, "") else None,
+        direct_call=category == "external" and recipient == wallet,
+        input=None,  # not in the transfer list; transaction_input reads it when it is needed
+        succeeded=True,  # Alchemy lists no transfer from a failed transaction
+    )
+
+
+def _alchemy_url(chain_id: int) -> str:
+    if chain_id not in ALCHEMY_URLS:
+        raise ExplorerUnavailable(f"Alchemy does not serve chain {chain_id}")
+    return ALCHEMY_URLS[chain_id].format(key=_key("ALCHEMY_API_KEY", "Alchemy"))
+
+
+def _alchemy_rpc(url: str, method: str, params: list):
+    return _json_rpc("Alchemy", _alchemy_pace, url, method, params)
+
+
+# ── Shared ────────────────────────────────────────────────────────────────────
+
+
+def _transfer_pages(search: Callable[[dict], dict | None], params: dict, read: Callable[[dict], Movement | None]) -> list[Movement]:
+    """
+    Every page of one asset-transfer search, read into movements. NodeReal's and Alchemy's searches
+    page the same way: a `pageKey` in the answer means there is more, asked for by sending it back.
+    """
+    movements: list[Movement] = []
+    seen_keys: set[str] = set()
+    while True:
+        result = search(params) or {}
+        transfers = result.get("transfers") or []
+        movements += [m for m in map(read, transfers) if m]
+        page_key = result.get("pageKey") or result.get("PageKey")
+        if not transfers or not page_key or page_key in seen_keys:
+            return movements
+        seen_keys.add(page_key)
+        params = params | {"pageKey": page_key}
+
+
+def _json_rpc(service: str, pace: _Pace, url: str, method: str, params: list):
+    """One JSON-RPC call to a keyed service, paced, with a rate limit retried once."""
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
 
     def once():
-        _nodereal_pace.wait()
-        body = _get_json("NodeReal", lambda: requests.post(url, json=payload, timeout=TIMEOUT_SECS))
+        pace.wait()
+        body = _get_json(service, lambda: requests.post(url, json=payload, timeout=TIMEOUT_SECS))
         error = body.get("error")
         if error is None:
             return body.get("result")
         message = str(error.get("message", error)) if isinstance(error, dict) else str(error)
-        if "limit" in message.lower():
+        code = error.get("code") if isinstance(error, dict) else None
+        # NodeReal says "limit exceeded"; Alchemy answers code 429, "exceeded its compute units per
+        # second capacity".
+        if code == 429 or "limit" in message.lower() or "capacity" in message.lower():
             raise _TryAgain(message[:120])
-        raise ExplorerUnavailable(f"NodeReal: {message[:120]}")
+        raise ExplorerUnavailable(f"{service}: {message[:120]}")
 
-    return _retry_once("NodeReal", once)
-
-
-# ── Shared ────────────────────────────────────────────────────────────────────
+    return _retry_once(service, once)
 
 
 def _key(env_name: str, service: str) -> str:
@@ -391,6 +493,13 @@ def _int(value) -> int:
         return value
     text = str(value)
     return int(text, 16) if text.lower().startswith("0x") else int(text)
+
+
+def _iso_time(value) -> int:
+    """Unix seconds from an ISO 8601 time such as Alchemy's "2026-10-07T08:15:31.000Z"; 0 if missing."""
+    if not value:
+        return 0
+    return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
 
 
 def _bytes(value) -> bytes:

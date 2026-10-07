@@ -87,7 +87,7 @@ contract DeploySHProtocol is Script {
             heartbeats[0] = config.bnbHeartbeat;
         } else if (
             block.chainid == MAINNET_CHAIN_ID || block.chainid == SEPOLIA_CHAIN_ID || block.chainid == LOCAL_CHAIN_ID
-                || block.chainid == ARB_CHAIN_ID // Arbitrum's native gas token is ETH
+                || block.chainid == ARB_CHAIN_ID || block.chainid == BASE_CHAIN_ID // both L2s pay gas in ETH
         ) {
             priceFeeds[0] = config.ethUsdPriceFeed;
             heartbeats[0] = config.ethHeartbeat;

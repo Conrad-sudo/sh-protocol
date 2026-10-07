@@ -1,7 +1,7 @@
 """
-Offline checks for explorers.py, the History tab's view of activity outside Mitfah: how Etherscan's
-and NodeReal's answers are read, paged and windowed, how a rate limit is retried, and that an API
-key never reaches an error or a log.
+Offline checks for explorers.py, the History tab's view of activity outside Mitfah: how Etherscan's,
+NodeReal's and Alchemy's answers are read, paged and windowed, how a rate limit is retried, and that
+an API key never reaches an error or a log.
 
 No network: `requests` is replaced by scripted answers shaped like the services' real ones. The
 real services are checked, read-only, by check_explorers_live.py.
@@ -9,6 +9,7 @@ real services are checked, read-only, by check_explorers_live.py.
 Run: make explorers-test   (or: python app/tests/test_explorers.py)
 """
 import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import requests
@@ -20,7 +21,8 @@ from web3 import Web3              # noqa: E402
 
 ETHERSCAN_KEY = "ETHERSCAN-SECRET-KEY"
 NODEREAL_KEY = "NODEREAL-SECRET-KEY"
-SEPOLIA, BSC = 11155111, 56
+ALCHEMY_KEY = "ALCHEMY-SECRET-KEY"
+SEPOLIA, BSC, BASE = 11155111, 56, 8453
 
 WALLET = Web3.to_checksum_address(f"0x{0xA11CE:040x}")
 OWNER = Web3.to_checksum_address(f"0x{0x0E1:040x}")
@@ -31,6 +33,7 @@ FACTORY = Web3.to_checksum_address(f"0x{0xFAC:040x}")
 # No waiting between calls in a test.
 explorers._etherscan_pace = explorers._Pace(1e9)
 explorers._nodereal_pace = explorers._Pace(1e9)
+explorers._alchemy_pace = explorers._Pace(1e9)
 explorers.time = SimpleNamespace(sleep=lambda _s: None, monotonic=explorers.time.monotonic)
 
 
@@ -72,8 +75,8 @@ def _restore_http():
     explorers.requests = requests
 
 
-def _keys(etherscan: str | None = ETHERSCAN_KEY, nodereal: str | None = NODEREAL_KEY):
-    for name, value in (("ETHERSCAN_API_KEY", etherscan), ("NODEREAL_API_KEY", nodereal)):
+def _keys(etherscan: str | None = ETHERSCAN_KEY, nodereal: str | None = NODEREAL_KEY, alchemy: str | None = ALCHEMY_KEY):
+    for name, value in (("ETHERSCAN_API_KEY", etherscan), ("NODEREAL_API_KEY", nodereal), ("ALCHEMY_API_KEY", alchemy)):
         if value is None:
             os.environ.pop(name, None)
         else:
@@ -404,11 +407,164 @@ def test_nodereal_lookups_limits_and_errors():
     _keys()
 
 
+# ── Alchemy ───────────────────────────────────────────────────────────────────
+
+
+def _iso(block: int) -> str:
+    """The block's time as Alchemy writes it, e.g. "2023-11-14T22:13:30.000Z"."""
+    return datetime.fromtimestamp(1_700_000_000 + block, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _alchemy_transfer(n: int, block: int, category: str, sender: str, recipient: str | None, raw_value: int,
+                      token: str | None = None, decimals: int | None = 18) -> dict:
+    # `value` is Alchemy's float, already divided by the decimals; only rawContract is exact.
+    return {"blockNum": hex(block), "uniqueId": f"{_hash(n)}:{category}", "hash": _hash(n), "from": sender.lower(),
+            "to": recipient.lower() if recipient else None, "value": raw_value / 10 ** (decimals or 18),
+            "asset": "USDC" if token else "ETH", "category": category,
+            "rawContract": {"value": hex(raw_value), "address": token.lower() if token else None,
+                            "decimal": hex(decimals) if decimals is not None else None},
+            "metadata": {"blockTimestamp": _iso(block)}}
+
+
+def test_alchemy_both_sides_and_pages():
+    print("\n[6] Alchemy: the whole range in one batch, both sides, pages followed, exact amounts")
+    _keys()
+
+    def answer(call):
+        p = call["json"]["params"][0]
+        if "toAddress" in p and "pageKey" not in p:
+            return Reply({"jsonrpc": "2.0", "id": 1, "result": {"pageKey": "page-2", "transfers": [
+                _alchemy_transfer(1, 10, "external", OWNER, WALLET, 0),
+                _alchemy_transfer(2, 11, "erc20", SAM, WALLET, 2_500_000, token=USDC, decimals=6),
+            ]}})
+        if "toAddress" in p:
+            return Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": [
+                _alchemy_transfer(3, 12, "internal", SAM, WALLET, 10**18)]}})
+        return Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": [
+            # The wallet's own creation by the factory: nothing moved.
+            _alchemy_transfer(4, 5, "internal", FACTORY, None, 0),
+            _alchemy_transfer(5, 100_005, "internal", WALLET, SAM, 7),
+        ]}})
+
+    fake = FakeHttp(answer)
+    _with_http(fake)
+    try:
+        batches = _all(BASE, 0)
+    finally:
+        _restore_http()
+    searches = [c["json"]["params"][0] for c in fake.calls]
+    check("one batch, from the cursor to the head", len(batches) == 1 and all(
+        p["fromBlock"] == "0x0" and p["toBlock"] == "latest" for p in searches), str([(p["fromBlock"], p["toBlock"]) for p in searches]))
+    check("searched from the wallet and to it",
+          {side for p in searches for side in ("fromAddress", "toAddress") if p.get(side) == WALLET} == {"fromAddress", "toAddress"})
+    check("zero values and the block's time asked for, with the three categories",
+          all(p["excludeZeroValue"] is False and p["withMetadata"] is True and p["category"] == ["external", "internal", "erc20"]
+              for p in searches))
+    check("Alchemy's own method, with the key in the URL",
+          all(c["json"]["method"] == "alchemy_getAssetTransfers" and c["url"] == f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"
+              for c in fake.calls))
+    check("a page key is followed", any(p.get("pageKey") == "page-2" for p in searches))
+    movements, cursor = batches[0]
+    by_hash = {m.tx_hash: m for m in movements}
+    owner_call = by_hash.get(_hash(1))
+    check("an external transaction to the wallet is a direct call, its calldata read later",
+          owner_call is not None and owner_call.direct_call and owner_call.input is None and owner_call.amount == 0, str(owner_call))
+    token = by_hash.get(_hash(2))
+    check("a token transfer: exact base units and decimals from rawContract, not the rounded float",
+          token is not None and token.token == USDC and token.amount == 2_500_000 and token.decimals == 6 and token.block == 11,
+          str(token))
+    internal = by_hash.get(_hash(3))
+    check("an internal transfer is native, its time read from the metadata",
+          internal is not None and internal.token is None and internal.decimals is None and internal.amount == 10**18
+          and internal.mined_at == 1_700_000_012, str(internal))
+    check("the wallet's creation is not a movement", _hash(4) not in by_hash)
+    out = by_hash.get(_hash(5))
+    check("a payment out of the wallet, marked succeeded (Alchemy lists no failed transfer)",
+          out is not None and out.sender == WALLET and out.recipient == SAM and out.succeeded and not out.direct_call, str(out))
+    check("the cursor is the highest block seen, searched again next time", cursor == 100_005, str(cursor))
+
+    _with_http(FakeHttp(lambda _call: Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": []}})))
+    try:
+        (nothing, cursor), = _all(BASE, 4_242)
+    finally:
+        _restore_http()
+    check("nothing new: no movements, and the cursor stays where it was", nothing == [] and cursor == 4_242, str(cursor))
+
+
+def test_alchemy_lookups_limits_and_errors():
+    print("\n[7] Alchemy: calldata lookups, rate limits, errors without the key")
+    _keys()
+
+    def answer(call):
+        body = call["json"]
+        if body["method"] == "eth_getTransactionByHash":
+            known = body["params"][0] == _hash(1)
+            return Reply({"jsonrpc": "2.0", "id": 1, "result": {"input": "0x8456cb59"} if known else None})
+        return Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": []}})
+
+    fake = FakeHttp(answer)
+    _with_http(fake)
+    try:
+        data = explorers.transaction_input(BASE, _hash(1))
+        error = _raises(lambda: explorers.transaction_input(BASE, _hash(2)))
+    finally:
+        _restore_http()
+    check("a transaction's calldata, from Alchemy", data == bytes.fromhex("8456cb59")
+          and fake.calls[0]["url"] == f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}", str(data))
+    check("a transaction Alchemy doesn't know is unavailable", error is not None and "Alchemy" in str(error), str(error))
+
+    answers = iter([
+        Reply({"jsonrpc": "2.0", "id": 1, "error": {"code": 429, "message": "Your app has exceeded its compute units per "
+                                                    "second capacity. If you have retries enabled, you can safely ignore this message."}}),
+        Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": []}}),
+        Reply({}, status_code=429),
+        Reply({"jsonrpc": "2.0", "id": 1, "result": {"transfers": []}}),
+    ])
+    fake = FakeHttp(lambda _call: next(answers))
+    _with_http(fake)
+    try:
+        _all(BASE)
+    finally:
+        _restore_http()
+    check("a rate limit (Alchemy's code 429 or HTTP 429) is retried once, and goes through", len(fake.calls) == 4, str(len(fake.calls)))
+
+    _with_http(FakeHttp(lambda _call: Reply({"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": f"Must be authenticated! {ALCHEMY_KEY}"}})))
+    try:
+        error = _raises(lambda: _all(BASE))
+    finally:
+        _restore_http()
+    check("an error names the service, with the key masked",
+          error is not None and str(error).startswith("Alchemy") and ALCHEMY_KEY not in str(error), str(error))
+
+    def unreachable(call):
+        raise requests.ConnectionError(f"Max retries exceeded with url: /v2/{ALCHEMY_KEY}")
+
+    _with_http(FakeHttp(unreachable))
+    try:
+        error = _raises(lambda: _all(BASE))
+    finally:
+        _restore_http()
+    check("a network error names the service only", error is not None and str(error) == "Alchemy unreachable", str(error))
+
+    _with_http(FakeHttp(lambda _call: Reply({}, status_code=401)))
+    try:
+        error = _raises(lambda: _all(BASE))
+    finally:
+        _restore_http()
+    check("a refused key says its status", error is not None and "401" in str(error), str(error))
+
+    _keys(alchemy=None)
+    error = _raises(lambda: _all(BASE))
+    check("no key: unavailable, saying which setting is missing", error is not None and "ALCHEMY_API_KEY" in str(error), str(error))
+    _keys()
+
+
 def test_which_service_covers_which_chain():
-    print("\n[6] which service covers which chain")
+    print("\n[8] which service covers which chain")
     check("Etherscan for Ethereum, Sepolia, Arbitrum and Celo",
           all(explorers.provider_for(c) == "etherscan" for c in (1, 11155111, 42161, 42220)))
     check("NodeReal for BSC", explorers.provider_for(56) == "nodereal")
+    check("Alchemy for Base", explorers.provider_for(8453) == "alchemy")
     check("nothing for a local anvil chain", explorers.provider_for(31337) is None)
     check("a chain nothing covers yields nothing", list(explorers.movements_since(31337, WALLET, 0)) == [])
 
@@ -419,5 +575,7 @@ if __name__ == "__main__":
     test_etherscan_rate_limits_and_errors()
     test_nodereal_windows_sides_and_pages()
     test_nodereal_lookups_limits_and_errors()
+    test_alchemy_both_sides_and_pages()
+    test_alchemy_lookups_limits_and_errors()
     test_which_service_covers_which_chain()
     finish("All explorer checks passed.")
