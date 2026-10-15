@@ -1,9 +1,9 @@
 # Blockchain interface
-web3==7.14.1
-eth-account==0.13.7
+web3==8.0.0
+eth-account==0.14.0
 # Already installed with eth-account; named because bundler.py encodes the unsigned transaction an
 # OP Stack chain's L1 fee is priced from.
-rlp==4.1.0
+rlp==5.0.0
 
 # ERC20, Uniswap V2 and ERC-8004 registry calldata construction. All three return
 # account-agnostic execution plans (lists of (to, value, data) calls) that app/tools.py
@@ -12,24 +12,24 @@ rlp==4.1.0
 # its write return shape between 0.2.0 and 0.3.0. langchain-erc8004 also reads
 # registration files over the network, so an upgrade changes an outbound-request surface
 # as well as a calldata one (THREAT_MODEL 4.6, 4.7).
-langchain-erc20==0.1.0
-langchain-uniswap-v2==0.4.0
+langchain-erc20==0.3.1
+langchain-uniswap-v2==0.5.1
 langchain-erc8004==0.1.1
 
 # LangChain agent stack
-langchain==1.2.10
+langchain==1.4.4
 langchain-deepseek==1.1.1
-langgraph==1.0.10
-langgraph-checkpoint-sqlite==3.1.0
+langgraph==1.2.14
+langgraph-checkpoint-sqlite==3.1.1
 aiosqlite==0.22.1
 
 # Vault (session-key custody) + HTTP (bundler RPC)
 hvac==2.4.0
-requests==2.32.5
+requests==2.34.2
 
 # Config + Telegram front end
-python-dotenv==1.2.1
-python-telegram-bot[job-queue]==22.6
+python-dotenv==1.2.4
+python-telegram-bot[job-queue]==22.8
 # Reads the assistant's Markdown so the bots can show it as Telegram formatting (telegram_format.py).
 markdown-it-py==4.2.0
 
@@ -37,10 +37,10 @@ markdown-it-py==4.2.0
 # verified with eth-account above, so there is no separate siwe package, password hasher or
 # Google client. Run uvicorn with --workers 1 -- tx_sender hands out bundler nonces under a
 # process-wide lock, so a second worker means a second nonce counter.
-fastapi==0.141.1
-uvicorn[standard]==0.52.4
-pydantic==2.12.5
-PyJWT==2.13.0
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+PyJWT==2.15.1
 slowapi==0.1.10
 # Required by fastapi.testclient, which app/tests/test_auth.py drives the API through.
 httpx==0.28.1
