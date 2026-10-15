@@ -1,9 +1,11 @@
+import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN } from './helpers.ts'
+import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, walletState } from './helpers.ts'
 
 /*
  * The Telegram card in Settings at every screen size, in both themes, against a mocked API. The
  * "bot" is the test: it flips the account to linked, as the real bot does when Start is pressed.
+ * Also the dashboard's way there.
  */
 
 const LINK = 'https://t.me/mitfah_base_bot?start=e2e-nonce'
@@ -14,13 +16,17 @@ const SEPOLIA = 11155111
 const CHAINS = [
   { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
   { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
-].map(chain => ({ ...chain, fork: false, rpc_url: null, router: null }))
+].map(chain => ({ ...chain, fork: false, rpc_url: null, default_spenders: [], exchange: null }))
 
 async function mockApi(page: Page, { linked = false, notConfigured = false } = {}) {
   const server = { linked, unlinks: 0 }
   await page.route(isApiUrl, route => {
     const method = route.request().method()
-    switch (new URL(route.request().url()).pathname) {
+    const path = new URL(route.request().url()).pathname
+    // The dashboard's wallet, on whichever network it asks for.
+    const wallet = /^\/api\/wallet\/(\d+)$/.exec(path)
+    if (wallet) return route.fulfill({ json: walletState(Number(wallet[1]), '0x2222222222222222222222222222222222222222') })
+    switch (path) {
       case '/api/auth/refresh':
         return route.fulfill({ json: TOKEN })
       case '/api/me':
@@ -47,6 +53,19 @@ async function mockApi(page: Page, { linked = false, notConfigured = false } = {
   return server
 }
 
+/** axe's serious and critical findings on the page as it is, once any entrance has finished (as in a11y.spec.ts). */
+async function seriousProblems(page: Page) {
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .every(animation => animation.playState !== 'running' || animation.effect?.getComputedTiming().endTime === Infinity),
+  )
+  const { violations } = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze()
+  return violations
+    .filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
+    .map(violation => `${violation.id}: ${violation.nodes.map(node => node.target).join(' · ')}`)
+}
+
 test('linking Telegram: link, wait, linked', async ({ page }, testInfo) => {
   const server = await mockApi(page)
   await page.goto('/settings')
@@ -71,10 +90,36 @@ test('linking Telegram: link, wait, linked', async ({ page }, testInfo) => {
   await expect(card.getByText('Linked')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByText('Telegram linked. You can now chat with your assistant there.')).toBeVisible()
   await expect(open).toBeHidden()
-  // Once linked, each network's bot is a link away.
+  // Once linked, each network's bot is a link away, and on a desktop a QR code away too.
   await expect(card.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
   await expect(card.getByRole('link', { name: '@mitfah_sepolia_bot' })).toBeVisible()
+  await expect(card.locator('li .mf-telegram-bot-qr')).toHaveCount(2)
+  for (const code of await card.locator('li .mf-telegram-bot-qr').all()) {
+    await expect(code).toBeVisible({ visible: !touch })
+  }
   await expectNoSidewaysScroll(page)
+  // Of the card only, as above: a full-page capture would show the codes on a touch screen.
+  await card.screenshot({ path: testInfo.outputPath('settings-telegram-bots.png') })
+
+  if (!touch) {
+    // A code opens large and on its own, so a phone's camera reads that one and no other.
+    const enlarge = card.getByRole('button', { name: "Enlarge the Base bot's QR code" })
+    await enlarge.click()
+    const dialog = page.getByRole('dialog', { name: 'Base bot' })
+    await expect(dialog.getByRole('img', { name: 'QR code of the Base bot' })).toBeVisible()
+    await expect(dialog.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
+    for (const code of await card.locator('li .mf-telegram-bot-qr').all()) {
+      await expect(code).toHaveCSS('opacity', '0')
+    }
+    expect(await seriousProblems(page)).toEqual([])
+    await page.screenshot({ path: testInfo.outputPath('settings-telegram-bot-enlarged.png') })
+
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(enlarge).toHaveCSS('opacity', '1')
+    // Back where the user was: on the code they opened.
+    await expect(enlarge).toBeFocused()
+  }
   await snap(page, testInfo, 'settings-telegram-linked')
 
   await card.getByRole('button', { name: 'Unlink' }).click()
@@ -91,4 +136,24 @@ test('a server without a Telegram bot says so', async ({ page }, testInfo) => {
   await expect(card.getByText("Telegram isn't set up on this server.")).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'settings-telegram-unavailable')
+})
+
+test("the dashboard's Link Telegram opens Settings at the Telegram card", async ({ page }, testInfo) => {
+  await mockApi(page)
+  await page.goto('/dashboard')
+
+  const link = page.getByRole('link', { name: 'Link Telegram' })
+  await expect(link).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await page.locator('.mf-page-header').screenshot({ path: testInfo.outputPath('dashboard-link-telegram.png') })
+
+  await link.click()
+  await expect(page).toHaveURL(/\/settings#telegram$/)
+  const card = page.locator('#telegram')
+  await expect(card.getByRole('button', { name: 'Link Telegram' })).toBeInViewport()
+  // Clear of the top bar that floats over the page.
+  const bar = await page.locator('.mf-topbar').boundingBox()
+  const title = await card.getByText('Telegram', { exact: true }).boundingBox()
+  expect(title!.y).toBeGreaterThanOrEqual(bar!.y + bar!.height)
+  await snap(page, testInfo, 'settings-opened-at-telegram')
 })

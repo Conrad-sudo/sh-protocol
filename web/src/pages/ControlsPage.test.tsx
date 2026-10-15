@@ -14,6 +14,7 @@ vi.mock('../lib/tx', async importOriginal => ({
 }))
 
 const MAINNET = 1
+const BSC = 56
 const TX_HASH = `0x${'78'.repeat(32)}`
 const PREPARED_TX = { to: '0x2222222222222222222222222222222222222222', data: '0x8456cb59', value: '0x0', gas: '0x7530' }
 const LINK = '0x779877A7B0D9E8603169DdbD7836e478b4624789'
@@ -24,10 +25,16 @@ const TOKENS = [
   { ticker: 'weth', address: WETH, always_counted: true },
 ]
 const PENDING_KEY = `mitfah-pending-owner-tx:7:${SEPOLIA}`
-// Sepolia's exchange router, as /api/chains names it.
-const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+// What every new wallet on Sepolia trusts, as /api/chains lists it: Uniswap V3's router, then its
+// positions contract.
+const V3_ROUTER = '0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E'
+const POSITION_MANAGER = '0x1238536071E1c677A632429e3655c799b22cDA52'
+// Uniswap V2's router on Sepolia: all a wallet made before the move to V3 trusts.
+const V2_ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+// PancakeSwap's router: what every new wallet on BSC trusts.
+const PANCAKE_ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E'
 const REGISTRY = '0x8004000000000000000000000000000000000713'
-const ROUTER_ENTRY: AllowlistEntry = { address: ROUTER, label: 'Uniswap V2 router' }
+const ROUTER_ENTRY: AllowlistEntry = { address: V3_ROUTER, label: 'Uniswap V3 router' }
 const USDC_ENTRY: AllowlistEntry = { address: USDC, label: 'USDC' }
 const REGISTRY_ENTRY: AllowlistEntry = { address: REGISTRY, label: 'ERC-8004 review registry' }
 /** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
@@ -103,8 +110,23 @@ function stubServer({
         return Promise.resolve(
           json(200, {
             chains: [
-              { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false, router: ROUTER },
-              { chain_id: MAINNET, name: 'mainnet', native_ticker: 'ETH', fork: false, router: null },
+              {
+                chain_id: SEPOLIA,
+                name: 'sepolia',
+                native_ticker: 'ETH',
+                fork: false,
+                exchange: 'uniswap-v3',
+                default_spenders: [V3_ROUTER, POSITION_MANAGER],
+              },
+              { chain_id: MAINNET, name: 'mainnet', native_ticker: 'ETH', fork: false, exchange: null, default_spenders: [] },
+              {
+                chain_id: BSC,
+                name: 'bsc',
+                native_ticker: 'BNB',
+                fork: false,
+                exchange: 'pancakeswap-v2',
+                default_spenders: [PANCAKE_ROUTER],
+              },
             ],
           }),
         )
@@ -519,10 +541,10 @@ describe('ControlsPage', () => {
     expect(server.prepared[0].body).toEqual({ chain_id: SEPOLIA, spender, action: 'remove' })
   })
 
-  it("keeps the exchange's router off the list, so it can't be removed by accident", async () => {
+  it("keeps the network's default spenders off the list, so they can't be removed by accident", async () => {
     const other = '0xeb2A2b8F6e0b1a1b3e5ec2dF1d2B2E1ad2E1F0A7'
     // Lower case on purpose: the match must not depend on how the address is written.
-    const trusted = [ROUTER.toLowerCase(), other]
+    const trusted = [V3_ROUTER.toLowerCase(), POSITION_MANAGER.toLowerCase(), other]
     stubServer({ wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: trusted } })] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
@@ -532,13 +554,85 @@ describe('ControlsPage', () => {
     const list = await screen.findByRole('list', { name: 'Trusted spenders' })
     expect(within(list).getAllByRole('listitem')).toHaveLength(1)
     expect(within(list).getByRole('button', { name: `Stop trusting ${other}` })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: new RegExp(`Stop trusting ${ROUTER}`, 'i') })).toBeNull()
-    expect(screen.getByText(/Uniswap V2's router is trusted by default as the assistant uses it to remove liquidity/)).toBeInTheDocument()
+    for (const spender of [V3_ROUTER, POSITION_MANAGER]) {
+      expect(screen.queryByRole('button', { name: new RegExp(`Stop trusting ${spender}`, 'i') })).toBeNull()
+    }
+    expect(
+      screen.getByText(
+        'The Uniswap V3 router and Uniswap V3 positions are trusted by default, as the assistant uses them to swap and to add or remove liquidity.',
+      ),
+    ).toBeInTheDocument()
     expect(screen.queryByText('None.')).toBeNull()
+    expect(screen.queryByText('Not trusted yet')).toBeNull()
 
     // Still counted as trusted, so it can't be added a second time.
-    await user.type(screen.getByLabelText('Trust a spender'), ROUTER)
+    await user.type(screen.getByLabelText('Trust a spender'), V3_ROUTER)
     expect(screen.getByText('Already trusted.')).toBeInTheDocument()
+  })
+
+  it('offers to trust what new wallets start with, where an older wallet lacks it', async () => {
+    // Made before Sepolia moved to Uniswap V3: it trusts only V2's router, now an ordinary spender.
+    const server = stubServer({
+      wallets: [makeWalletState({ limits: { ...makeWalletState().limits, trusted_spenders: [V2_ROUTER] } })],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    const trusted = await screen.findByRole('list', { name: 'Trusted spenders' })
+    expect(within(trusted).getByRole('button', { name: `Stop trusting ${V2_ROUTER}` })).toBeInTheDocument()
+    const missing = within(screen.getByRole('list', { name: 'Spenders new wallets trust' })).getAllByRole('listitem')
+    expect(missing).toHaveLength(2)
+    expect(missing[0]).toHaveTextContent('Uniswap V3 router')
+    expect(missing[0]).toHaveTextContent('Not trusted yet')
+    expect(missing[1]).toHaveTextContent('Uniswap V3 positions')
+    expect(
+      screen.getByText(
+        'New wallets trust these from the start. Without them, the assistant can only swap and provide liquidity with tokens Mitfah can price.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/trusted by default/)).toBeNull()
+
+    // The same question as trusting any spender, naming this one.
+    await user.click(within(missing[1]).getByRole('button', { name: 'Trust Uniswap V3 positions' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Trust this spender?')
+    expect(dialog).toHaveTextContent(`Uniswap V3 positions (0x1238…DA52${POSITION_MANAGER})`)
+    expect(dialog).toHaveTextContent("will be allowed approvals for tokens Mitfah can't price")
+    expect(dialog).toHaveTextContent('New wallets on this network trust it from the start.')
+    await user.click(within(dialog).getByRole('button', { name: 'Trust spender' }))
+
+    expect(await screen.findByText('Uniswap V3 positions trusted.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/trusted-spenders/prepare',
+        body: { chain_id: SEPOLIA, spender: POSITION_MANAGER, action: 'add' },
+      },
+    ])
+  })
+
+  it("names BSC's default spender, PancakeSwap's router", async () => {
+    stubServer({
+      walletChains: [BSC],
+      wallets: [
+        makeWalletState({
+          chain_id: BSC,
+          limits: { ...makeWalletState().limits, trusted_spenders: [PANCAKE_ROUTER.toLowerCase()] },
+        }),
+      ],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
+    expect(
+      await screen.findByText(
+        'The PancakeSwap router is trusted by default, as the assistant uses it to swap and to add or remove liquidity.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Trusted spenders' })).toBeNull()
+    expect(screen.queryByText('Not trusted yet')).toBeNull()
   })
 
   it('asks before raising the network fee cap', async () => {
@@ -564,6 +658,78 @@ describe('ControlsPage', () => {
     })
   })
 
+  it("shows what's left of the daily fee budget, and asks before raising it", async () => {
+    const limits = makeWalletState().limits
+    const refillsAt = Math.floor(Date.now() / 1000) + 5 * 3_600
+    const server = stubServer({
+      wallets: [
+        makeWalletState({
+          limits: {
+            ...limits,
+            session_gas: { budget_wei: '50000000000000000', remaining_wei: '20000000000000000', refills_at: refillsAt },
+          },
+        }),
+      ],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    const budget = await screen.findByLabelText('Most per day')
+    expect(budget).toHaveValue('0.05')
+    expect(
+      within(row('Daily fee budget')).getByText(/^0\.02 of 0\.05 ETH left\. Refills in (4 h 59 min|5 h)\.$/),
+    ).toBeInTheDocument()
+
+    await user.clear(budget)
+    await user.type(budget, '0.1')
+    await user.click(within(budget.closest('form')!).getByRole('button', { name: 'Save' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('up to 0.1 ETH in fees a day, up from 0.05 ETH')
+    await user.click(within(dialog).getByRole('button', { name: 'Raise budget' }))
+    expect(await screen.findByText('Daily fee budget set to 0.1 ETH.')).toBeInTheDocument()
+    expect(server.prepared[0]).toEqual({
+      path: '/api/wallet/session-gas-budget/prepare',
+      body: { chain_id: SEPOLIA, budget_eth: '0.1' },
+    })
+  })
+
+  it('lowers the daily fee budget without asking', async () => {
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(within(row('Daily fee budget')).getByText('All 0.05 ETH left.')).toBeInTheDocument()
+    const budget = await screen.findByLabelText('Most per day')
+    await user.clear(budget)
+    await user.type(budget, '0.01')
+    await user.click(within(budget.closest('form')!).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByText('Daily fee budget set to 0.01 ETH.')).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(server.prepared[0]).toEqual({
+      path: '/api/wallet/session-gas-budget/prepare',
+      body: { chain_id: SEPOLIA, budget_eth: '0.01' },
+    })
+  })
+
+  it('says so when the wallet was made before daily fee budgets', async () => {
+    const limits = makeWalletState().limits
+    stubServer({ wallets: [makeWalletState({ limits: { ...limits, session_gas: null } })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(
+      await within(row('Daily fee budget')).findByText('This wallet was made before daily fee budgets existed.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Most per day')).toBeNull()
+  })
+
   it('turns the contract allowlist on with what the assistant uses, in one signature', async () => {
     const server = stubServer({
       wallets: [makeWalletState(), walletWithAllowlistOn()],
@@ -578,13 +744,13 @@ describe('ControlsPage', () => {
     const usdc = await within(row('Contract allowlist')).findByRole('checkbox', { name: /USDC/ })
     expect(within(row('Contract allowlist')).getByText('Off')).toBeInTheDocument()
     expect(usdc).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: /Uniswap V2 router/ })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /Uniswap V3 router/ })).toBeChecked()
     await user.click(usdc)
     await user.click(within(row('Contract allowlist')).getByRole('button', { name: 'Turn on' }))
 
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('The assistant will only be able to call these 2 contracts')
-    expect(dialog).toHaveTextContent('Uniswap V2 router')
+    expect(dialog).toHaveTextContent('Uniswap V3 router')
     expect(dialog).not.toHaveTextContent('USDC')
     await user.click(within(dialog).getByRole('button', { name: 'Turn on' }))
 
@@ -594,7 +760,7 @@ describe('ControlsPage', () => {
     expect(server.prepared).toEqual([
       {
         path: '/api/wallet/allowlist/prepare',
-        body: { chain_id: SEPOLIA, action: 'enable', targets: [ROUTER, REGISTRY] },
+        body: { chain_id: SEPOLIA, action: 'enable', targets: [V3_ROUTER, REGISTRY] },
       },
     ])
     // Read again: on, with its two entries, and USDC still on offer.
@@ -658,20 +824,20 @@ describe('ControlsPage', () => {
     expect(add).toBeDisabled()
     await user.clear(input)
     // Lower case on purpose: the match must not depend on how the address is written.
-    await user.type(input, ROUTER.toLowerCase())
+    await user.type(input, V3_ROUTER.toLowerCase())
     expect(screen.getByText('Already on the list.')).toBeInTheDocument()
     await user.clear(input)
     await user.type(input, makeWalletState().address)
     expect(screen.getByText("That's this wallet's own address.")).toBeInTheDocument()
     expect(add).toBeDisabled()
 
-    await user.click(screen.getByRole('button', { name: 'Remove Uniswap V2 router from the allowlist' }))
+    await user.click(screen.getByRole('button', { name: 'Remove Uniswap V3 router from the allowlist' }))
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent("won't be able to call any contract until you add one or turn the list off")
     await user.click(within(dialog).getByRole('button', { name: 'Remove it' }))
-    expect(await screen.findByText('Uniswap V2 router removed from the allowlist.')).toBeInTheDocument()
+    expect(await screen.findByText('Uniswap V3 router removed from the allowlist.')).toBeInTheDocument()
     expect(server.prepared).toEqual([
-      { path: '/api/wallet/allowlist/prepare', body: { chain_id: SEPOLIA, action: 'remove', targets: [ROUTER] } },
+      { path: '/api/wallet/allowlist/prepare', body: { chain_id: SEPOLIA, action: 'remove', targets: [V3_ROUTER] } },
     ])
   })
 

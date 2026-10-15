@@ -36,6 +36,21 @@ _FAILED_OP_WITH_REVERT_SELECTOR = keccak(text="FailedOpWithRevert(uint256,string
 _RESTRICTED_TARGET_SELECTOR = keccak(text="SessionHandler_SessionRestrictedTarget(address)")[:4]
 
 
+# The wallet's daily gas budget for everything the owner didn't sign, used up. Explained too: the
+# name alone says neither that it refills nor that only the owner can raise it.
+_GAS_BUDGET_SELECTOR = keccak(text="SessionHandler_SessionGasBudgetExceeded(uint256,uint256)")[:4]
+
+
+def _explain_gas_budget(spent: int, budget: int) -> str:
+    """Why the wallet refused to pay this transaction's gas, and what happens next."""
+    return (
+        f"the wallet's daily gas budget for the assistant is used up: with this transaction its gas "
+        f"would come to {spent / 10**18:.6g} of the native coin today, and the budget is "
+        f"{budget / 10**18:.6g}. It refills 24 hours after the day's first transaction, and the owner "
+        f"can raise it with one transaction from their own wallet."
+    )
+
+
 def _explain_restricted_target(target: str) -> str:
     """Why the wallet refused to let the assistant call `target`, and what the owner can do."""
     return (
@@ -142,6 +157,11 @@ def describe_revert_data(data: bytes) -> str:
             _, reason, inner = decode(["uint256", "string", "bytes"], data[4:])
             return f"{reason}: {describe_revert_data(inner)}"
         except Exception:  # noqa: BLE001
+            pass
+    if data[:4] == _GAS_BUDGET_SELECTOR:
+        try:
+            return _explain_gas_budget(*decode(["uint256", "uint256"], data[4:]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
             pass
     if data[:4] == _RESTRICTED_TARGET_SELECTOR:
         try:

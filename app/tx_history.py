@@ -38,7 +38,13 @@ import explorers
 import tx_movements
 from abi import ientry_point
 from bundler import find_user_op_receipt
-from constants import CHAIN_ID_CELO, get_native_asset_ticker, get_native_wrapped_ticker, get_router
+from constants import (
+    CHAIN_ID_CELO,
+    get_native_asset_ticker,
+    get_native_wrapped_ticker,
+    get_router,
+    get_v3_network,
+)
 from db import (
     add_transaction,
     delete_transaction,
@@ -282,6 +288,8 @@ def describe_wallet_tx(w3: Web3, user_id: int, chain_id: int, wallet, tx) -> str
         return f"Stop trusting {_spender(chain_id, args['spender'])}"
     if name == "setMaxOpGasCost":
         return f"Set the network fee cap to {_amount(args['newMax'], 18)} {native}"
+    if name == "setSessionGasBudget":
+        return f"Set the daily network fee budget to {_amount(args['newBudget'], 18)} {native}"
     return f"Call {name} on your wallet"
 
 
@@ -354,13 +362,28 @@ def _who(user_id: int, address: str) -> str:
 
 
 def _spender(chain_id: int, address: str) -> str:
+    """A trusted spender as the user knows it: an exchange contract by name, anything else shortened."""
     address = Web3.to_checksum_address(address)
+    return _exchange_names(chain_id).get(address) or _short(address)
+
+
+def _exchange_names(chain_id: int) -> dict[str, str]:
+    """
+    The exchange contracts on chain_id, by checksummed address, named as the History tab names them:
+    the V2 router wherever there is one ("the exchange router": BSC's exchange, and on the V3 chains
+    the one wallets traded through before the move), and Uniswap V3's router and position manager
+    where the chain trades on V3.
+    """
+    names = {}
     try:
-        if address == Web3.to_checksum_address(get_router(chain_id)):
-            return "the exchange router"
+        names[get_router(chain_id)] = "the exchange router"
     except ValueError:
-        pass
-    return _short(address)
+        pass  # no V2 deployment here (a bare Anvil)
+    v3 = get_v3_network(chain_id)
+    if v3 is not None:
+        names[v3["swap_router"]] = "the Uniswap V3 router"
+        names[v3["position_manager"]] = "Uniswap V3 positions"
+    return names
 
 
 # ── Settling ──────────────────────────────────────────────────────────────────
@@ -496,7 +519,9 @@ def _read_row_movements(w3: Web3, row: dict):
         tokens.info,
         native=_native(chain_id),
         wrapped=tokens.address_of(_wrapped_ticker(chain_id)),
-        router=_router(chain_id),
+        # Every exchange contract, the V2 router included on the V3 chains: an op sent before the
+        # move may only now be read.
+        exchanges=set(_exchange_names(chain_id)),
         native_contract=tokens.address_of(_native(chain_id)) if chain_id == CHAIN_ID_CELO else None,
     )
     save_movements(row["id"], moved, tx_movements.direction_of(moved))
@@ -511,13 +536,6 @@ def _owner_movements(w3: Web3, user_id: int, chain_id: int, wallet_contract, tx)
 def _wrapped_ticker(chain_id: int) -> str | None:
     try:
         return get_native_wrapped_ticker(chain_id)
-    except ValueError:
-        return None
-
-
-def _router(chain_id: int) -> str | None:
-    try:
-        return get_router(chain_id)
     except ValueError:
         return None
 

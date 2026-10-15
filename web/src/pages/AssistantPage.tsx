@@ -121,7 +121,7 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
   // Only where the assistant can swap: the network has an exchange and lists a stablecoin to buy.
   const swapTo = SWAP_TARGETS.find(ticker => tokens.data?.some(token => token.ticker === ticker))
   const swap =
-    chain?.router && chain.native_ticker && swapTo
+    chain?.exchange && chain.native_ticker && swapTo
       ? { from: chain.native_ticker.toUpperCase(), to: swapTo.toUpperCase() }
       : null
 

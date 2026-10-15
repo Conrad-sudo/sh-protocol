@@ -43,6 +43,18 @@ export function formatTokenAmount(raw: string, decimals: number, maxFraction = 6
   return shown ? `${grouped}.${shown}` : grouped
 }
 
+const price = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 5 })
+const largePrice = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
+
+/**
+ * A pool price for display, from the server's float: "3,150.4", "0.00041231". Five significant
+ * figures keep a range's two ends apart even on a stablecoin pair (0.995 – 1.005). From 100,000 up,
+ * whole numbers.
+ */
+export function formatPrice(value: number): string {
+  return value >= 100_000 ? largePrice.format(value) : price.format(value)
+}
+
 const date = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 
 /** A calendar day, e.g. "Oct 24, 2026", from milliseconds. */

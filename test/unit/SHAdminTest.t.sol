@@ -259,6 +259,204 @@ contract SHAdminTest is Test {
         treasury.transferProtocol(address(0));
     }
 
+    /// @dev The registry records its factory after deployment; until it does, there is nothing to
+    ///      hand over and the migration refuses rather than calling into address(0).
+    function test_transferProtocol_revertsWithNoFactoryRecorded() public {
+        SHTreasury fresh = new SHTreasury();
+        fresh.setRegistry(address(_registryOwnedBy(address(fresh))));
+
+        vm.expectRevert(SHTreasury.SHTreasury_InvalidFactory.selector);
+        fresh.transferProtocol(makeAddr("successor"));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         TREASURY FUNDS AND WIRING
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev A registry like the deployed one, owned by `admin`, with no factory recorded.
+    function _registryOwnedBy(address admin) internal returns (SHRegistry) {
+        return new SHRegistry(
+            admin,
+            registry.protocolFee(),
+            registry.MIN_PROTOCOL_FEE(),
+            registry.MAX_PROTOCOL_FEE(),
+            admin,
+            address(oracle),
+            config.reputationRegistry,
+            config.identityRegistry,
+            config.entryPoint,
+            0
+        );
+    }
+
+    function test_treasury_receiveCountsEveryFee() public {
+        uint256 before = treasury.totalFeesCollected();
+        vm.deal(rando, 3 ether);
+        vm.startPrank(rando);
+        (bool first,) = address(treasury).call{value: 1 ether}("");
+        (bool second,) = address(treasury).call{value: 2 ether}("");
+        vm.stopPrank();
+
+        assertTrue(first && second, "the treasury accepts plain ETH");
+        assertEq(treasury.totalFeesCollected(), before + 3 ether);
+        assertEq(address(treasury).balance, before + 3 ether);
+    }
+
+    function test_treasury_withdraw_paysTheRecipientAndEmits() public {
+        vm.deal(address(treasury), 5 ether);
+        address recipient = makeAddr("recipient");
+
+        vm.expectEmit(true, true, true, true, address(treasury));
+        emit SHTreasury.FeesWithdrawn(recipient, 2 ether);
+        vm.prank(owner);
+        treasury.withdraw(recipient, 2 ether);
+
+        assertEq(recipient.balance, 2 ether);
+        assertEq(address(treasury).balance, 3 ether);
+    }
+
+    function test_treasury_withdraw_refusesBadRequests() public {
+        vm.deal(address(treasury), 1 ether);
+        // Made before any expectRevert, which would otherwise latch onto the deployment.
+        address refuses = address(new RefusesEth());
+
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.withdraw(rando, 1);
+
+        vm.startPrank(owner);
+        vm.expectRevert(SHTreasury.SHTreasury_InvalidRecipient.selector);
+        treasury.withdraw(address(0), 1);
+        vm.expectRevert(SHTreasury.SHTreasury_InvalidAmount.selector);
+        treasury.withdraw(rando, 0);
+        vm.expectRevert(SHTreasury.SHTreasury_InsufficientBalance.selector);
+        treasury.withdraw(rando, 1 ether + 1);
+        vm.expectRevert(SHTreasury.SHTreasury_WithdrawalFailed.selector);
+        treasury.withdraw(refuses, 1);
+        vm.stopPrank();
+
+        assertEq(address(treasury).balance, 1 ether, "nothing left the treasury");
+    }
+
+    function test_treasury_withdrawAll_paysEverything() public {
+        vm.deal(address(treasury), 4 ether);
+        address recipient = makeAddr("recipient");
+
+        vm.expectEmit(true, true, true, true, address(treasury));
+        emit SHTreasury.FeesWithdrawn(recipient, 4 ether);
+        vm.prank(owner);
+        treasury.withdrawAll(recipient);
+
+        assertEq(recipient.balance, 4 ether);
+        assertEq(address(treasury).balance, 0);
+    }
+
+    function test_treasury_withdrawAll_refusesBadRequests() public {
+        address refuses = address(new RefusesEth());
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.withdrawAll(rando);
+
+        vm.startPrank(owner);
+        vm.deal(address(treasury), 0);
+        vm.expectRevert(SHTreasury.SHTreasury_InsufficientBalance.selector);
+        treasury.withdrawAll(rando);
+
+        vm.deal(address(treasury), 1 ether);
+        vm.expectRevert(SHTreasury.SHTreasury_InvalidRecipient.selector);
+        treasury.withdrawAll(address(0));
+        vm.expectRevert(SHTreasury.SHTreasury_WithdrawalFailed.selector);
+        treasury.withdrawAll(refuses);
+        vm.stopPrank();
+    }
+
+    /// @dev An owner contract that re-enters while being paid gets the inner withdrawal refused,
+    ///      which fails the payment, which fails the outer withdrawal: nothing leaves.
+    function test_treasury_withdraw_cannotBeReentered() public {
+        ReentrantOwner attacker = new ReentrantOwner();
+        SHTreasury owned = attacker.treasury();
+        vm.deal(address(owned), 1 ether);
+
+        vm.expectRevert(SHTreasury.SHTreasury_WithdrawalFailed.selector);
+        attacker.withdrawTo(address(attacker), 0.5 ether);
+
+        assertEq(address(owned).balance, 1 ether);
+    }
+
+    function test_treasury_setRegistry_refusesZeroAndOutsiders() public {
+        SHTreasury fresh = new SHTreasury();
+
+        vm.expectRevert(SHTreasury.SHTreasury_InvalidRegistry.selector);
+        fresh.setRegistry(address(0));
+
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        fresh.setRegistry(address(registry));
+    }
+
+    /// @dev Before setRegistry every registry passthrough fails loudly, rather than calling into
+    ///      address(0).
+    function test_treasury_passthroughsRefuseBeforeTheRegistryIsSet() public {
+        SHTreasury fresh = new SHTreasury();
+        bytes4 notSet = SHTreasury.SHTreasury_RegistryNotSet.selector;
+
+        vm.expectRevert(notSet);
+        fresh.setProtocolFee(1);
+        vm.expectRevert(notSet);
+        fresh.proposePriceOracle(address(oracle));
+        vm.expectRevert(notSet);
+        fresh.commitPriceOracle();
+        vm.expectRevert(notSet);
+        fresh.cancelPriceOracle();
+        vm.expectRevert(notSet);
+        fresh.setTreasury(rando);
+        vm.expectRevert(notSet);
+        fresh.setAgentId(1);
+        vm.expectRevert(notSet);
+        fresh.setSpendingLimitModule(rando);
+        vm.expectRevert(notSet);
+        fresh.setFactory(rando);
+        vm.expectRevert(notSet);
+        fresh.transferProtocol(rando);
+    }
+
+    /// @dev Redirecting the fee stream is the step BEFORE transferProtocol when migrating treasuries.
+    function test_treasury_setTreasury_redirectsTheFeeStream() public {
+        address successor = makeAddr("successorTreasury");
+        vm.prank(owner);
+        treasury.setTreasury(successor);
+        assertEq(registry.treasury(), successor);
+    }
+
+    /// @dev Any id goes through, 0 and the current one included: ERC-8004 registries mint from 0.
+    function test_treasury_setAgentId_acceptsAnyId() public {
+        vm.startPrank(owner);
+        treasury.setAgentId(7);
+        assertEq(registry.agentId(), 7);
+        treasury.setAgentId(7);
+        assertEq(registry.agentId(), 7);
+        treasury.setAgentId(0);
+        assertEq(registry.agentId(), 0);
+        vm.stopPrank();
+
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.setAgentId(1);
+    }
+
+    function test_treasury_factoryPassthroughs_refuseOutsiders() public {
+        uint256 minFee = registry.MIN_PROTOCOL_FEE();
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.unpauseFactory(address(factory));
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.setProtocolFee(minFee);
+        vm.prank(rando);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        treasury.setTreasury(rando);
+    }
+
     /*//////////////////////////////////////////////////////////////
                          ORACLE TIMELOCK: PROPOSE
     //////////////////////////////////////////////////////////////*/
@@ -662,6 +860,31 @@ contract SHAdminTest is Test {
         treasury.setFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, uint256(type(uint48).max) + 1);
     }
 
+    /// @dev The feed's decimals are read, not assumed: an 18-decimal feed (Chainlink's ETH-quoted
+    ///      feeds are) prices the same dollar amount as the usual 8-decimal one.
+    function test_addFeed_readsTheFeedsOwnDecimals() public {
+        ERC20Mock token = new ERC20Mock("Six", "SIX", 6);
+        MockV3Aggregator eightDecimals = new MockV3Aggregator(8, 2e8); // $2.00
+        MockV3Aggregator eighteenDecimals = new MockV3Aggregator(18, 2e18); // $2.00
+        MockV3Aggregator zeroDecimals = new MockV3Aggregator(0, 2); // $2
+
+        vm.startPrank(owner);
+        treasury.setFeed(address(oracle), address(token), address(eightDecimals), 1 days);
+        assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "8-decimal feed");
+        treasury.setFeed(address(oracle), address(token), address(eighteenDecimals), 1 days);
+        assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "18-decimal feed");
+        treasury.setFeed(address(oracle), address(token), address(zeroDecimals), 1 days);
+        assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "0-decimal feed");
+        vm.stopPrank();
+    }
+
+    function test_addFeed_revertsOnFeedFinerThan18Decimals() public {
+        MockV3Aggregator tooFine = new MockV3Aggregator(19, 2e19);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SHOracle.PriceOracle_InvalidFeedDecimals.selector, uint8(19)));
+        treasury.setFeed(address(oracle), config.usdc, address(tooFine), 1 days);
+    }
+
     function test_removeFeed_deregistersToken() public {
         assertTrue(oracle.isPriced(config.usdc));
 
@@ -896,6 +1119,27 @@ contract SHAdminTest is Test {
         vm.warp(block.timestamp + registry.ORACLE_TIMELOCK());
         for (uint256 i = 0; i < feeds.length; i++) {
             feeds[i].updateAnswer(feeds[i].latestAnswer());
+        }
+    }
+}
+
+/// @dev Takes no ETH: no receive or fallback, so any transfer to it fails.
+contract RefusesEth {}
+
+/// @dev Owns a treasury of its own and, when paid by it, tries to withdraw again from inside the
+///      payment. The treasury's reentrancy guard must stop the second withdrawal.
+contract ReentrantOwner {
+    SHTreasury public treasury = new SHTreasury();
+    bool public reentered;
+
+    function withdrawTo(address recipient, uint256 amount) external {
+        treasury.withdraw(recipient, amount);
+    }
+
+    receive() external payable {
+        if (msg.sender == address(treasury) && !reentered) {
+            reentered = true;
+            treasury.withdraw(address(this), 1);
         }
     }
 }

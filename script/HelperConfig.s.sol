@@ -106,6 +106,10 @@ contract HelperConfig is Script {
      * @param cake               PancakeSwap Token (CAKE) ERC-20 address. address(0) on Sepolia.
      * @param cakeUsdPriceFeed   Chainlink CAKE/USD price feed. address(0) on mainnet (feed deprecated Nov 2022) and Sepolia.
      * @param cakeHeartbeat      Chainlink CAKE/USD feed heartbeat in seconds (BSC: 60)
+     * @param maxOpGasCost       Starting SessionHandler.maxOpGasCost for wallets on this chain, in
+     *                          wei of its native coin: the most one UserOp may cost.
+     * @param sessionGasBudget   Starting SessionHandler.sessionGasBudget, in wei: the most the
+     *                          UserOps the owner didn't sign may cost per day, all together.
      * @param ethHeartbeat        Chainlink ETH/USD feed heartbeat in seconds (mainnet: 3600)
      * @param usdcHeartbeat       Chainlink USDC/USD feed heartbeat in seconds (mainnet: 82800)
      * @param daiHeartbeat        Chainlink DAI/USD feed heartbeat in seconds (mainnet: 3600)
@@ -203,6 +207,11 @@ contract HelperConfig is Script {
         uint256 wavaxHeartbeat;
         uint256 imxHeartbeat;
         uint256 cakeHeartbeat;
+        // Starting gas ceilings for every wallet on this chain, in its native coin: the most one
+        // UserOp may cost, and the most the ops the owner didn't sign may cost per day, together.
+        // See SessionHandler.GasCeilings; the owner can change both on their wallet.
+        uint80 maxOpGasCost;
+        uint80 sessionGasBudget;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -364,7 +373,10 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_72H,
             wavaxHeartbeat: HEARTBEAT_72H,
             imxHeartbeat: HEARTBEAT_72H,
-            cakeHeartbeat: HEARTBEAT_72H
+            cakeHeartbeat: HEARTBEAT_72H,
+            // Gas ceilings (a testnet: generous, nothing real at stake).
+            maxOpGasCost: 0.1 ether,
+            sessionGasBudget: 0.5 ether
         });
     }
 
@@ -451,7 +463,10 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            cakeHeartbeat: HEARTBEAT_24H
+            cakeHeartbeat: HEARTBEAT_24H,
+            // Gas ceilings (a ~600k-gas swap at ~80 gwei per op; a busy day's worth of ops).
+            maxOpGasCost: 0.05 ether,
+            sessionGasBudget: 0.25 ether
         });
     }
 
@@ -537,7 +552,10 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            cakeHeartbeat: HEARTBEAT_1H // BSC CAKE/USD feed heartbeat is 1 min; 1h gives a safety buffer
+            cakeHeartbeat: HEARTBEAT_1H, // BSC CAKE/USD feed heartbeat is 1 min; 1h gives a safety buffer
+            // Gas ceilings (BNB, at gas prices of a few gwei at most).
+            maxOpGasCost: 0.01 ether,
+            sessionGasBudget: 0.05 ether
         });
     }
 
@@ -637,7 +655,10 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            cakeHeartbeat: HEARTBEAT_1H
+            cakeHeartbeat: HEARTBEAT_1H,
+            // Gas ceilings (an L2: a typical op costs a few hundredths of a cent).
+            maxOpGasCost: 0.002 ether,
+            sessionGasBudget: 0.02 ether
         });
     }
 
@@ -737,7 +758,10 @@ contract HelperConfig is Script {
             yfiHeartbeat: HEARTBEAT_24H,
             wavaxHeartbeat: HEARTBEAT_24H,
             imxHeartbeat: HEARTBEAT_24H,
-            cakeHeartbeat: HEARTBEAT_24H
+            cakeHeartbeat: HEARTBEAT_24H,
+            // Gas ceilings (an L2: a typical op costs a few hundredths of a cent, L1 fee included).
+            maxOpGasCost: 0.002 ether,
+            sessionGasBudget: 0.02 ether
         });
     }
 
@@ -895,7 +919,10 @@ contract HelperConfig is Script {
                 yfiHeartbeat: HEARTBEAT_1H,
                 wavaxHeartbeat: HEARTBEAT_1H,
                 imxHeartbeat: HEARTBEAT_1H,
-                cakeHeartbeat: HEARTBEAT_1H
+                cakeHeartbeat: HEARTBEAT_1H,
+                // Gas ceilings (local: generous, nothing real at stake).
+                maxOpGasCost: 0.1 ether,
+                sessionGasBudget: 0.5 ether
             });
             return sLocalNetworkConfig;
         }

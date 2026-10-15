@@ -15,6 +15,7 @@ import contextlib
 import datetime
 import html
 import logging
+import math
 import signal
 import time
 
@@ -30,8 +31,10 @@ from telegram.ext import (
 )
 from smart_wallet_agent import chat, init_agent, open_checkpointer, close_checkpointer
 from bundler import TELEGRAM_BUNDLER_ENV, use_bundler_key
-from constants import get_chain_display_name, get_native_asset_ticker
-from tools import _get_wallet_status
+from redact import install_log_redaction
+from constants import get_chain_display_name, get_exchange, get_native_asset_ticker
+from positions import read_positions
+from tools.wallet_reads import _get_wallet_status
 from db import (
     acting_network,
     consume_telegram_link_nonce,
@@ -168,6 +171,48 @@ def wallet_warnings(status: dict, chain: str, now: int) -> list[str]:
     return warnings
 
 
+def _price(value: float) -> str:
+    """
+    A pool price for a message, as the web app's formatPrice shows it: five significant figures with
+    thousands separators ("3,150.4", "0.00041231"), whole numbers from 100,000 up, never an exponent.
+    Five figures keep a stablecoin range's two ends apart (0.995–1.005).
+    """
+    if value >= 100_000:
+        return f"{value:,.0f}"
+    if value <= 0:
+        return "0"
+    places = max(4 - math.floor(math.log10(value)), 0)
+    text = f"{value:,.{places}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def position_warnings(positions: list[dict], chain: str) -> list[str]:
+    """
+    One warning per Uniswap V3 position whose price has left its range. Such a position earns no
+    fees until the price comes back, and nothing about it changes on its own to say so -- the
+    dashboard tags it, but a Telegram-only user would never look. Sent every day while it stays out:
+    the user's choice, so they hear about it until they act.
+
+    A full-range position covers every price, so it is never out of range.
+
+    @param positions  The rows positions.read_positions returns.
+    @param chain      The chain's name, for the text.
+    @return           The messages to send, in order; none when every position is earning.
+    """
+    warnings = []
+    for position in positions:
+        if position["in_range"] or position["full_range"] or position["max_price"] is None:
+            continue
+        base, quote = position["base"].upper(), position["quote"].upper()
+        warnings.append(
+            f"⚠️ Your {position['pair'].upper()} position on {chain} "
+            f"({_price(position['min_price'])}–{_price(position['max_price'])} {quote} per {base}) "
+            f"is out of range: {base} is at {_price(position['current_price'])} {quote}, so it isn't "
+            "earning fees. Ask me to move it or take it out."
+        )
+    return warnings
+
+
 def _read_wallet_status(user_id: int, chain_id: int, network: str) -> dict | None:
     """
     The user's wallet status on a bot's chain, or None when it can't be read.
@@ -187,12 +232,36 @@ def _read_wallet_status(user_id: int, chain_id: int, network: str) -> dict | Non
         return None
 
 
+def _read_positions(user_id: int, chain_id: int, network: str) -> list[dict]:
+    """
+    The user's Uniswap V3 positions on a bot's chain, read like _read_wallet_status: on a worker
+    thread, with the bot's chain as the acting network. [] when they can't be read, so the wallet's
+    own warnings still go out.
+    """
+    try:
+        with acting_network(user_id, network, chain_id):
+            return read_positions(user_id, chain_id)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Could not read the positions of user %s on %s", user_id, network, exc_info=True
+        )
+        return []
+
+
 async def _warn(bot, chat_id: int, user_id: int, chain_id: int, network: str):
-    """Checks the user's wallet on a bot's chain and sends them whatever warnings apply."""
-    status = await asyncio.to_thread(_read_wallet_status, user_id, chain_id, network)
-    if status is None:
-        return
-    for text in wallet_warnings(status, get_chain_display_name(chain_id), int(time.time())):
+    """
+    Checks the user's wallet on a bot's chain and sends them whatever warnings apply: the wallet's
+    own, then any position out of range where the chain trades on Uniswap V3. The two are read side
+    by side, and either failing leaves the other's warnings to go out.
+    """
+    reads = [asyncio.to_thread(_read_wallet_status, user_id, chain_id, network)]
+    if get_exchange(chain_id) == "uniswap-v3":
+        reads.append(asyncio.to_thread(_read_positions, user_id, chain_id, network))
+    status, *positions = await asyncio.gather(*reads)
+    chain = get_chain_display_name(chain_id)
+    texts = wallet_warnings(status, chain, int(time.time())) if status is not None else []
+    texts += position_warnings(positions[0] if positions else [], chain)
+    for text in texts:
         try:
             await bot.send_message(chat_id=chat_id, text=text)
         except Forbidden:
@@ -435,6 +504,7 @@ async def serve(bots: list[Application]):
 
 
 def main():
+    install_log_redaction()
     # This process bundles with its own key, never the API's: the two run side by side, and each
     # keeps its own nonce counter, so sharing one key would have them hand out the same nonces.
     use_bundler_key(TELEGRAM_BUNDLER_ENV)

@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test py-test e2e-test agent-smoke api
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test py-test e2e-test agent-smoke api api-prod
 
 
 
@@ -87,8 +87,34 @@ bundler-test:
 telebot-test:
 	.venv/bin/python3 app/tests/test_telebot.py
 
+# API keys kept out of HTTP errors, the model's tool results and the logs. Offline.
+redact-test:
+	.venv/bin/python3 app/tests/test_redact.py
+
+# The numbered database migrations: a new database, one from before the numbering, each migration
+# run once, a newer database refused. Throwaway files, so offline.
+migrations-test:
+	.venv/bin/python3 app/tests/test_migrations.py
+
+# The in-repo Uniswap V3 toolkit: its tick and liquidity math against Solidity's own values, its
+# addresses against script/Constants.s.sol, and every plan it builds (call order, approvals, the
+# deadline multicall, burn at 100%) against a stand-in chain. Offline.
+uniswap-v3-test:
+	.venv/bin/python3 app/tests/test_uniswap_v3.py
+
+# The dashboard's and Telegram's Uniswap V3 positions reader: spam and empty positions hidden, the
+# native coin named as such, base token first, nothing raised when the chain read fails. Offline.
+positions-test:
+	.venv/bin/python3 app/tests/test_positions.py
+
+# The assistant's Uniswap V3 liquidity tools: the range picked by name lands on the ticks that were
+# shown, deposits count against the limit, and every refusal (unknown token, someone else's position,
+# the wrong network's tools) holds; plus the per-network filter on which liquidity tools it sees.
+position-tools-test:
+	.venv/bin/python3 app/tests/test_position_tools.py
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
@@ -99,7 +125,7 @@ e2e-test:
 
 # The prompt-regression gate: a REAL conversation against the fork, checking the agent still
 # reaches the right tools in the right order now that the prompt no longer spells out an id
-# argument. Costs Anthropic credits. Needs the same stack as e2e-test.
+# argument. Costs DeepSeek credits. Needs the same stack as e2e-test.
 agent-smoke:
 	.venv/bin/python3 app/tests/test_agent_smoke.py
 
@@ -107,18 +133,18 @@ unit-test:
 	forge test --match-path test/unit/SHProtocolTest.t.sol -vvvv
 
 mainnet-uniswap-test:
-	forge test --match-path test/fork/SHUniswapV2Test.t.sol --fork-url $(MAINNET_RPC_URL) -vvvv
+	forge test --match-path test/fork/SHMainnetUniswapV3Test.t.sol -vvvv
 
 sepolia-uniswap-test:
-	forge test --match-path test/fork/SHSepoliaUniswapV2Test.t.sol --fork-url $(SEPOLIA_RPC_URL) -vvvv
+	forge test --match-path test/fork/SHSepoliaUniswapV3Test.t.sol -vvvv
 pancakeswap-test:
-	forge test --match-path test/fork/SHPancakeswapV2Test.t.sol --fork-url $(BSC_RPC_URL) -vvvv
+	forge test --match-path test/fork/SHPancakeswapV2Test.t.sol -vvvv
 
 arbitrum-uniswap-test:
-	forge test --match-path test/fork/SHArbitrumUniswapV2Test.t.sol --fork-url $(ARB_RPC_URL) -vvvv
+	forge test --match-path test/fork/SHArbitrumUniswapV3Test.t.sol -vvvv
 
 base-uniswap-test:
-	forge test --match-path test/fork/SHBaseUniswapV2Test.t.sol --fork-url $(BASE_RPC_URL) -vvvv
+	forge test --match-path test/fork/SHBaseUniswapV3Test.t.sol -vvvv
 
 # SHSepoliaTest.t.sol was folded into the shared fork base (identity/reputation checks now run
 # on every network), so sepolia-test is an alias of sepolia-uniswap-test.
@@ -287,10 +313,16 @@ endif
 
 # Live Sepolia is the only target that leaves the local node: real endpoint, Etherscan
 # verification, and no --sender (Forge derives the sender from --private-key).
+# --gas-estimate-multiplier 1000: Sepolia runs Glamsterdam's new gas prices, where storing state
+# costs far more (deploying code ~1,540 gas/byte instead of 200). Forge 1.5.1 simulates with the
+# old prices and sets every gas limit ~4-8x too low, so each tx ran out of gas (2026-10-15).
+# 10x the simulated gas covers the worst case (SHFactory, which also deploys SessionHandler).
+# You pay only for gas used, so the higher limit costs nothing. Drop it once Forge prices
+# Glamsterdam itself.
 ifeq ($(ARGS),sepolia)
 	DEPLOY_RPC    := $(SEPOLIA_RPC_URL)
 	DEPLOY_SIGNER := --private-key $(API_BUNDLER)
-	DEPLOY_EXTRA  := --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv
+	DEPLOY_EXTRA  := --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv --gas-estimate-multiplier 1000
 endif
 
 # strip: DEPLOY_EXTRA is empty for most networks, which would otherwise leave a trailing space.
@@ -308,8 +340,10 @@ deploy:
 
 # ── Python ────────────────────────────────────────────────────────────────────
 
+# db is a package now (app/db/), run as a module with app/ on the path; the working directory stays
+# the repo root, where the deploy broadcasts it reads are.
 db:
-	.venv/bin/python3 app/db.py
+	PYTHONPATH=app .venv/bin/python3 -m db
 
 # Depends on fund for the same reason as deploy — deploy_wallet.py signs with that same account,
 # and this makes a standalone `make deploy-wallet ARGS=<fork>` work without remembering to fund.
@@ -334,10 +368,17 @@ agent:
 # safe beside it only because it bundles with a different key (TELEGRAM_BUNDLER). The CLI agent
 # (`make agent`) and `make agent-smoke` bundle with API_BUNDLER, so don't run them beside the API.
 # --reload is for development.
-# --app-dir rather than `cd app`: db.DB_PATH is "./app/wallet.db", relative to the repo root, so
-# the working directory has to stay here while app/ goes on sys.path.
+# --app-dir rather than `cd app`: the contract ABIs are read from ./out and the deploy records from
+# ./broadcast, relative to the repo root, so the working directory has to stay here while app/ goes
+# on sys.path. (The database follows APP_DB_PATH, or app/wallet.db.)
 api:
 	.venv/bin/uvicorn --app-dir app api:app --reload --workers 1 --port 8000
+
+# Production, behind Caddy (deploy/Caddyfile): no --reload, listening on this machine only, and
+# trusting the proxy's X-Forwarded-For so the per-address rate limits see each visitor rather than
+# 127.0.0.1. One worker, for the same reason as above.
+api-prod:
+	.venv/bin/uvicorn --app-dir app api:app --workers 1 --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
 
 
 # ── Combined workflows ──────────────────────────────────────────────────────────

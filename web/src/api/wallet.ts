@@ -91,6 +91,8 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
       return ['/api/wallet/trusted-spenders/prepare', { chain_id, spender: action.spender, action: action.action }]
     case 'max-gas':
       return ['/api/wallet/max-op-gas-cost/prepare', { chain_id, max_cost_eth: action.maxCostEth }]
+    case 'gas-budget':
+      return ['/api/wallet/session-gas-budget/prepare', { chain_id, budget_eth: action.budgetEth }]
     case 'allowlist':
       return ['/api/wallet/allowlist/prepare', { chain_id, action: action.action, targets: action.targets }]
   }

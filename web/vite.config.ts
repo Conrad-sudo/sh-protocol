@@ -1,6 +1,6 @@
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
-import type { Plugin } from 'vite'
+import { searchForWorkspaceRoot, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 
 /**
@@ -53,6 +53,11 @@ export default defineConfig({
     // Same origin as the page, so the refresh cookie (path /api/auth) is sent without CORS.
     proxy: {
       '/api': 'http://localhost:8000',
+    },
+    fs: {
+      // Vite's default, plus ../deploy: src/securityHeaders.test.ts checks the security headers the
+      // Caddyfile there sends against this app. That folder holds nothing secret.
+      allow: [searchForWorkspaceRoot(process.cwd()), '../deploy'],
     },
   },
   test: {

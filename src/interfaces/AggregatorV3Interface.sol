@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.33;
 
 /// @dev Standard Chainlink price feed interface. Vendored locally (rather than pulling in the
 ///      full chainlink-brownie-contracts submodule) since this is the only piece we need, keeping

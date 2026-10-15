@@ -9,8 +9,10 @@ viaIR = true
 gas_reports = ["*"]
 remappings= ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
  ,"@account-abstraction/contracts/=lib/account-abstraction/contracts/",
- '@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/',
- "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/"
+ "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+ "@uniswap/v3-core/=lib/v3-core/",
+ "@uniswap/v3-periphery/=lib/v3-periphery/",
+ "@uniswap/swap-router-contracts/=lib/swap-router-contracts/"
  ]
 
 
@@ -28,4 +30,10 @@ runs   = 500      # number of invariant sequences to run
 depth  = 100      # number of calls per sequence
 fail_on_revert = false   # handler uses try/catch for expected reverts
 
+[rpc_endpoints]
+mainnet = "${MAINNET_RPC_URL}"
+arbitrum="${ARB_RPC_URL}"
+bschain="${BSC_RPC_URL}"
+sepolia="${SEPOLIA_RPC_URL}"
+base= "${BASE_RPC_URL}"
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

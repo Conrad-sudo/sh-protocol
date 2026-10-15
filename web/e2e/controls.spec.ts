@@ -11,11 +11,14 @@ const SEPOLIA = 11155111
 const ADDRESS = '0x2222222222222222222222222222222222222222'
 const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const TX_HASH = `0x${'9a'.repeat(32)}`
-// Sepolia's exchange router, and a review registry, as the allowlist read names them.
-const ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
+// What every new wallet on Sepolia trusts, as /api/chains lists it: Uniswap V3's router, then its
+// positions contract. The mocked wallet predates them, so the Advanced panel offers to trust both.
+const V3_ROUTER = '0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E'
+const POSITION_MANAGER = '0x1238536071E1c677A632429e3655c799b22cDA52'
+// A review registry, as the allowlist read names it.
 const REGISTRY = '0x8004000000000000000000000000000000000713'
 const ALLOWLIST_SUGGESTED = [
-  { address: ROUTER, label: 'Uniswap V2 router' },
+  { address: V3_ROUTER, label: 'Uniswap V3 router' },
   { address: USDC, label: 'USDC' },
   { address: REGISTRY, label: 'ERC-8004 review registry' },
 ]
@@ -88,7 +91,18 @@ async function mockServer(
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: [SEPOLIA] } })
       case '/api/chains':
         return route.fulfill({
-          json: { chains: [{ chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false }] },
+          json: {
+            chains: [
+              {
+                chain_id: SEPOLIA,
+                name: 'sepolia',
+                native_ticker: 'ETH',
+                fork: false,
+                exchange: 'uniswap-v3',
+                default_spenders: [V3_ROUTER, POSITION_MANAGER],
+              },
+            ],
+          },
         })
       case '/api/tokens':
         return route.fulfill({
@@ -159,6 +173,8 @@ test('changes that loosen a limit ask first', async ({ page }, testInfo) => {
   await expect(page.getByText('WETH now counts toward your limit.')).toBeVisible()
 
   await page.getByRole('button', { name: 'Advanced' }).click()
+  // It predates Uniswap V3 too, so it's offered the spenders new wallets start with.
+  await expect(page.getByRole('button', { name: 'Trust Uniswap V3 positions' })).toBeVisible()
   await expect(page.getByLabel('Most per operation')).toHaveValue('0.01')
   await expect(page.getByText('Contract allowlist')).toBeVisible()
   await expectNoSidewaysScroll(page)
@@ -202,7 +218,7 @@ test('turning the contract allowlist on', async ({ page }, testInfo) => {
   await snap(page, testInfo, 'controls-allowlist-on')
 
   expect(prepared.map(p => p.body)).toEqual([
-    { chain_id: SEPOLIA, action: 'enable', targets: [ROUTER, USDC, REGISTRY] },
+    { chain_id: SEPOLIA, action: 'enable', targets: [V3_ROUTER, USDC, REGISTRY] },
   ])
 })
 

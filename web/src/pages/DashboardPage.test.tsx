@@ -4,7 +4,7 @@ import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeSession, makeWalletState, SEPOLIA, USDC } from '../test/fixtures'
+import { makePosition, makeSession, makeWalletState, SEPOLIA, USDC } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 // Owner transactions poll with a 2 s gap; the tests don't wait.
@@ -35,6 +35,10 @@ interface ServerOptions {
   walletPrompt?: Promise<void>
   /** Answers POST /api/wallet/tx/confirm; by default every transaction has mined. */
   confirm?: () => Response | Promise<Response>
+  /** Whether each network has a Telegram bot; by default none has. */
+  telegramBots?: boolean
+  /** Whether the account has linked Telegram. */
+  telegramLinked?: boolean
 }
 
 /** A signed-in account whose wallets answer from `wallets`. Also answers the mock wallet's RPC. */
@@ -44,7 +48,10 @@ function stubServer({
   extra = {},
   walletPrompt = Promise.resolve(),
   confirm = () => json(200, { status: 'confirmed', tx_hash: TX_HASH }),
+  telegramBots = false,
+  telegramLinked = false,
 }: ServerOptions = {}) {
+  const chains = CHAINS.map(chain => ({ ...chain, telegram_bot: telegramBots ? `mitfah_${chain.name}_bot` : null }))
   const walletCalls: number[] = []
   const sent: Record<string, string>[] = []
   const prepared: { path: string; body: unknown }[] = []
@@ -64,8 +71,12 @@ function stubServer({
         )
       }
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
-      if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
-      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
+      if (url === '/api/me') {
+        return Promise.resolve(
+          json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains, telegram_linked: telegramLinked }),
+        )
+      }
+      if (url === '/api/chains') return Promise.resolve(json(200, { chains }))
       const route = `${(init?.method ?? 'GET').toUpperCase()} ${url}`
       if (extra[route]) {
         const body = init?.body ? JSON.parse(String(init.body)) : undefined
@@ -147,6 +158,8 @@ describe('DashboardPage', () => {
     // WETH is not watched, so the assistant could move it without limit.
     expect(row('WETH')).toHaveTextContent('Not limited')
     expect(screen.getByRole('button', { name: 'Add funds' })).toBeInTheDocument()
+    // No liquidity positions, so no card for them.
+    expect(screen.queryByRole('heading', { name: 'Liquidity positions' })).toBeNull()
   })
 
   it('warns about everything that weakens the protection', async () => {
@@ -261,6 +274,42 @@ describe('DashboardPage', () => {
     await user.click(screen.getByRole('button', { name: 'Network: BNB Smart Chain' }))
     await user.click(screen.getByRole('menuitem', { name: 'Add a network' }))
     await waitFor(() => expect(router.state.location.pathname).toBe('/wallets/new'))
+  })
+
+  it('offers to link Telegram beside "Ask the assistant", opening Settings at its card', async () => {
+    stubServer({ telegramBots: true })
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView')
+    const user = userEvent.setup()
+    const router = await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    const link = await screen.findByRole('link', { name: 'Link Telegram' })
+    expect(link).toHaveAttribute('href', '/settings#telegram')
+    expect(screen.getByRole('link', { name: 'Ask the assistant' }).nextElementSibling).toBe(link)
+
+    await user.click(link)
+    expect(await screen.findByRole('button', { name: 'Link Telegram' })).toBeInTheDocument()
+    expect(router.state.location).toMatchObject({ pathname: '/settings', hash: '#telegram' })
+    // The page opens at the Telegram card, not at the top.
+    await waitFor(() => expect(scrolled.mock.contexts.at(-1)).toHaveAttribute('id', 'telegram'))
+    scrolled.mockRestore()
+  })
+
+  it('offers no Telegram button once Telegram is linked, or where the server runs no bot', async () => {
+    for (const options of [{ telegramBots: true, telegramLinked: true }, { telegramBots: false }]) {
+      cleanup()
+      resetClientForTests()
+      stubServer(options)
+      const user = userEvent.setup()
+      await renderRoutes(routes, '/dashboard')
+
+      await walletHeader()
+      // "Add a network" needs the network list too, so the button would be showing by now.
+      await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
+      expect(await screen.findByRole('menuitem', { name: 'Add a network' })).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: 'Ask the assistant' })).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: 'Link Telegram' })).not.toBeInTheDocument()
+    }
   })
 
   it('shows a wallet on Base by its name and logo, like every network', async () => {
@@ -584,6 +633,65 @@ describe('DashboardPage', () => {
     expect(prepared).toEqual([
       { path: '/api/wallet/withdraw/prepare', body: { chain_id: SEPOLIA, token: POOL, amount: '4', to: WALLET } },
     ])
+  })
+
+  it('lists liquidity positions with their range, the price, what each holds and its unclaimed fees', async () => {
+    const positions = [
+      makePosition(),
+      // LINK has risen past the top of the range: the position has sold it all for ETH.
+      makePosition({
+        id: 102,
+        pair: 'link/eth',
+        base: 'link',
+        quote: 'eth',
+        fee_pct: 0.3,
+        min_price: 0.0041234,
+        max_price: 0.0045678,
+        current_price: 0.0049876,
+        in_range: false,
+        amounts: [
+          { ticker: 'link', decimals: 18, raw: '0' },
+          { ticker: 'eth', decimals: 18, raw: '2500000000000000000' },
+        ],
+        fees: [
+          { ticker: 'link', decimals: 18, raw: '0' },
+          { ticker: 'eth', decimals: 18, raw: '0' },
+        ],
+      }),
+      // The same pair in another pool, over every price: it never leaves its range.
+      makePosition({ id: 103, fee_pct: 1, min_price: 0, max_price: null, full_range: true }),
+    ]
+    stubServer({ wallets: { [SEPOLIA]: [makeWalletState({ positions })] } })
+    await renderRoutes(routes, '/dashboard')
+
+    expect(await screen.findByRole('heading', { name: 'Liquidity positions' })).toBeInTheDocument()
+    const items = within(screen.getByRole('list', { name: 'Liquidity positions' })).getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    const [inRange, outOfRange, fullRange] = items.map(item => within(item))
+    const fact = (item: typeof inRange, label: string) => item.getByText(label).nextElementSibling
+
+    expect(inRange.getByRole('heading', { name: 'ETH/USDC · 0.05%' })).toBeInTheDocument()
+    expect(inRange.getByText('In range')).toBeInTheDocument()
+    expect(fact(inRange, 'Range')).toHaveTextContent('2,850.4 – 3,150.1 USDC per ETH')
+    expect(fact(inRange, 'Current price')).toHaveTextContent('3,020.2 USDC per ETH')
+    expect(fact(inRange, 'Holds now')).toHaveTextContent('1.2 ETH + 3,400 USDC')
+    expect(fact(inRange, 'Unclaimed fees')).toHaveTextContent('0.004 ETH + 12.5 USDC')
+    expect(inRange.queryByText(/isn't earning fees/)).toBeNull()
+
+    expect(outOfRange.getByRole('heading', { name: 'LINK/ETH · 0.3%' })).toBeInTheDocument()
+    expect(outOfRange.getByText('Out of range')).toBeInTheDocument()
+    expect(outOfRange.getByText("It isn't earning fees until the price comes back into this range.")).toBeInTheDocument()
+    expect(fact(outOfRange, 'Range')).toHaveTextContent('0.0041234 – 0.0045678 ETH per LINK')
+    expect(fact(outOfRange, 'Current price')).toHaveTextContent('0.0049876 ETH per LINK')
+    expect(fact(outOfRange, 'Holds now')).toHaveTextContent('0 LINK + 2.5 ETH')
+    expect(fact(outOfRange, 'Unclaimed fees')).toHaveTextContent('None yet')
+
+    expect(fullRange.getByRole('heading', { name: 'ETH/USDC · 1%' })).toBeInTheDocument()
+    expect(fact(fullRange, 'Range')).toHaveTextContent(/^Full range$/)
+    expect(fact(fullRange, 'Current price')).toHaveTextContent('3,020.2 USDC per ETH')
+    expect(fullRange.getByText('In range')).toBeInTheDocument()
+
+    expect(screen.getByText('To collect fees, add to a position or take one out, ask the assistant.')).toBeInTheDocument()
   })
 
   it('removes a token the user added, after saying the tokens stay in the wallet', async () => {

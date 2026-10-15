@@ -10,16 +10,18 @@ Each kind of row is read from where its truth is:
   - 'assistant': the mined receipt. Token Transfer logs give every token that moved, exactly, with
     the other side. The native coin leaves no log, so what left is read from the op's own
     executions (their values), and what came back from unwrapping the wrapped native token, by the
-    wallet or by the router on its behalf.
+    wallet or by an exchange contract on its behalf (a V2 router, Uniswap V3's router or its
+    position manager).
 
 Fees are never movements: the gas prefund and the protocol fee are in neither the logs nor the
 executions. Everything here is pure -- no database, no node -- so it is tested on its own.
 """
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Collection
 
 from eth_abi import decode
 from langchain_uniswap_v2.abis import router_abi
+from langchain_uniswap_v3.abis import position_manager_abi, swap_router_abi
 from web3 import Web3
 
 IN, OUT = "in", "out"
@@ -37,8 +39,12 @@ _HANDLE_OPS = Web3.keccak(
 _EXECUTE = Web3.keccak(text="execute(bytes32,bytes)")[:4]
 _CALLTYPE_SINGLE, _CALLTYPE_BATCH = 0x00, 0x01
 
-# Decoding calldata needs no node.
-_router = Web3().eth.contract(abi=router_abi)
+# Decoding calldata needs no node. SwapRouter02 and the position manager each batch their calls in
+# a multicall -- SwapRouter02's takes a deadline, the position manager's doesn't -- and both have
+# the same unwrapWETH9(amountMinimum, recipient).
+_v2_router = Web3().eth.contract(abi=router_abi)
+_swap_router = Web3().eth.contract(abi=swap_router_abi)
+_position_manager = Web3().eth.contract(abi=position_manager_abi)
 
 
 @dataclass(frozen=True)
@@ -100,7 +106,7 @@ def assistant_movements(
     *,
     native: str,
     wrapped: str | None,
-    router: str | None,
+    exchanges: Collection[str],
     native_contract: str | None = None,
 ) -> list[Moved]:
     """
@@ -110,8 +116,9 @@ def assistant_movements(
     @param tx               The bundle transaction (EntryPoint.handleOps), as the node returns it.
     @param token_info       Tokens the user knows; a Transfer of any other token is left out.
     @param wrapped          The chain's wrapped native token (WETH, WBNB), or None.
-    @param router           The exchange router, or None: it unwraps a swap's or a withdrawn
-                            pool's native coin and sends it on.
+    @param exchanges        The chain's exchange contracts -- its V2 router, Uniswap V3's router
+                            and position manager -- or none. Each may unwrap the native coin of a
+                            swap, a withdrawn pool or a withdrawn position and send it on.
     @param native_contract  Where the native coin is also an ERC-20 (CELO), its address. Its
                             Transfer logs are then the native coin's movements, and the
                             executions' values aren't counted a second time.
@@ -119,9 +126,20 @@ def assistant_movements(
     wallet = Web3.to_checksum_address(wallet)
     executions = executions_of(wallet, _bytes(tx.get("input")))
     logs = list(receipt["logs"])
-    moved: list[Moved] = []
+    moved = _token_movements(wallet, logs, token_info, native, native_contract)
+    if native_contract is not None:
+        return moved
+    # The native coin the op sent, call by call.
+    moved += [Moved(OUT, None, native, value, 18, target) for target, value, _ in executions if value]
+    if wrapped is None:
+        return moved
+    exchanges = {Web3.to_checksum_address(address) for address in exchanges}
+    return moved + _wrapping_movements(wallet, logs, executions, token_info, native, wrapped, exchanges)
 
-    # Every token that moved, with the other side.
+
+def _token_movements(wallet: str, logs: list, token_info: TokenInfo, native: str, native_contract: str | None) -> list[Moved]:
+    """Every token that moved in or out of the wallet, with the other side, from the Transfer logs."""
+    moved: list[Moved] = []
     for log in logs:
         parties = _transfer(log)
         if parties is None:
@@ -139,17 +157,16 @@ def assistant_movements(
             moved.append(Moved(IN, token, ticker, value, decimals, _party(src)))
         elif src == wallet and dst != wallet:
             moved.append(Moved(OUT, token, ticker, value, decimals, _party(dst)))
+    return moved
 
-    if native_contract is not None:
-        return moved
 
-    # The native coin the op sent, call by call.
-    for target, value, _ in executions:
-        if value:
-            moved.append(Moved(OUT, None, native, value, 18, target))
-
-    if wrapped is None:
-        return moved
+def _wrapping_movements(
+    wallet: str, logs: list, executions: list, token_info: TokenInfo, native: str, wrapped: str, exchanges: set[str]
+) -> list[Moved]:
+    """
+    What wrapping and unwrapping the native coin moved: the wrapped token the wallet minted or
+    burned, and the native coin that came back.
+    """
     wrapped = Web3.to_checksum_address(wrapped)
     own = [log for log in logs if Web3.to_checksum_address(log["address"]) == wrapped]
     wrapped_ticker = (token_info(wrapped) or (_short(wrapped), 18))[0]
@@ -159,6 +176,7 @@ def assistant_movements(
         if len(log["topics"]) == 2 and _topic(log, 0) in (_DEPOSIT, _WITHDRAWAL)
     ]
     transfers = [t for t in map(_transfer, own) if t is not None]
+    moved: list[Moved] = []
 
     # WETH9 and its copies emit Deposit and Withdrawal and no Transfer when wrapping; tokens that
     # mint and burn instead (Arbitrum's) were already counted above, from their Transfer logs.
@@ -166,24 +184,35 @@ def assistant_movements(
         for kind, who, wad in wrap_events:
             if who == wallet and wad:
                 moved.append(Moved(IN if kind == _DEPOSIT else OUT, wrapped, wrapped_ticker, wad, 18, None))
+    return moved + _native_unwrapped(wallet, executions, native, wrapped, exchanges, wrap_events, transfers)
 
-    # The native coin that came back: unwrapped by the wallet itself, or by the router for a swap
-    # or a pool withdrawal that pays the wallet. Read from Withdrawal events, or from burns where
-    # the token emits those instead.
+
+def _native_unwrapped(
+    wallet: str, executions: list, native: str, wrapped: str, exchanges: set[str], wrap_events: list, transfers: list
+) -> list[Moved]:
+    """
+    The native coin that came back: unwrapped by the wallet itself, or by an exchange contract for a
+    swap, a pool withdrawal or a position withdrawal that pays the wallet. Read from Withdrawal
+    events, or from burns where the token emits those instead.
+
+    An exchange's unwrap counts only when the op's own call to that contract names the wallet as who
+    gets the native coin. The same swap paying somebody else unwraps just the same, and none of
+    that is the wallet's.
+    """
     unwraps = [(who, wad) for kind, who, wad in wrap_events if kind == _WITHDRAWAL]
     if not unwraps:
         unwraps = [(src, value) for src, dst, value in transfers if dst == _ZERO]
-    router = Web3.to_checksum_address(router) if router else None
-    router_pays_wallet = router is not None and any(
-        target == router and _router_recipient(data) == wallet for target, _, data in executions
-    )
+    paying = {
+        target for target, _, data in executions if target in exchanges and wallet in _native_recipients(data)
+    }
+    moved: list[Moved] = []
     for who, wad in unwraps:
         if not wad:
             continue
         if who == wallet:
             moved.append(Moved(IN, None, native, wad, 18, wrapped))
-        elif who == router and router_pays_wallet:
-            moved.append(Moved(IN, None, native, wad, 18, router))
+        elif who in paying:
+            moved.append(Moved(IN, None, native, wad, 18, who))
     return moved
 
 
@@ -217,14 +246,45 @@ def executions_of(wallet: str, data: bytes) -> list[tuple[str, int, bytes]]:
     return []
 
 
-def _router_recipient(data: bytes) -> str | None:
-    """The `to` of a router call -- who gets the swap's output or the pool's tokens -- or None."""
+def _native_recipients(data: bytes) -> set[str]:
+    """
+    Who a call to an exchange contract has it send the native coin it unwraps; empty for a call
+    that unwraps nothing, or that isn't an exchange's.
+
+      - A V2 router call: its `to` (swapExactTokensForETH, removeLiquidityETH, ...).
+      - SwapRouter02's multicall(deadline, calls) or the position manager's multicall(calls): the
+        recipient of each unwrapWETH9(amountMinimum, recipient) in it. That is how a V3 swap pays
+        out the native coin (the swap pays the router, which unwraps), and how a position
+        withdrawal does (collect pays the position manager, which unwraps).
+      - An unwrapWETH9(amountMinimum, recipient) on its own: its recipient.
+    """
+    v2 = _decoded(_v2_router, data)
+    if v2 is not None:
+        to = v2[1].get("to")
+        return {Web3.to_checksum_address(to)} if to else set()
+    for contract in (_swap_router, _position_manager):
+        decoded = _decoded(contract, data)
+        if decoded is None:
+            continue
+        name, args = decoded
+        # One level only: neither contract's own calls nest a multicall.
+        calls = [bytes(call) for call in args["data"]] if name == "multicall" else [data]
+        recipients = set()
+        for call in calls:
+            inner = _decoded(contract, call)
+            if inner is not None and inner[0] == "unwrapWETH9":
+                recipients.add(Web3.to_checksum_address(inner[1]["recipient"]))
+        return recipients
+    return set()
+
+
+def _decoded(contract, data: bytes) -> tuple[str, dict] | None:
+    """(function name, arguments) of a call to one of `contract`'s functions, or None for any other call."""
     try:
-        _, args = _router.decode_function_input(data)
-    except ValueError:
+        fn, args = contract.decode_function_input(data)
+    except Exception:  # noqa: BLE001 -- another contract's selector (ValueError), or calldata eth_abi can't decode
         return None
-    to = args.get("to")
-    return Web3.to_checksum_address(to) if to else None
+    return fn.fn_name, args
 
 
 def _transfer(log) -> tuple[str, str, int] | None:

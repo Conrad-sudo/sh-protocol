@@ -1,5 +1,4 @@
-import { LiquidGlass } from 'quick-liquid/react'
-import { type ComponentProps, useContext } from 'react'
+import { type ComponentProps, lazy, Suspense, useContext } from 'react'
 import { Panel, type PanelProps } from 'rsuite'
 import { ThemeContext } from '../theme/ThemeContext'
 
@@ -13,7 +12,12 @@ import { ThemeContext } from '../theme/ThemeContext'
  * content itself would cut off the top bar's dropdown menus and the focus rings at a card's edge.
  * So a surface carries the class `mf-glass-surface`, this layer is its first child, and the content
  * after it paints on top (styles/app.css, "Liquid glass").
+ *
+ * The engine (about 80 kB gzipped) loads on its own rather than with the page, so the landing
+ * page's first paint never waits for it. Until it arrives, and wherever it can't run, the layer is
+ * a plain frosted plate: styles/app.css frosts a `.mf-glass` that has no lens in it.
  */
+const LiquidGlass = lazy(() => import('quick-liquid/react').then(module => ({ default: module.LiquidGlass })))
 
 /**
  * Corners, in px. `plate` is --mf-radius-plate in tokens.css. The engine keeps a corner to half the
@@ -30,30 +34,34 @@ const SUPPORTED = typeof ResizeObserver !== 'undefined'
 export function GlassLayer({ shape = 'plate' }: { shape?: keyof typeof RADIUS }) {
   // The app's theme, not the system's: the theme switch can override the system.
   const theme = useContext(ThemeContext)?.resolved ?? 'light'
+  const frost = <div aria-hidden className="mf-glass" />
+  if (!SUPPORTED) return frost
 
   return (
-    <LiquidGlass
-      aria-hidden
-      className="mf-glass"
-      active={SUPPORTED}
-      config={{
-        appearance: theme,
-        tint: TINT[theme],
-        tintOpacity: 0.4,
-        blur: 12,
-        saturation: 1.4,
-        // The lens: a 30px curved rim that shifts the wallpaper up to 18px near the edge. The
-        // content on the glass is never bent, only what is behind it.
-        bezelWidth: 30,
-        refractionStrength: 18,
-        thickness: 20,
-        // Colour fringes would be blurred away by the frost anyway; one displacement pass, not three.
-        chromaticAberration: 0,
-        borderRadius: RADIUS[shape],
-        // The lens map is smooth, so large plates don't need it at full size.
-        quality: shape === 'capsule' ? 'high' : 'medium',
-      }}
-    />
+    <Suspense fallback={frost}>
+      <LiquidGlass
+        aria-hidden
+        className="mf-glass"
+        active
+        config={{
+          appearance: theme,
+          tint: TINT[theme],
+          tintOpacity: 0.4,
+          blur: 12,
+          saturation: 1.4,
+          // The lens: a 30px curved rim that shifts the wallpaper up to 18px near the edge. The
+          // content on the glass is never bent, only what is behind it.
+          bezelWidth: 30,
+          refractionStrength: 18,
+          thickness: 20,
+          // Colour fringes would be blurred away by the frost anyway; one displacement pass, not three.
+          chromaticAberration: 0,
+          borderRadius: RADIUS[shape],
+          // The lens map is smooth, so large plates don't need it at full size.
+          quality: shape === 'capsule' ? 'high' : 'medium',
+        }}
+      />
+    </Suspense>
   )
 }
 

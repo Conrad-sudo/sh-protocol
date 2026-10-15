@@ -23,6 +23,9 @@ from web3.providers.rpc import HTTPProvider       # noqa: E402
 import network_config                             # noqa: E402
 import parallel                                   # noqa: E402
 import tools                                      # noqa: E402
+import tools.checks  # noqa: E402
+import tools.common  # noqa: E402
+import tools.quoting  # noqa: E402
 import userop                                     # noqa: E402
 
 WEI = 10**18
@@ -147,58 +150,58 @@ def erc20(address, decimals, balance):
 def leg(token, amount, direction, address=None, decimals=18, unlisted=False, balance=10**30):
     """One leg; an ERC20 one holds `balance` base units (plenty, unless a check says otherwise)."""
     contract = None if address is None else erc20(address, decimals, balance)
-    return tools._Leg(token, amount, direction, address or tools.ETH_SENTINEL, contract, unlisted, token.upper())
+    return tools.common._Leg(token, amount, direction, address or tools.common.ETH_SENTINEL, contract, unlisted, token.upper())
 
 
 def test_wallet_checks():
     print("\n[3] the wallet checks every transaction tool now runs itself")
-    S, R = tools.SENT, tools.RECEIVED
+    S, R = tools.common.SENT, tools.common.RECEIVED
     usdc = lambda amount, d: leg("usdc", amount, d, USDC, 6)   # noqa: E731
     weth = lambda amount, d: leg("weth", amount, d, WETH, 18)  # noqa: E731
 
-    out = tools._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S)])
     check("a native send counts in full", out["charged_usd"] == 20 and out["usd_value"] == 20, str(out))
     check("...and fits $100", out["within_budget"] and not out["is_paused"] and out["session_active"], str(out))
 
-    out = tools._wallet_checks(FakeWallet(watched={USDC, WETH}), "0xkey", [usdc(10, S), weth(0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(watched={USDC, WETH}), "0xkey", [usdc(10, S), weth(0.01, S)])
     check("adding liquidity counts BOTH deposits (the LP token has no price)",
           out["charged_usd"] == 30 and out["usd_value"] == 30, str(out))
 
-    out = tools._wallet_checks(FakeWallet(watched={WETH}), "0xkey", [leg("eth", 0.01, S), weth(0.01, R)])
+    out = tools.checks._wallet_checks(FakeWallet(watched={WETH}), "0xkey", [leg("eth", 0.01, S), weth(0.01, R)])
     check("a wrap into watched WETH counts nothing", out["charged_usd"] == 0 and out["usd_value"] == 20, str(out))
 
-    out = tools._wallet_checks(FakeWallet(watched=set()), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
+    out = tools.checks._wallet_checks(FakeWallet(watched=set()), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
     check("a swap into an unwatched token counts the ETH paid", out["charged_usd"] == 20, str(out))
 
-    out = tools._wallet_checks(FakeWallet(), "0xkey", [leg("pepe", 1000, S, PEPE, 18, unlisted=True)])
+    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("pepe", 1000, S, PEPE, 18, unlisted=True)])
     check("a token the user added: no price, nothing counted", out["usd_value"] is None and out["charged_usd"] == 0,
           str(out))
 
-    out = tools._wallet_checks(FakeWallet(broken={USDC}), "0xkey", [usdc(10, S)])
+    out = tools.checks._wallet_checks(FakeWallet(broken={USDC}), "0xkey", [usdc(10, S)])
     check("an unwatched token's price failing doesn't fail the checks (it is only shown)",
           out["usd_value"] is None and out["charged_usd"] == 0 and "usd_value_unavailable" in out, str(out))
     try:
-        tools._wallet_checks(FakeWallet(watched={USDC}, broken={USDC}), "0xkey", [usdc(10, S)])
+        tools.checks._wallet_checks(FakeWallet(watched={USDC}, broken={USDC}), "0xkey", [usdc(10, S)])
         check("a counted token's price failing fails the checks", False, "nothing raised")
     except ValueError as e:
         check("a counted token's price failing fails the checks, by name", "StalePrice" in str(e), str(e))
 
-    out = tools._wallet_checks(FakeWallet(remaining=10), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(remaining=10), "0xkey", [leg("eth", 0.01, S)])
     check("$20 doesn't fit $10", out["within_budget"] is False, str(out))
-    out = tools._wallet_checks(FakeWallet(valid_for=30), "0xkey", [])
+    out = tools.checks._wallet_checks(FakeWallet(valid_for=30), "0xkey", [])
     check("a key with 30s left is reported as about to run out",
           out["expiring_imminently"] and not out["session_active"], str(out))
 
-    out = tools._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.02, S)])
+    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.02, S)])
     check("sending more of the native asset than the wallet holds is caught, with both figures",
           out["enough_balance"] is False
           and out["balance_short"] == "Not enough ETH: the wallet holds 0.01, and this needs 0.02.", str(out))
-    out = tools._wallet_checks(FakeWallet(), "0xkey", [leg("usdc", 10, S, USDC, 6, balance=5 * 10**6)])
+    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("usdc", 10, S, USDC, 6, balance=5 * 10**6)])
     check("...and of a token, counted in its own decimals",
           out["enough_balance"] is False and "holds 5, and this needs 10" in out["balance_short"], str(out))
-    out = tools._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
+    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
     check("what only comes back isn't balance-checked", out["enough_balance"] is True, str(out))
-    out = tools._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.01, S)])
     check("exactly the balance is enough (the fees are the quote's to check)", out["enough_balance"] is True,
           str(out))
 
@@ -210,7 +213,7 @@ def test_quote_refusals():
 
     def refusal(**changes) -> str:
         try:
-            tools._enforce_wallet_checks({**base, **changes}, priced=True)
+            tools.checks._enforce_wallet_checks({**base, **changes}, priced=True)
             return ""
         except ToolException as e:
             return str(e)
@@ -231,14 +234,14 @@ def test_quote_refusals():
     check("too little to send: says what the wallet holds, ahead of the limit",
           message == f"{short} Nothing was sent.", message)
 
-    shown = tools._enforce_wallet_checks(base, priced=True)
+    shown = tools.checks._enforce_wallet_checks(base, priced=True)
     check("a passing quote carries the figures to show",
           shown == {"session_expires_in_secs": 3600, "usd_value": 20.0, "charged_usd": 20.0, "remaining_usd": 80.0},
           str(shown))
-    shown = tools._enforce_wallet_checks({**base, "within_budget": False}, priced=False)
+    shown = tools.checks._enforce_wallet_checks({**base, "within_budget": False}, priced=False)
     check("a write that moves nothing countable checks only the pause and the key",
           shown == {"session_expires_in_secs": 3600}, str(shown))
-    shown = tools._enforce_wallet_checks({**base, "remaining_usd": -5.0}, priced=True)
+    shown = tools.checks._enforce_wallet_checks({**base, "remaining_usd": -5.0}, priced=True)
     check("a limit lowered below what was spent shows nothing left, not a negative figure",
           shown["remaining_usd"] == 0, str(shown))
 
@@ -250,7 +253,7 @@ def test_native_headroom():
     def refusal(value, fee, balance, deposit=0, max_gas=None) -> str:
         quote = None if max_gas is None else SimpleNamespace(max_gas_wei=max_gas)
         try:
-            tools._check_native_headroom(11155111, value, fee, balance, deposit, quote)
+            tools.quoting._check_native_headroom(11155111, value, fee, balance, deposit, quote)
             return ""
         except ToolException as e:
             return str(e)
@@ -304,6 +307,26 @@ def test_user_op_hash():
     userop._local_hash_matches.clear()
 
 
+def test_abis_are_parsed_once():
+    print("\n[7] an ABI file is parsed once, and again only when it changes")
+    import json
+    import os
+    import tempfile
+
+    import db
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "Thing.json")
+        with open(path, "w") as file:
+            json.dump({"abi": [{"name": "old"}]}, file)
+        first = db.get_json(path)
+        check("asked twice, it is parsed once", db.get_json(path) is first)
+        with open(path, "w") as file:
+            json.dump({"abi": [{"name": "new"}, {"name": "and longer"}]}, file)
+        os.utime(path, ns=(time.time_ns(), time.time_ns() + 1_000_000))
+        check("a rebuilt file is read again", db.get_json(path)["abi"][0]["name"] == "new", str(db.get_json(path)))
+
+
 if __name__ == "__main__":
     test_chain_id_is_asked_once()
     test_reads_run_together()
@@ -311,4 +334,5 @@ if __name__ == "__main__":
     test_quote_refusals()
     test_native_headroom()
     test_user_op_hash()
+    test_abis_are_parsed_once()
     finish("All speed checks passed.")

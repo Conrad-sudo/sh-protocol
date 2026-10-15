@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from web3.logs import DISCARD
-from constants import get_router
+from constants import get_default_spenders
 from network_config import load_network_config_by_name, load_network_config
 from db import (
     save_wallet_address,
@@ -121,15 +121,15 @@ def _default_watched_tokens(user_id: int, chain_name: str) -> list[str]:
 def deploy_wallet(user_id: int, chain_name: str):
     """
     Deploys a new SessionHandler wallet for user_id by calling SHFactory.deployWallet(
-    dailyLimitUsd, windowDuration, watchedTokens, sessionKey, trustedSpenders) on
-    the given chain, then persists the resulting address to wallet.db. The first three
-    arguments seed the wallet's spending-cap config: SpendingLimitModule is installed as a
-    hook with a DEFAULT_DAILY_LIMIT_USD cap per DEFAULT_WINDOW_SECS window, metering the
+    dailyLimitUsd, windowDuration, watchedTokens, sessionKey, sessionKeyValidUntil,
+    trustedSpenders) on the given chain, then persists the resulting address to wallet.db. The
+    first three arguments seed the wallet's spending-cap config: SpendingLimitModule is installed
+    as a hook with a DEFAULT_DAILY_LIMIT_USD cap per DEFAULT_WINDOW_SECS window, metering the
     DEFAULT_WATCHED_TICKERS for this network.
 
-    The last two make the wallet usable after this ONE transaction. The session key and the
-    trusted router used to require a follow-up owner-signed call each (add_default_session and
-    trust_router below); they are now applied inside initialize(). The wallet is deployed with
+    The rest make the wallet usable after this ONE transaction. The session key and the trusted
+    spenders used to require a follow-up owner-signed call each (add_default_session and
+    trust_default_spenders below); they are now applied inside initialize(). The wallet is deployed with
     CREATE2 at a salt the FACTORY derives from (deployer, its per-owner deployCount), so its
     address is known BEFORE the transaction is sent -- which is what lets the session key, whose
     Vault entry is keyed by wallet address, be minted up front.
@@ -195,15 +195,14 @@ def deploy_wallet(user_id: int, chain_name: str):
     session_key, session_key_ct = create_pending_session_key(user_id, chain_id, predicted)
     session_key_valid_until = int(time.time()) + DEFAULT_SESSION_TTL_SECS
 
-    # The router is a wallet-level choice, not protocol config, so it is granted by the caller here
-    # rather than auto-trusted in initialize(). Sourced from constants.get_router so the router the
-    # wallet trusts is always the one toolkits.py builds calldata for. Bare Anvil has no Uniswap
-    # deployment, so it gets an empty list.
-    try:
-        trusted_spenders = [get_router(chain_id)]
-    except ValueError:
-        print(f"No router configured for chain {chain_id}; deploying with no trusted spenders")
-        trusted_spenders = []
+    # The exchange contracts the assistant approves tokens to are a wallet-level choice, not
+    # protocol config, so they are granted by the caller here rather than auto-trusted in
+    # initialize(). Sourced from constants.get_default_spenders, which reads the same network tables
+    # the assistant's toolkits are bound to, so the wallet always trusts what it trades through.
+    # A chain with no exchange (bare Anvil) gets an empty list.
+    trusted_spenders = get_default_spenders(chain_id)
+    if not trusted_spenders:
+        print(f"No exchange on chain {chain_id}; deploying with no trusted spenders")
 
     tx = factory.functions.deployWallet(
         DEFAULT_DAILY_LIMIT_USD,
@@ -333,25 +332,27 @@ def add_default_session(user_id: int):
         print("Warning: SessionAdded event could not be decoded (stale ABI — run forge build)")
 
 
-def trust_router(user_id: int):
+def trust_default_spenders(user_id: int):
     """
-    Trusts the chain's canonical V2 router on the user's wallet, as the owner.
+    Trusts the chain's default spenders (constants.get_default_spenders) on the user's wallet, as
+    the owner: one addTrustedSpender for each the wallet doesn't trust yet. Does nothing on a chain
+    with no exchange, or for a wallet that already trusts them all.
 
-    NOT part of the deploy path any more: deploy_wallet() passes the router in
-    SHFactory.deployWallet's trustedSpenders, which grants it inside initialize(). Kept as a
-    recovery helper for wallets deployed with an empty list, or to re-grant after
-    removeTrustedSpender. Idempotent — the module ignores a spender it already trusts.
+    NOT part of the deploy path any more: deploy_wallet() passes them in SHFactory.deployWallet's
+    trustedSpenders, which grants them inside initialize(). Kept as a recovery helper: for a wallet
+    deployed with an empty list, for one deployed before its chain moved to Uniswap V3 (it trusts
+    only the V2 router), and to re-grant after removeTrustedSpender. The module would ignore a
+    spender it already trusts, but asking first saves the owner a transaction for nothing.
 
     A wallet deploys with an EMPTY trusted-spender list unless one is seeded. SpendingLimitModule
-    refuses any
-    approval on a token the oracle cannot price unless its spender is trusted, so without
-    this the LP-token approval inside remove_liquidity would revert (LP tokens have no
-    Chainlink feed). Priced-token approvals never needed the exemption and are unaffected.
+    refuses any approval on a token the oracle cannot price unless its spender is trusted, so
+    without this, swapping or depositing a token the user added by address reverts, and so does the
+    LP-token approval inside a V2 remove_liquidity (LP tokens have no Chainlink feed). Priced-token
+    approvals never needed the exemption and are unaffected.
 
-    The router used to be protocol configuration (SHRegistry.router) and was auto-trusted
-    inside initialize(). It is now a wallet-level choice, granted here from the same
-    constants.ROUTER entry toolkits.py binds the Uniswap toolkit to, so the trusted router
-    and the router the bot builds calldata for cannot drift apart.
+    The spenders are a wallet-level choice, not protocol configuration (SHRegistry.router is gone),
+    granted here from the same table the assistant's toolkits are bound to, so the contracts the
+    wallet trusts and the ones the assistant builds calldata for cannot drift apart.
 
     Trusting a spender is a real grant: it may pull an unpriced token within a single
     transaction. The no-standing-approval rule still forces every such approval to exactly
@@ -360,30 +361,34 @@ def trust_router(user_id: int):
     @param user_id  The application user ID.
     """
     w3, chain_id, chain_name = load_network_config(user_id)
-    try:
-        router = get_router(chain_id)
-    except ValueError:
-        # Bare Anvil has no Uniswap deployment; nothing to trust and nothing to do.
-        print(f"No router configured for chain {chain_id}; skipping trust_router")
+    spenders = get_default_spenders(chain_id)
+    if not spenders:
+        # Bare Anvil has no exchange; nothing to trust and nothing to do.
+        print(f"No exchange on chain {chain_id}; nothing to trust")
         return
 
     private_key_env = _private_key_env(chain_name)
     owner = w3.eth.account.from_key(os.getenv(private_key_env))
     session_handler = load_session_handler(user_id=user_id)
 
-    tx = session_handler.functions.addTrustedSpender(router).build_transaction(
-        {
-            "from": owner.address,
-            "nonce": w3.eth.get_transaction_count(owner.address),
-            "chainId": chain_id,
-        }
-    )
-    signed_tx = w3.eth.account.sign_transaction(tx, owner.key)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    if receipt["status"] != 1:
-        raise RuntimeError(f"addTrustedSpender reverted (tx: {tx_hash.hex()})")
-    print(f"Router trusted: {router} (tx: {tx_hash.hex()})")
+    for spender in spenders:
+        if session_handler.functions.isTrustedSpender(spender).call():
+            print(f"Already trusted: {spender}")
+            continue
+        tx = session_handler.functions.addTrustedSpender(spender).build_transaction(
+            {
+                "from": owner.address,
+                # Read per transaction: the previous one has mined by now, so this is the next nonce.
+                "nonce": w3.eth.get_transaction_count(owner.address),
+                "chainId": chain_id,
+            }
+        )
+        signed_tx = w3.eth.account.sign_transaction(tx, owner.key)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        if receipt["status"] != 1:
+            raise RuntimeError(f"addTrustedSpender({spender}) reverted (tx: {tx_hash.hex()})")
+        print(f"Trusted {spender} (tx: {tx_hash.hex()})")
 
 
 def deploy(user_id: int, network: str):
@@ -449,6 +454,6 @@ if __name__ == "__main__":
     user_id = resolve_harness_user()
     save_contact(user_id=user_id,name="tim",address="0x9f4d8D3f66C47c75b95325f01861d1643825Bffc")
     network = sys.argv[1] if len(sys.argv) > 1 else "anvil"
-    # One transaction. add_default_session() and trust_router() are no longer part of the happy
-    # path — deployWallet seeds both — and are kept above only as recovery/re-grant helpers.
+    # One transaction. add_default_session() and trust_default_spenders() are no longer part of the
+    # happy path — deployWallet seeds both — and are kept above only as recovery/re-grant helpers.
     deploy(user_id=user_id, network=network)

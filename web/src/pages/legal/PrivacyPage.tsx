@@ -7,7 +7,7 @@ export function PrivacyPage() {
       title="Privacy Policy"
       description="What Mitfah stores about you and why, what stays in your browser, who else sees your data, how long it is kept and your choices."
       path="/privacy"
-      updated="1 October 2026"
+      updated="8 October 2026"
     >
       <p>
         This policy explains what Mitfah stores about you, why, and who else sees it. Mitfah is an AI assistant that
@@ -63,8 +63,9 @@ export function PrivacyPage() {
       <h2>Who else sees your data</h2>
       <ul>
         <li>
-          <strong>Anthropic</strong> runs the AI model. Your chat messages, and the wallet details the assistant needs to
-          answer, are sent to it to produce each reply.
+          <strong>DeepSeek</strong> runs the AI model. Your chat messages, and the wallet details the assistant needs to
+          answer, are sent to it to produce each reply. DeepSeek is a company based in China and stores the data it
+          receives there, where data protection laws may differ from those where you live.
         </li>
         <li>
           <strong>Blockchain networks.</strong> Every transaction your wallet makes is public and permanent. Anyone can

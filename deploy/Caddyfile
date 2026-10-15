@@ -1,0 +1,75 @@
+# Mitfah on one server behind Caddy: HTTPS with automatic certificates, security headers, the built
+# web app, and /api passed to the API on the same machine.
+#
+# Before `caddy run --config deploy/Caddyfile`:
+#   - Set MITFAH_DOMAIN (e.g. mitfah.com) and ACME_EMAIL (who Let's Encrypt writes to about the
+#     certificate). MITFAH_WEB_ROOT defaults to /srv/mitfah.
+#   - Build the web app (cd web && npm run build) and copy web/dist/ to MITFAH_WEB_ROOT. Leave
+#     VITE_API_URL unset: the API is served from this same origin, under /api.
+#   - Run the API on 127.0.0.1:8000 with `make api-prod`. It trusts this proxy's X-Forwarded-For, so
+#     the per-address rate limits see each visitor rather than 127.0.0.1.
+#   - In the API's environment: SIWE_DOMAIN=<MITFAH_DOMAIN> (sign-in messages name the site),
+#     CORS_ORIGINS=https://<MITFAH_DOMAIN>, and COOKIE_SECURE left at its default (on).
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Every canonical link names the bare domain.
+www.{$MITFAH_DOMAIN} {
+	redir https://{$MITFAH_DOMAIN}{uri} permanent
+}
+
+{$MITFAH_DOMAIN} {
+	encode zstd gzip
+
+	# On every response, pages and API alike.
+	#
+	# The Content-Security-Policy, one directive per line (the header itself has to be one line):
+	#   default-src 'self'
+	#   script-src  'self' + the two inline scripts in web/index.html, by hash. Change either script
+	#               and its hash here must change too; web/src/securityHeaders.test.ts fails until it does.
+	#   style-src   'self' 'unsafe-inline': the prerendered pages carry inline style attributes.
+	#   img-src     'self' data: blob: + WalletConnect's wallet logos.
+	#   connect-src 'self' (the API) + each chain's default RPC in viem, which wagmi reads from (the
+	#               test checks every one is here) + WalletConnect's relay and APIs.
+	#   frame-src   WalletConnect's verify and secure frames. The WalletConnect hosts are only needed
+	#               when the web app is built with VITE_WALLETCONNECT_PROJECT_ID.
+	#   worker-src  'self' blob:
+	#   object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';
+	#   upgrade-insecure-requests
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin-allow-popups"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-LIS3Hm0CN+gdA00Xmcl7BfY6tawMNSDIuQlPy1uvZsY=' 'sha256-QQXQvUN4RsEKA7///2fp6tjEHvVg8Vt5GDkZZh8WdZQ='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.walletconnect.com https://*.walletconnect.org https://*.reown.com; font-src 'self' data:; connect-src 'self' https://ethereum.reth.rs https://*.rpc.thirdweb.com https://arb1.arbitrum.io https://mainnet.base.org https://*.walletconnect.com wss://*.walletconnect.com https://*.walletconnect.org wss://*.walletconnect.org https://*.reown.com wss://*.reown.com; frame-src https://verify.walletconnect.com https://verify.walletconnect.org https://secure.walletconnect.org; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+		-Server
+	}
+
+	# The API. Its answers carry account data, so nothing between here and the browser may keep a
+	# copy. Request bodies are small JSON; anything far larger is refused before it reaches Python.
+	handle /api/* {
+		header Cache-Control "no-store"
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# The web app. /terms and /privacy are prerendered pages of their own (terms.html, privacy.html);
+	# every other address gets index.html, and the app routes it in the browser.
+	handle {
+		root * {$MITFAH_WEB_ROOT:/srv/mitfah}
+		try_files {path} {path}.html /index.html
+		# Hashed file names change with their content, so these never need checking again; the pages
+		# do, so a new release is seen at once.
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@pages not path /assets/*
+		header @pages Cache-Control "no-cache"
+		file_server
+	}
+}

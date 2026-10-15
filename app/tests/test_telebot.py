@@ -1,10 +1,10 @@
 """
 The Telegram bots, offline: each bot acts on its own chain and only in private chats, one link
 covers them all, replies keep their formatting and fit Telegram's limit, and the daily check
-reaches the right chats.
+reaches the right chats -- with a word about any Uniswap V3 position out of range.
 
-No Telegram, no chain and no model: updates and the bot are stand-ins, and chat() and the wallet
-read are swapped for recorders. Runs against a throwaway database.
+No Telegram, no chain and no model: updates and the bot are stand-ins, and chat(), the wallet read
+and the positions read are swapped for recorders. Runs against a throwaway database.
 
 Run: make telebot-test   (or: python app/tests/test_telebot.py)
 """
@@ -34,7 +34,7 @@ import telebot                                    # noqa: E402
 import telegram_bots                              # noqa: E402
 import telegram_format                            # noqa: E402
 
-SEPOLIA, BASE, ARBITRUM = 11155111, 8453, 42161
+SEPOLIA, BASE, ARBITRUM, BSC = 11155111, 8453, 42161, 56
 SEPOLIA_BOT = {"chain_id": SEPOLIA, "network": "sepolia"}
 BASE_BOT = {"chain_id": BASE, "network": "base"}
 ARBITRUM_BOT = {"chain_id": ARBITRUM, "network": "arbitrum"}
@@ -297,6 +297,139 @@ def test_wallet_warnings():
           len(warnings) == 1 and "$5.00 of your $100.00 limit" in warnings[0], str(warnings))
 
 
+def _position(**overrides) -> dict:
+    """A row as positions.read_positions returns it: ETH/USDC, 2,850-3,150 USDC per ETH, in range."""
+    share = [{"ticker": "eth", "decimals": 18, "raw": "1"}, {"ticker": "usdc", "decimals": 6, "raw": "1"}]
+    return {"id": 7, "pair": "eth/usdc", "base": "eth", "quote": "usdc", "fee_pct": 0.05,
+            "min_price": 2850.0, "max_price": 3150.0, "full_range": False, "current_price": 3000.0,
+            "in_range": True, "amounts": share, "fees": share} | overrides
+
+
+OUT_OF_RANGE_ABOVE = (
+    "⚠️ Your ETH/USDC position on Base (2,850–3,150 USDC per ETH) is out of range: ETH is at 3,420 USDC, "
+    "so it isn't earning fees. Ask me to move it or take it out."
+)
+
+
+def test_position_warnings():
+    print("\n[5b] a position out of range is mentioned, with its range and where the price is")
+    check("no positions: nothing to say", telebot.position_warnings([], "Base") == [])
+    check("in range: nothing to say", telebot.position_warnings([_position()], "Base") == [])
+
+    warnings = telebot.position_warnings([_position(current_price=3420.0, in_range=False)], "Base")
+    check("above its range: one warning, saying what to do", warnings == [OUT_OF_RANGE_ABOVE], str(warnings))
+    warnings = telebot.position_warnings([_position(current_price=2400.5, in_range=False)], "Base")
+    check("below its range: the same, with the price below",
+          len(warnings) == 1 and "(2,850–3,150 USDC per ETH) is out of range: ETH is at 2,400.5 USDC" in warnings[0],
+          str(warnings))
+
+    full = _position(min_price=0.0, max_price=None, full_range=True, in_range=False)
+    check("a full-range position is never out of range", telebot.position_warnings([full], "Base") == [])
+
+    small = _position(pair="pepe/eth", base="pepe", quote="eth", min_price=0.00000041231, max_price=0.0000005,
+                      current_price=0.00000061234, in_range=False)
+    warnings = telebot.position_warnings([small], "Base")
+    check("small prices keep five significant figures and never an exponent",
+          len(warnings) == 1 and "Your PEPE/ETH position on Base (0.00000041231–0.0000005 ETH per PEPE)" in warnings[0]
+          and "PEPE is at 0.00000061234 ETH" in warnings[0], str(warnings))
+    large = _position(pair="wbtc/usdc", base="wbtc", quote="usdc", min_price=95_000.25, max_price=120_000.4,
+                      current_price=131_234.4, in_range=False)
+    warnings = telebot.position_warnings([large], "Base")
+    check("from 100,000 up, whole numbers; below it, five figures",
+          len(warnings) == 1 and "(95,000–120,000 USDC per WBTC)" in warnings[0]
+          and "WBTC is at 131,234 USDC" in warnings[0], str(warnings))
+    stable = _position(pair="usdc/usdt", base="usdc", quote="usdt", min_price=0.995, max_price=1.005,
+                       current_price=1.0112, in_range=False)
+    warnings = telebot.position_warnings([stable], "Base")
+    check("a stablecoin range keeps its two ends apart",
+          len(warnings) == 1 and "(0.995–1.005 USDT per USDC)" in warnings[0] and "USDC is at 1.0112 USDT" in warnings[0],
+          str(warnings))
+
+    mixed = [_position(id=1), _position(id=2, current_price=3420.0, in_range=False), full,
+             _position(id=3, current_price=2400.5, in_range=False)]
+    warnings = telebot.position_warnings(mixed, "Base")
+    check("one warning per position out of range, in order",
+          len(warnings) == 2 and "3,420" in warnings[0] and "2,400.5" in warnings[1], str(warnings))
+
+
+def test_position_check():
+    print("\n[6b] the check mentions positions out of range on a Uniswap V3 chain, and only there")
+    now = int(time.time())
+    fine = {"session_active": True, "session_expires_at": now + 30 * 86_400,
+            "daily_limit_usd": 100.0, "remaining_usd": 90.0}
+    low = {**fine, "remaining_usd": 1.0}
+    out = [_position(current_price=3420.0, in_range=False), _position(id=8)]
+    user = make_user(4001, wallet_chains=(BASE, BSC))
+    answers = {"status": fine, "positions": out}
+    reads = []
+    original = telebot._read_wallet_status, telebot._read_positions
+    telebot._read_wallet_status = lambda user_id, chain_id, network: answers["status"]
+
+    def fake_positions(user_id, chain_id, network):
+        reads.append((user_id, chain_id, network))
+        return answers["positions"]
+
+    telebot._read_positions = fake_positions
+    try:
+        bot = FakeBot()
+        asyncio.run(telebot._warn(bot, 4001, user, BASE, "base"))
+        check("on Base the positions are read, on the bot's network", reads == [(user, BASE, "base")], str(reads))
+        check("and the one out of range is mentioned", bot.sent == [(4001, OUT_OF_RANGE_ABOVE)], str(bot.sent))
+
+        reads.clear()
+        bot = FakeBot()
+        asyncio.run(telebot._warn(bot, 4001, user, BSC, "bsc"))
+        check("on BSC (PancakeSwap V2) no positions are read", reads == [], str(reads))
+        check("and nothing is said about them", bot.sent == [], str(bot.sent))
+
+        answers["status"] = low
+        bot = FakeBot()
+        asyncio.run(telebot._warn(bot, 4001, user, BASE, "base"))
+        check("with the wallet's own warnings first",
+              [text.split(":")[0] for _, text in bot.sent]
+              == ["⚠️ Low spending budget on Base", "⚠️ Your ETH/USDC position on Base (2,850–3,150 USDC per ETH) is out of range"],
+              str(bot.sent))
+
+        answers["status"] = None
+        bot = FakeBot()
+        asyncio.run(telebot._warn(bot, 4001, user, BASE, "base"))
+        check("a wallet that can't be read still gets its position warning", bot.sent == [(4001, OUT_OF_RANGE_ABOVE)],
+              str(bot.sent))
+
+        bot = FakeBot()
+        job = SimpleNamespace(chat_id=4001, data=user)
+        answers["status"] = fine
+        asyncio.run(telebot.first_check(SimpleNamespace(bot_data=BASE_BOT, bot=bot, job=job)))
+        check("the check after /start mentions it too", bot.sent == [(4001, OUT_OF_RANGE_ABOVE)], str(bot.sent))
+    finally:
+        telebot._read_wallet_status, telebot._read_positions = original
+
+    # The real positions read: on the bot's chain, and a failure leaves the wallet's warnings alone.
+    seen = []
+    original_read = telebot.read_positions
+    try:
+        telebot.read_positions = lambda user_id, chain_id: seen.append((db.get_user_network(user_id), chain_id)) or out
+        check("the positions are read on the bot's chain", telebot._read_positions(user, BASE, "base") == out
+              and seen == [("base", BASE)], str(seen))
+
+        def broken(user_id, chain_id):
+            raise RuntimeError("node down")
+
+        telebot.read_positions = broken
+        check("a failed positions read is no positions", telebot._read_positions(user, BASE, "base") == [])
+        original_status = telebot._read_wallet_status
+        telebot._read_wallet_status = lambda user_id, chain_id, network: low
+        try:
+            bot = FakeBot()
+            asyncio.run(telebot._warn(bot, 4001, user, BASE, "base"))
+            check("and doesn't stop the wallet's own warnings",
+                  len(bot.sent) == 1 and "Low spending budget on Base" in bot.sent[0][1], str(bot.sent))
+        finally:
+            telebot._read_wallet_status = original_status
+    finally:
+        telebot.read_positions = original_read
+
+
 def test_daily_check():
     print("\n[6] the daily check reaches each linked chat with a wallet on the bot's chain")
     low = {"session_active": True, "session_expires_at": int(time.time()) + 30 * 86_400,
@@ -323,6 +456,9 @@ def test_daily_check():
         return fine if user_id == fine_user else low
 
     telebot._read_wallet_status = fake_status
+    # Arbitrum trades on Uniswap V3, so the check reads positions too: none here (see [6b]).
+    original_positions = telebot._read_positions
+    telebot._read_positions = lambda user_id, chain_id, network: []
     try:
         bot = FakeBot(errors={2001: Forbidden("bot was blocked by the user"), 2002: TimedOut()})
         asyncio.run(telebot.daily_check(SimpleNamespace(bot_data=ARBITRUM_BOT, bot=bot)))
@@ -338,6 +474,7 @@ def test_daily_check():
         check("the check after /start warns that one chat", [chat for chat, _ in bot.sent] == [2003], str(bot.sent))
     finally:
         telebot._read_wallet_status = original
+        telebot._read_positions = original_positions
 
     # The real read makes the bot's chain the acting network, whatever the user last deployed on.
     seen = []
@@ -457,7 +594,9 @@ if __name__ == "__main__":
         test_replies_fit_telegram()
         test_replies_keep_their_formatting()
         test_wallet_warnings()
+        test_position_warnings()
         test_daily_check()
+        test_position_check()
         test_network_check()
         test_one_turn_at_a_time_per_chat()
     finally:

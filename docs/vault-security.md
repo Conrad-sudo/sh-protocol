@@ -29,7 +29,7 @@ BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/your_alchemy_key
 CELO_RPC_URL=https://celo-mainnet.g.alchemy.com/v2/your_alchemy_key
 
 # AI / bot credentials
-ANTHROPIC_API_KEY=your_anthropic_api_key_here   # default LLM; not needed if you swap in another provider
+DEEPSEEK_API_KEY=your_deepseek_api_key_here     # default LLM; not needed if you swap in another provider
 APP_USER_ID=1                                   # which account the local harnesses run as (see setup.md)
 
 # Optional — the Telegram bots, one per network (`make bot`). A token per bot, from @BotFather, and
@@ -86,7 +86,7 @@ ALCHEMY_API_KEY=your_alchemy_key
 >
 > **The bot tokens are optional — the whole Telegram layer is.** `MITFAH_<STEM>_API` is read only by `telebot.py` (`make bot`), which starts a bot for each network that has one; `MITFAH_<STEM>_USERNAME` is read by the API, to mint the link that opens a bot and to list the bots in the web app. The interactive CLI (`make agent`) reads neither, so you can run the full agent without a bot or a Telegram account; it runs as `APP_USER_ID` (see [setup.md](setup.md)). On a live chain, `TELEGRAM_BUNDLER` must hold that chain's native coin for every network whose bot you run.
 >
-> **`ANTHROPIC_API_KEY` is only the default.** The agent uses Anthropic's Claude out of the box, but the LLM is not tied to Anthropic — swap in any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)), and this key is no longer needed. Some LLM provider is always required; Anthropic specifically is not.
+> **`DEEPSEEK_API_KEY` is only the default.** The agent uses DeepSeek out of the box, but the LLM is not tied to DeepSeek — swap in any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)), and this key is no longer needed. Some LLM provider is always required; DeepSeek specifically is not.
 
 ---
 

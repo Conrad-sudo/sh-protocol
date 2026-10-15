@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { formatTimeLeft, formatTokenAmount, formatUsd, formatWindow, isValidAmount, shortAddress } from './format'
+import {
+  formatPrice,
+  formatTimeLeft,
+  formatTokenAmount,
+  formatUsd,
+  formatWindow,
+  isValidAmount,
+  shortAddress,
+} from './format'
 
 describe('shortAddress', () => {
   it('keeps the start and end of an address', () => {
@@ -61,6 +69,21 @@ describe('formatTokenAmount', () => {
   it('never shows dust as zero', () => {
     expect(formatTokenAmount('1', 18)).toBe('<0.000001')
     expect(formatTokenAmount('5', 6, 2)).toBe('<0.01')
+  })
+})
+
+describe('formatPrice', () => {
+  it('keeps five significant figures, so close prices stay apart', () => {
+    expect(formatPrice(3150.1234)).toBe('3,150.1')
+    expect(formatPrice(2850)).toBe('2,850')
+    expect(formatPrice(0.99501)).toBe('0.99501')
+    expect(formatPrice(1.00499)).toBe('1.005')
+  })
+
+  it('shows small prices in full and large ones as whole numbers', () => {
+    expect(formatPrice(0.000412312)).toBe('0.00041231')
+    expect(formatPrice(123_456.7)).toBe('123,457')
+    expect(formatPrice(0)).toBe('0')
   })
 })
 

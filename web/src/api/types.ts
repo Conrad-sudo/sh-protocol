@@ -97,11 +97,20 @@ export interface Chain {
   fork: boolean
   /** That fork's local node, for the user's wallet (each fork has its own port); null on a live chain. */
   rpc_url: string | null
-  /** The exchange router every wallet here is deployed trusting, or null where there is none. */
-  router: string | null
+  /**
+   * The exchange contracts every new wallet here is deployed trusting, checksummed, in this order:
+   * Uniswap V3's router then its positions contract, or PancakeSwap's router on BSC. Empty where the
+   * network has no exchange.
+   */
+  default_spenders: string[]
+  /** The exchange the assistant swaps and provides liquidity on, or null where it can do neither. */
+  exchange: Exchange | null
   /** The username (no @) of this network's Telegram bot, or null where it has none. */
   telegram_bot: string | null
 }
+
+/** Uniswap V3 on Ethereum, Sepolia, Arbitrum and Base; PancakeSwap V2 on BSC. */
+export type Exchange = 'uniswap-v3' | 'pancakeswap-v2'
 
 /** One row of GET /api/wallet/{chain_id} `balances`. A token that could not be read has `error`. */
 export interface TokenBalance {
@@ -135,12 +144,44 @@ export interface TokenBalance {
   error?: string
 }
 
-/** How much of one of a pool's tokens an LP row holds. */
+/** How much of one of a pool's tokens an LP row or a liquidity position holds. */
 export interface PoolShare {
   ticker: string
   decimals: number
   /** Integer string in the token's smallest unit. */
   raw: string
+}
+
+/**
+ * A Uniswap V3 liquidity position the wallet holds, from GET /api/wallet/{chain_id} `positions`: a
+ * deposit into one pool that earns a share of its fees while the price stays between two bounds.
+ * Listed only while it still holds liquidity or unclaimed fees, and only when the user knows both
+ * of its tokens: anyone can send a position to any wallet.
+ *
+ * Prices are in whole tokens of `quote` per `base`, e.g. USDC per ETH. The native coin is named by
+ * its own ticker ("eth"), never as its wrapped token.
+ */
+export interface Position {
+  /** The position's NFT id. */
+  id: number
+  /** "eth/usdc": the base token, then the quote token. */
+  pair: string
+  base: string
+  quote: string
+  /** The pool's fee tier as a percentage: 0.05 for the 0.05% pool. */
+  fee_pct: number
+  /** The range's lower bound; 0 for a full-range position. */
+  min_price: number
+  /** The range's upper bound; null for a full-range position. */
+  max_price: number | null
+  full_range: boolean
+  current_price: number
+  /** True while the price is inside the range, the only time the position earns fees. */
+  in_range: boolean
+  /** What the position holds now: the base token first. */
+  amounts: PoolShare[]
+  /** Fees it has earned and nobody has collected yet: the base token first. */
+  fees: PoolShare[]
 }
 
 /** GET /api/wallet/{chain_id} (get_wallet_state): everything the dashboard shows. */
@@ -183,10 +224,22 @@ export interface WalletState {
   }
   limits: {
     max_op_gas_cost_wei: string
+    /**
+     * The most the assistant's operations may pay in network fees per day, all together. Null for
+     * a wallet made before the budget existed.
+     */
+    session_gas: {
+      budget_wei: string
+      remaining_wei: string
+      /** Unix seconds: when what's been used comes back. Null while none of it is used. */
+      refills_at: number | null
+    } | null
     allowlist_enabled: boolean
     trusted_spenders: string[]
   }
   balances: TokenBalance[]
+  /** The wallet's Uniswap V3 positions. Always empty on a network that doesn't use Uniswap V3. */
+  positions: Position[]
 }
 
 /**
@@ -209,6 +262,7 @@ export type OwnerAction =
   | { kind: 'session'; action: 'remove' }
   | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
   | { kind: 'max-gas'; maxCostEth: string }
+  | { kind: 'gas-budget'; budgetEth: string }
   /**
    * The contract allowlist. `enable` lists `targets` and turns it on in one transaction (`targets` may
    * be empty when the list already has entries); `remove` takes exactly one; `disable` ignores them.
@@ -218,7 +272,7 @@ export type OwnerAction =
 /** One contract on, or worth adding to, the wallet's contract allowlist. */
 export interface AllowlistEntry {
   address: string
-  /** Mitfah's name for it ("USDC", "Uniswap V2 router", "sam (contact)"), or null when it has none. */
+  /** Mitfah's name for it ("USDC", "Uniswap V3 router", "sam (contact)"), or null when it has none. */
   label: string | null
 }
 

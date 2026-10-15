@@ -7,11 +7,13 @@ The `app/` directory bridges the AI agent to the on-chain contracts. It is built
 ```
 app/
 ├── constants.py           ← Chain IDs, ETH sentinel, native-wrapped ticker map
-├── db.py                  ← SQLite data layer (all reads/writes to wallet.db)
+├── db/                    ← SQLite data layer (all reads/writes to wallet.db), one module per area; numbered migrations in db/schema.py
 ├── seed_data.py           ← Static reference data (chains, RPCs, token addresses) seeded by make db
 ├── network_config.py      ← Web3 connection factory
 ├── contracts.py           ← Contract loading with per-user_id caching; ERC-7579 calldata/nonce helpers
-├── toolkits.py            ← Per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits (cached)
+├── toolkits.py            ← Per-user_id toolkits (cached): langchain-erc20, the chain's exchange (Uniswap V3 or PancakeSwap V2), langchain-erc8004
+├── langchain_uniswap_v3/  ← In-repo Uniswap V3 toolkit: swaps through SwapRouter02, positions through the position manager; no app imports
+├── positions.py           ← The wallet's Uniswap V3 positions, read one way for the dashboard, the agent and the Telegram bots
 ├── userop.py              ← UserOp calldata, nonce and session-key signing
 ├── bundler.py             ← The app's own ERC-4337 bundler, on every network — single + batch
 ├── parallel.py            ← Runs independent chain reads at the same time (two pools: reads, tasks)
@@ -24,11 +26,13 @@ app/
 ├── tx_movements.py        ← What each transaction moved in or out of the wallet, for the History tab's filters
 ├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
-├── tools.py               ← LangChain tool wrappers for the AI agent
+├── tools/                 ← LangChain tool wrappers for the AI agent, one module per area; get_tools() in tools/__init__.py
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
 ├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
-├── api.py                 ← FastAPI HTTP API — what the web app in web/ talks to
+├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
+├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share
+├── redact.py              ← Masks API keys in HTTP errors, the model's tool results and the logs
 ├── telebot.py             ← Telegram front end: one bot per chain, all in one process
 ├── telegram_bots.py       ← Each chain's bot token and username, from .env
 ├── telegram_format.py     ← The agent's Markdown as Telegram HTML, under the web app's rules
@@ -46,16 +50,26 @@ app/
     ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
     ├── test_bundler.py    ← The L1 data charge in preVerificationGas: Base's fee, Arbitrum's gas, none on forks; fake node (make bundler-test)
     ├── test_telebot.py    ← The Telegram bots: own chain each, private chats only, one link for all, formatting, daily check (make telebot-test)
+    ├── test_redact.py     ← API keys kept out of HTTP errors, tool results and logs (make redact-test)
+    ├── test_migrations.py ← The numbered database migrations (make migrations-test)
+    ├── test_uniswap_v3.py ← The V3 toolkit: tick math vs Solidity, addresses vs Constants.s.sol, every plan's calls; stand-in chain (make uniswap-v3-test)
+    ├── test_positions.py  ← The positions reader: spam and empty positions hidden, native coin named, base first, never raises (make positions-test)
+    ├── test_position_tools.py ← The agent's V3 liquidity tools, their refusals, and the per-chain liquidity-tool filter (make position-tools-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
 ```
 
-> **ERC20 and Uniswap V2 calldata comes from two external packages.**
-> [`langchain-erc20`](https://pypi.org/project/langchain-erc20/) and
-> [`langchain-uniswap-v2`](https://pypi.org/project/langchain-uniswap-v2/) build every balance
-> read, quote, slippage bound and approval sequence. They return an ordered *execution plan* of
-> `(to, value, data)` calls and never sign or submit; `tools._quote_plan` prices a plan as one
-> UserOperation and parks it for the user to approve. That is why `abi.py` no longer carries the router/factory/pair/WETH ABIs and
+> **ERC20 and exchange calldata comes from toolkits, never from the agent.**
+> [`langchain-erc20`](https://pypi.org/project/langchain-erc20/) builds the ERC-20 side. The
+> exchange is the chain's (`constants.get_exchange`): the in-repo `app/langchain_uniswap_v3/` on
+> Ethereum, Sepolia, Arbitrum and Base (swaps through SwapRouter02, liquidity as positions through
+> the NonfungiblePositionManager — "the position manager"), and
+> [`langchain-uniswap-v2`](https://pypi.org/project/langchain-uniswap-v2/), pointed at PancakeSwap's
+> router, on BSC. They build every balance read, quote, slippage bound and approval sequence,
+> return an ordered *execution plan* of `(to, value, data)` calls and never sign or submit;
+> `tools/quoting._quote_plan` prices a plan as one UserOperation and parks it for the user to
+> approve. The V3 toolkit is modeled on the V2 package — same constructor style, `for_chain`,
+> `get_tools()`, plan shape and call roles — and imports nothing from the app. That is why `abi.py` no longer carries the router/factory/pair/WETH ABIs and
 > `constants.py` no longer hardcodes factory addresses.
 
 > **Celo support is partial.** Celo's tokens are seeded into `supported_tokens` and the network routing handles `"celo"`/`"celo-fork"`, but there is no Solidity-side deployment path yet, and Celo is intentionally excluded from `deploy_wallet.py`'s default watched-token map (see [docs/contracts.md](contracts.md#helperconfigssol)).
@@ -63,13 +77,20 @@ app/
 ## Module Dependency Flow
 
 ```
-telebot.py ──────────► smart_wallet_agent.py ──► tools.py ──► contracts.py ──► network_config.py ──► db.py
-                                                  tools.py ──► toolkits.py ──► contracts.py
-                                                  tools.py ──► quotes.py  ───► bundler.py
-                                                  tools.py ──► bundler.py ───► userop.py ──► vault_signer.py
-                                                               bundler.py ───► tx_sender.py
-                                                  tools.py ──► db.py
-deploy_wallet.py ───────────────────────────────────────────────────────────────────────────────────► db.py
+telebot.py ──────────► smart_wallet_agent.py ──► tools/ ──► contracts.py ──► network_config.py ──► db/
+                                                  tools/ ──► toolkits.py ──► contracts.py
+                                                  tools/ ──► quotes.py  ───► bundler.py
+                                                  tools/ ──► bundler.py ───► userop.py ──► vault_signer.py
+                                                             bundler.py ───► tx_sender.py
+                                                  tools/ ──► db/
+api.py ──► routes/ ──► smart_wallet_agent.py, contracts.py, userop.py, tx_history.py, db/
+deploy_wallet.py ──────────────────────────────────────────────────────────────────────────────► db/
+
+Inside the packages the imports run one way too. tools/: common ← checks ← quoting ← transfers,
+uniswap, positions, erc8004 (positions also takes uniswap's _require_exchange); sending and
+wallet_reads use common only. routes/: every router imports deps;
+allowlist also imports wallet and owner. db/: every module imports get_db from db/__init__.py,
+which re-exports them all, so `from db import ...` works as it always did.
 ```
 
 The dependency graph is one-directional with a single exception: `contracts.invalidate_cache` imports `toolkits.invalidate_toolkits` inside the function body, because `toolkits.py` imports `load_session_handler` from `contracts.py` at module scope. Keeping invalidation behind one entry point is worth the function-local import.
@@ -91,11 +112,16 @@ CHAIN_ID_BASE       = 8453
 WEI_PER_ETH         = 10**18
 ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 
-# get_router(chain_id) returns the chain's canonical V2 router from langchain-uniswap-v2's
-# KNOWN_NETWORKS, checksummed (the package stores some, e.g. Arbitrum's, in lowercase).
-# V2 factory addresses stay unhardcoded: langchain-uniswap-v2 reads router.factory()
-# off that router. See toolkits.py.
+# get_exchange(chain_id)        -> "uniswap-v3" (1, 11155111, 42161, 8453) | "pancakeswap-v2" (56) | None
+# get_v3_network(chain_id)      -> the V3 toolkit's KNOWN_NETWORKS row (swap_router, quoter,
+#                                  position_manager, native_wrapped), checksummed; None off V3
+# get_default_spenders(chain_id)-> [SwapRouter02, position manager] on V3, [PancakeSwap router] on BSC, []
+# get_router(chain_id) returns the chain's V2 router from langchain-uniswap-v2's KNOWN_NETWORKS,
+# checksummed (the package stores some, e.g. Arbitrum's, in lowercase). V2 factory addresses stay
+# unhardcoded: langchain-uniswap-v2 reads router.factory() off that router. See toolkits.py.
 ```
+
+**The exchange is per chain.** `get_exchange` decides which toolkit builds a chain's swaps and liquidity, which liquidity tools the agent sees (Section 3) and what `/api/chains` reports. `get_default_spenders` is what every new wallet is deployed trusting (`deployWallet`'s `trustedSpenders`): the contracts the assistant approves tokens to, which must be trusted because the module refuses an approval of an unpriced token to anyone else (a token the user added; a BSC LP token). The app refuses to remove them (`routes/owner.py`), and the Controls page keeps them off its removable list. `get_router` stays the V2 router: BSC's exchange, and on the V3 chains the router wallets used before the move — the dashboard reads their old V2 LP tokens through its factory, History still names it, and wallets deployed before the move trust only it. The V3 addresses live in `app/langchain_uniswap_v3/networks.py`, copied from `script/Constants.s.sol`, which stays the source of truth: `make uniswap-v3-test` fails if the two differ.
 
 `NATIVE_WRAPPED_TICKER` maps each chain ID to its wrapped-native ticker — `"weth"` on Ethereum/Sepolia/Anvil/Arbitrum/Base (both L2s pay gas in ETH), `"wbnb"` on BSC, `"celo"` on Celo. `get_native_wrapped_ticker(chain_id)` and `get_native_asset_ticker(chain_id)` resolve these, raising `ValueError` for unconfigured chains.
 
@@ -105,9 +131,15 @@ ETH_SENTINEL        = "0x0000000000000000000000000000000000000000"
 
 ---
 
-## `db.py`
+## `db/`
 
-The data persistence layer. All SQLite reads and writes go through this module. It has no web3 dependency, making it independently testable. Each thread gets its own connection via `threading.local()`.
+The data persistence layer. All SQLite reads and writes go through this package. `db/__init__.py` holds what everything shares (where the database lives, the per-thread connection via `threading.local()`, the cached JSON reads) and re-exports every function from the modules that hold the tables: `schema` (tables and migrations), `seed` (reference data), `chains`, `wallets` (wallets and session keys), `tokens`, `contacts`, `users`, `signin` (refresh tokens and nonces) and `transactions`.
+
+**Where it lives.** `APP_DB_PATH`, or else `app/wallet.db`. A server keeps it on a backed-up volume outside the checkout.
+
+**Migrations are numbered.** `db.schema.MIGRATIONS` is an ordered tuple; SQLite's `PRAGMA user_version` records how many have run, and `init_db` (`make db`) runs the rest, in order. The first five predate the numbering: a database from before it reads version 0 whatever shape it is in, so those five check the shape themselves. Add a schema change as a new migration at the end; never edit or reorder one that has run. A database newer than the code is refused rather than written to. `make db` is now `PYTHONPATH=app python -m db`.
+
+**ABIs are parsed once.** `get_json` caches each file's parse until its modification time or size changes, so a `forge build` is picked up without a restart. The cached value is shared: read it, never change it.
 
 **Schema (`wallet.db`):**
 
@@ -217,9 +249,9 @@ CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL,
 
 **Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through (the owner's withdraw endpoint relies on that). The agent's tools add one rule on top, in `tools._token_address`: an address is accepted only for a listed or added token, so the chat can never trade or send a token the owner didn't choose (THREAT_MODEL §4.2). It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bots' process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
 
-**The dashboard's tokens (`dashboard_tokens`).** The dashboard shows only the tokens the user chose: the native token, the listed tokens in `dashboard_tokens`, and their `custom_tokens`. Every wallet read copies the wallet's counted (watched) tokens into `dashboard_tokens`, plus the wrapped native token (`api._show_counted_tokens`) — so the tokens picked at deploy, tokens counted later in Controls, and wallets made before the list existed all show without a separate write. A listed token can also be added by address (it keeps its listed ticker and skips the symbol rules and the 25-token cap). Any token can be removed except the native token and WETH/WBNB; a listed token is refused (409) while the wallet still counts it, so the dashboard always shows everything the limit covers. The list is dashboard-only: the agent still knows every listed token. Read as a join on `supported_tokens`, so a token Mitfah stops listing drops off every dashboard.
+**The dashboard's tokens (`dashboard_tokens`).** The dashboard shows only the tokens the user chose: the native token, the listed tokens in `dashboard_tokens`, and their `custom_tokens`. Every wallet read copies the wallet's counted (watched) tokens into `dashboard_tokens`, plus the wrapped native token (`routes/wallet._show_counted_tokens`) — so the tokens picked at deploy, tokens counted later in Controls, and wallets made before the list existed all show without a separate write. A listed token can also be added by address (it keeps its listed ticker and skips the symbol rules and the 25-token cap). Any token can be removed except the native token and WETH/WBNB; a listed token is refused (409) while the wallet still counts it, so the dashboard always shows everything the limit covers. The list is dashboard-only: the agent still knows every listed token. Read as a join on `supported_tokens`, so a token Mitfah stops listing drops off every dashboard.
 
-**LP tokens on the dashboard (`lp_tokens`, 2026-10-05).** When the user agrees to an `add_liquidity` quote, `confirm_transaction` saves the deposit's pool (`db.save_lp_token`) *before* the deposit is sent, like the History row, so one that lands after the wait still shows; a failure to save never fails the send. The quote carries the pool (`PendingTransaction.lp_pool`, from `tools._lp_pool`); nothing else saves one. A pool is one row whichever way round it was named — its two tokens in the pool's own order — and the wrapped native token is named as the native asset (`eth`), since that is what goes in and comes back. Every wallet read lists, after the added tokens, one row per pool the wallet still holds LP tokens in (`api._lp_balances`): `lp: true`, named like `eth/usdc lp` (native side first), with `underlying` = the wallet's share of each of the pool's tokens right now (balance × reserve ÷ totalSupply). A pool the wallet holds nothing in isn't shown, and less than a trillionth of a pool counts as nothing (`_LP_DUST`): "remove all" passes through a float and can leave a few wei. The first read of a pool finds its address (`factory.getPair`, the factory read once per chain off the router) and its tokens' decimals and saves them; after that it is three reads per pool, all at once. The list is the dashboard's only — it is deliberately not `custom_tokens`, so the agent still can't name or send an LP token (THREAT_MODEL §4.2). Only deposits made through the assistant are tracked; liquidity added elsewhere isn't found.
+**LP tokens on the dashboard (`lp_tokens`, 2026-10-05).** When the user agrees to an `add_liquidity` quote (PancakeSwap V2 on BSC; on the Uniswap V3 chains liquidity is a position, read straight from the chain by `positions.py`), `confirm_transaction` saves the deposit's pool (`db.save_lp_token`) *before* the deposit is sent, like the History row, so one that lands after the wait still shows; a failure to save never fails the send. The quote carries the pool (`PendingTransaction.lp_pool`, from `tools/uniswap._lp_pool`); nothing else saves one. A pool is one row whichever way round it was named — its two tokens in the pool's own order — and the wrapped native token is named as the native asset (`eth`), since that is what goes in and comes back. Every wallet read lists, after the added tokens, one row per pool the wallet still holds LP tokens in (`routes/wallet._lp_balances`): `lp: true`, named like `eth/usdc lp` (native side first), with `underlying` = the wallet's share of each of the pool's tokens right now (balance × reserve ÷ totalSupply). A pool the wallet holds nothing in isn't shown, and less than a trillionth of a pool counts as nothing (`_LP_DUST`): "remove all" passes through a float and can leave a few wei. The first read of a pool finds its address (`factory.getPair`, the factory read once per chain off the router) and its tokens' decimals and saves them; after that it is three reads per pool, all at once. The list is the dashboard's only — it is deliberately not `custom_tokens`, so the agent still can't name or send an LP token (THREAT_MODEL §4.2). Only deposits made through the assistant are tracked; liquidity added elsewhere isn't found. On the V3 chains, the V2 LP tokens a wallet took before the move still show this way (through the V2 router's factory, `constants.get_router`), and the owner can withdraw them; the assistant no longer takes them out there.
 
 **Initialisation:** run `make db` once to create tables and seed. Re-running is safe (`INSERT OR REPLACE`, each chain's tokens replaced as a whole, plus the drops above). The `sepolia` RPC row comes from `SEPOLIA_RPC_URL` in `.env`, keeping API-keyed URLs out of source control.
 
@@ -285,27 +317,41 @@ def session_key_nonce_key(module_address) -> int                    # uint192(ui
 
 ## `toolkits.py`
 
-Builds and caches the two external toolkits per `user_id`, mirroring `contracts.py`'s caching. A toolkit instance is bound to one RPC, one router and one token map, so it cannot be shared across users.
+Builds and caches the toolkits per `(user_id, chain_id)`, mirroring `contracts.py`'s caching. A toolkit instance is bound to one RPC, one chain's contracts and one token map, so it cannot be shared across users or chains.
 
 ```python
 def get_erc20_tools(user_id)   -> dict[str, BaseTool]   # langchain-erc20
-def get_uniswap_tools(user_id) -> dict[str, BaseTool]   # langchain-uniswap-v2
+def get_uniswap_tools(user_id) -> dict[str, BaseTool]   # the chain's exchange: langchain_uniswap_v3, else langchain-uniswap-v2
+def get_erc8004_tools(user_id) -> dict[str, BaseTool]   # langchain-erc8004 (see the ERC-8004 tools below)
 def invalidate_toolkits(user_id) -> None                # called by contracts.invalidate_cache
 ```
 
-Both are constructed with `tx_mode="calls"`, which emits `plan["calls"]` and makes zero nonce/gas/fee RPC calls — the right mode for a smart account, whose nonce is `EntryPoint.getNonce(sender, key)` rather than an EOA transaction count.
+All are constructed with `tx_mode="calls"`, which emits `plan["calls"]` and makes zero nonce/gas/fee RPC calls — the right mode for a smart account, whose nonce is `EntryPoint.getNonce(sender, key)` rather than an EOA transaction count.
 
-Three configuration choices carry weight:
+**`get_uniswap_tools` builds the chain's exchange** (`constants.get_exchange`): `UniswapV3Toolkit` on a Uniswap V3 chain, `UniswapV2Toolkit` everywhere else (BSC's PancakeSwap). The two name their two quote tools and six swap tools alike, with the same arguments and summary fields, so `tools/uniswap.py`'s `swap` serves both. The V3 toolkit adds `suggest_price_ranges`, `open_position`, `add_to_position`, `withdraw_from_position`, `collect_fees`, `get_positions` and `get_position`, which `tools/positions.py` and `positions.py` wrap.
+
+The configuration choices that carry weight:
 
 | Setting | Why |
 |---|---|
-| `router_address` read from `constants.get_router(chain_id)` | Never the package's own chain registry: it has no Anvil entry and points BSC elsewhere. The router is no longer protocol config (`SHRegistry.router` is gone), so this constant is also what `deploy_wallet` passes as `deployWallet`'s `trustedSpenders` (and what `trust_router` would pass to `addTrustedSpender` when re-granting) — one source of truth, so the router the toolkit builds calldata for is always the one the wallet trusts. |
-| `factory_address=None` | The toolkit reads `router.factory()`, so pair lookups cannot drift from the router in use, and chains with no hardcoded factory work. |
-| `reset_residual_approvals=True` | Appends `approve(spender, 0)` wherever the router may pull less than approved. Already the default in calls mode; explicit because the module depends on it. |
+| V3: the router, position manager, quoter and WETH from `constants.get_v3_network(chain_id)` | The same SwapRouter02 and position manager every new wallet is deployed trusting (`get_default_spenders`), so the calldata targets what the wallet trusts. The constructor reads `factory()` and `WETH9()` off all three contracts and refuses to start unless they agree — a few RPC reads, once per user and chain. |
+| V3: `stable_tokens` = the chain's listed USDC, USDT and DAI (`_STABLECOIN_TICKERS`) | The toolkit's only notion of a stablecoin. It decides which side of a pair prices are quoted in (USDC per ETH, never ETH per USDC; otherwise WETH is the quote) and which ranges a pair is offered: ±0.5/1/3% for two stablecoins, ±5/15/50% for anything else. Listed tokens only: a token a user added can call itself anything, and one passing for a stablecoin would shrink its pair's ranges to a fraction of a percent. |
+| V2: `router_address` read from `constants.get_router(chain_id)` | Never the package's own chain registry: it has no Anvil entry and points BSC elsewhere. On BSC this router is also the wallet's one default spender, so the router the toolkit builds calldata for is the one the wallet trusts. |
+| V2: `factory_address=None` | The toolkit reads `router.factory()`, so pair lookups cannot drift from the router in use, and chains with no hardcoded factory work. |
+| `reset_residual_approvals=True` | Appends `approve(spender, 0)` wherever the spender may pull less than approved: exact-output swaps, V2 `addLiquidity`, and every V3 `mint` and `increaseLiquidity`. Already the V2 package's default in calls mode; explicit in both because the module depends on it. |
+
+**The V3 toolkit (`app/langchain_uniswap_v3/`).** `networks.py` holds the four chains' addresses, `abis.py` minimal ABIs, `v3math.py` exact integer ports of `TickMath` and `LiquidityAmounts` (checked against Solidity's own values), and `toolkit.py` the tools. What differs from V2:
+
+- **Routing.** A pair has a pool per fee tier (0.01%, 0.05%, 0.3%, 1%). The candidates are the direct pool at each tier and one hop through WETH — no other hop tokens, as on V2. Pools are found with `factory.getPool`, never computed (the init-code hash in v3-periphery's 0.8 branch is wrong for the live pools); one that doesn't exist is skipped, and remembered as missing for 60 s. The rest are quoted with QuoterV2 in parallel and the best fill wins, a single pool on a tie. A hop costs two rounds of quotes, not one per pair of tiers: the direct tiers and the first leg's together, then — with the best first leg fixed — each second-leg tier along the whole path.
+- **Deadlines.** SwapRouter02's structs carry none, so every router write is its `multicall(deadline, [...])`.
+- **The native coin is never approved.** It goes in as the call's value (`refundETH` returns what an exact-output swap or a deposit didn't use); it comes out by swapping to the router, or collecting to the position manager, and `unwrapWETH9` to the recipient in the same multicall (`sweepToken` passes the other token on).
+- **Deposits** never create a pool: the pool is the given tier's, or the one with the most active liquidity. The range is rounded to the pool's tick spacing, and a range that at today's price needs only the other token is refused with which token to deposit instead.
+- **Withdrawals** are one position-manager multicall — `decreaseLiquidity`, then `collect` (and `burn` at 100%) — with no approval at all: the wallet owns the position, and the toolkit refuses one it doesn't (`ownerOf`). `collect_fees` refuses when there is nothing to collect.
+- **Reads.** `get_positions` lists an owner's positions (filtered to given tokens, up to the first 200 looked through); unclaimed fees come from an `eth_call` of `collect` made from the owner's address, which shows what it would pay and changes nothing.
 
 **They share the app's provider.** Each package builds its own web3 connection from the bare RPC URL, with web3's stock provider — the one that asks the chain id before every call. `_share_provider` points the ERC-20 and Uniswap toolkits' connections at the app's (`toolkit.w3.provider = w3.provider`), so they ask once too and share one HTTP session per chain; their contracts look the provider up per call, so everything already bound follows. The ERC-8004 toolkit keeps its own: it sets a 20 s timeout of its own and is off the send/swap path.
 
-`_BLOCKED_TOOLS` withholds `approve`, `approve_token` and `revoke_approval` from the returned dicts. They build valid calldata but always revert here (see the approvals note under `tools.py`), so exposing them would only let the agent burn a UserOp on a guaranteed failure.
+`_BLOCKED_TOOLS` withholds `approve`, `approve_token` and `revoke_approval` from the returned dicts. They build valid calldata but always revert here (see the approvals note under `tools/`), so exposing them would only let the agent burn a UserOp on a guaranteed failure.
 
 ---
 
@@ -403,7 +449,7 @@ Three properties do the work:
 - **The transaction is fixed before the user sees it.** A quote holds the calldata and gas the
   confirm will use, so there is no re-describing step in between for an instruction to sit in, and
   `action` is composed from the calls themselves (the packages' own `description` fields, or
-  `tools.py` for a bare native send) rather than by the model. The most a confirmed quote can do is
+  `tools/transfers.py` for a bare native send) rather than by the model. The most a confirmed quote can do is
   what its quote said.
 - **Confirming takes a real turn boundary.** `take` refuses a quote whose `turn_id` is not strictly
   less than the current one. `turn_id` comes from `smart_wallet_agent._next_turn_id()`, bumped once
@@ -441,7 +487,7 @@ Routes (all need a signed-in account and a wallet on the chain; none needs a sig
 | `POST /api/tokens/custom` `{chain_id, address}` | Runs the checks again, then saves: a listed token to `dashboard_tokens`, any other to `custom_tokens`. 201; 409 if a parallel request just added it. Counting a listed token is the owner's separate `watched-tokens/prepare` transaction |
 | `DELETE /api/tokens/custom/{chain_id}/{address}` | Takes it off the dashboard (404 if it isn't on it). 409 for a listed token the wallet still counts ("Stop counting it first"), 400 for WETH/WBNB. The tokens stay in the wallet |
 
-`GET /api/wallet/{chain_id}` lists only the dashboard's tokens in `balances`: the native token, then the listed ones in `dashboard_tokens` (`always_counted: true` on WETH/WBNB), then added ones with `custom: true` and their `name` (one `balanceOf` each; decimals are stored), then the LP tokens of the pools the assistant deposited into, with `lp: true` and `underlying` (see `lp_tokens` above). `POST /api/wallet/withdraw/prepare` accepts a token **address** as well as a ticker, so the owner can recover any token — added or not, LP tokens included.
+`GET /api/wallet/{chain_id}` lists only the dashboard's tokens in `balances`: the native token, then the listed ones in `dashboard_tokens` (`always_counted: true` on WETH/WBNB), then added ones with `custom: true` and their `name` (one `balanceOf` each; decimals are stored), then the LP tokens of the pools the assistant deposited into, with `lp: true` and `underlying` (see `lp_tokens` above). Beside `balances` it returns `positions`, the wallet's Uniswap V3 positions (`positions.py`; `[]` on a chain that doesn't trade on V3), which the dashboard's Liquidity positions card shows. `POST /api/wallet/withdraw/prepare` accepts a token **address** as well as a ticker, so the owner can recover any token — added or not, LP tokens included.
 
 ---
 
@@ -468,27 +514,27 @@ DEFAULT_WATCHED_TICKERS = {                 # tokens metered against the cap, pe
 
 Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress(deployer)` returns the address this deploy will land on — the factory salts with its own per-owner `deployCount`, so the value advances after each of our deploys and is untouched by anyone else's — then `create_pending_session_key(user_id, chain_id, predicted)` mints a fresh key **under the address the wallet is about to have** — the same `(user_id, chain_id, wallet_address)` key `tools._get_session_keys` resolves — and holds it in `pending_session_keys` until the deploy has mined. Without a predictable address the key could not exist before the deploy that takes it as an argument. The mismatch check after the receipt is deliberate: a wrong address would silently orphan the key. On a stale prediction it re-files the session key under the address that actually deployed rather than raising — the on-chain grant is already correct for it, and raising would strand a funded wallet with no `session_handlers` row.
 
-⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `[constants.get_router(chain_id)]`, or empty on bare Anvil, which has no Uniswap deployment. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
+⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `constants.get_default_spenders(chain_id)` — SwapRouter02 and the position manager on a Uniswap V3 chain, PancakeSwap's router on BSC — or empty on bare Anvil, which has no exchange. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
 
 The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. On a fork the deployer is also the API's bundler (`API_BUNDLER`, see `bundler.resolve_bundler`), and `make fund` tops up the Telegram bot's bundler (`TELEGRAM_BUNDLER`) at the same time, so there is no separate bundler-funding step.
 
 **`add_default_session(user_id)`** registers the wallet's **single** session key. It mints a **fresh** key via `create_pending_session_key` (Vault-encrypted, keyed to the wallet address), calls **`SessionHandler.addSession(key, validUntil)`** as the owner, and promotes the key out of pending once that mines. Granting evicts whatever key the wallet held. **No longer part of the deploy path** — `deploy_wallet` seeds the key inside `deployWallet` — it is kept for re-granting a key on a wallet deployed without one, or after `removeSession`. There are no per-target sessions, selectors or budgets to configure — the wallet-wide cap and the admin guard replace all of that; the one thing a key carries is its deadline. (The old `add_session(targets, functions, ...)` and the `approve()` router-pre-approval helper were removed: standing approvals now revert on-chain, so approvals only ever happen atomically inside the swap/liquidity tools.)
 
-**`deploy(user_id, network)`** is the top-level dispatcher (validates the network, then calls `deploy_wallet`) — invoked by `make deploy-wallet` via the `__main__` block, which also seeds a demo contact. `__main__` no longer calls `add_default_session` or `trust_router`: `deployWallet` does both.
+**`deploy(user_id, network)`** is the top-level dispatcher (validates the network, then calls `deploy_wallet`) — invoked by `make deploy-wallet` via the `__main__` block, which also seeds a demo contact. `__main__` no longer calls `add_default_session` or `trust_default_spenders`: `deployWallet` does both. `trust_default_spenders(user_id)` stays as a recovery helper — for a wallet deployed with no spenders, one deployed before its chain moved to Uniswap V3 (it trusts only the V2 router), or after `removeTrustedSpender` — and adds only the defaults the wallet doesn't trust yet.
 
 **Signing-key resolution** (`LIVE_PRIVATE_KEY_ENV`): live BSC and Celo use their own key (`BSC_PRIVATE_KEY`, `CELO_PRIVATE_KEY`); **every fork plus live Sepolia uses `API_BUNDLER`** (formerly `SEPOLIA_PRIVATE_KEY`); plain `anvil` falls back to `ANVIL_PRIVATE_KEY`. Forks of a real chain must avoid the well-known Anvil burner key: it is EIP-7702-delegated to drainers on real Sepolia/BSC/mainnet, and a fork inherits that code — which both breaks fork tests and disqualifies it as a `handleOps` beneficiary (the EntryPoint's bare ETH send reverts AA91 against an address with code).
 
 ---
 
-## `tools.py`
+## `tools/`
 
-Wraps blockchain operations as LangChain `@tool`-decorated functions; each docstring tells the LLM when/how to call it. `get_tools()` is the factory.
+Wraps blockchain operations as LangChain `@tool`-decorated functions; each docstring tells the LLM when/how to call it. `get_tools()` in `tools/__init__.py` is the factory. One module per area: `common` (amounts, token and contact resolution, slippage, the session key, legs), `checks` (the wallet checks and `preflight_check`), `quoting` (plan → quote), `sending` (`confirm_transaction`, `cancel_transaction`), `wallet_reads`, `transfers`, `uniswap` (swaps on either exchange, and PancakeSwap V2's liquidity), `positions` (Uniswap V3's liquidity) and `erc8004`. A refusal reaches the model through `_tool_error_text`, which masks any API key in it (`redact.py`).
 
-**The ERC20 and Uniswap tools are wrappers.** Their bodies do three things: resolve tickers and contact names to addresses, invoke the matching `langchain-erc20` / `langchain-uniswap-v2` tool to get an execution plan, and hand that plan to `_quote_plan`. `_quote_plan` prices a one-call plan as an ERC-7579 single execution and anything longer as an atomic batch, and parks it in `quotes.py`.
+**The ERC20 and exchange tools are wrappers.** Their bodies do three things: resolve tickers and contact names to addresses, invoke the matching `langchain-erc20` or exchange-toolkit tool (`langchain_uniswap_v3`, or `langchain-uniswap-v2` on BSC) to get an execution plan, and hand that plan to `_quote_plan`. `_quote_plan` prices a one-call plan as an ERC-7579 single execution and anything longer as an atomic batch, and parks it in `quotes.py`.
 
 **No write tool sends anything.** They all stop at a quote — what the transaction does, what it costs in USD, and a `quote_id`. `confirm_transaction(quote_id)` is the only tool in the app that signs and broadcasts, and `cancel_transaction(quote_id)` discards one. See `quotes.py` above for why the send is a separate, turn-gated step.
 
-The wrappers exist — rather than exposing the package tools directly — because the package tools take no `user_id` (a toolkit instance is bound to one user's chain), `langchain-uniswap-v2` accepts raw addresses only, and neither package submits anything. Their docstrings describe a *different* function signature (addresses, `from_address`, `nonce`, returns an unsubmitted plan), so they are not interchangeable with the docstrings here, which are the contract the LLM actually sees. See [langchain-packages-migration.md](langchain-packages-migration.md) §3.
+The wrappers exist — rather than exposing the package tools directly — because the package tools take no `user_id` (a toolkit instance is bound to one user's chain), the exchange toolkits accept raw addresses only, and no toolkit submits anything. Their docstrings describe a *different* function signature (addresses, `from_address`, `nonce`, returns an unsubmitted plan), so they are not interchangeable with the docstrings here, which are the contract the LLM actually sees. See [langchain-packages-migration.md](langchain-packages-migration.md) §3.
 
 **One key, one budget — and the model never handles the key.** The wallet on the user's CURRENT chain has exactly one session key, so there is nothing to choose: no tool takes it as an argument. `_quote_executions` reads it only to refuse early when there is none, and `confirm_transaction` reads it when it signs, so a key renewed between quote and confirm is the one used. (Until 2026-10-02 a `get_session_keys` tool handed the model the Vault ciphertext to pass back into every write — one model call to fetch it and ~90 characters of random text to repeat, per transaction.) Spending is bounded by one wallet-wide USD cap per window, read on-chain.
 
@@ -504,7 +550,7 @@ Removed on 2026-10-02, each covered by a tool above or by the checks every quote
 
 ### Read and quote tools
 
-`get_eth_balance`, `get_erc20_balance(token, contact?)` (the wallet's own balance, or a saved contact's with `contact`), `get_quote_in`, `get_quote_out`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance` (`token_b` defaults to `"eth"`, the native asset's pool), plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens` (returns `{"native": "ETH", "listed": [...], "custom": [...]}` — `custom` is the tokens the user added). The quote and preview tools are for questions: the write tools quote the router themselves.
+`get_eth_balance`, `get_erc20_balance(token, contact?)` (the wallet's own balance, or a saved contact's with `contact`), `get_quote_in`, `get_quote_out` (either exchange; on Uniswap V3 they price every fee tier), BSC's `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance` (`token_b` defaults to `"eth"`, the native asset's pool), the V3 chains' `suggest_price_ranges` and `get_positions` (see Uniswap V3 positions below), plus contacts (`get_contact`/`get_all_contacts`) and `get_supported_tokens` (returns `{"native": "ETH", "listed": [...], "custom": [...]}` — `custom` is the tokens the user added). The quote and preview tools are for questions: the write tools quote the router themselves.
 
 Removed on 2026-10-02: `get_contact_erc20_balance` (now `get_erc20_balance`'s `contact`), `get_native_asset` (`get_supported_tokens` returns it as `native`, `get_eth_balance` as `asset`, and every quote's `action` names it), `get_erc20_allowance` (the wallet's allowance to a contact is always 0 by design, and the one that matters — a contact's to the wallet, for `transferFrom_erc20` — that tool checks itself), and the four `is_*_sufficient` tools (every write tool refuses a short balance itself).
 
@@ -512,13 +558,13 @@ Every token argument accepts a listed ticker, a ticker the user added, or a `0x`
 
 > **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts/prepare`, `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. Adding (or changing) one also takes the owner wallet's EIP-712 signature over the exact name and address: `prepare` checks the contact and returns the typed data (`AddContact`, domain `Mitfah`/`1`, a single-use nonce), and the save verifies the signature against `owner_addr` — so even a stolen web session cannot add a payee. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
 
-> **The quote tools return whole units only.** `get_quote_in` / `get_quote_out` return `{amount_in, amount_out, path}`, and `get_pool_quote` / `get_lp_amounts` return only their whole-unit fields. The old `*_base`, `decimals_a/b`, `liquidity` and `token_*_address` keys are gone: they existed so the swap tools could do their own base-unit and slippage arithmetic, which now happens inside the packages.
+> **The quote tools return whole units only.** `get_quote_in` / `get_quote_out` return `{amount_in, amount_out, path}` (plus `fees`, each hop's fee tier, on Uniswap V3), and `get_pool_quote` / `get_lp_amounts` return only their whole-unit fields. The old `*_base`, `decimals_a/b`, `liquidity` and `token_*_address` keys are gone: they existed so the swap tools could do their own base-unit and slippage arithmetic, which now happens inside the packages.
 >
-> **`"eth"` (or `"bnb"`) means the native asset in the Uniswap-side tools only.** `swap`, `add_liquidity` and `remove_liquidity` take a native side through the router's native functions (`swapExactETHForTokens`, `addLiquidityETH`, …), so it is sent or received as the native asset itself; `"weth"`/`"wbnb"` names the wrapped token. The quote and preview tools route their token arguments through `tools._resolve`, which maps the native asset to the wrapped-native address — the pool the native asset trades in — and passes a raw `0x…` through. The four ERC20 tools (`get_erc20_balance`, `wrap_eth`, `transfer_erc20`, `transferFrom_erc20`) hand the ticker to `langchain-erc20`, whose token map has no `"eth"`: use `get_eth_balance` / `send_eth` for the native asset.
+> **`"eth"` (or `"bnb"`) means the native asset in the exchange tools only.** `swap` and the liquidity tools take a native side as the native asset itself — through the V2 router's native functions (`swapExactETHForTokens`, `addLiquidityETH`, …), or on Uniswap V3 as the call's value going in and `unwrapWETH9` coming out; `"weth"`/`"wbnb"` names the wrapped token. The quote and preview tools route their token arguments through `tools._resolve`, which maps the native asset to the wrapped-native address — the pool the native asset trades in — and passes a raw `0x…` through. The four ERC20 tools (`get_erc20_balance`, `wrap_eth`, `transfer_erc20`, `transferFrom_erc20`) hand the ticker to `langchain-erc20`, whose token map has no `"eth"`: use `get_eth_balance` / `send_eth` for the native asset.
 
 ### Write tools
 
-**Every write tool checks before it quotes (2026-10-02).** `_quote_executions(runtime, executions, action, legs)` runs `_wallet_checks` — the pause, the session key (and the 60 s expiry margin), and, from `legs` (`[(token, amount, SENT | RECEIVED)]`), whether the wallet holds what it sends and what the spending limit would count — on a task thread *alongside* the quote's own reads, and refuses with the reason (`_enforce_wallet_checks`) before anything is parked: "the owner has paused this wallet", "the session key is no longer active … Controls → Renew", "Not enough ETH: the wallet holds X, and this needs Y", "this would count $X toward the spending limit, but only $Y is left". A failed check wins over a failed simulation, being the clearer reason. A passing quote carries `usd_value`, `charged_usd`, `remaining_usd` and `session_expires_in_secs`. Writes that move nothing countable (registry writes, removing liquidity, a `transferFrom` from a contact) pass `legs=None` and check only the pause and the key. Adding liquidity counts **both** deposits (the LP token back has no price). The packages' own preflight (`preflight=True`) refuses a short token balance too, while building the plan; `send_eth` has no package plan, so its balance is checked only here.
+**Every write tool checks before it quotes (2026-10-02).** `_quote_executions(runtime, executions, action, legs)` runs `_wallet_checks` — the pause, the session key (and the 60 s expiry margin), and, from `legs` (`[(token, amount, SENT | RECEIVED)]`), whether the wallet holds what it sends and what the spending limit would count — on a task thread *alongside* the quote's own reads, and refuses with the reason (`_enforce_wallet_checks`) before anything is parked: "the owner has paused this wallet", "the session key is no longer active … Controls → Renew", "Not enough ETH: the wallet holds X, and this needs Y", "this would count $X toward the spending limit, but only $Y is left". A failed check wins over a failed simulation, being the clearer reason. A passing quote carries `usd_value`, `charged_usd`, `remaining_usd` and `session_expires_in_secs`. Writes that move nothing countable (registry writes, removing liquidity, taking a V3 position or its fees out, a `transferFrom` from a contact) pass `legs=None` and check only the pause and the key. Adding liquidity counts **both** deposits (the LP token or position NFT back has no price). The packages' own preflight (`preflight=True`) refuses a short token balance too, while building the plan; `send_eth` has no package plan, so its balance is checked only here.
 
 **The native asset has to cover the fees as well (`_check_native_headroom`).** One balance pays, in this order, the gas the EntryPoint asks for up front (whatever the wallet's deposit there doesn't cover), Mitfah's fee, then the value the calls carry. So when the calls carry native value, the quote also reads the wallet's balance and its EntryPoint deposit, and refuses unless value + fee + (`max_gas_wei` − deposit) fits — saying the most it can use now. Before this, "send all my ETH" was refused as a bare `FailedCall()`, and an amount a little smaller passed the quote and then failed on chain after the user agreed, charging them the gas. When the quote itself failed (the value plus the fee already don't fit), the gas is unknown and only the fee is counted.
 
@@ -530,9 +576,13 @@ The swaps' quotes carry the router's figures, so no `get_quote_*` first: the pac
 | `transfer_erc20(...)` | Sends tokens (metered if watched) |
 | `transferFrom_erc20(...)` | Transfers from a sender who has approved the wallet (the package checks that allowance and their balance) |
 | `wrap_eth(...)` | Wraps native → WETH/WBNB |
-| `swap(token_in, token_out, amount_in? \| amount_out?, slippage_bps, recipient?)` | Uniswap/PancakeSwap V2 swaps — **approve + swap sent as one atomic batch**. Exactly one amount; picks the router function (below). Optional `recipient` delivers the output straight to a saved contact (see below) |
-| `add_liquidity(token_a, amount_a, token_b="eth", slippage_bps)` | Add liquidity — approvals batched and residuals zeroed atomically. The native asset by default (`addLiquidityETH`); `token_a`'s amount is the one fixed, and a native `token_a` is refused ("Name how much X to deposit first"). Its quote carries the pool, which confirming puts on the dashboard (`lp_tokens`) |
-| `remove_liquidity(token_a, lp_amount, token_b="eth", slippage_bps)` | Remove liquidity — the pool's **LP token** is approved by address to the trusted router (granted in the `deployWallet` call itself) and consumed in one batch. The native asset back by default (`removeLiquidityETH`); a pool named native-first is turned round |
+| `swap(token_in, token_out, amount_in? \| amount_out?, slippage_bps, recipient?)` | Swaps on the chain's exchange (Uniswap V3; PancakeSwap V2 on BSC) — **approve + swap sent as one atomic batch**. Exactly one amount; picks the router function (below). Optional `recipient` delivers the output straight to a saved contact (see below) |
+| `add_liquidity(token_a, amount_a, token_b="eth", slippage_bps)` | (BSC) Add liquidity — approvals batched and residuals zeroed atomically. The native asset by default (`addLiquidityETH`); `token_a`'s amount is the one fixed, and a native `token_a` is refused ("Name how much X to deposit first"). Its quote carries the pool, which confirming puts on the dashboard (`lp_tokens`) |
+| `remove_liquidity(token_a, lp_amount, token_b="eth", slippage_bps)` | (BSC) Remove liquidity — the pool's **LP token** is approved by address to the trusted router (granted in the `deployWallet` call itself) and consumed in one batch. The native asset back by default (`removeLiquidityETH`); a pool named native-first is turned round |
+| `open_position(token_a, amount_a, token_b="eth", range? \| min_price + max_price, fee?, slippage_bps)` | (Uniswap V3) Opens a position on the range the user picked from `suggest_price_ranges`, by name, or on bounds they named; deposits `amount_a` and what the range needs of `token_b` (the native asset by default, paid as value). A native `token_a` is refused, as for `add_liquidity`. Approvals and their resets in the same batch; both deposits count |
+| `add_to_position(position_id, token, amount, wrapped?, slippage_bps)` | (Uniswap V3) Adds to one of the wallet's positions, keeping its range; the ETH side in ETH unless `wrapped` |
+| `withdraw_from_position(position_id, percent, wrapped?, slippage_bps)` | (Uniswap V3) Takes a percent out with all the fees it has earned; 100 also burns the NFT. No approval; counts nothing; the ETH side back as ETH unless `wrapped` |
+| `collect_fees(position_id, wrapped?)` | (Uniswap V3) Claims a position's fees and leaves it as it is; refused when there is nothing to collect |
 | `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the wallet's current session key and broadcasts it. Its result ends with what is left of the spending limit (`_budget_left`; omitted if the read fails — never an error after a send), so the agent needs no `get_wallet_status` call |
 | `cancel_transaction(quote_id)` | Discards a quote the user declined |
 
@@ -563,7 +613,9 @@ The swaps' quotes carry the router's figures, so no `get_quote_*` first: the pac
 >
 > Both amounts or neither, the native asset on both sides, or the same token on both (the native
 > asset and its wrapped form count as one: `wrap_eth` wraps, and unwrapping isn't offered) are
-> refused before anything is built. "eth" now always means the native asset here: before, passing
+> refused before anything is built. On Uniswap V3 the six shapes are the V3 toolkit's tools of the same
+> names, each a SwapRouter02 `multicall(deadline, …)` of `exactInput[Single]` / `exactOutput[Single]`,
+> with `refundETH` or `unwrapWETH9` for the native side. "eth" now always means the native asset here: before, passing
 > it to a token-to-token swap or as `add_liquidity`'s `token_b` quietly used WETH while the quote
 > said ETH. The quote helpers (`_quote_exact_input_swap` / `_quote_exact_output_swap`) are
 > unchanged, and `test_custom_tokens` checks that each shape reaches its own package function.
@@ -593,29 +645,57 @@ The swaps' quotes carry the router's figures, so no `get_quote_*` first: the pac
 > nothing coming back, so the module charges the **full** outgoing value against the cap instead of a
 > swap's usual near-zero net.
 
-> **There is no `approve_erc20` tool.** Standing approvals revert on-chain (the module forbids leaving an allowance outstanding), so a standalone approval can never succeed — which is also why `toolkits._BLOCKED_TOOLS` withholds the packages' own `approve` / `approve_token` / `revoke_approval`. The swap and liquidity tools instead receive the approval as `plan["calls"][0]`, already sized to what the router will actually pull, and the plan is sent as one atomic ERC-7579 batch. Exact-output swaps and `addLiquidity` — where the router may pull less than approved — carry a trailing `approve(router, 0)` in the same plan. Each call's `role` (`approve`, `approve_reset`, `swap`, …) records which is which.
+> **There is no `approve_erc20` tool.** Standing approvals revert on-chain (the module forbids leaving an allowance outstanding), so a standalone approval can never succeed — which is also why `toolkits._BLOCKED_TOOLS` withholds the packages' own `approve` / `approve_token` / `revoke_approval`. The swap and liquidity tools instead receive the approval as `plan["calls"][0]`, already sized to what the router will actually pull, and the plan is sent as one atomic ERC-7579 batch. Exact-output swaps and every deposit (V2 `addLiquidity`, V3 `mint` and `increaseLiquidity`) — where the spender may pull less than approved — carry a trailing `approve(spender, 0)` in the same plan. Taking a V3 position or its fees out needs no approval at all: the wallet owns the NFT. Each call's `role` (`approve`, `approve_reset`, `swap`, …) records which is which.
+
+### Uniswap V3 positions
+
+On Ethereum, Sepolia, Arbitrum and Base a deposit is a **position**: an NFT the position manager keeps it under, with a price range, earning fees only while the price is inside that range. `tools/positions.py` holds the six tools; on BSC they refuse, and BSC's `add_liquidity` / `remove_liquidity` refuse on the V3 chains (`tools/uniswap._require_exchange`, which says which tools apply instead).
+
+- **The range is the user's choice, picked by name.** `suggest_price_ranges(token_a, token_b="eth", fee?)` works out narrow, medium and wide bands around today's price and the full range, in the pool with the most active liquidity unless `fee` names one. It keeps them on the server (`_range_options`: per user and chain, only the last suggestion, for 15 minutes — `RANGE_OPTIONS_TTL_SECS` — in memory like the quotes), and its `next_step` tells the model to show every option and stop. `open_position(range="wide")` then passes the toolkit that option's prices and fee exactly as the toolkit returned them, so the position lands on the ticks the user was shown — never on rounded copies the model carried over, or another pair's. It is refused with no fresh suggestion for this pair, with a different `fee`, or when the toolkit's pool or ticks no longer match the option (suggest again). `min_price` / `max_price` are for bounds the user named themselves.
+- **A position is named by its id, and anyone can mint one to any address.** Every tool that takes an id refuses one the wallet doesn't own (the toolkit's `ownerOf` check) or one built from a token the user doesn't know — the rule the dashboard hides spam positions by (`_owned_position`).
+- **The limit:** both deposits are legs `SENT` (the native asset always counts, a token while it is watched); withdrawals and fee collection have no legs. The wrapped native side goes in and comes out as the native asset unless the user asks for WETH (`wrapped`).
+- **`get_positions`** shows `positions.read_positions` in words — each position's id, pair, fee tier, range, today's price, whether it is in range and what that means, what it holds and its unclaimed fees. It reads with `strict=True`, so a failed read is an error rather than "no positions".
 
 ### ERC-8004 tools
 
 [`langchain-erc8004`](https://pypi.org/project/langchain-erc8004/) owns the registry ABIs, address resolution, registration-file resolution, the sybil-aware read shapes and all calldata construction. `toolkits.get_erc8004_tools(user_id)` builds the toolkit per user, reading **both registry addresses off the wallet** (`SessionHandler.IDENTITY_REGISTRY()` / `.REPUTATION_REGISTRY()`) rather than from the package's chain table: that is the canonical `0x8004…` pair on Sepolia/BSC but the local mocks on Anvil, and chain 31337 is not in the package's `KNOWN_NETWORKS` at all.
 
-**Who the agent is.** `DeploySHProtocol.s.sol` registers exactly **one** agent per deployment, stores its id in `SHRegistry.agentId`, and leaves the ERC-721 with the deploying operator's key. That agent is the *protocol's* on-chain identity, shared by every wallet on the chain — a user's SessionHandler is a smart account, not an agent, and has no registry entry of its own. This shapes the whole surface: `"protocol"` is the default for every `agent` argument (resolved by `_resolve_agent` via `get_agent_id`, which stays project-side), the user's wallet is always the *reviewer* rather than the subject, and the identity writes are withheld.
+**Who the agent is.** `DeploySHProtocol.s.sol` registers exactly **one** agent per deployment, stores its id in `SHRegistry.agentId`, and leaves the ERC-721 with the deploying operator's key. That agent is the *protocol's* on-chain identity, shared by every wallet on the chain — a user's SessionHandler is a smart account, not an agent, and has no registry entry of its own. This shapes the whole surface: `"protocol"` is the default for every `agent` argument (resolved by `_resolve_agent` via `get_agent_id`, which stays project-side), the user's wallet is always the *reviewer* rather than the subject, and the identity writes are not wrapped at all.
 
 | Group | Tools | Exposed to the agent? |
 |---|---|---|
 | identity reads | `get_registry_info`, `get_agent_identity`, `agent_exists`, `get_agent_metadata`, `verify_agent_endpoint` | yes |
 | reputation reads | `get_feedback_clients`, `get_agent_feedback`, `list_all_feedback`, `get_last_feedback_index`, `get_response_count`, `get_agent_reputation` | yes |
 | reputation writes | `post_reputation_feedback`, `give_feedback`, `revoke_feedback`, `append_response` | yes |
-| identity writes | `register_agent`, `parse_registration_receipt`, `set_agent_uri`, `set_agent_metadata`, `transfer_agent`, and `resolve_registration_file` (it exists to check a file before registering one) | **no** |
-| agent wallet | `build_agent_wallet_typed_data`, `set_agent_wallet`, `unset_agent_wallet` | **no** |
+| identity writes | `register_agent`, `parse_registration_receipt`, `set_agent_uri`, `set_agent_metadata`, `transfer_agent`, and `resolve_registration_file` (it exists to check a file before registering one) | **no wrapper** |
+| agent wallet | `build_agent_wallet_typed_data`, `set_agent_wallet`, `unset_agent_wallet` | **no wrapper** |
 
-15 exposed, 37 agent tools in total (2026-10-02: down from 61). Five of the package's reads are not wrapped at all, because another tool returns what they do: `get_agent_owner`, `get_agent_uri` and `get_agent_wallet` (all three are in `get_agent_identity`, which reports an unreachable registration file as data rather than failing), `get_feedback_summary` (the registry's truncated average — `get_agent_reputation` is the one to show) and `read_feedback` (`get_agent_feedback` with one reviewer lists each entry with its index). Wherever a read takes a reviewer (`client`, `clients`, `responders`), `"me"` is the user's own wallet (`_resolve_reviewer`): the model is never told the wallet's address, and `revoke_feedback` needs the user's own entries to find the index. The feedback writes ask for no yes of their own: the quote is the confirmation, and their docstrings say to state that the write is public and permanent when showing it. Every write returns a plan and is quoted through the same `_quote_plan` as the ERC20/Uniswap tools (via `_quote_registry_plan`, which carries the package's `summary` into the quote), so a registry write is confirmed exactly like a transfer; like every write, none takes the session key — it is read when the user confirms. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
+15 ERC-8004 tools, 43 agent tools in total: 37 after the 2026-10-02 review (down from 61), plus the six Uniswap V3 position tools. The model sees 38 of them on a V3 chain, 37 on BSC and 32 where there is no exchange: a turn hides the liquidity tools of every exchange its chain doesn't trade on (Section 3). The nine identity and agent-wallet wrappers were defined but withheld from `get_tools()` until 2026-10-08, when they were removed as dead code; git history has them. Five of the package's reads are not wrapped at all, because another tool returns what they do: `get_agent_owner`, `get_agent_uri` and `get_agent_wallet` (all three are in `get_agent_identity`, which reports an unreachable registration file as data rather than failing), `get_feedback_summary` (the registry's truncated average — `get_agent_reputation` is the one to show) and `read_feedback` (`get_agent_feedback` with one reviewer lists each entry with its index). Wherever a read takes a reviewer (`client`, `clients`, `responders`), `"me"` is the user's own wallet (`_resolve_reviewer`): the model is never told the wallet's address, and `revoke_feedback` needs the user's own entries to find the index. The feedback writes ask for no yes of their own: the quote is the confirmation, and their docstrings say to state that the write is public and permanent when showing it. Every write returns a plan and is quoted through the same `_quote_plan` as the ERC20/Uniswap tools (via `_quote_registry_plan`, which carries the package's `summary` into the quote), so a registry write is confirmed exactly like a transfer; like every write, none takes the session key — it is read when the user confirms. Every `agent` argument also accepts a bare id or a fully-qualified `eip155:chain:registry:id` reference, so third-party agents can be read and rated.
 
 > **The eight identity writes are defined but withheld from `get_tools()`**, on the same principle as `toolkits._BLOCKED_TOOLS`: a tool that cannot succeed is worse than no tool. Changing the protocol agent is governance done with the operator's key, and a user's wallet cannot own an agent of its own either — `register_agent` mints the ERC-721 to the wallet, and `SessionHandler` installs no ERC-7579 fallback handler for `onERC721Received`, so any mint or `safeTransferFrom` to the account reverts with `ERC7579MissingFallbackHandler(0x150b7a02)`. Each wrapper additionally calls `_reject_protocol_agent_write`, which refuses the protocol's own agent before any calldata is built — so a deployment whose wallet *does* own an agent (or has been granted `setApprovalForAll`) can re-enable them by adding them back to the list, without exposing the protocol identity.
 
 > **The Validation Registry's seven tools are absent too.** ERC-8004's validation registry has no canonical deployment on any chain and this protocol deploys none, so `get_erc8004_tools` passes `validation_registry=None` and the toolkit withholds them.
 
 > **What the port fixed.** `get_agent_reputation` used to call `SessionHandler.getAgentReputation()`, which hardcodes `clients[0] = address(this)` and therefore only ever read back feedback *the wallet itself had given* — a real bug for "how is this service rated". It now aggregates over named reviewers, or over every discovered reviewer flagged as unfiltered. `post_reputation_feedback` passed the user's free-text label into **tag1**, the slot that names the *scale*, leaving every rating invisible to a reader filtering on `"starred"`; it now writes `tag1="starred"` with the label in `tag2`, and takes an optional `agent` so other agents can be rated. Note the `langchain-erc8004.md` spec's claim that the old tool was self-feedback does **not** apply here: `isAuthorizedOrOwner(userWallet, agentId)` is false, so a user rating the protocol's agent is a genuine attributed review, and that stayed the default.
+
+---
+
+## `positions.py`
+
+The wallet's Uniswap V3 positions, read one way for everyone who shows them: the dashboard (`GET /api/wallet/{chain_id}`'s `positions`), the assistant's `get_positions` and the Telegram bots' daily check.
+
+```python
+read_positions(user_id, chain_id=None, *, strict=False) -> list[dict]   # blocking; chain_id=None is the user's current chain
+start_positions_read(user_id, chain_id=None) -> Future                  # the same, as a task (parallel.py); never raises
+forget(chain_id, account) -> None                                       # drop the cache once a transaction has landed
+```
+
+Each row is `{id, pair ("eth/usdc"), base, quote, fee_pct, min_price, max_price (None for full range), full_range, current_price, in_range, amounts, fees}`: prices quote per base in whole tokens (USDC per ETH, WETH per LINK — the toolkit decides which token is the base), `amounts` and `fees` as `[{ticker, decimals, raw (str)}]`, base first, and the wrapped native token named as the native coin (`eth`, never `weth`). It is `[]` on a chain that doesn't trade on Uniswap V3 or where the user has no wallet.
+
+- **Only positions worth showing.** It is built on the V3 toolkit's `get_positions`, filtered to the tokens the user knows on that chain — the listed ones and the ones they added, the rule the History tab hides unknown tokens by — because anyone can mint a position to any address, out of tokens of their choosing. A position that holds nothing and has earned nothing is left out too. At most `POSITIONS_LIMIT` (20); the toolkit counts only positions that pass the filter, so ones someone else sent can't crowd the real ones out.
+- **A 30-second cache** (`CACHE_TTL_SECS`) per chain and wallet, per process, since each position costs three to five RPC calls: the dashboard polls every 60 s, and a burst of reads shares one. A read filtered by a different token set (the user added a token) isn't reused, and `confirm_transaction` calls `forget` after every send, so the assistant's own deposit or withdrawal shows at once; an epoch counter stops a read already under way from storing what the wallet held before it.
+- **Never raises.** A failed read is logged with URLs and keys masked and shows as no positions: the dashboard and the daily check have other things to show. `strict=True` (the assistant) raises `PositionsReadError`, whose message is safe to show, instead.
+- **Another chain** than the user's current one is read with that chain as the acting network, as the Telegram bots do.
 
 ---
 
@@ -651,7 +731,10 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
   by `POST /api/transactions/deposit` for the Fund drawer. The first poll that can see the
   transaction records it, the one with the receipt settles it, and the unique index stops
   duplicates. Only a transaction sent to the user's own wallet is recorded, and it is described from
-  its calldata against the SessionHandler ABI, never from anything the browser says.
+  its calldata against the SessionHandler ABI, never from anything the browser says. Trusting a
+  spender or no longer trusting one names the exchange's contracts as the user knows them
+  (`_spender`): "the Uniswap V3 router", "Uniswap V3 positions", and "the exchange router" for
+  the V2 router; any other address is shortened.
 - **Settling.** Reading the History tab's first page runs `settle_pending`. An assistant op is
   searched for by its `userOpHash` from `from_block`. If it isn't there and its nonce has since been
   used by another op, it can never land, so it becomes `dropped`. The nonce is read before the log
@@ -666,7 +749,10 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
   its receipt: token `Transfer` logs touching the wallet (exact, with the other side); the native
   coin that left from the op's own executions, decoded from the bundle's `handleOps` calldata; the
   native coin that came back from the wrapped token's `Withdrawal` (or burn) by the wallet, or by
-  the router when the router call's `to` is the wallet. On Celo the native coin is also an ERC-20,
+  an exchange contract (a V2 router, Uniswap V3's router or its position manager) when the op's own
+  call to it pays the wallet: a V2 router call's `to`, or the recipient of an `unwrapWETH9` in a
+  SwapRouter02 or position-manager `multicall`. The V2 router counts on the V3 chains too, for an
+  op sent before the move. On Celo the native coin is also an ERC-20,
   so its `Transfer` logs are the native movements and the executions aren't counted again. Fees are
   never movements. Unknown tokens are left out, as for outside rows.
   - **The group** (`direction`): *out* if anything left the wallet (sends, withdrawals, swaps,
@@ -731,16 +817,21 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
 
 ## Section 3 — LangChain Agent
 
-`app/smart_wallet_agent.py` wraps the tools in a LangChain agent powered by Claude (`claude-sonnet-4-6` by default).
+`app/smart_wallet_agent.py` wraps the tools in a LangChain agent powered by DeepSeek (`deepseek-flash` by default), with its thinking mode off.
 
-> **The Anthropic LLM is optional — any LangChain chat model works.** The provider is set in one place: the `llm = ChatAnthropic(...)` call in `smart_wallet_agent.py`. To use a different provider, replace that line with the matching LangChain chat model (e.g. `ChatOpenAI`, `ChatGoogleGenerativeAI`, `ChatOllama`) and its API-key env var, and drop or swap the `AnthropicPromptCachingMiddleware` in `init_agent()` (it is Anthropic-specific). Nothing else in the app is tied to Anthropic — the tools, prompt, and checkpointer are provider-agnostic. `ANTHROPIC_API_KEY` is only needed while the default provider is in use.
+> **DeepSeek is optional — any LangChain chat model works.** The provider is set in one place: the `llm = ChatDeepSeek(...)` call in `smart_wallet_agent.py`. To use a different provider, replace that call with the matching LangChain chat model (e.g. `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, `ChatOllama`) and its API-key env var. Nothing else in the app is tied to DeepSeek — the tools, prompt, and checkpointer are provider-agnostic. `DEEPSEEK_API_KEY` is only needed while the default provider is in use. Claude was the default until 2026-10-08.
+>
+> **Thinking mode is off on purpose** (`extra_body={"thinking": {"type": "disabled"}}`; DeepSeek turns it on by default). With tools, DeepSeek requires the model's reasoning to be sent back on every later call or it answers 400, and `langchain-deepseek` 1.1.1 never sends it, so the second model call of a turn would fail. Turning it on needs that fixed first. Off is also faster.
 
 ```python
 def init_agent():
-    agent = create_agent(model=llm, tools=get_tools(), system_prompt=SystemMessage(<SYSTEM_PROMPT, cached 1h>), checkpointer=_checkpointer, middleware=[...])
+    agent = create_agent(model=llm, tools=get_tools(), system_prompt=SYSTEM_PROMPT, checkpointer=_checkpointer,
+                         middleware=[ToolRetryMiddleware(...), ChainLiquidityTools()])
 ```
 
-**Prompt caching has two points.** The tools and the prompt (~20k tokens since the 2026-10-02 tool review, ~30k before; the same for every user) end in a cache marker of their own with a one-hour lifetime, so every conversation — a new user's, or one started afresh after a transaction — reads that block from the cache. `AnthropicPromptCachingMiddleware` marks the last message (five minutes), which caches each conversation's growing history. Before 2026-10-02 only the second existed, and every new conversation's first call wrote the whole ~33k-token block again (measured: 0 read, 32,828 written; now ~30,300 read, ~400 written). The longer-lived marker has to come first, and it does.
+**Each chain's liquidity tools only.** The agent is built once, with every tool, and serves every chain, but only one exchange's liquidity tools apply on a chain, and the two sets have different names because the tool node needs every name to be unique (`tools.LIQUIDITY_TOOLS`: Uniswap V3's six position tools; PancakeSwap V2's `add_liquidity`, `remove_liquidity`, `get_pool_quote`, `get_lp_amounts`, `get_liquidity_token_balance`). `ChainLiquidityTools`, a `wrap_model_call` middleware, hides from each model call the sets of every exchange the turn's chain doesn't trade on (`_tools_for_chain`; both where there is none). The chain is the turn's acting network, read from the database without an RPC call. A model shown both sets would reach for `add_liquidity` on a V3 chain and burn a round trip on the refusal each tool still gives as a backstop (`_require_exchange`); the hidden descriptions also cost tokens. It is a class with both the sync and async hooks, because `chat()` runs the agent synchronously while the CLI and the smoke test await it.
+
+**Prompt caching needs no setup.** DeepSeek caches by itself: whatever a request shares with the start of a recent one is read from the cache, at a fraction of the normal input price. The tools and the prompt (~20k tokens since the 2026-10-02 tool review, ~30k before; the same for every user whose chain trades on the same exchange, since `ChainLiquidityTools` picks the liquidity tools) open every request, so every conversation — a new user's, or one started afresh after a transaction — reads them from the cache, and a running conversation also reads its own earlier history. It is best-effort (no hit is guaranteed), and an unused cache is cleared within hours to days. The usage of each reply reports the hits as `cache_read`. Under Claude the same took two explicit cache markers: a one-hour one on the prompt and `AnthropicPromptCachingMiddleware` (five minutes) on the last message.
 
 `AsyncSqliteSaver` persists message history keyed by `thread_id(user_id, chain_id)` (e.g. `"1:42161"`), so each user has an isolated, restart-surviving conversation per chain, shared by Telegram and the web app.
 
@@ -752,11 +843,13 @@ The `SYSTEM_PROMPT` teaches the agent the new model up front:
 - **Watched tokens and native value count against the cap;** only unwatched tokens move freely. A swap is charged its **net** value change, not the gross input.
 - **Approvals are automatic** — there is no approve step or tool; swap/liquidity tools batch them atomically. A "please approve X" request should be declined with an explanation.
 - **Removing liquidity is free** against the cap (it returns value — a net inflow).
+- **Liquidity is per network.** BSC has PancakeSwap V2's `add_liquidity` / `remove_liquidity`; Ethereum, Sepolia, Arbitrum and Base have Uniswap V3 positions. For a position the agent calls `suggest_price_ranges`, shows every option (its name, its prices, today's price and how a deposit splits), then **stops** and lets the user pick one or name their own bounds — it never picks — and only then calls `open_position(range=<their pick>)`. It says in plain words that out of range a position earns no fees and holds only one of its two tokens until the price comes back, and that fees are not added to the position: `collect_fees` claims them.
 - **A paused wallet rejects every transaction** until the owner unpauses it in the web app; the agent can't unpause, and says so.
 - **One tool call, one message, one yes.** The agent calls the transaction tool straight away — it resolves the contact, checks the wallet and quotes — and shows the quote with its figures in one message; the user's reply to that is the only yes (swaps state the default 0.5% slippage there instead of asking first). No `preflight_check`, `get_contact`, `get_quote_*` or balance read first: the tool refuses with the reason when a check fails. **Never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` for questions; a swap's quote carries the router's figures); `"eth"` is the native asset in every token argument, and the wrapped token is named only when meant; never invent addresses.
+- **Figures in plain words.** A reply never shows a field name (`charged_usd`, `total_usd`, …). A quote's `total_usd` is its fees only (network fee plus protocol fee), so it is never called the transaction's total cost, and its `remaining_usd` is what is left of the limit before the transaction, so it is never called what is left after; the confirmation reports that. These rules were added on 2026-10-08, after DeepSeek broke each in the smoke test.
 - **Measured (`make agent-smoke`, Sepolia fork):** a send went from 3 user messages, 8 model calls and 22.6 s to 2 messages, 4 calls and 8.6 s; a swap from 3 messages, 9 calls and 27.7 s to 2, 4 and 9.9 s. With 0.2 s added to every RPC request (to stand in for a live provider), quoting a send went from 37 requests and 7.9 s to 16 and 0.7 s, confirming it from 20 and 4.3 s to 8 and 1.1 s, and quoting a swap from 45 and 9.6 s to 22 and 1.35 s.
 
-The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point. It returns the reply as plain text (joining Anthropic content blocks). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
+The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point. It returns the reply as plain text (joining the text blocks of a model that answers in blocks, as Claude did). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
 
 ### Short memory: the chat starts afresh after each transaction
 
@@ -814,7 +907,7 @@ Replies longer than Telegram's 4096-character limit are split between paragraphs
 
 ### Wallet checks
 
-Every day at **12:00 UTC** (`DAILY_CHECK_TIME`) each bot checks every linked chat whose account has a wallet on its chain (`db.get_telegram_chats_on_chain`), and once more 10 seconds after a `/start`. The check reads the wallet through `_get_wallet_status` with the bot's chain as the acting network, and warns on three counts (`wallet_warnings`): the assistant's key is inactive (turned off, replaced or run out), it runs out within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or less than **10%** (`BUDGET_ALERT_THRESHOLD`) of the limit is left. The list is read afresh each day, so a chat linked or a wallet set up since the bot started is included without a restart, and a fixed time of day means a restart neither repeats a warning nor puts the next one off. A chat whose user never pressed Start in that bot, or blocked it, is skipped.
+Every day at **12:00 UTC** (`DAILY_CHECK_TIME`) each bot checks every linked chat whose account has a wallet on its chain (`db.get_telegram_chats_on_chain`), and once more 10 seconds after a `/start`. The check reads the wallet through `_get_wallet_status` with the bot's chain as the acting network, and warns on three counts (`wallet_warnings`): the assistant's key is inactive (turned off, replaced or run out), it runs out within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or less than **10%** (`BUDGET_ALERT_THRESHOLD`) of the limit is left. On a Uniswap V3 chain it also reads the wallet's positions (`positions.read_positions`), side by side with the status, and warns about each one whose price has left its range (`position_warnings`): "⚠️ Your ETH/USDC position on Base (2,850–3,150 USDC per ETH) is out of range: ETH is at 3,420 USDC, so it isn't earning fees. Ask me to move it or take it out." Such a position earns nothing and nothing about it changes to say so, so the warning repeats every day it stays out; a full-range position is never out of range. Either read failing leaves the other's warnings to go out. The list is read afresh each day, so a chat linked or a wallet set up since the bot started is included without a restart, and a fixed time of day means a restart neither repeats a warning nor puts the next one off. A chat whose user never pressed Start in that bot, or blocked it, is skipped.
 
 The expiry warning is why this matters to a Telegram-only user: renewing the key is an owner-signed transaction they can only make in the web app (Controls → Assistant), so learning about it after the key lapsed is learning too late.
 
@@ -825,7 +918,7 @@ The expiry warning is why this matters to a Telegram-only user: renewing the key
 ## Section 5 — Web Front End
 
 `web/` is a React app served at mitfah.com and the main way people use any of this; Telegram is the
-other. It has no privileges of its own: everything goes through `api.py`, with the same `user_id`
+other. It has no privileges of its own: everything goes through `api.py` and its routers in `routes/`, with the same `user_id`
 rules as the bot, so nothing below this layer has to trust the browser.
 
 What it does that the bot cannot:
@@ -839,11 +932,28 @@ What it does that the bot cannot:
 - **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
   is owned by a key the server has never seen. The API only prepares the transaction and records it
   once the network has it (`POST /api/deploy`, then `POST /api/deploy/confirm`).
-- **Owner-only actions.** Pausing, limits, watched tokens, trusted spenders and withdrawals are all
-  signed by that same owner key in the browser, each one prepared by its own
+- **Owner-only actions.** Pausing, limits, watched tokens, trusted spenders, the two gas ceilings
+  and withdrawals are all signed by that same owner key in the browser, each one prepared by its own
   `/api/wallet/<action>/prepare` endpoint and finished with `POST /api/wallet/tx/confirm`. The agent
   has no way to reach them: the module's guard blocks execute-routed admin calls even for the owner
   ([THREAT_MODEL.md](../THREAT_MODEL.md) §3.5).
+- **The exchange's contracts.** `/api/chains` gives each chain its `exchange` (`"uniswap-v3"`,
+  `"pancakeswap-v2"` or `null`, from `constants.get_exchange`) and `default_spenders`, the
+  contracts every new wallet there is deployed trusting. Controls → Advanced keeps those off the
+  removable list (`/api/wallet/trusted-spenders/prepare` refuses to remove one anyway, 400) and
+  offers "Trust" for any the wallet is missing: a wallet deployed before its chain moved to Uniswap
+  V3 trusts only the V2 router, which it can now remove like any other spender. The Assistant page
+  offers its swap suggestion only where `exchange` is set.
+- **Liquidity positions.** The dashboard's Liquidity positions card
+  (`components/dashboard/PositionsCard.tsx`) shows the wallet read's `positions`: pair and fee tier,
+  the range ("2,850 – 3,150 USDC per ETH") with an In range / Out of range tag, what each holds and
+  its unclaimed fees. It shows nothing for a wallet without positions, which is every wallet on BSC;
+  opening, adding to, collecting from and closing a position are the assistant's.
+- **The gas ceilings.** Controls → Advanced edits both: "Network fee cap" (`max-op-gas-cost/prepare`,
+  one op) and "Daily fee budget" (`session-gas-budget/prepare`, every op the owner didn't sign, per
+  24 hours). `GET /api/wallet/{chain_id}` reports the budget as `limits.session_gas`
+  (`budget_wei`, `remaining_wei`, `refills_at`), or `null` for a wallet deployed before the budget
+  existed: its getters revert, and the row says so instead of offering an editor.
 - **The assistant's key.** Controls turns the assistant off (`removeSession`), and turns it on or
   renews it — the same transaction, since every grant mints a new key lasting 30 days. These finish
   with `POST /api/wallet/session/confirm` instead, which files the new key or forgets the revoked

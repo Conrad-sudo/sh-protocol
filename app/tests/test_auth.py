@@ -12,7 +12,7 @@ import tempfile
 import time
 from urllib.parse import quote
 
-from checks import add_contact, check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
+from checks import add_contact, check, finish, sign_in, set_everywhere   # first: it puts app/ on sys.path for the imports below
 
 # A scratch database, set before app modules import and read db.DB_PATH.
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -37,8 +37,12 @@ from eth_utils import keccak                # noqa: E402
 from web3 import Web3                       # noqa: E402
 
 import api                                  # noqa: E402
+import routes.catalog  # noqa: E402
+import routes.chat  # noqa: E402
+import routes.deps  # noqa: E402
+import routes.signin  # noqa: E402
 import auth                                 # noqa: E402
-from constants import get_router            # noqa: E402
+from constants import get_router, get_v3_network  # noqa: E402
 from contract_errors import describe_revert_data  # noqa: E402
 
 # A checksummed address, used by the contacts tests to prove the API normalises what it stores.
@@ -82,7 +86,7 @@ def test_siwe_sign_in_and_refresh():
     body = r.json()
     check("it returns an access token", "access_token" in body)
     check("the refresh token is NOT in the body", "refresh_token" not in body)
-    check("the refresh cookie is set", api.REFRESH_COOKIE in r.cookies, str(dict(r.cookies)))
+    check("the refresh cookie is set", routes.signin.REFRESH_COOKIE in r.cookies, str(dict(r.cookies)))
 
     r = c.get("/api/me", headers={"Authorization": f"Bearer {body['access_token']}"})
     check("the token reaches a protected endpoint", r.status_code == 200, r.text[:120])
@@ -161,14 +165,14 @@ def test_refresh_reuse_revokes_everything():
     print("\n[3] reusing a rotated refresh token signs every session out")
     c = make_client()
     sign_in(c)
-    stolen = c.cookies[api.REFRESH_COOKIE]
+    stolen = c.cookies[routes.signin.REFRESH_COOKIE]
 
     r = c.post("/api/auth/refresh")
     check("the first refresh works", r.status_code == 200, r.text[:120])
 
     # Replay the pre-rotation token, as a thief holding a copy would.
     c.cookies.clear()
-    c.cookies.set(api.REFRESH_COOKIE, stolen, path=api.REFRESH_COOKIE_PATH)
+    c.cookies.set(routes.signin.REFRESH_COOKIE, stolen, path=routes.signin.REFRESH_COOKIE_PATH)
     r = c.post("/api/auth/refresh")
     check("replaying the old token -> 401", r.status_code == 401, str(r.status_code))
 
@@ -181,11 +185,11 @@ def test_refresh_reuse_revokes_everything():
     # actually reaches /api/auth/logout -- with the old /api/auth/refresh path it never did.
     c = make_client()
     sign_in(c)
-    before_logout = c.cookies[api.REFRESH_COOKIE]
+    before_logout = c.cookies[routes.signin.REFRESH_COOKIE]
     r = c.post("/api/auth/logout")
     check("logout answers 200", r.status_code == 200, str(r.status_code))
     c.cookies.clear()
-    c.cookies.set(api.REFRESH_COOKIE, before_logout, path=api.REFRESH_COOKIE_PATH)
+    c.cookies.set(routes.signin.REFRESH_COOKIE, before_logout, path=routes.signin.REFRESH_COOKIE_PATH)
     r = c.post("/api/auth/refresh")
     check("a token presented after logout is refused", r.status_code == 401, f"{r.status_code} {r.text[:80]}")
 
@@ -426,6 +430,7 @@ def test_owner_actions_are_guarded():
         "/api/wallet/session/prepare": {"chain_id": 31337, "action": "remove"},
         "/api/wallet/trusted-spenders/prepare": {"chain_id": 31337, "spender": "0x000000000000000000000000000000000000dEaD", "action": "add"},
         "/api/wallet/max-op-gas-cost/prepare": {"chain_id": 31337, "max_cost_eth": "0.05"},
+        "/api/wallet/session-gas-budget/prepare": {"chain_id": 31337, "budget_eth": "0.02"},
         "/api/wallet/allowlist/prepare": {"chain_id": 31337, "action": "disable"},
         "/api/wallet/tx/confirm": {"chain_id": 31337, "tx_hash": "0x" + "11" * 32},
     }
@@ -461,6 +466,7 @@ def test_owner_actions_are_guarded():
         "a zero window": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 0}),
         "a window past the uint48 ceiling": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 281_474_976_710_656}),
         "a zero gas ceiling": ("/api/wallet/max-op-gas-cost/prepare", {"chain_id": 31337, "max_cost_eth": "0"}),
+        "a zero gas budget": ("/api/wallet/session-gas-budget/prepare", {"chain_id": 31337, "budget_eth": "0"}),
         "an invalid session action": ("/api/wallet/session/prepare", {"chain_id": 31337, "action": "steal"}),
         "an invalid allowlist action": ("/api/wallet/allowlist/prepare", {"chain_id": 31337, "action": "open"}),
         "too many allowlist targets in one go": (
@@ -478,20 +484,43 @@ def test_owner_actions_are_guarded():
     check("a zero daily limit is accepted by the schema", r.status_code == 403, str(r.status_code))
 
 
-def test_router_removal_is_refused():
-    print("\n[7b] the exchange router can't be removed through the app")
+def test_default_spenders_cannot_be_removed():
+    print("\n[7b] the exchange contracts every wallet trusts can't be removed through the app")
+    from fastapi import HTTPException
+
     c = make_client()
     _, headers, _ = sign_in(c)
 
-    router = get_router(11155111)
-    # Lower case on purpose: the comparison must not depend on how the address is written.
-    r = c.post(
-        "/api/wallet/trusted-spenders/prepare",
-        headers=headers,
-        json={"chain_id": 11155111, "spender": router.lower(), "action": "remove"},
-    )
-    check("removing the router -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
-    check("the refusal says why", "remove liquidity" in r.json().get("detail", ""), r.text[:160])
+    def remove(chain_id: int, spender: str):
+        return c.post(
+            "/api/wallet/trusted-spenders/prepare",
+            headers=headers,
+            json={"chain_id": chain_id, "spender": spender, "action": "remove"},
+        )
+
+    v3 = get_v3_network(11155111)
+    for label, chain_id, spender in (
+        ("the Uniswap V3 router", 11155111, v3["swap_router"]),
+        ("Uniswap V3 positions", 11155111, v3["position_manager"]),
+        ("PancakeSwap's router on BSC", 56, get_router(56)),
+    ):
+        # Lower case on purpose: the comparison must not depend on how the address is written.
+        r = remove(chain_id, spender.lower())
+        check(f"removing {label} -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+        check(f"{label}: the refusal says why", "trades through it" in r.json().get("detail", ""), r.text[:160])
+
+    # A V3 chain's old V2 router is no default any more, so the guard lets its removal through to
+    # the chain -- stubbed here, so nothing is dialled.
+    def reached_the_chain(_chain_id):
+        raise HTTPException(418, "reached the chain")
+
+    original = set_everywhere(api, "_resolve_chain", reached_the_chain)
+    try:
+        r = remove(11155111, get_router(11155111))
+    finally:
+        set_everywhere(api, "_resolve_chain", original)
+    check("Sepolia's old V2 router can be removed: past the guard, on to the chain",
+          r.status_code == 418, f"{r.status_code} {r.text[:120]}")
 
 
 def test_allowlist_requests_are_checked():
@@ -527,6 +556,89 @@ def test_allowlist_requests_are_checked():
     explained = describe_revert_data(data)
     check("the refused contract is named", target in explained, explained)
     check("the way out is named", "Controls -> Advanced" in explained and "allowlist" in explained, explained)
+
+    # ...and when the day's gas budget for the assistant is used up, as handleOps reports it.
+    inner = keccak(text="SessionHandler_SessionGasBudgetExceeded(uint256,uint256)")[:4] + abi_encode(
+        ["uint256", "uint256"], [6 * 10**17, 5 * 10**17]
+    )
+    data = keccak(text="FailedOpWithRevert(uint256,string,bytes)")[:4] + abi_encode(
+        ["uint256", "string", "bytes"], [0, "AA23 reverted", inner]
+    )
+    explained = describe_revert_data(data)
+    check("a used-up gas budget is explained, with both figures",
+          "daily gas budget" in explained and "0.6" in explained and "0.5" in explained, explained)
+    check("...and when it refills", "refills" in explained, explained)
+
+
+def test_allowlist_suggests_what_the_assistant_trades_through():
+    """
+    The allowlist's suggestions follow the chain's exchange: Uniswap V3's router and position
+    manager where the chain trades on V3 -- the V2 router and V2 pools a wallet used before the move
+    still named, but no longer suggested -- and on BSC PancakeSwap's router and the pools, as before.
+    """
+    print("\n[7e] the allowlist suggests what the assistant trades through: Uniswap V3's two, or PancakeSwap's router and pools")
+    from types import SimpleNamespace
+
+    c = make_client()
+    body, headers, _ = sign_in(c)
+    user_id = body["user_id"]
+    wallet_address = Web3.to_checksum_address("0x" + "a1" * 20)
+    weth, usdc = "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+    wbnb, usdt = Web3.to_checksum_address("0x" + "bb" * 20), Web3.to_checksum_address("0x" + "dd" * 20)
+    eth_pool, bnb_pool = Web3.to_checksum_address("0x" + "e1" * 20), Web3.to_checksum_address("0x" + "b1" * 20)
+    for chain_id, (a, ticker_a, b, ticker_b, pool) in {
+        11155111: (weth, "eth", usdc, "usdc", eth_pool),
+        56: (wbnb, "bnb", usdt, "usdt", bnb_pool),
+    }.items():
+        db.save_wallet_address(user_id, chain_id, wallet_address)
+        db.save_lp_token(user_id, chain_id, a, ticker_a, b, ticker_b)
+        token0, token1 = sorted((a, b), key=lambda token: int(token, 16))
+        db.set_lp_token_pair(user_id, chain_id, token0, token1, pool, 18, 18)
+
+    listed: list[str] = []
+
+    def value(v):
+        return SimpleNamespace(call=lambda *_a, **_k: v)
+
+    wallet = SimpleNamespace(address=wallet_address, functions=SimpleNamespace(
+        sessionAllowlistEnabled=lambda: value(False),
+        getAllowedTargets=lambda: value(list(listed)),
+        REPUTATION_REGISTRY=lambda: value("0x" + "0" * 40),
+    ))
+    # No chain at all: every pool's address is already saved, so nothing is read off one.
+    original = (
+        set_everywhere(api, "_resolve_chain", lambda chain_id: (SimpleNamespace(eth=SimpleNamespace()), "test")),
+        set_everywhere(api, "_load_wallet_for_chain", lambda _w3, _user_id, _chain_id: wallet),
+    )
+
+    def read(chain_id: int) -> dict:
+        r = c.get(f"/api/wallet/{chain_id}/allowlist", headers=headers)
+        check(f"the allowlist read on chain {chain_id} -> 200", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
+        return r.json()
+
+    try:
+        v3, v2_router = get_v3_network(11155111), get_router(11155111)
+        suggested = [(s["address"], s["label"]) for s in read(11155111)["suggested"]]
+        check("on a V3 chain, Uniswap V3's router and positions come first",
+              suggested[:2] == [(v3["swap_router"], "Uniswap V3 router"), (v3["position_manager"], "Uniswap V3 positions")],
+              str(suggested))
+        check("...and neither the V2 router nor a V2 pool is suggested",
+              not {v2_router, eth_pool} & {address for address, _ in suggested}, str(suggested))
+        listed[:] = [v2_router, eth_pool]
+        targets = read(11155111)["targets"]
+        check("...though a list made before the move still names them",
+              targets == [{"address": v2_router, "label": "Uniswap V2 router"},
+                          {"address": eth_pool, "label": "ETH/USDC pool"}], str(targets))
+
+        listed.clear()
+        suggested = [(s["address"], s["label"]) for s in read(56)["suggested"]]
+        check("on BSC, PancakeSwap's router comes first, as before",
+              suggested[:1] == [(get_router(56), "PancakeSwap V2 router")], str(suggested))
+        check("...and the pools the assistant deposited into are suggested",
+              (bnb_pool, "BNB/USDT pool") in suggested, str(suggested))
+    finally:
+        set_everywhere(api, "_resolve_chain", original[0])
+        set_everywhere(api, "_load_wallet_for_chain", original[1])
 
 
 def test_wrapped_native_always_counts():
@@ -709,7 +821,7 @@ def test_chat_history_shows_only_the_conversation():
 
     Tool messages and tool-call arguments carry the session-key ciphertext, so the stub thread below
     plants a marker in every place a ciphertext can sit and asserts it never reaches the response.
-    The real agent is not needed (or wanted: it would call Anthropic) -- only its checkpointed state.
+    The real agent is not needed (or wanted: it would call DeepSeek) -- only its checkpointed state.
     """
     print("\n[10] chat history returns what was said, never tool traffic")
     from types import SimpleNamespace
@@ -881,7 +993,7 @@ def test_chat_acts_on_the_pages_network():
         db.save_user_network(body["user_id"], "arbitrum-fork")   # the chain they last deployed on
 
         r = c.post("/api/chat", json={"chain_id": 56, "message": "how much BNB do I have?"}, headers=headers)
-        page = api._network_name(56)
+        page = routes.deps._network_name(56)
         check("the turn ran", r.status_code == 200 and r.json() == {"reply": "done"}, f"{r.status_code} {r.text[:160]}")
         check("every tool call acted on the page's network, not the saved one", seen == [page, page], str(seen))
         check("the saved network is left alone", db.get_user_network(body["user_id"]) == "arbitrum-fork",
@@ -895,6 +1007,78 @@ def test_chat_acts_on_the_pages_network():
         check("a network that is not the turn's chain is refused, not answered", refused)
     finally:
         smart_wallet_agent.agent = original
+
+
+def test_chat_is_rationed():
+    """
+    A chat turn holds a worker thread for up to a minute, so turns are rationed: one at a time per
+    account, a cap across every account, and a per-account rate limit. Every refusal is a 4xx, which
+    the web app reads as "never reached the assistant, safe to send again".
+    """
+    print("\n[10e] chat turns are rationed: one per account at a time, a cap overall, a rate limit")
+    import threading
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
+    import smart_wallet_agent
+
+    entered, release = threading.Event(), threading.Event()
+
+    class StubAgent:
+        block = False
+
+        def get_state(self, config):
+            return SimpleNamespace(values={"messages": []})
+
+        def invoke(self, state, config, context):
+            if self.block:
+                entered.set()
+                release.wait(10)
+            return {"messages": [AIMessage(content="ok")]}
+
+    stub = StubAgent()
+    original_agent, original_slots = smart_wallet_agent.agent, routes.chat._chat_slots
+    smart_wallet_agent.agent = stub
+    try:
+        c = make_client()
+        _, alice, _ = sign_in(c)
+        _, bob, _ = sign_in(c)
+        ask = {"chain_id": 11155111, "message": "hi"}
+
+        set_everywhere(api, "_chat_slots", threading.BoundedSemaphore(1))
+        stub.block = True
+        first = {}
+        other = make_client()
+        worker = threading.Thread(target=lambda: first.setdefault("r", other.post("/api/chat", json=ask, headers=alice)))
+        worker.start()
+        check("the first turn is running", entered.wait(10))
+        r = c.post("/api/chat", json=ask, headers=alice)
+        check("a second message from the same account while it runs -> 409",
+              r.status_code == 409 and "still answering" in r.text, f"{r.status_code} {r.text[:160]}")
+        r = c.post("/api/chat", json=ask, headers=bob)
+        check("another account, with every slot taken -> 429", r.status_code == 429 and "busy" in r.text,
+              f"{r.status_code} {r.text[:160]}")
+        release.set()
+        worker.join(10)
+        check("the first turn still gets its reply", first.get("r") is not None and first["r"].status_code == 200,
+              str(first.get("r") and first["r"].text[:160]))
+        stub.block = False
+        check("then the account can send again", c.post("/api/chat", json=ask, headers=alice).status_code == 200)
+        check("...and so can the other one", c.post("/api/chat", json=ask, headers=bob).status_code == 200)
+
+        set_everywhere(api, "_chat_slots", original_slots)
+        c = make_client(rate_limit=True)
+        _, carol, _ = sign_in(c)
+        _, dave, _ = sign_in(c)
+        codes = [c.post("/api/chat", json=ask, headers=carol).status_code for _ in range(12)]
+        check("an account past 10 messages a minute gets 429", codes[:10] == [200] * 10 and 429 in codes[10:], str(codes))
+        check("the limit is per account, not per address",
+              c.post("/api/chat", json=ask, headers=dave).status_code == 200)
+    finally:
+        release.set()
+        smart_wallet_agent.agent, routes.chat._chat_slots = original_agent, original_slots
+        api.limiter.enabled = False
 
 
 def test_vault_failure_is_named():
@@ -945,12 +1129,25 @@ def test_chains_lists_only_deployed_served_chains():
     check("each carries its name and native ticker",
           by_id[11155111]["name"] == "sepolia" and by_id[11155111]["native_ticker"] == "ETH"
           and by_id[56]["native_ticker"] == "BNB", str(chains))
-    check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == api.FORK_MODE, str(chains))
+    check("the fork flag follows APP_FORK_MODE", by_id[11155111]["fork"] == routes.catalog.FORK_MODE, str(chains))
     check("a fork carries its own local node, a live chain none",
           {cid: by_id[cid]["rpc_url"] for cid in fork_rpcs}
-          == (fork_rpcs if api.FORK_MODE else dict.fromkeys(fork_rpcs)), str(chains))
-    check("each carries the router its wallets trust",
-          by_id[11155111]["router"] == Web3.to_checksum_address(get_router(11155111)), str(chains))
+          == (fork_rpcs if routes.catalog.FORK_MODE else dict.fromkeys(fork_rpcs)), str(chains))
+    check("each says what its assistant trades on",
+          by_id[11155111]["exchange"] == "uniswap-v3" and by_id[56]["exchange"] == "pancakeswap-v2", str(chains))
+    sepolia_v3 = get_v3_network(11155111)
+    check("each carries the contracts its wallets are deployed trusting: Uniswap V3's router and positions, "
+          "or PancakeSwap's router",
+          by_id[11155111]["default_spenders"] == [sepolia_v3["swap_router"], sepolia_v3["position_manager"]]
+          and by_id[56]["default_spenders"] == [get_router(56)], str(chains))
+    check("the old single router field is gone", all("router" not in x for x in chains), str(chains))
+    conn.execute("INSERT INTO factory (chain_id, address) VALUES (?, ?)", (31337, ADDR))
+    conn.commit()
+    anvil = next(x for x in make_client().get("/api/chains").json()["chains"] if x["chain_id"] == 31337)
+    check("a chain with no exchange says so, and carries no spenders",
+          anvil["exchange"] is None and anvil["default_spenders"] == [], str(anvil))
+    conn.execute("DELETE FROM factory WHERE chain_id = ?", (31337,))
+    conn.commit()
     check("each carries its own Telegram bot",
           by_id[11155111]["telegram_bot"] == "test_sepolia_bot" and by_id[56]["telegram_bot"] == "test_bsc_bot",
           str(chains))
@@ -985,14 +1182,16 @@ if __name__ == "__main__":
         test_telegram_link_nonce()
         test_bot_start_explains_a_chat_linked_elsewhere()
         test_owner_actions_are_guarded()
-        test_router_removal_is_refused()
+        test_default_spenders_cannot_be_removed()
         test_allowlist_requests_are_checked()
+        test_allowlist_suggests_what_the_assistant_trades_through()
         test_wrapped_native_always_counts()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
         test_chat_history_shows_only_the_conversation()
         test_chat_turn_returns_text_and_hides_failures()
         test_chat_acts_on_the_pages_network()
+        test_chat_is_rationed()
         test_vault_failure_is_named()
         test_chains_lists_only_deployed_served_chains()
         test_rate_limit()

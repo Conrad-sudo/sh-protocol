@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {ERC7579Utils, Mode, CallType} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";

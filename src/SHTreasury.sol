@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -253,8 +253,8 @@ contract SHTreasury is Ownable, ReentrancyGuard {
 
     /**
      * @notice Updates the registered agentId for the SessionHandler Protocol. Only callable by the owner.
-     * @dev Reverts if newId is 0 or equal to the current agentId.
-     * @param newId The new agentId. Must not be 0 and must differ from the current agentId.
+     * @dev Any id is accepted, 0 and the current one included: see {SHRegistry-setAgentId}.
+     * @param newId The new agentId.
      */
     function setAgentId(uint256 newId) external onlyOwner registrySet {
         REGISTRY.setAgentId(newId);

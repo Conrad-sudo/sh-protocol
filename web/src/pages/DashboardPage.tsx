@@ -5,6 +5,7 @@ import { useSelectedChain } from '../chain/useSelectedChain'
 import { AddressText } from '../components/AddressText'
 import { BalancesCard } from '../components/dashboard/BalancesCard'
 import { FundDrawer } from '../components/dashboard/FundDrawer'
+import { PositionsCard } from '../components/dashboard/PositionsCard'
 import { SpendingCard } from '../components/dashboard/SpendingCard'
 import { WalletHeader } from '../components/dashboard/WalletHeader'
 import { LinkButton } from '../components/LinkButton'
@@ -15,7 +16,10 @@ import { useMe } from '../hooks/useMe'
 import { type OwnerActionHandle, useOwnerAction } from '../hooks/useOwnerAction'
 import { useWalletView } from '../hooks/useWalletView'
 
-/** The selected network's wallet: its status, what the assistant may still spend, and balances. */
+/**
+ * The selected network's wallet: its status, what the assistant may still spend, its balances and its
+ * liquidity positions.
+ */
 export function DashboardPage() {
   const { data: me } = useMe()
   const view = useWalletView()
@@ -55,12 +59,25 @@ function WalletOverview({ wallet, tx }: { wallet: WalletState; tx: OwnerActionHa
       <div className="mf-card-grid">
         <SpendingCard spending={wallet.spending} />
         <BalancesCard wallet={wallet} chain={chain} tx={tx} />
+        {/* An API process started before positions existed sends none: show no card, not a broken page. */}
+        <PositionsCard positions={wallet.positions ?? []} />
       </div>
     </div>
   )
 }
 
-/** Add funds, withdraw, and the emergency brake. */
+/**
+ * Opens Settings at its Telegram card, where the account is linked. Not offered once Telegram is
+ * linked, or where this server runs no bot.
+ */
+function LinkTelegramButton() {
+  const { data: me } = useMe()
+  const { chains } = useSelectedChain()
+  if (!me || me.telegram_linked || !chains.some(chain => chain.telegram_bot)) return null
+  return <LinkButton to="/settings#telegram">Link Telegram</LinkButton>
+}
+
+/** Add funds, withdraw, ask the assistant or link Telegram, and the emergency brake. */
 function WalletActions({ wallet, tx }: { wallet: WalletState; tx: OwnerActionHandle }) {
   const { chain } = useSelectedChain()
   const [fundOpen, setFundOpen] = useState(false)
@@ -76,6 +93,7 @@ function WalletActions({ wallet, tx }: { wallet: WalletState; tx: OwnerActionHan
         Withdraw
       </Button>
       <LinkButton to="/assistant">Ask the assistant</LinkButton>
+      <LinkTelegramButton />
       {wallet.paused ? (
         <Button appearance="ghost" color="orange" onClick={() => setPauseMode('unpause')}>
           Unpause

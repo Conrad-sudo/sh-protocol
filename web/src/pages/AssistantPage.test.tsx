@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { ChatMessage, Contact, WalletState } from '../api/types'
+import type { ChatMessage, Contact, Exchange, WalletState } from '../api/types'
 import { routes } from '../routes'
 import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
@@ -33,8 +33,8 @@ interface ServerOptions {
   contacts?: Contact[]
   /** What DELETE /api/chat/history answers: 200 clears the chat, 409 means a turn is running. */
   clearStatus?: number
-  /** The network's exchange router; without one the assistant can't swap. */
-  router?: string
+  /** The network's exchange; without one the assistant can't swap. */
+  exchange?: Exchange
   /** Whether the account has linked Telegram. */
   telegramLinked?: boolean
   /** The username of the network's Telegram bot; it has none by default. */
@@ -53,7 +53,7 @@ function stubServer({
   walletChains = [SEPOLIA],
   contacts = [SAM],
   clearStatus = 200,
-  router,
+  exchange,
   telegramLinked = false,
   telegramBot,
 }: ServerOptions = {}) {
@@ -72,7 +72,11 @@ function stubServer({
         )
       }
       if (url === '/api/chains') {
-        return Promise.resolve(json(200, { chains: CHAINS.map(c => ({ ...c, router, telegram_bot: telegramBot ?? null })) }))
+        return Promise.resolve(
+          json(200, {
+            chains: CHAINS.map(c => ({ ...c, exchange: exchange ?? null, default_spenders: [], telegram_bot: telegramBot ?? null })),
+          }),
+        )
       }
       if (url === `/api/tokens?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { tokens: TOKENS }))
       if (url === '/api/contacts') return Promise.resolve(json(200, { contacts }))
@@ -208,11 +212,10 @@ describe('AssistantPage', () => {
   })
 
   it('offers no Telegram link before Telegram is linked, or where the network has no bot', async () => {
-    const router = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3'
     for (const options of [{ telegramBot: 'mitfah_sepolia_bot' }, { telegramLinked: true }]) {
       cleanup()
       resetClientForTests()
-      stubServer({ ...options, router })
+      stubServer({ ...options, exchange: 'uniswap-v3' })
       await renderRoutes(routes, '/assistant')
       // The swap suggestion needs the network list too, so the link would be showing by now.
       expect(await screen.findByRole('button', { name: 'Swap 1 ETH for USDC…' })).toBeInTheDocument()
@@ -343,7 +346,7 @@ describe('AssistantPage', () => {
   })
 
   it('drafts a swap where the assistant can trade, without sending it', async () => {
-    const { posted } = stubServer({ router: '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3' })
+    const { posted } = stubServer({ exchange: 'uniswap-v3' })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
@@ -352,6 +355,15 @@ describe('AssistantPage', () => {
     expect(posted).toHaveLength(0)
     expect(await composer()).toHaveValue('Swap 1 ETH for USDC')
     expect(await composer()).toHaveFocus()
+  })
+
+  it('offers no swap where the network has no exchange, though it lists a stablecoin', async () => {
+    stubServer()
+    await renderRoutes(routes, '/assistant')
+
+    const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
+    expect(await within(suggestions).findByRole('button', { name: 'Send 5 USDC to sam…' })).toBeInTheDocument()
+    expect(within(suggestions).queryByRole('button', { name: /^Swap/ })).toBeNull()
   })
 
   it('leaves out the payment suggestion when there is no one to pay', async () => {

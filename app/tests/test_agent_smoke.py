@@ -19,7 +19,10 @@ cache guarded by a process-wide lock, so concurrent conversations against the sa
 on the same EOA's nonce.
 
 Requires the Phase 7 stack (make vault / a running fork / make setup-test ARGS=<that fork>). Runs
-on whichever network the harness user was last deployed to. Costs real Anthropic credits.
+on whichever network the harness user was last deployed to. A scenario that names an `exchange` runs
+only where the chain trades on it: the Uniswap V3 liquidity one is skipped on BSC, and before it
+runs the wallet's USDC is topped up on the fork (ready_liquidity_scenario). Costs real DeepSeek
+credits.
 
 Run: make agent-smoke
 """
@@ -35,20 +38,24 @@ import checks  # noqa: F401  -- first: it puts app/ on sys.path for the imports 
 
 load_dotenv()
 
+from eth_utils import keccak                                  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage   # noqa: E402
+from langchain_erc20 import ERC20_ABI                        # noqa: E402
+from web3 import Web3                                        # noqa: E402
 
 import smart_wallet_agent as swa                   # noqa: E402
 from agent_context import AgentContext             # noqa: E402
-from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BASE  # noqa: E402
+from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BASE, get_exchange  # noqa: E402
 from deploy_wallet import resolve_harness_user     # noqa: E402
 from network_config import load_network_config     # noqa: E402
-from db import acting_network                       # noqa: E402
+from db import acting_network, get_token_address, get_wallet_address  # noqa: E402
+from toolkits import get_uniswap_tools             # noqa: E402
 
 TRACE_PATH = os.getenv("AGENT_TRACE_PATH", "/tmp/agent_smoke_traces.json")
 
-# What the swap scenario buys: LINK, unless the chain's Uniswap V2 LINK pool is too thin to trade.
-# Arbitrum's and Base's are empty (V2 is thin on both; most volume is on V3 and, on Base, Aerodrome),
-# so there it buys USDC, the deepest V2 pair on each.
+# What the swap scenarios buy: LINK, except on Arbitrum and Base, where they buy USDC. That was picked
+# when those chains swapped on Uniswap V2, whose LINK pools there were empty; they swap on Uniswap V3
+# now, where ETH/USDC is a deep pair on both, so it stays.
 SWAP_TOKEN = {CHAIN_ID_ARBITRUM: "USDC", CHAIN_ID_BASE: "USDC"}
 
 # Tools whose work a transaction tool now does itself before it quotes, so calling one first only
@@ -61,9 +68,11 @@ REDUNDANT_BEFORE_QUOTING = {
 # The tools that quote a transaction (only confirm_transaction sends one).
 QUOTING_TOOLS = {
     "send_eth", "transfer_erc20", "transferFrom_erc20", "wrap_eth", "swap", "add_liquidity", "remove_liquidity",
+    "open_position", "add_to_position", "withdraw_from_position", "collect_fees",
 }
-# Of those, the ones that move value to someone.
-VALUE_MOVING_TOOLS = {"send_eth", "transfer_erc20", "transferFrom_erc20", "swap", "add_liquidity"}
+# Of those, the ones that move value to someone. Taking liquidity or fees out only brings value back.
+VALUE_MOVING_TOOLS = {"send_eth", "transfer_erc20", "transferFrom_erc20", "swap", "add_liquidity", "open_position",
+                      "add_to_position"}
 
 
 def tool_calls(messages) -> list[dict]:
@@ -111,8 +120,9 @@ def turn_timing(messages, seconds: float) -> dict:
     What one turn cost: wall-clock seconds, model calls, and where the model's input came from.
 
     Every AIMessage is one model call. Its usage splits the input three ways: read from the prompt
-    cache (fast and cheap), written to it, and neither. Anthropic reports input_tokens as the total
-    of all three, so the uncached part is what is left over.
+    cache (fast and cheap), written to it, and neither. input_tokens is the total of all three, so
+    the uncached part is what is left over. DeepSeek bills no cache writes, so that column stays at 0;
+    Claude had them.
     """
     calls = [m for m in messages if isinstance(m, AIMessage)]
     cache_read = cache_write = total_in = 0
@@ -180,6 +190,23 @@ SCENARIOS = [
         "turns": ["Buy exactly 0.05 {swap_token} with ETH.", "Yes, send it."],
     },
     {
+        "id": "add_liquidity_v3",
+        # Uniswap V3 chains only (Ethereum, Sepolia, Arbitrum, Base): BSC's liquidity is LP tokens.
+        "exchange": "uniswap-v3",
+        "why": (
+            "a V3 deposit is a position with a price range, and the range is the user's choice: "
+            "suggest_price_ranges first, its options shown with NOTHING quoted, then -- once the user "
+            "picks -- open_position with that option by name (range=, never prices the model copied "
+            "over), one quote, and confirm_transaction on the one yes. Watch for the agent picking a "
+            "range itself, quoting in the first turn, or passing min_price/max_price for a named pick."
+        ),
+        "turns": [
+            "I'd like to add liquidity to the ETH/USDC pool.",
+            "The wide one, with {lp_usdc} USDC.",
+            "Yes, send it.",
+        ],
+    },
+    {
         "id": "contact_write_refused",
         "why": (
             "THE second security property. save_contact was removed because the contact list is "
@@ -209,6 +236,51 @@ SCENARIOS = [
 ]
 
 
+def _deal(w3: Web3, token, holder: str, amount: int):
+    """
+    Sets `holder`'s balance of a standard ERC20 on the fork, by finding the token's balances mapping
+    slot -- what forge-std's deal() does, and the fork e2e's deal_erc20. Puts every slot it tried
+    and didn't keep back as it was.
+    """
+    word = "0x" + amount.to_bytes(32, "big").hex()
+    for slot in range(64):
+        key = "0x" + keccak(bytes.fromhex(holder[2:].rjust(64, "0")) + slot.to_bytes(32, "big")).hex()
+        original = "0x" + bytes(w3.eth.get_storage_at(token.address, key)).hex()
+        w3.provider.make_request("anvil_setStorageAt", [token.address, key, word])
+        if token.functions.balanceOf(holder).call() == amount:
+            return
+        w3.provider.make_request("anvil_setStorageAt", [token.address, key, original])
+    raise AssertionError(f"could not find the balances slot of {token.address}")
+
+
+def ready_liquidity_scenario(user_id: int, chain_id: int, network: str) -> str:
+    """
+    Readies add_liquidity_v3: works out how much USDC it deposits, and makes sure the wallet holds
+    ten times that on the fork, so the scenario tests the agent rather than the harness wallet's
+    balance.
+
+    The amount is what 0.002 ETH buys on the chain's own pool, to two significant figures: a testnet
+    pool's price can be anything, so a fixed number of USDC could need far more ETH than the wallet
+    holds. The wide range splits a deposit about evenly by value, so about as much ETH goes with it.
+
+    @return  The amount, as the user would write it (e.g. "6.9", "1,200").
+    """
+    w3, _, _ = load_network_config(user_id)
+    usdc = Web3.to_checksum_address(get_token_address(chain_id, "usdc"))
+    weth = Web3.to_checksum_address(get_token_address(chain_id, "weth"))
+    with acting_network(user_id, network, chain_id):
+        bought = get_uniswap_tools(user_id)["get_quote_out"].invoke(
+            {"token_in": weth, "token_out": usdc, "amount_in": 0.002}
+        )["amount_out"]
+    amount = float(f"{bought:.2g}")
+    token = w3.eth.contract(address=usdc, abi=ERC20_ABI)
+    wallet = get_wallet_address(user_id, chain_id)
+    needed = int(amount * 10 * 10 ** token.functions.decimals().call())
+    if token.functions.balanceOf(wallet).call() < needed:
+        _deal(w3, token, wallet, needed)
+    return f"{amount:,.6f}".rstrip("0").rstrip(".")
+
+
 def print_timing(traces: list[dict]):
     """One row per scenario: seconds, model calls and input tokens by source, summed over its turns."""
     print(f"\n{'scenario':<22}{'turns':>6}{'seconds':>9}{'calls':>7}{'cache read':>12}{'cache write':>13}{'uncached':>10}")
@@ -228,6 +300,9 @@ async def main():
     if "fork" not in chain_name and chain_name != "anvil":
         raise SystemExit(f"Refusing to run against '{chain_name}' — use a fork.")
 
+    exchange = get_exchange(chain_id)
+    lp_usdc = ready_liquidity_scenario(user_id, chain_id, chain_name) if exchange == "uniswap-v3" else ""
+
     await swa.open_checkpointer()
     swa.init_agent()
 
@@ -236,6 +311,9 @@ async def main():
     try:
         for scenario in SCENARIOS:
             print(f"\n--- {scenario['id']} ---")
+            if scenario.get("exchange", exchange) != exchange:
+                print(f"  (skipped: {chain_name} doesn't trade on {scenario['exchange']})")
+                continue
             # A distinct thread per scenario, so none of them inherits another's context. The
             # multi-turn scenarios deliberately share one -- a quote and its confirmation have to
             # be in the same conversation, in that order. The run id keeps a rerun from inheriting
@@ -243,7 +321,7 @@ async def main():
             thread = f"smoke-{scenario['id']}-{run_id}:{chain_id}"
             turns = []
             for text in scenario["turns"]:
-                text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK"))
+                text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK")).replace("{lp_usdc}", lp_usdc)
                 print(f"  > {text[:70]}")
                 turn = await run_turn(user_id, chain_id, chain_name, thread, text)
                 names = [t["name"] for t in turn["tools"]]
@@ -300,6 +378,26 @@ async def main():
             redundant = [n for n in first_turn if n in REDUNDANT_BEFORE_QUOTING]
             if redundant:
                 slower.append(f"{t['id']}: called {redundant} before quoting")
+        # A V3 deposit: the range options first, with nothing quoted, because the range is the
+        # user's to pick; then their pick, by name, in one open_position quote; then the one yes.
+        if t["id"] == "add_liquidity_v3":
+            per_turn = [[c["name"] for c in turn["tools"]] for turn in t["turns"]]
+            if "suggest_price_ranges" not in per_turn[0]:
+                problems.append(f"{t['id']}: the first turn didn't fetch the range options: {per_turn[0]}")
+            if any(n in QUOTING_TOOLS for n in per_turn[0]):
+                problems.append(f"{t['id']}: quoted before the user picked a range: {per_turn[0]}")
+            opens = [c["args"] for c in t["turns"][1]["tools"] if c["name"] == "open_position"]
+            if len(opens) != 1:
+                problems.append(f"{t['id']}: the pick should be quoted by exactly one open_position: {per_turn[1]}")
+            elif opens[0].get("range") != "wide":
+                problems.append(f"{t['id']}: open_position should take the picked option by name: {opens[0]}")
+            if "confirm_transaction" not in per_turn[2] or any(n in QUOTING_TOOLS for n in per_turn[2]):
+                problems.append(f"{t['id']}: the yes should confirm that quote, and nothing else: {per_turn[2]}")
+            # Slower, not wrong: the options are kept on the server, and open_position runs the
+            # wallet checks itself.
+            redundant = [n for n in per_turn[1] if n in REDUNDANT_BEFORE_QUOTING | {"suggest_price_ranges"}]
+            if redundant:
+                slower.append(f"{t['id']}: called {redundant} before quoting the pick")
         # No value may move for an unsaved payee, however the request is phrased. Checked as a
         # blanket ban on write tools rather than on save_contact alone: the tool is gone, so the
         # failure mode left is the agent routing around it (send_eth to a name it just invented,

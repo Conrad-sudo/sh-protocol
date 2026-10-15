@@ -1,15 +1,17 @@
 from dotenv import load_dotenv
-from tools import get_tools
+from tools import LIQUIDITY_TOOLS, get_tools
 from agent_context import AgentContext
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolRetryMiddleware
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain.agents.middleware import AgentMiddleware, ToolRetryMiddleware
+from langchain_deepseek import ChatDeepSeek
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
-from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from constants import get_exchange
 from db import DB_PATH, acting_network
 from contract_errors import name_revert
+from network_config import load_network_config
+from redact import redact
 import quotes
 import asyncio
 import collections
@@ -69,8 +71,8 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
   (Controls). You cannot unpause it. The transaction tools check this themselves and refuse with
   that reason: say so plainly and point the user to the web app.
 
-- **Removing liquidity is free against the cap.** It returns value to the wallet (a net inflow),
-  so it never charges the budget.
+- **Removing liquidity is free against the cap**, and so is collecting a position's fees. Both
+  return value to the wallet (a net inflow), so they never charge the budget.
 
 - **Prices can pause for a while.** Any transaction that moves the native asset or a metered
   token, and any price lookup, fails while price data can't be
@@ -94,7 +96,7 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
 
 - **"eth" means the chain's native asset; the wrapped token has its own ticker.** In every token
   argument, "eth" (or "bnb") is the native asset — ETH on Ethereum/Sepolia/Arbitrum/Base, BNB on BSC —
-  and `add_liquidity`/`remove_liquidity` default to it. The wrapped token is `"weth"` on
+  and the liquidity tools' second token defaults to it. The wrapped token is `"weth"` on
   Ethereum/Sepolia/Arbitrum/Base and `"wbnb"` on BSC: pass it only when the user means the wrapped
   token itself. `get_supported_tokens()` names both the native asset and the listed tokens if
   you're unsure.
@@ -116,18 +118,20 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
 ## Nothing sends until the user confirms it
 
 **No transaction tool sends anything.** `send_eth`, `transfer_erc20`, `transferFrom_erc20`,
-`wrap_eth`, `swap`, `add_liquidity`, `remove_liquidity` and every ERC-8004 write all stop at a
-QUOTE: they build the exact transaction, price it against the chain, and hand back `action` (what
-it does), what it costs in USD, and a `quote_id`. Nothing has been signed and nothing has been
-sent.
+`wrap_eth`, `swap`, every tool that puts in or takes out liquidity (or a position's fees) and
+every ERC-8004 write all stop at a QUOTE: they build the exact transaction, price it against the
+chain, and hand back `action` (what it does), what it costs in USD, and a `quote_id`. Nothing has
+been signed and nothing has been sent.
 
 `confirm_transaction(quote_id)` is the ONLY tool that sends. The sequence is always:
 
 1. Call the transaction tool. You get a quote back.
 2. Tell the user, in your own message: what `action` says and its `details` if it has any, the
    `network` it runs on, what it is worth and counts toward the spending limit (`usd_value`,
-   `charged_usd`, when the quote has them), what `total_usd` costs, and that nothing has been sent
-   yet. Use the quote's own `action` text —
+   `charged_usd`, when the quote has them), what it costs in fees (`total_usd`), and that nothing
+   has been sent yet — each in plain words, never by its field name. `total_usd` is the fees ONLY,
+   the network fee plus the protocol fee: what is being sent or spent comes on top, so never call
+   it the transaction's total cost. Use the quote's own `action` text —
    do not paraphrase the recipient or the amount into something different from what it says.
 3. STOP. End your turn there and wait for the user's reply.
 4. If they agree, call `confirm_transaction` with that `quote_id`. If they don't, or they change
@@ -168,8 +172,10 @@ it can use, when the refusal gives that figure.
 
 When they pass, the quote carries the figures to show with it: `usd_value` (what is leaving the
 wallet is worth), `charged_usd` (what it will count toward the spending limit), `remaining_usd`
-(what is left of the limit now) and `session_expires_in_secs`. `usd_value` is null for a token the
-user added — say it has no price in Mitfah instead of showing a figure — or when
+(what is left of the limit now) and `session_expires_in_secs`. `remaining_usd` is read BEFORE the
+transaction: call it what is left now, never what will be left after it, and don't work that out
+yourself — `confirm_transaction` reports it once the transaction is sent. `usd_value` is null for a
+token the user added — say it has no price in Mitfah instead of showing a figure — or when
 `usd_value_unavailable` says its price can't be read right now. If the key runs out within a few
 days, mention it.
 
@@ -208,18 +214,38 @@ reply.
   contact's name only — never an address. When you show the quote, state plainly that the output
   goes to that recipient and NOT into the user's wallet. Omit `recipient` (or pass `"me"`) to keep
   the output.
-- **Adding liquidity:** `add_liquidity(token_a, amount_a)`. `token_b` defaults to the native
+- **Liquidity: you only have the tools of the network you're on.** BSC has PancakeSwap V2's
+  (`add_liquidity`, `remove_liquidity`); Ethereum, Sepolia, Arbitrum and Base have Uniswap V3's
+  positions (below).
+- **Adding liquidity (BSC):** `add_liquidity(token_a, amount_a)`. `token_b` defaults to the native
   asset (ETH/BNB), deposited as it is; pass `"weth"`/`"wbnb"` only for the wrapped token, or another
   ticker for another pool. The amount fixed is always the token's: if the user gives only a native
   amount ("add 0.5 ETH of liquidity with DAI"), ask how much of the token instead —
   `get_pool_quote` shows what an amount pairs with. The tool works out the second amount from the
   pool and checks both balances; its `details` show both deposits. Both count toward the limit —
   the LP token that comes back has no price. Both approvals are atomic.
-- **Removing liquidity:** if the user hasn't said how much, call `get_liquidity_token_balance` to
+- **Removing liquidity (BSC):** if the user hasn't said how much, call `get_liquidity_token_balance` to
   show what they hold and ask. Then `remove_liquidity(token_a, lp_amount)` — `token_b` defaults to
   the native asset, as for adding. Note the exact amounts returned depend on pool reserves at
   execution. It counts nothing toward the limit, and the LP-token approval to the router is
   atomic.
+- **Uniswap V3 positions (Ethereum, Sepolia, Arbitrum, Base).** A deposit is a position with a
+  price range, and it earns fees only while the price is inside it. To open one: (1) as soon as
+  the user asks to add liquidity, call `suggest_price_ranges(token_a)` (`token_b` defaults to the
+  native asset) — nothing first: no token list, no wallet status, and don't ask for the amount yet
+  (ask for it together with their pick); it checks the tokens itself and the quote checks the
+  balances; (2) show the user every
+  option — its name, its prices, today's price and how a deposit splits; (3) STOP and let them pick
+  one, or name their own lower and upper price — never pick for them; (4) call
+  `open_position(token_a, amount_a, range=<their pick>)`, or with `min_price`/`max_price` for
+  their own bounds. If the user already named a range (narrow, medium, wide or full) and an amount
+  before you've shown the options, that IS their pick: call `suggest_price_ranges` and then
+  `open_position` in the same turn, and show the quote. As for BSC, the amount fixed is the token's, never the native asset's, and both
+  deposits count toward the limit. Say in plain words that out of range the position earns no fees
+  and holds only one of its two tokens until the price comes back, and that fees are not added to
+  it: `collect_fees` claims them. `get_positions` lists the wallet's positions with their ids;
+  `add_to_position`, `withdraw_from_position` (a percent: 100 closes it) and `collect_fees` take
+  that id. Taking a position or its fees out counts nothing toward the limit.
 
 ## ERC-8004 agent registries
 
@@ -307,21 +333,26 @@ user's own wallet.
   questions about a contact.
 - **Ask for missing information.** If the request is missing the token, recipient, or amount, ask
   before calling any tool.
+- **Field names are for you, not the user.** Tool results label their figures with names like
+  `usd_value`, `charged_usd`, `total_usd`, `remaining_usd` or `session_expires_in_secs`. Never put
+  one in a reply, in backticks or otherwise: say what it means in plain words ("worth $25.39",
+  "counts $25.39 toward your limit", "$0.71 in fees").
 - **Your memory of this chat is short.** After each transaction the conversation starts afresh,
   keeping only the last message and your reply to it. If the user asks about an earlier
   transaction or something said before that, don't guess: say you no longer have it, and point
   them to the History tab in the web app, which lists every transaction with its hash, date and
   time.
 """
-# claude-sonnet-4-6
-# claude-sonnet-4-5-20250929
-llm = ChatAnthropic(
-    model="claude-sonnet-4-6",
+llm = ChatDeepSeek(
+    model="deepseek-flash",
     temperature=0.1,
     timeout=30,
     max_tokens=4096,
     max_retries=2,
-   
+    # Thinking is on by default, and once tools are in play DeepSeek wants the model's reasoning sent
+    # back on every later call, or it answers 400. langchain-deepseek (1.1.1) never sends it back,
+    # so a turn's second model call would fail. Off is also faster.
+    extra_body={"thinking": {"type": "disabled"}},
 )
 _checkpointer_cm= None
 _checkpointer= None
@@ -347,12 +378,59 @@ def _tool_failure_message(exc: Exception) -> str:
 
     Mostly a contract revert on a read, which web3 reports as bare hex (ContractCustomError). Named,
     the agent can tell a price pause from a real fault; the middleware's default text would also
-    end in "Please try again.", which is exactly wrong for an outage.
+    end in "Please try again.", which is exactly wrong for an outage. Anything else is a network
+    error as often as not, naming the RPC's URL and its key, so the text is masked before the model
+    -- a third-party service -- reads it.
     """
     reason = name_revert(str(exc))
     if reason:
         return f"The contract call reverted with {reason}."
-    return f"The tool failed with {type(exc).__name__}: {exc}"
+    return f"The tool failed with {type(exc).__name__}: {redact(exc)}"
+
+
+def _tools_for_chain(tools: list, user_id: int | None) -> list:
+    """
+    The tools the model is shown for a turn: all of them, less the liquidity tools of every exchange
+    the user's chain doesn't trade on (tools.LIQUIDITY_TOOLS) -- Uniswap V3's positions on its four
+    chains, PancakeSwap V2's LP tokens on BSC, neither where there is no exchange.
+
+    The chain is the one the turn acts on: load_network_config answers the network chat() made the
+    acting one, as it does for every tool the turn runs. It reads the database only (its Web3 is
+    built without touching the node), so this costs no RPC.
+    """
+    try:
+        _, chain_id, _ = load_network_config(user_id)
+        exchange = get_exchange(chain_id)
+    except ValueError:  # no network configured for the user: no exchange to offer
+        exchange = None
+    hidden = set().union(*(names for venue, names in LIQUIDITY_TOOLS.items() if venue != exchange))
+    return [t for t in tools if getattr(t, "name", None) not in hidden]
+
+
+class ChainLiquidityTools(AgentMiddleware):
+    """
+    Shows the model only its chain's liquidity tools (_tools_for_chain).
+
+    The agent is built once, with every tool, and serves every chain. A model shown both exchanges'
+    tools would reach for add_liquidity on a V3 chain or open_position on BSC, and every such call
+    is a wasted round trip ending in a refusal (each tool also refuses on the wrong chain, as a
+    backstop); the hidden tool's description is also a few hundred tokens of every request.
+
+    A class rather than the @wrap_model_call decorator, which makes either a sync or an async hook:
+    chat() runs the agent synchronously, while the CLI harness and the agent smoke test await it,
+    and a middleware with only one of the two fails the other.
+    """
+
+    @staticmethod
+    def _narrowed(request):
+        context = request.runtime.context
+        return request.override(tools=_tools_for_chain(request.tools, getattr(context, "user_id", None)))
+
+    def wrap_model_call(self, request, handler):
+        return handler(self._narrowed(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self._narrowed(request))
 
 
 def init_agent():
@@ -361,22 +439,12 @@ def init_agent():
     agent = create_agent(
         model=llm,
         tools=tools,
-        # A cache point of its own at the end of the prompt, so the tools and the prompt (~20k
-        # tokens, the same for everyone) are cached as one shared block. The middleware below only
-        # marks the LAST message, which caches each conversation's history but never this block on
-        # its own: every new conversation -- a new user, and every one started afresh after a
-        # transaction -- used to pay to read all of it uncached before its first reply. An hour,
-        # not five minutes, because the next new conversation can be a while coming; a block cached
-        # for longer has to come before the five-minute one, and it does.
-        system_prompt=SystemMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                }
-            ]
-        ),
+        # No cache markers: DeepSeek caches by itself, reusing whatever a request shares with the
+        # start of a recent one. The tools and the prompt (~20k tokens) open every request, and are
+        # the same for everyone on a chain's exchange (ChainLiquidityTools picks the liquidity
+        # tools), so a new conversation reads them from the cache too, and a running one also reads
+        # its own earlier history.
+        system_prompt=SYSTEM_PROMPT,
         checkpointer=_checkpointer,
         # Carries the user's identity to the tools OUT OF BAND, so it never appears in the schema
         # the model fills in. Every tool reads it from its ToolRuntime instead of taking it as an
@@ -387,11 +455,11 @@ def init_agent():
         # propagates past the ToolNode's default handler — which only catches malformed
         # tool-call args, not runtime failures — and crashes the process mid-tool-call,
         # leaving an orphaned tool_use with no tool_result in the sqlite checkpoint. That
-        # corrupts the thread permanently: Anthropic rejects every future message in it.
-        middleware=[ToolRetryMiddleware(max_retries=0, on_failure=_tool_failure_message),
-                    AnthropicPromptCachingMiddleware(ttl="5m")
-                    
-                    ],
+        # corrupts the thread permanently: the API rejects every future message in it.
+        middleware=[
+            ToolRetryMiddleware(max_retries=0, on_failure=_tool_failure_message),
+            ChainLiquidityTools(),
+        ],
     )
 
 
@@ -439,8 +507,8 @@ def thread_id(user_id: int, chain_id: int) -> str:
 # How long a conversation may grow before it starts afresh even without a transaction, in
 # approximate tokens of message history (characters / 4). Every model call re-sends the whole
 # history on top of ~20k tokens of prompt and tool descriptions, so a short one is also cheaper and
-# faster. Far under Sonnet's 200k window, which an unbounded thread used to fill until every turn
-# failed; a local model with a smaller window needs a smaller figure.
+# faster. Far under DeepSeek's 1M window; an unbounded thread once filled Claude's 200k until every
+# turn failed. A local model with a smaller window needs a smaller figure.
 HISTORY_TOKEN_LIMIT = 40_000
 
 # Turns running per thread in this process: a conversation is not deleted under a turn (see

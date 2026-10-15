@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -52,13 +52,15 @@ contract SHFactory is Ownable, Pausable {
      *      immutable on the registry too, so there is no later change for wallets to miss. The
      *      SpendingLimitModule is the exception: the operator can change it, so {deployWallet} reads
      *      it fresh for every wallet. The registry must therefore already be deployed.
-     * @param owner     Address that will own this factory — the SHTreasury, the protocol's single
-     *                  admin root. Supplied rather than taken from msg.sender so no follow-up
-     *                  transferOwnership is needed; the operator reaches {pause}/{unpause} through
-     *                  SHTreasury's owner-only passthroughs.
-     * @param _registry The SHRegistry this factory and its wallets read configuration from.
+     * @param owner       Address that will own this factory — the SHTreasury, the protocol's
+     *                    single admin root. Supplied rather than taken from msg.sender so no
+     *                    follow-up transferOwnership is needed; the operator reaches
+     *                    {pause}/{unpause} through SHTreasury's owner-only passthroughs.
+     * @param _registry   The SHRegistry this factory and its wallets read configuration from.
+     * @param gasCeilings This chain's starting gas ceilings for every wallet: see
+     *                    {SessionHandler-GasCeilings}. Both must be > 0.
      */
-    constructor(address owner, address _registry) Ownable(owner) {
+    constructor(address owner, address _registry, SessionHandler.GasCeilings memory gasCeilings) Ownable(owner) {
         REGISTRY = SHRegistry(_registry);
         IMPLEMENTATION = address(
             new SessionHandler(
@@ -67,7 +69,8 @@ contract SHFactory is Ownable, Pausable {
                     reputationRegistry: SHRegistry(_registry).REPUTATION_REGISTRY(),
                     identityRegistry: SHRegistry(_registry).IDENTITY_REGISTRY(),
                     registry: _registry
-                })
+                }),
+                gasCeilings
             )
         );
     }

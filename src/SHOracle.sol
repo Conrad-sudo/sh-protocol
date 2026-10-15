@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -63,6 +63,10 @@ contract SHOracle is Ownable {
     ///      storage ceiling, where the cast would silently truncate into a much tighter ceiling.
     error PriceOracle_InvalidHeartbeat();
 
+    /// @dev Reverts when a feed reports more than 18 decimals. Prices are scaled UP to 18 decimals,
+    ///      so a finer feed would need scaling down; no USD feed is that fine.
+    error PriceOracle_InvalidFeedDecimals(uint8 decimals);
+
     /// @dev Reverts on any attempt to deregister the native (address(0)) feed. SpendingLimitModule
     ///      prices the account's native balance delta on EVERY metered transaction, so removing this
     ///      feed would revert every native-moving execution on every wallet installed against this
@@ -118,15 +122,16 @@ contract SHOracle is Ownable {
     int256 private constant SEQUENCER_DOWN = 1;
 
     /// @notice Everything getPrice needs for one token, packed into a single 32-byte storage slot.
-    /// @dev address(20) + uint8(1) + uint48(6) = 27 bytes, so a getPrice reads ONE slot instead of
-    ///      two separate mappings, and `decimals` is cached here at construction so getPrice no
-    ///      longer makes an external IERC20Metadata.decimals() call into an arbitrary token on
-    ///      every valuation. A uint48 heartbeat holds ~8.9 million years of seconds — Chainlink
-    ///      heartbeats are hours-to-days, so there is no practical ceiling being given up.
+    /// @dev address(20) + uint8(1) + uint48(6) + uint8(1) = 28 bytes, so a getPrice reads ONE slot
+    ///      instead of separate mappings. Both decimals are cached here when the feed is set, so
+    ///      getPrice makes no external decimals() call into the token or the feed on every
+    ///      valuation. A uint48 heartbeat holds ~8.9 million years of seconds — Chainlink heartbeats
+    ///      are hours-to-days, so there is no practical ceiling being given up.
     struct Feed {
         address feed; // Chainlink USD price feed for this token; address(0) means "not registered"
-        uint8 decimals; // the token's own ERC-20 decimals (18 for native ETH), cached at construction
+        uint8 decimals; // the token's own ERC-20 decimals (18 for native ETH), cached when set
         uint48 heartbeat; // this feed's staleness ceiling in seconds (its Chainlink-published heartbeat)
+        uint8 feedDecimals; // the FEED's own decimals: 8 for Chainlink's USD feeds, but read, not assumed
     }
 
     /// @notice Maps each registered token address to its packed Feed record.
@@ -134,10 +139,6 @@ contract SHOracle is Ownable {
     ///      Chainlink heartbeats vary per feed: volatile assets update hourly, stablecoins every 23–24 hours.
     ///      Using a uniform timeout would either flag stablecoin feeds as stale or mask genuinely stale volatile feeds.
     mapping(address => Feed) private sFeeds;
-
-    /// @notice Multiplier to convert Chainlink's 8-decimal prices to 18-decimal precision
-    /// @dev Chainlink returns prices with 8 decimals. Multiply by 1e10 to get 18 decimals.
-    int256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
 
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
@@ -219,9 +220,9 @@ contract SHOracle is Ownable {
      *      oracle works correctly with tokens of any decimal count (e.g., USDC at 6, WBTC at 8).
      *      ETH (address(0)) is hardcoded to 18 decimals since it has no on-chain contract.
      *
-     *      Formula: (amount × chainlinkPrice × 1e10) / (10 ** tokenDecimals)
-     *      Example — 1000 USDC (6 dec) at $0.99:
-     *        chainlinkPrice = 99_000_000  (8 dec)
+     *      Formula: (amount × feedPrice × 10 ** (18 - feedDecimals)) / (10 ** tokenDecimals)
+     *      Example — 1000 USDC (6 dec) at $0.99, from an 8-decimal feed:
+     *        feedPrice = 99_000_000
      *        (1000e6 × 99_000_000 × 1e10) / 1e6 = 990e18  → $990 with 18 decimals
      *
      * @param token  Token address. Use address(0) for native ETH.
@@ -236,7 +237,8 @@ contract SHOracle is Ownable {
 
         // amount is a token balance/allowance that cannot approach 2**255, so the cast never truncates.
         // forge-lint: disable-next-line(unsafe-typecast)
-        return (int256(amount) * price * ADDITIONAL_FEED_PRECISION) / int256(10 ** f.decimals);
+        // Scaled up to 18 decimals by the feed's own decimals, which _setFeed caps at 18.
+        return (int256(amount) * price * int256(10 ** (18 - f.feedDecimals))) / int256(10 ** f.decimals);
     }
 
     /**
@@ -244,7 +246,7 @@ contract SHOracle is Ownable {
      * @param priceFeed Address of the Chainlink price feed to query
      * @param heartbeat This feed's staleness ceiling in seconds (passed in from the packed Feed
      *                  record so this function makes no extra storage read of its own)
-     * @return price    The current price with 8 decimals (Chainlink standard)
+     * @return price    The current price, with the feed's own decimals (8 for Chainlink's USD feeds)
      *
      * @notice Reverts with PriceOracle_StalePrice if the feed has not updated within its heartbeat.
      *
@@ -315,11 +317,12 @@ contract SHOracle is Ownable {
      *      the timelock protecting wallets from a bad oracle lives on
      *      {SHRegistry-proposePriceOracle}, which governs WHICH oracle they read, not its contents.
      *      The owner is therefore trusted for cap integrity either way (THREAT_MODEL §3.8).
-     * @dev The token's decimals are read on-chain rather than supplied by the caller: a wrong
-     *      decimals value would silently mis-price every valuation of that token by a power of ten,
-     *      with nothing on-chain to catch it.
+     * @dev The token's decimals and the feed's are both read on-chain rather than supplied by the
+     *      caller: a wrong decimals value would silently mis-price every valuation of that token by a
+     *      power of ten, with nothing on-chain to catch it.
      * @param token     Token to price. Use address(0) for native.
-     * @param priceFeed Chainlink USD aggregator for it. Must not be address(0).
+     * @param priceFeed Chainlink USD aggregator for it. Must not be address(0), and must report at
+     *                  most 18 decimals.
      * @param heartbeat That feed's Chainlink-published heartbeat, in seconds. Must be > 0.
      */
     function setFeed(address token, address priceFeed, uint256 heartbeat) external onlyOwner {
@@ -349,7 +352,12 @@ contract SHOracle is Ownable {
         if (heartbeat == 0 || heartbeat > type(uint48).max) revert PriceOracle_InvalidHeartbeat();
         // Native ETH has no contract to query; every other token exposes its own decimals.
         uint8 tokenDecimals = token == ETH_TOKEN_ADDRESS ? 18 : IERC20Metadata(token).decimals();
-        sFeeds[token] = Feed({feed: priceFeed, decimals: tokenDecimals, heartbeat: uint48(heartbeat)});
+        // Read off the feed rather than assumed: Chainlink's USD feeds use 8, but not every feed
+        // does, and a wrong figure would mis-price every valuation by a power of ten.
+        uint8 feedDecimals = AggregatorV3Interface(priceFeed).decimals();
+        if (feedDecimals > 18) revert PriceOracle_InvalidFeedDecimals(feedDecimals);
+        sFeeds[token] =
+            Feed({feed: priceFeed, decimals: tokenDecimals, heartbeat: uint48(heartbeat), feedDecimals: feedDecimals});
         emit FeedSet(token, priceFeed, heartbeat);
     }
 }

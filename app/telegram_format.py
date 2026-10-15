@@ -168,32 +168,42 @@ def _table_rows(node: SyntaxTreeNode) -> list[str]:
     Each row of a table as one line: its first cell in bold, then the others. With more than two
     columns, each cell after the first is labelled with its column's header.
     """
-    head = next((part for part in node.children if part.type == "thead"), None)
-    headers = [_text_of(cell) for cell in head.children[0].children] if head and head.children else []
+    headers = _table_headers(node)
     rows = []
     for body in (part for part in node.children if part.type == "tbody"):
         for row in body.children:
-            cells = [_text_of(cell) for cell in row.children]
-            if not cells:
-                continue
-            first = re.sub(r"</?b>", "", cells[0])
-            rest = cells[1:]
-            if len(rest) > 1:
-                rest = [
-                    f"{headers[i]}: {cell}" if i < len(headers) and headers[i] else cell
-                    for i, cell in enumerate(cells[1:], start=1)
-                    if cell
-                ]
-            shown = " · ".join(cell for cell in rest if cell)
-            if not first:
-                rows.append(shown)
-            elif not shown:
-                rows.append(f"<b>{first}</b>")
-            else:
-                rows.append(f"<b>{first}</b>{':' if len(cells) == 2 else ' —'} {shown}")
+            line = _table_row_line([_text_of(cell) for cell in row.children], headers)
+            if line is not None:
+                rows.append(line)
     if not rows and headers:
         rows.append(" · ".join(header for header in headers if header))
     return rows
+
+
+def _table_headers(node: SyntaxTreeNode) -> list[str]:
+    """The text of a table's header cells, or [] when it has no header row."""
+    head = next((part for part in node.children if part.type == "thead"), None)
+    return [_text_of(cell) for cell in head.children[0].children] if head and head.children else []
+
+
+def _table_row_line(cells: list[str], headers: list[str]) -> str | None:
+    """One table row as a line, as _table_rows describes it, or None for a row with no cells."""
+    if not cells:
+        return None
+    first = re.sub(r"</?b>", "", cells[0])
+    rest = cells[1:]
+    if len(rest) > 1:
+        rest = [
+            f"{headers[i]}: {cell}" if i < len(headers) and headers[i] else cell
+            for i, cell in enumerate(cells[1:], start=1)
+            if cell
+        ]
+    shown = " · ".join(cell for cell in rest if cell)
+    if not first:
+        return shown
+    if not shown:
+        return f"<b>{first}</b>"
+    return f"<b>{first}</b>{':' if len(cells) == 2 else ' —'} {shown}"
 
 
 def _pack(pieces: list[tuple[str, str]], limit: int) -> list[str]:

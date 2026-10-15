@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+import { useLocation } from 'react-router'
 import { Button, Placeholder, Stack } from 'rsuite'
 import { GlassPanel } from '../components/Glass'
 import { PageHeader } from '../components/PageHeader'
@@ -13,6 +15,15 @@ import { useSignOut } from '../hooks/useSignOut'
 export function SettingsPage() {
   const { data: me, isPending, isError, refetch } = useMe()
   const signOut = useSignOut()
+  const { hash } = useLocation()
+  const loaded = me !== undefined
+
+  // Opened at a card (/settings#telegram, from the dashboard): go to it once the account's cards are
+  // in. Once only: the account is read again while a Telegram link is pending, which mustn't pull
+  // the page back.
+  useEffect(() => {
+    if (loaded && hash) document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' })
+  }, [loaded, hash])
 
   let account
   if (isPending) {

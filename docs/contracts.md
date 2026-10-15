@@ -39,12 +39,13 @@ test/
 │   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (37 tests)
 │   └── SpendingLimitModuleHarness.sol ← Test harness exposing the module's internal calldata/approval helpers
 ├── fork/
-│   ├── SHForkTestBase.sol              ← Shared abstract fork suite (10 tests) parameterized per network
-│   ├── SHUniswapV2Test.t.sol           ← Mainnet-fork instance (WETH→DAI)
-│   ├── SHSepoliaUniswapV2Test.t.sol    ← Sepolia-fork instance (WETH→USDC)
-│   ├── SHPancakeswapV2Test.t.sol       ← BSC-fork instance (USDT→WBNB→LINK)
-│   ├── SHArbitrumUniswapV2Test.t.sol   ← Arbitrum-fork instance (WETH→USDC) + L2 sequencer-gate tests
-│   └── SHBaseUniswapV2Test.t.sol       ← Base-fork instance (WETH→USDC) + L2 sequencer-gate tests
+│   ├── SHForkTestBase.sol              ← Shared abstract fork suite (14 tests) parameterized per network; V2 venue hooks: swap calldata, _trustedSpenders(), liquidity round-trip
+│   ├── SHUniswapV3ForkTestBase.sol     ← Same suite on Uniswap V3: swaps through SwapRouter02, trusts it and the position manager, and a position round-trip (mint → half out → rest out + burn)
+│   ├── SHMainnetUniswapV3Test.t.sol    ← Mainnet-fork instance (WETH→DAI, V3 0.3%)
+│   ├── SHSepoliaUniswapV3Test.t.sol    ← Sepolia-fork instance (WETH→USDC, V3 0.05%)
+│   ├── SHPancakeswapV2Test.t.sol       ← BSC-fork instance (USDT→WBNB→LINK, PancakeSwap V2)
+│   ├── SHArbitrumUniswapV3Test.t.sol   ← Arbitrum-fork instance (WETH→USDC, V3 0.05%) + L2 sequencer-gate tests
+│   └── SHBaseUniswapV3Test.t.sol       ← Base-fork instance (WETH→USDC, V3 0.05%) + L2 sequencer-gate tests
 └── invariant/
     ├── InvariantSH.t.sol  ← Stateful invariant tests (8 invariants)
     └── SHHandler.sol      ← Action handler for fuzzing, with a ghost metering model
@@ -128,7 +129,7 @@ Three more properties worth knowing:
 
 `totalFeesCollected` on `SHTreasury` sums **wei** collected across different native prices. It is not a dollar total and cannot be converted into one with a spot price after the fact.
 
-> `router` / `setUniswapRouter` were **removed**: which DEX a wallet trades on is a wallet-level choice, not protocol configuration. Wallets now start with an empty trusted-spender list and the owner grants a router explicitly via `addTrustedSpender`.
+> `router` / `setUniswapRouter` were **removed**: which DEX a wallet trades on is a wallet-level choice, not protocol configuration. A wallet trusts only the spenders its deployer passes to `deployWallet` (the app passes the chain's exchange contracts, `constants.get_default_spenders`), and the owner can grant more via `addTrustedSpender`.
 
 > The former `callValueInterpreter` parameter and `SHValueInterpreter` contract were **removed**: the new module meters spending by diffing watched-token balances, so it needs no per-call calldata decoder.
 
@@ -256,7 +257,7 @@ The `SHOracle` converts native-asset and ERC-20 token amounts into real-time USD
 
 The module calls it directly (there is no interpreter layer). `getPrice` returns the **signed 18-decimal USD value** of an amount, and `isPriced` gates whether a token may be watched or approved through the hook.
 
-**Supported tokens:** registered per-token via parallel `(address token, address priceFeed, uint256 heartbeat)` arrays passed to the constructor — native ETH/BNB uses `address(0)`. Pairs whose `priceFeed` is `address(0)` are silently skipped, so the same array shapes can be reused across networks. Each token's `decimals` is read once at construction and cached, so `getPrice` never makes an external `decimals()` call at valuation time.
+**Supported tokens:** registered per-token via parallel `(address token, address priceFeed, uint256 heartbeat)` arrays passed to the constructor — native ETH/BNB uses `address(0)`. Pairs whose `priceFeed` is `address(0)` are silently skipped, so the same array shapes can be reused across networks. Each token's `decimals`, and each feed's, are read once when the feed is set and cached, so `getPrice` never makes an external `decimals()` call at valuation time. The feed's decimals are read rather than assumed: Chainlink's USD feeds use 8, but a feed that uses another number is still priced correctly, and one finer than 18 decimals is refused (`PriceOracle_InvalidFeedDecimals`).
 
 **Staleness protection:** each registered feed has its **own** heartbeat, set once at construction — volatile assets (ETH, LINK, BTC) update roughly hourly, stablecoins every 23–24 hours. `getPrice` reverts with `PriceOracle_StalePrice` if `block.timestamp - updatedAt > heartbeat` for that feed, and with `PriceOracle_InvalidPrice` on a non-positive answer. (The error names retain the `PriceOracle_` prefix from the contract's earlier name.)
 
@@ -284,7 +285,7 @@ function getPrice(address token, uint256 amount) external view returns (int256);
 
 The `SessionHandler` is an **ERC-7579 smart account** (extends OpenZeppelin's `AccountERC7579Hooked`, plus `OwnableUpgradeable` and `Pausable`), deployed behind an EIP-1167 clone by `SHFactory`. It owns three responsibilities the module doesn't: **validating its own UserOps**, **managing the session-key allowlist**, and **guarding session-key executions** away from its own admin surface. `SpendingLimitModule` is installed as a **hook only** (no validator).
 
-**Self-validation — no separate validator module.** `SessionHandler._validateUserOp` authenticates every UserOp itself instead of delegating to `AccountERC7579._validateUserOp`. It recovers the signer once from the EIP-191 envelope of the userOpHash (`toEthSignedMessageHash`, matching the bot and the Foundry helper) and branches: the **owner** validates unconditionally, **`currentSession`** validates with its `validUntil` packed into the returned validation data, and anything else returns `SIG_VALIDATION_FAILED`. Raw-signature validation stays at `AccountERC7579`'s default of `false`, so exactly one function decides who may sign.
+**Self-validation — no separate validator module.** `SessionHandler._authenticate` (called from `validateUserOp`) authenticates every UserOp itself instead of delegating to `AccountERC7579._validateUserOp`. It recovers the signer once from the EIP-191 envelope of the userOpHash (`toEthSignedMessageHash`, matching the bot and the Foundry helper) and branches: the **owner** validates unconditionally, **`currentSession`** validates with its `validUntil` packed into the returned validation data, and anything else returns `SIG_VALIDATION_FAILED`. Raw-signature validation stays at `AccountERC7579`'s default of `false`, so exactly one function decides who may sign.
 
 Not delegating is deliberate. The base routes to a validator module named by the nonce key and otherwise falls back to `_rawSignatureValidation`; no validator module is ever installed here, so that branch is dead, and taking it would cost a second `ecrecover` just to learn which key signed. Recovering once is what lets an expired key fail as `AA22 expired or not due` instead of `AA24 signature error`. The accepted consequence: a validator module installed by the owner is ignored for UserOp validation (though `isValidSignature` would still consult it).
 
@@ -301,9 +302,9 @@ Session-key management and cap configuration are plain `onlyOwner`. Note that th
 
 One key rather than an allowlist is what keeps the wallet and whoever holds the key in step: a mapping cannot be enumerated, so nothing on chain could answer "which keys does this wallet trust?". `isSessionActive(key)` answers both halves at once, comparing with `<=` to match the EntryPoint exactly (an op is still valid in the second that equals the deadline).
 
-Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of contracts via the target allowlist (off by default; an address with no code always passes). A key (with its deadline) and a trusted router are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
+Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of contracts via the target allowlist (off by default; an address with no code always passes). A key (with its deadline) and the chain's exchange contracts as trusted spenders are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
 
-**Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and `removeLiquidity`'s LP-token approval then fails until the owner grants a router. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
+**Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and every approval of a token the oracle can't price (a BSC LP token for `removeLiquidity`, a token added by address for a swap or a deposit) then fails until the owner grants a spender. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
 ```solidity
 /// Passed ONCE, when SHFactory's constructor creates the implementation. The four become
@@ -371,10 +372,18 @@ function getAgentId() public view returns (uint256);
 function getAgentIdentity() public view returns (bool registered, uint256 agentId, string memory agentUri);
 function getAgentReputation() public view returns (uint256 agentId, uint64 feedbackCount, int128 summaryValue, uint8 summaryValueDecimals);
 
-// Per-UserOp gas ceiling (THREAT_MODEL 3.12) - the cap cannot see gas, these bound it
-uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
-uint80 public maxOpGasCost;                     // up to ~1.2M ETH
+// Gas ceilings (THREAT_MODEL 3.12) - the cap cannot see gas, these bound it. Defaults are set per
+// chain when the factory builds the implementation (HelperConfig: maxOpGasCost, sessionGasBudget).
+uint256 public immutable DEFAULT_MAX_OP_GAS_COST;
+uint256 public immutable DEFAULT_SESSION_GAS_BUDGET;
+uint256 public constant SESSION_GAS_WINDOW = 1 days;
+uint80 public maxOpGasCost;                     // per UserOp; up to ~1.2M ETH
 function setMaxOpGasCost(uint256 newMax) external onlyOwner;   // rejects 0 and > type(uint80).max
+uint80 public sessionGasBudget;                 // per window, across every op the owner didn't sign
+uint128 public sessionGasSpent;                 // ...spent so far this window
+uint48 public sessionGasWindowStart;
+function setSessionGasBudget(uint256 newBudget) external onlyOwner;   // rejects 0 and > type(uint80).max
+function sessionGasRemaining() external view returns (uint256);
 
 // Optional session-key target allowlist (THREAT_MODEL 3.13), off by default. Confines calls to
 // listed CONTRACTS: while it is on, an address with no code passes whether listed or not.
@@ -391,14 +400,17 @@ function getAllowedTargets() external view returns (address[] memory);  // whole
 event SessionAdded(address indexed sessionKey, uint48 validUntil);
 event SessionRemoved(address indexed sessionKey);
 event MaxOpGasCostUpdated(uint256 oldMax, uint256 newMax);
+event SessionGasBudgetUpdated(uint256 oldBudget, uint256 newBudget);
 event SessionAllowlistToggled(bool enabled);
 event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
 
-> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts `currentSession` in slot 9 — `app/bundler.py`'s `CURRENT_SESSION_SLOT` must match. `forge inspect SessionHandler storageLayout` shows the assignment.
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts `currentSession` in slot 9 — `app/bundler.py`'s `CURRENT_SESSION_SLOT` must match. The gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 10, after it, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
 
-> The account currently has **no validator module**, and `_validateUserOp` never consults one: the nonce key the app sends is irrelevant to who may sign. Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_validateUserOp` — this self-validation path is the only way UserOps are authenticated.
+> **Two gas ceilings.** `maxOpGasCost` bounds one UserOp: `_authenticate` prices the op's own gas fields against it, and `validateUserOp` bounds the prefund transfer too. `sessionGasBudget` bounds all of them: every UserOp the owner did not sign is charged its prefund top-up (`missingAccountFunds`) against a budget that refills every `SESSION_GAS_WINDOW` (24 hours), and validation reverts with `SessionHandler_SessionGasBudgetExceeded(spent, budget)` past it. Without it, a stolen key running its own bundler could pack many ops, each just under the per-op ceiling, into one `handleOps` and collect all their gas. The charge is the top-up, not the op's maximum price, so an ordinary op uses up about what it really cost. That is only safe because `_authenticate` refuses any op whose `callData` calls `validateUserOp` itself (`SessionHandler_SelfValidationCall`), the one way a key could otherwise have the account pay a prefund outside validation. The window reads `block.timestamp` during validation, which ERC-7562 bans for public bundlers; the protocol bundles every op itself (`app/bundler.py`), so it holds.
+
+> The account currently has **no validator module**, and `_authenticate` never consults one: the nonce key the app sends is irrelevant to who may sign. Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_authenticate` — this self-validation path is the only way UserOps are authenticated.
 
 ---
 
@@ -429,7 +441,7 @@ struct Config {
 
 Because spending *is* the drop in watched-portfolio USD, the module needs no per-venue swap decoder: a value-neutral swap nets ~0, and a bad-rate or sandwiched swap registers its lost value automatically. Both `execute` and `executeFromExecutor` calldata are decoded for approvals; delegatecalls are not decoded (no reliable selector), but the net-value cap still applies to them.
 
-**Trusted-spender exemption (unpriced approvals).** An `approve` on a token the oracle can't price normally reverts (`TokenNotPriced`) — *unless* the spender is on the account's `trustedSpenders` list. This is the escape hatch that lets a Uniswap V2 **LP token** (which has no Chainlink feed) be approved to the router for `removeLiquidity`. The no-standing-approval and no-unlimited-approval rules still apply in full to trusted spenders — the exemption only skips the price check. The list starts empty unless the deployer seeds one: `SHFactory.deployWallet`'s `trustedSpenders` argument grants them inside `initialize` (this is how the bot grants the router now, from `constants.get_router`). `addTrustedSpender` remains for granting one later.
+**Trusted-spender exemption (unpriced approvals).** An `approve` on a token the oracle can't price normally reverts (`TokenNotPriced`) — *unless* the spender is on the account's `trustedSpenders` list. This is the escape hatch that lets a V2 **LP token** (which has no Chainlink feed) be approved to the router for `removeLiquidity` on BSC, and a token the user added by address be approved to the exchange for a swap or a Uniswap V3 deposit. The no-standing-approval and no-unlimited-approval rules still apply in full to trusted spenders — the exemption only skips the price check. The list starts empty unless the deployer seeds one: `SHFactory.deployWallet`'s `trustedSpenders` argument grants them inside `initialize` (this is how the app grants the chain's exchange contracts, from `constants.get_default_spenders`: SwapRouter02 and the position manager on the Uniswap V3 chains, PancakeSwap's router on BSC). `addTrustedSpender` remains for granting one later.
 
 **Self-guard on the module's admin surface.** `preCheck` reverts `AdminExecution` if any sub-call of the execution targets the module itself with one of its own selectors (the six config setters, `onInstall`, `onUninstall`). It runs *first*, before approvals are collected, so a refused transaction pays almost nothing. It is defence-in-depth that holds even on a host account with no guard of its own — and it deliberately blocks the **owner's** `execute` path too, because by the time `preCheck` runs `msg.sender` is the account whether an owner or a session key drove it, leaving no way to tell them apart. Nothing legitimate is lost: the owner reaches the six setters through `SessionHandler`'s `onlyOwner` passthroughs (a direct call, so no hook runs), and `onInstall`/`onUninstall` through `installModule`/`uninstallModule`, whose outer calldata is not an `execute` selector and so never reaches the check.
 
@@ -515,15 +527,15 @@ Session-key calls to the Reputation Registry (`giveFeedback`) work without any s
 
 ## `HelperConfig.s.sol`
 
-`HelperConfig` resolves chain-specific deployment parameters at runtime. Its `NetworkConfig` struct carries ~22 tokens and their Chainlink USD price feeds + heartbeats, plus the L2 sequencer uptime feed and the ERC-8004 registry addresses. (The router is **not** protocol config — which venue a wallet trades on is a wallet-level choice; the fork suite reads it straight from `Constants.s.sol`, as an owner would.)
+`HelperConfig` resolves chain-specific deployment parameters at runtime. Its `NetworkConfig` struct carries ~22 tokens and their Chainlink USD price feeds + heartbeats, plus the L2 sequencer uptime feed, the ERC-8004 registry addresses, and the chain's starting gas ceilings for every wallet (`maxOpGasCost` per op, `sessionGasBudget` per day; see `SessionHandler` above). (The router is **not** protocol config — which venue a wallet trades on is a wallet-level choice; the fork suite reads it straight from `Constants.s.sol`, as an owner would.)
 
-| Network | Chain ID | EntryPoint | Router (from Constants) | Sequencer uptime feed |
+| Network | Chain ID | EntryPoint | Exchange (from Constants) | Sequencer uptime feed |
 |---|---|---|---|---|
-| Ethereum Mainnet | 1 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | none (`address(0)`) |
-| Ethereum Sepolia | 11155111 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | none (`address(0)`) |
+| Ethereum Mainnet | 1 | `ENTRYPOINT_V07` (canonical) | Uniswap V3 (SwapRouter02, position manager) | none (`address(0)`) |
+| Ethereum Sepolia | 11155111 | `ENTRYPOINT_V07` (canonical) | Uniswap V3 (SwapRouter02, position manager) | none (`address(0)`) |
 | BSC | 56 | `ENTRYPOINT_V07` (canonical) | PancakeSwap V2 | none (`address(0)`) |
-| Arbitrum One | 42161 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | `ARB_SEQUENCER_UPTIME_FEED` |
-| Base | 8453 | `ENTRYPOINT_V07` (canonical) | Uniswap V2 | `BASE_SEQUENCER_UPTIME_FEED` |
+| Arbitrum One | 42161 | `ENTRYPOINT_V07` (canonical) | Uniswap V3 (SwapRouter02, position manager) | `ARB_SEQUENCER_UPTIME_FEED` |
+| Base | 8453 | `ENTRYPOINT_V07` (canonical) | Uniswap V3 (SwapRouter02, position manager) | `BASE_SEQUENCER_UPTIME_FEED` |
 | Anvil (local) | 31337 | Freshly deployed, cached per session | none (`address(0)`) | none (`address(0)`) |
 
 `getConfigByChainId` **reverts with `HelperConfig__InvalidChainId`** on an unrecognised chain ID, rather than silently handing back mainnet's token and feed addresses — which would be wrong for that chain. For Anvil, `HelperConfig` deploys a fresh `EntryPoint`, `MockV3Aggregator` feeds seeded with approximate real-world prices, and the ERC-8004 mocks (all inside `vm.startBroadcast`, so the mock token addresses land on-chain and are recoverable from the broadcast file). Sepolia uses a wide 72h heartbeat across the board (its Chainlink nodes update far less often than mainnet's — an accepted testnet characteristic). The mainnet/BSC/Arbitrum/Base deployer resolves from `MAINNET_DEPLOYER_ADDRESS`, falling back to a deterministic placeholder for fork tests — export the real one before a live deployment.
@@ -548,7 +560,7 @@ Orchestrates deployment of all shared infrastructure. Individual `SessionHandler
 6. Call `treasury.setRegistry(address(registry))` — write-once, fixing the pairing.
 6b. Deploy `SpendingLimitModule(address(registry))` — wired to the **registry**, from which it resolves the current oracle on every valuation (no interpreter). Must come after the registry: its constructor reads `priceOracle()` off it.
 7. Call `treasury.setSpendingLimitModule(address(module))` — the module could not be a registry constructor argument (see the registry section), so it is registered here.
-8. Deploy `SHFactory(address(treasury), address(registry))` — just owner and registry. Every other address a wallet needs is read off the registry at `deployWallet` time, so the factory stores none of them. It deploys the `SessionHandler` implementation it clones from internally.
+8. Deploy `SHFactory(address(treasury), address(registry), GasCeilings(maxOpGasCost, sessionGasBudget))` — owner, registry, and this chain's starting gas ceilings from `HelperConfig`. Every address a wallet needs is read off the registry, so the factory stores none of them. It deploys the `SessionHandler` implementation it clones from internally, with the gas ceilings as that implementation's defaults.
 9. Call `treasury.setFactory(address(factory))` — records the factory on the registry for off-chain discoverability.
 
 No `transferOwnership` step is needed anywhere, and at no point does the deployer EOA own a live contract other than the treasury.
@@ -600,7 +612,7 @@ Expiry is proved through the same real `handleOps` path: a key past its deadline
 
 > **Gotcha:** the vendored account-abstraction is EntryPoint **v0.9**, whose `nonReentrant` requires `tx.origin == msg.sender` — tests must submit `handleOps` with a two-arg `vm.prank(bundler, bundler)` (EOA bundler) or it reverts `Reentrancy()`.
 
-**`test/fork/SHForkTestBase.sol` (10 tests, abstract)** + thin per-network instances **`SHUniswapV2Test`** (mainnet, WETH→DAI), **`SHSepoliaUniswapV2Test`** (Sepolia, WETH→USDC), and **`SHPancakeswapV2Test`** (BSC, USDT→WBNB→LINK multi-hop). Runs identically against the real router, live Chainlink feeds, and the canonical EntryPoint: wallet deploys with cap config and the owner trusts the chain's router (from Constants.s.sol); net-value metering at live prices; budget-exceeded reverts atomically; a real **session-key swap** metered by net portfolio change; standing/unlimited approvals rejected on a real DEX; a session op targeting the module reverts; a revoked key fails validation; and a full **`addLiquidity → removeLiquidity` round-trip** proving the unpriced LP-token approval flows through the trusted router (BSC exercises the router's create-pair path). Metering assertions are computed from actual balance diffs priced through the deployed oracle, so they hold despite testnet pool-ratio divergence.
+**`test/fork/SHForkTestBase.sol` (14 tests, abstract)** + thin per-network instances: **`SHMainnetUniswapV3Test`** (mainnet, WETH→DAI), **`SHSepoliaUniswapV3Test`** (Sepolia, WETH→USDC), **`SHArbitrumUniswapV3Test`** and **`SHBaseUniswapV3Test`** (WETH→USDC, plus the sequencer-gate tests), all swapping through Uniswap V3's SwapRouter02 via **`SHUniswapV3ForkTestBase`**, and **`SHPancakeswapV2Test`** (BSC, USDT→WBNB→LINK multi-hop on PancakeSwap V2). Each suite forks its own chain in `setUp` (`vm.createSelectFork(vm.rpcUrl(...))`, URLs from foundry.toml's `[rpc_endpoints]`). Runs identically against the real router, live Chainlink feeds, and the canonical EntryPoint: wallet deploys with cap config, `deployWallet` seeding the chain's default spenders (`_trustedSpenders()`: SwapRouter02 and the position manager on the V3 networks, PancakeSwap's router on BSC — from Constants.s.sol, as `constants.get_default_spenders` seeds them in the app), each asserted trusted; net-value metering at live prices; budget-exceeded reverts atomically; a real **session-key swap** metered by net portfolio change; standing/unlimited approvals rejected on a real DEX; a session op targeting the module reverts; a revoked key fails validation; and a **liquidity round-trip** (`_liquidityRoundTrip()`, whose body depends on the venue). On BSC it is `addLiquidity → removeLiquidity`, proving the unpriced LP-token approval flows through the trusted router (the router creates the pair where there is no direct pool). On the V3 networks it is a position, every step a session-key UserOp through the real EntryPoint: approve both tokens, `mint`, approve both back to 0; then `decreaseLiquidity` by half and `collect`; then the rest, `collect` and `burn`. It checks the wallet holds the NFT (the position manager mints with a plain `_mint`, so a SessionHandler without `onERC721Received` can), the deposit is metered, no allowance is left, and neither withdrawal is metered — they need no approval, since the wallet owns the position. Metering assertions are computed from actual balance diffs priced through the deployed oracle, so they hold despite testnet pool-ratio divergence.
 
 **`test/invariant/` (8 invariants)** — `SHHandler` fuzzes owner executes (transfers, mint+transfer batches), config changes, non-owner attacks, session-key management, and time warps, maintaining a **ghost model** that independently replicates the module's roll-then-accumulate net metering. `InvariantSH` asserts, among others: `invariant_meteringMatchesGhostModel` (module `spentInWindow` equals the ghost exactly), spend never negative, config only ever changed by the owner, the hook stays installed, the watched list stays bounded/consistent, remaining-budget consistency, and the session allowlist matches ghost bookkeeping.
 
@@ -622,11 +634,11 @@ forge test --match-path "test/unit/*"
 forge test --match-contract InvariantSH
 
 # Fork tests (need the respective RPC in .env)
-make mainnet-uniswap-test    # Uniswap V2, mainnet fork
-make sepolia-uniswap-test    # Uniswap V2, Sepolia fork  (make sepolia-test is an alias)
+make mainnet-uniswap-test    # Uniswap V3, mainnet fork
+make sepolia-uniswap-test    # Uniswap V3, Sepolia fork  (make sepolia-test is an alias)
 make pancakeswap-test        # PancakeSwap V2, BSC fork
-make arbitrum-uniswap-test   # Uniswap V2, Arbitrum One fork (+ the live sequencer gate)
-make base-uniswap-test       # Uniswap V2, Base fork (+ the live sequencer gate)
+make arbitrum-uniswap-test   # Uniswap V3, Arbitrum One fork (+ the live sequencer gate)
+make base-uniswap-test       # Uniswap V3, Base fork (+ the live sequencer gate)
 
 # Deploy shared protocol infrastructure
 forge script script/DeploySHProtocol.s.sol \

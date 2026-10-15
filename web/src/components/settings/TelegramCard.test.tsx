@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, screen } from '@testing-library/react'
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../../api/client'
 import { routes } from '../../routes'
@@ -14,7 +14,7 @@ const CHAINS = [
   { chain_id: BSC, name: 'bsc', native_ticker: 'BNB', telegram_bot: 'mitfah_bsc_bot' },
   { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
   { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
-].map(chain => ({ ...chain, fork: false, rpc_url: null, router: null }))
+].map(chain => ({ ...chain, fork: false, rpc_url: null, default_spenders: [], exchange: null }))
 
 interface ServerOptions {
   linked?: boolean
@@ -157,8 +157,34 @@ describe('TelegramCard', () => {
       'https://t.me/mitfah_sepolia_bot',
     )
     expect(screen.getByText(/Each network has its own bot/)).toBeInTheDocument()
+    // Each also as a code that opens large, to scan with a phone (CSS hides them on touch screens).
+    expect(screen.getByRole('button', { name: "Enlarge the Base bot's QR code" })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: "Enlarge the Sepolia bot's QR code" })).toBeInTheDocument()
+    expect(screen.getByText(/click a code to enlarge it/)).toBeInTheDocument()
     // No wallet on BNB Smart Chain, so no bot to open there.
     expect(screen.queryByRole('link', { name: '@mitfah_bsc_bot' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /BNB Smart Chain bot/ })).not.toBeInTheDocument()
+  })
+
+  it("shows one bot's QR code large and on its own, so a phone's camera reads the right one", async () => {
+    stubServer({ linked: true, walletChains: [SEPOLIA, BASE] })
+    const user = await setup()
+    const list = () => document.querySelector('.mf-telegram-bots')
+
+    await user.click(await screen.findByRole('button', { name: "Enlarge the Base bot's QR code" }))
+    const dialog = await screen.findByRole('dialog', { name: 'Base bot' })
+    expect(within(dialog).getByTitle('QR code of the Base bot')).toBeInTheDocument()
+    expect(within(dialog).getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute(
+      'href',
+      'https://t.me/mitfah_base_bot',
+    )
+    // Meanwhile the small codes step aside (CSS hides them), so they can't be read instead.
+    expect(list()).toHaveAttribute('data-enlarged')
+
+    // The footer's Close; the header's X is called Close too.
+    await user.click(within(dialog).getAllByRole('button', { name: 'Close' }).at(-1)!)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(list()).not.toHaveAttribute('data-enlarged')
   })
 
   it('says so when the server has no Telegram bot', async () => {

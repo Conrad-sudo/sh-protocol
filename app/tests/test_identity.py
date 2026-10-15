@@ -15,7 +15,7 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import check, finish, set_everywhere   # first: it puts app/ on sys.path for the imports below
 from agent_context import AgentContext
 from tools import get_tools
 
@@ -126,6 +126,9 @@ def test_no_tool_writes_the_contact_list():
     print("\n[3] the agent cannot add a payee")
     import db
     import tools
+    import tools.checks
+    import tools.common
+    import tools.erc8004
 
     names = {t.name for t in get_tools()}
     check("no contact-writing tool is exported",
@@ -135,23 +138,25 @@ def test_no_tool_writes_the_contact_list():
 
     # Stronger than a name check: neither db writer may be bound in the tools module AT ALL, under
     # any alias, so nothing there can reach one even indirectly.
+    import sys
+    modules = [m for n, m in sys.modules.items() if m is not None and (n == "tools" or n.startswith("tools."))]
     for label, fn in (("save_contact", db.save_contact), ("delete_contact", db.delete_contact)):
-        aliases = [n for n, v in vars(tools).items() if v is fn]
-        check(f"db.{label} is not reachable from tools.py", not aliases, f"bound as {aliases}")
+        aliases = [f"{m.__name__}.{n}" for m in modules for n, v in vars(m).items() if v is fn]
+        check(f"db.{label} is not reachable from any tools module", not aliases, f"bound as {aliases}")
 
     # The complementary half. If _resolve_contact ever starts accepting addresses, removing the
     # write tool buys nothing -- the model could just name the address directly.
     from langchain_core.tools import ToolException
 
-    original = tools._get_contact
-    tools._get_contact = lambda user_id, name: None      # no DB access; every name is unsaved
+    original = tools.common._get_contact
+    set_everywhere(tools, "_get_contact", lambda user_id, name: None)
     try:
-        tools._resolve_contact(1, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+        tools.common._resolve_contact(1, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
         check("a raw address is refused as a recipient", False, "it was accepted")
     except ToolException:
         check("a raw address is refused as a recipient", True)
     finally:
-        tools._get_contact = original
+        set_everywhere(tools, "_get_contact", original)
 
 
 def test_thread_id_is_per_chain():
@@ -181,17 +186,17 @@ def test_me_is_the_users_own_wallet():
     import tools
 
     wallets = {1: "0x" + "11" * 20, 2: "0x" + "22" * 20}
-    original = tools.load_session_handler
-    tools.load_session_handler = lambda user_id: SimpleNamespace(address=wallets[user_id])
+    original = tools.checks.load_session_handler
+    set_everywhere(tools, "load_session_handler", lambda user_id: SimpleNamespace(address=wallets[user_id]))
     try:
-        check("\"me\" resolves to the turn's own wallet", tools._resolve_reviewer(1, "me") == wallets[1])
-        check("...for whichever user the turn is for", tools._resolve_reviewer(2, " Me ") == wallets[2])
+        check("\"me\" resolves to the turn's own wallet", tools.erc8004._resolve_reviewer(1, "me") == wallets[1])
+        check("...for whichever user the turn is for", tools.erc8004._resolve_reviewer(2, " Me ") == wallets[2])
         other = "0x" + "33" * 20
-        check("an address passes through untouched", tools._resolve_reviewer(1, other) == other)
-        check("no reviewer stays no reviewer", tools._resolve_reviewer(1, None) is None)
-        check("lists resolve entry by entry", tools._resolve_reviewers(1, ["me", other]) == [wallets[1], other])
+        check("an address passes through untouched", tools.erc8004._resolve_reviewer(1, other) == other)
+        check("no reviewer stays no reviewer", tools.erc8004._resolve_reviewer(1, None) is None)
+        check("lists resolve entry by entry", tools.erc8004._resolve_reviewers(1, ["me", other]) == [wallets[1], other])
     finally:
-        tools.load_session_handler = original
+        set_everywhere(tools, "load_session_handler", original)
 
 
 if __name__ == "__main__":

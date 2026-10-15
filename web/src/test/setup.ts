@@ -1,4 +1,10 @@
 import '@testing-library/jest-dom/vitest'
+import { configure } from '@testing-library/react'
+
+// The first test in a file also loads the app's lazy pages (routes.tsx). On a cold transform -- a
+// fresh checkout, CI -- that takes longer than findBy*'s 1 s default, and a test that would pass
+// failed for time alone (AssistantPage). The vitest timeout is raised for the same reason.
+configure({ asyncUtilTimeout: 5_000 })
 
 /*
  * jsdom has no matchMedia. This stub answers the two kinds of query the app asks:
@@ -39,5 +45,7 @@ Object.defineProperty(window, 'matchMedia', {
   }),
 })
 
-// jsdom has no scrolling either; the chat scrolls the window to its newest message.
+// jsdom has no scrolling either; the chat scrolls the window to its newest message, and Settings to
+// the card a link names.
 window.scrollTo = () => {}
+Element.prototype.scrollIntoView = () => {}

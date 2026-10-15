@@ -41,8 +41,8 @@ export const WETH = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'
 
 /**
  * A GET /api/wallet/{chain_id} answer: active, the assistant on, $40 of $100 spent an hour into a
- * 24-hour period, with ETH, USDC (watched) and WETH (not watched). Mirrors src/test/fixtures.ts,
- * which the e2e build cannot import.
+ * 24-hour period, with ETH, USDC (watched) and WETH (not watched), and no liquidity positions.
+ * Mirrors src/test/fixtures.ts, which the e2e build cannot import.
  */
 export function walletState(chainId: number, address: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -70,12 +70,18 @@ export function walletState(chainId: number, address: string, overrides: Record<
       expires_in_secs: 20 * 86_400,
       needs_renewal: false,
     },
-    limits: { max_op_gas_cost_wei: '10000000000000000', allowlist_enabled: false, trusted_spenders: [] },
+    limits: {
+      max_op_gas_cost_wei: '10000000000000000',
+      session_gas: { budget_wei: '50000000000000000', remaining_wei: '50000000000000000', refills_at: null },
+      allowlist_enabled: false,
+      trusted_spenders: [],
+    },
     balances: [
       { ticker: 'eth', address: null, native: true, decimals: 18, raw: '1500000000000000000', amount: 1.5 },
       { ticker: 'usdc', address: USDC, native: false, decimals: 6, raw: '25000000', amount: 25 },
       { ticker: 'weth', address: WETH, native: false, always_counted: true, decimals: 18, raw: '0', amount: 0 },
     ],
+    positions: [],
     ...overrides,
   }
 }

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.20;
+pragma solidity 0.8.33;
 
 import {
     IERC7579Hook,

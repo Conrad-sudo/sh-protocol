@@ -6,6 +6,7 @@ import {SHOracle} from "../src/SHOracle.sol";
 import {SHTreasury} from "../src/SHTreasury.sol";
 import {SHRegistry} from "../src/SHRegistry.sol";
 import {SHFactory} from "../src/SHFactory.sol";
+import {SessionHandler} from "../src/SessionHandler.sol";
 import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
 import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol";
 import {SpendingLimitModule} from "../src/SpendingLimitModule.sol";
@@ -165,7 +166,7 @@ contract DeploySHProtocol is Script {
         uint256 minFee = _usdToNative(MIN_PROTOCOL_FEE_USD, priceFeeds[0]);
         uint256 maxFee = _usdToNative(MAX_PROTOCOL_FEE_USD, priceFeeds[0]);
 
-        vm.deal(config.account, 100 ether); // Fund the deployer account with 10 ETH for deployment costs
+        vm.deal(config.account, 100 ether); // Fund the deployer account with 100 ETH for deployment costs
 
         // Broadcast as config.account so it becomes the Ownable owner of SHTreasury — and, through
         // it, the root of the registry, oracle, and factory deployed below.
@@ -206,8 +207,13 @@ contract DeploySHProtocol is Script {
         treasury.setSpendingLimitModule(address(module));
 
         // 7. Factory, owned by the treasury. It reads EntryPoint, both ERC-8004 registries, and the
-        //    module from the registry at deploy-wallet time, so it takes only owner + registry.
-        factory = new SHFactory(address(treasury), address(registry));
+        //    module from the registry, so beyond owner + registry it takes only this chain's
+        //    starting gas ceilings for every wallet it deploys.
+        factory = new SHFactory(
+            address(treasury),
+            address(registry),
+            SessionHandler.GasCeilings({maxOpGasCost: config.maxOpGasCost, sessionGasBudget: config.sessionGasBudget})
+        );
 
         // 8. Record the factory on the registry for off-chain discoverability.
         treasury.setFactory(address(factory));

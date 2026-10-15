@@ -1,4 +1,4 @@
-import type { WalletState } from '../api/types'
+import type { Position, WalletState } from '../api/types'
 
 export const SEPOLIA = 11155111
 export const USDC = '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8'
@@ -60,11 +60,46 @@ export function makeWalletState(
       watched_tokens: [{ ticker: 'usdc', address: USDC }],
     },
     session: makeSession('on', nowSecs),
-    limits: { max_op_gas_cost_wei: '10000000000000000', allowlist_enabled: false, trusted_spenders: [] },
+    limits: {
+      max_op_gas_cost_wei: '10000000000000000',
+      session_gas: { budget_wei: '50000000000000000', remaining_wei: '50000000000000000', refills_at: null },
+      allowlist_enabled: false,
+      trusted_spenders: [],
+    },
     balances: [
       { ticker: 'eth', address: null, native: true, decimals: 18, raw: '1500000000000000000', amount: 1.5 },
       { ticker: 'usdc', address: USDC, native: false, decimals: 6, raw: '25000000', amount: 25 },
       { ticker: 'weth', address: WETH, native: false, always_counted: true, decimals: 18, raw: '0', amount: 0 },
+    ],
+    positions: [],
+    ...overrides,
+  }
+}
+
+/**
+ * A Uniswap V3 position as GET /api/wallet lists it: ETH/USDC in the 0.05% pool, in range between
+ * about 2,850 and 3,150 USDC per ETH, holding 1.2 ETH and 3,400 USDC, with 0.004 ETH and 12.5 USDC
+ * of fees unclaimed. The bounds aren't round, as a range's bounds snap to the pool's ticks.
+ */
+export function makePosition(overrides: Partial<Position> = {}): Position {
+  return {
+    id: 101,
+    pair: 'eth/usdc',
+    base: 'eth',
+    quote: 'usdc',
+    fee_pct: 0.05,
+    min_price: 2850.4321,
+    max_price: 3150.1234,
+    full_range: false,
+    current_price: 3020.2468,
+    in_range: true,
+    amounts: [
+      { ticker: 'eth', decimals: 18, raw: '1200000000000000000' },
+      { ticker: 'usdc', decimals: 6, raw: '3400000000' },
+    ],
+    fees: [
+      { ticker: 'eth', decimals: 18, raw: '4000000000000000' },
+      { ticker: 'usdc', decimals: 6, raw: '12500000' },
     ],
     ...overrides,
   }

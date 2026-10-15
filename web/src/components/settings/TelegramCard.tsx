@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { QRCodeSVG } from 'qrcode.react'
-import { Button, Loader, Message, Text, useToaster } from 'rsuite'
+import { Button, Loader, Message, Modal, Text, useToaster } from 'rsuite'
 import { ApiError } from '../../api/client'
 import { createTelegramLink, telegramBotUrl, unlinkTelegram } from '../../api/telegram'
 import type { Me } from '../../api/types'
@@ -89,28 +89,85 @@ interface Bot {
 }
 
 /**
- * Where to chat once linked: the bots of the networks this account has a wallet on. A bot may only
+ * One bot's QR code, large and on its own. Side by side, the small codes confuse a phone's camera,
+ * which can read the neighbour of the one it's aimed at.
+ */
+function BotQrModal({ bot, open, onClose }: { bot: Bot | null; open: boolean; onClose: () => void }) {
+  if (!bot) return null
+  const name = chainName(bot.chainId)
+  const url = telegramBotUrl(bot.username)
+  return (
+    <Modal open={open} onClose={onClose} size="xs">
+      <Modal.Header>
+        <Modal.Title>{`${name} bot`}</Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="mf-telegram-bot-large">
+        <div className="mf-qr">
+          <QRCodeSVG value={url} size={256} marginSize={2} title={`QR code of the ${name} bot`} />
+        </div>
+        <Text>
+          Scan this with your phone's camera, then press <strong>Start</strong>.
+        </Text>
+        <a href={url} target="_blank" rel="noopener noreferrer">
+          @{bot.username}
+        </a>
+      </Modal.Body>
+      <Modal.Footer className="mf-modal-actions">
+        <Button appearance="subtle" onClick={onClose}>
+          Close
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  )
+}
+
+/**
+ * Where to chat once linked: the bots of the networks this account has a wallet on, each as a link
+ * and, on a desktop, a QR code that opens large on its own, to scan with a phone. A bot may only
  * write to someone who pressed Start in it, hence the ask.
  */
 function TelegramBots({ bots }: { bots: Bot[] }) {
+  // The bot whose code is shown large. Kept after closing, so the dialog doesn't empty as it animates out.
+  const [enlarged, setEnlarged] = useState<Bot | null>(null)
+  const [open, setOpen] = useState(false)
+
   return (
-    <div className="mf-telegram-bots">
+    // While one code is large, the small ones are hidden, so the camera sees only that one.
+    <div className="mf-telegram-bots" data-enlarged={open || undefined}>
       <Text muted size="sm">
         Each network has its own bot. Open the ones you want and press <strong>Start</strong>.
       </Text>
       <ul>
-        {bots.map(bot => (
-          <li key={bot.chainId}>
-            <span className="mf-chain-option">
-              <ChainLogo chainId={bot.chainId} />
-              {chainName(bot.chainId)}
-            </span>
-            <a href={telegramBotUrl(bot.username)} target="_blank" rel="noopener noreferrer">
-              @{bot.username}
-            </a>
-          </li>
-        ))}
+        {bots.map(bot => {
+          const url = telegramBotUrl(bot.username)
+          return (
+            <li key={bot.chainId}>
+              <span className="mf-chain-option">
+                <ChainLogo chainId={bot.chainId} />
+                {chainName(bot.chainId)}
+              </span>
+              <button
+                type="button"
+                className="mf-qr mf-telegram-bot-qr"
+                aria-label={`Enlarge the ${chainName(bot.chainId)} bot's QR code`}
+                onClick={() => {
+                  setEnlarged(bot)
+                  setOpen(true)
+                }}
+              >
+                <QRCodeSVG value={url} size={112} marginSize={2} aria-hidden />
+              </button>
+              <a href={url} target="_blank" rel="noopener noreferrer">
+                @{bot.username}
+              </a>
+            </li>
+          )
+        })}
       </ul>
+      <Text muted size="sm" className="mf-telegram-bot-qr">
+        Or click a code to enlarge it, and scan it with your phone's camera.
+      </Text>
+      <BotQrModal bot={enlarged} open={open} onClose={() => setOpen(false)} />
     </div>
   )
 }
@@ -186,7 +243,8 @@ export function TelegramCard({ me }: { me: Me }) {
   }
 
   return (
-    <GlassPanel bordered header="Telegram" id="telegram">
+    // An anchor: the dashboard's "Link Telegram" opens Settings here (/settings#telegram).
+    <GlassPanel bordered header="Telegram" id="telegram" className="mf-anchor">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
           <Text weight="medium">Telegram bots</Text>

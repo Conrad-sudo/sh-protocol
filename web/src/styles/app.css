@@ -1679,6 +1679,11 @@ main p a {
 
 /* ── Settings ───────────────────────────────────────────────────────────── */
 
+/* A card a link opens the page at (/settings#telegram): clear of the top bar floating over it. */
+.mf-anchor {
+  scroll-margin-top: 96px;
+}
+
 .mf-settings-row {
   display: flex;
   flex-wrap: wrap;
@@ -1750,10 +1755,11 @@ main p a {
   border-top: 1px solid var(--rs-border-primary);
 }
 
+/* On a desktop each bot is a tile: its network, a QR code to scan with a phone, and its link. */
 .mf-telegram-bots ul {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1761,15 +1767,72 @@ main p a {
 
 .mf-telegram-bots li {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  gap: 2px 16px;
+  gap: 8px;
+  text-align: center;
+}
+
+.mf-telegram-bots .mf-qr {
+  margin: 0;
+}
+
+/* Each small code is a button: a click shows it large, on its own (BotQrModal). */
+.mf-telegram-bots button.mf-qr {
+  border: 0;
+  cursor: zoom-in;
+  transition: box-shadow 0.15s;
+}
+
+.mf-telegram-bots button.mf-qr:hover {
+  box-shadow: 0 0 0 3px var(--rs-primary-500);
+}
+
+/*
+ * While one is large, the small ones go: side by side they confuse a phone's camera. Faded out
+ * rather than hidden, so the one clicked keeps the focus the dialog hands back when it closes.
+ */
+.mf-telegram-bots[data-enlarged] li .mf-qr {
+  opacity: 0;
+}
+
+.mf-telegram-bot-large {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.mf-telegram-bot-large .mf-qr {
+  margin: 0 0 4px;
 }
 
 /* Bot usernames are long and unbroken; on a narrow phone one may wrap rather than push sideways. */
 .mf-telegram-bots a {
   overflow-wrap: anywhere;
+}
+
+/* A touch screen opens the links themselves, so the codes go and each bot is one line. */
+@media (pointer: coarse) {
+  /* Two classes: .mf-qr, further down, would otherwise show the codes again. */
+  .mf-telegram-bots .mf-telegram-bot-qr {
+    display: none;
+  }
+
+  .mf-telegram-bots ul {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .mf-telegram-bots li {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 16px;
+    text-align: start;
+  }
 }
 
 /* Status tags */
@@ -2140,6 +2203,59 @@ main p a {
   gap: 4px;
 }
 
+/* The dashboard's liquidity positions: one block per position, ruled apart, its facts in two columns. */
+.mf-position-list {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-position-list > li {
+  padding: 12px 0;
+}
+
+.mf-position-list > li:first-child {
+  padding-top: 0;
+}
+
+.mf-position-list > li + li {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+.mf-position-title {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* The fee tier is part of the pool's name, said more quietly. */
+.mf-position-fee {
+  color: var(--rs-text-secondary);
+  font-weight: 400;
+}
+
+.mf-position-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 16px;
+  margin: 8px 0 0;
+}
+
+.mf-position-facts dt {
+  color: var(--rs-text-secondary);
+  font-size: 13px;
+}
+
+.mf-position-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mf-position-note {
+  margin-top: 8px;
+}
+
 /* Fund drawer */
 
 .mf-fund-drawer {
@@ -2348,6 +2464,11 @@ main p a {
 }
 
 .mf-token-list > li + li {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+/* Two lists in a row (trusted spenders, then the ones not trusted yet) stay ruled apart. */
+.mf-token-list + .mf-token-list > li:first-child {
   border-top: 1px solid var(--rs-border-primary);
 }
 

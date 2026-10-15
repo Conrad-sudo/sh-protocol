@@ -1,21 +1,23 @@
 """
-Per-user toolkit construction for langchain-erc20, langchain-uniswap-v2 and langchain-erc8004.
+Per-user toolkit construction for langchain-erc20, the two Uniswap toolkits and langchain-erc8004.
 
-These three packages own all ERC20, Uniswap V2 and ERC-8004 registry calldata construction:
-balances, quotes, slippage bounds, approval sequencing, agent reads and registry writes. They
-return an ordered *execution plan* -- a list of account-agnostic (to, value, data) calls -- and
-never sign, submit, or hold a key. Turning a plan into a UserOperation is app/tools.py's job
-(see _quote_plan there, which prices one and parks it for the user to confirm).
+These packages own all ERC20, exchange and ERC-8004 registry calldata construction: balances,
+quotes, slippage bounds, approval sequencing, agent reads and registry writes. The exchange is the
+chain's (constants.get_exchange): the in-repo langchain_uniswap_v3 on the chains that trade on
+Uniswap V3, langchain-uniswap-v2 (pointed at PancakeSwap's router) on BSC. They return an ordered
+*execution plan* -- a list of account-agnostic (to, value, data) calls -- and never sign, submit, or
+hold a key. Turning a plan into a UserOperation is the tools package's job (see
+tools/quoting.py's _quote_plan, which prices one and parks it for the user to confirm).
 
 Two things force a wrapper layer rather than exposing the package tools to the agent directly:
 
   1. A toolkit instance is bound to ONE rpc/router/token set. The bot is multi-tenant by
      user_id, so toolkits are built lazily and cached per user_id, exactly like the Contract
      instances in contracts.py.
-  2. langchain-uniswap-v2 takes raw addresses only. The agent speaks tickers and contact
-     names, so app/tools.py resolves those before invoking a package tool.
+  2. Both Uniswap toolkits take raw addresses only. The agent speaks tickers and contact names,
+     so the tools resolve those before invoking a package tool.
 
-All three toolkits are built in tx_mode="calls": they emit plan["calls"] and skip every
+All the toolkits are built in tx_mode="calls": they emit plan["calls"] and skip every
 nonce/gas/fee RPC call. That is the correct mode for a smart account -- an ERC-4337 nonce is
 EntryPoint.getNonce(sender, key), not an EOA transaction count, and eth_estimateGas with
 `from` set to the account simulates it calling itself rather than the EntryPoint invoking it.
@@ -25,10 +27,11 @@ from langchain_core.tools import BaseTool
 from langchain_erc20 import ERC20Toolkit
 from langchain_erc8004 import ERC8004Toolkit
 from langchain_uniswap_v2 import UniswapV2Toolkit
+from langchain_uniswap_v3 import UniswapV3Toolkit
 
-from constants import ETH_SENTINEL, get_native_wrapped_ticker, get_router
+from constants import ETH_SENTINEL, get_exchange, get_native_wrapped_ticker, get_router, get_v3_network
 from contracts import load_session_handler
-from db import get_supported_tokens, get_token_address
+from db import get_supported_tokens, get_supported_tokens_by_chain_id, get_token_address
 from network_config import load_network_config
 
 # Keyed (user_id, chain_id), matching contracts.py. Every toolkit below is bound to one chain's
@@ -45,6 +48,13 @@ _erc8004_tools_cache: dict[tuple[int, int], dict[str, BaseTool]] = {}
 # them in the same transaction -- which every write tool below already emits. Withheld so the
 # agent cannot reach for one and burn a UserOp on a guaranteed revert.
 _BLOCKED_TOOLS = frozenset({"approve", "approve_token", "revoke_approval"})
+
+# The listed tickers the V3 toolkit treats as stablecoins. The app has no other notion of one, and
+# the toolkit needs it for two things only: which side of a pair its prices are quoted in (USDC per
+# ETH, never ETH per USDC) and how tight the ranges it suggests for a pair of them are (+/-0.5% to
+# 3%, instead of 5% to 50%). The three dollar coins every V3 chain lists; anything else is an
+# ordinary token.
+_STABLECOIN_TICKERS = frozenset({"usdc", "usdt", "dai"})
 
 
 def _token_map(user_id: int) -> dict[str, str]:
@@ -101,13 +111,52 @@ def get_erc20_tools(user_id: int) -> dict[str, BaseTool]:
     return _erc20_tools_cache[key]
 
 
+def _stable_tokens(chain_id: int) -> list[str]:
+    """
+    The addresses of chain_id's stablecoins, for the V3 toolkit (see _STABLECOIN_TICKERS).
+
+    Listed tokens only, never one a user added: a token can pick any symbol it likes, and one that
+    passed for a stablecoin would shrink the ranges offered for its pair to a fraction of a percent.
+    """
+    return [t["address"] for t in get_supported_tokens_by_chain_id(chain_id) if t["ticker"] in _STABLECOIN_TICKERS]
+
+
 def get_uniswap_tools(user_id: int) -> dict[str, BaseTool]:
-    """Returns {tool_name: tool} for langchain-uniswap-v2, bound to this user's router.
+    """Returns {tool_name: tool} for the exchange this user's chain trades on, bound to its contracts.
+
+    Uniswap V3 (the in-repo langchain_uniswap_v3) where constants.get_exchange says "uniswap-v3",
+    langchain-uniswap-v2 everywhere else. The two name their swap and quote tools alike, with the
+    same arguments and summary fields, so tools/uniswap.py's swap serves both; the V3 toolkit adds
+    the position tools tools/positions.py wraps, and get_positions / get_position for the dashboard.
 
     @param user_id  The application user ID.
     """
     w3, chain_id, _ = load_network_config(user_id)
     key = (user_id, chain_id)
+    if key not in _uniswap_tools_cache and get_exchange(chain_id) == "uniswap-v3":
+        network = get_v3_network(chain_id)
+        # The constructor reads factory() and WETH9() off all three contracts and refuses to start
+        # unless they agree, so this is a few RPC reads -- once per user and chain, then cached.
+        toolkit = UniswapV3Toolkit(
+            rpc_url=w3.provider.endpoint_uri,
+            # From app constants, which read the toolkit's own network table: the same SwapRouter02
+            # and position manager every new wallet here is deployed trusting
+            # (get_default_spenders), so the calldata targets what the wallet trusts.
+            swap_router_address=network["swap_router"],
+            position_manager_address=network["position_manager"],
+            quoter_address=network["quoter"],
+            native_wrapped_address=network["native_wrapped"],
+            tx_mode="calls",
+            # Explicit, as for V2, because SpendingLimitModule depends on it: approve(spender, 0)
+            # follows every exact-output swap, mint and increase, which can pull less than they
+            # were approved for, so no residual allowance survives the transaction.
+            reset_residual_approvals=True,
+            stable_tokens=_stable_tokens(chain_id),
+        )
+        _share_provider(toolkit.w3, w3)
+        _uniswap_tools_cache[key] = {
+            t.name: t for t in toolkit.get_tools() if t.name not in _BLOCKED_TOOLS
+        }
     if key not in _uniswap_tools_cache:
         tokens = _token_map(user_id)
         toolkit = UniswapV2Toolkit(

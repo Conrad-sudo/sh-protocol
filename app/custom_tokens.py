@@ -134,6 +134,17 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     @raises CustomTokenError  With a message for the user, if the token can't be added.
     """
     network = get_chain_display_name(chain_id)
+    address = _token_address_from(address, wallet_address)
+    listed = get_supported_token_by_address(chain_id, address)
+    _refuse_if_already_added(user_id, chain_id, address, listed)
+    token, symbol = _read_token(user_id, chain_id, address, wallet_address, network)
+    if listed is not None:
+        return {**token, "ticker": listed["ticker"], "symbol": symbol, "listed": True}
+    return {**token, "ticker": _custom_ticker(user_id, chain_id, symbol, network), "symbol": symbol, "listed": False}
+
+
+def _token_address_from(address: str, wallet_address: str) -> str:
+    """What the user pasted, checksummed, unless it can't be a token at all."""
     try:
         address = Web3.to_checksum_address(address.strip())
     except (ValueError, TypeError, AttributeError):
@@ -142,20 +153,32 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
         raise CustomTokenError("That's the zero address, not a token.")
     if address == Web3.to_checksum_address(wallet_address):
         raise CustomTokenError("That's your Mitfah smart wallet's own address, not a token.")
+    return address
 
-    listed = get_supported_token_by_address(chain_id, address)
+
+def _refuse_if_already_added(user_id: int, chain_id: int, address: str, listed: dict | None):
+    """
+    Refuses a token the user already has: a listed one already on the dashboard, or one added by
+    address before. Also refuses past the per-chain cap, which is about unpriced tokens only.
+    """
     if listed is not None:
         if any(t["ticker"] == listed["ticker"] for t in get_dashboard_tokens(user_id, chain_id)):
             raise CustomTokenError(f"{listed['ticker'].upper()} is already on your dashboard.")
-    else:
-        existing = get_custom_token(user_id, chain_id, address)
-        if existing is not None:
-            raise CustomTokenError(f"You've already added this token ({existing['ticker'].upper()}).")
-        if len(get_custom_tokens(user_id, chain_id)) >= MAX_CUSTOM_TOKENS_PER_CHAIN:
-            raise CustomTokenError(
-                f"You can add up to {MAX_CUSTOM_TOKENS_PER_CHAIN} tokens on each network. Remove one first."
-            )
+        return
+    existing = get_custom_token(user_id, chain_id, address)
+    if existing is not None:
+        raise CustomTokenError(f"You've already added this token ({existing['ticker'].upper()}).")
+    if len(get_custom_tokens(user_id, chain_id)) >= MAX_CUSTOM_TOKENS_PER_CHAIN:
+        raise CustomTokenError(
+            f"You can add up to {MAX_CUSTOM_TOKENS_PER_CHAIN} tokens on each network. Remove one first."
+        )
 
+
+def _read_token(user_id: int, chain_id: int, address: str, wallet_address: str, network: str) -> tuple[dict, str]:
+    """
+    Reads the token off the chain: ({"address", "name", "decimals", "balance_raw"}, its symbol).
+    It counts as an ERC-20 only if symbol() and decimals() both answer.
+    """
     w3, acting_chain_id, _ = load_network_config(user_id)
     if acting_chain_id != chain_id:
         raise RuntimeError(f"inspect_custom_token needs chain {chain_id} as the acting network, not {acting_chain_id}")
@@ -174,12 +197,11 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
     if balance is None:
         raise _check_address_again(network, "This contract can't report a balance")
     name = _clean_name(_read(erc20.functions.name()) or _read_bytes32_text(w3, address, _SELECTOR_NAME))
-    symbol = symbol.strip()
-    token = {"address": address, "name": name, "decimals": decimals, "balance_raw": str(balance)}
+    return {"address": address, "name": name, "decimals": decimals, "balance_raw": str(balance)}, symbol.strip()
 
-    if listed is not None:
-        return {**token, "ticker": listed["ticker"], "symbol": symbol, "listed": True}
 
+def _custom_ticker(user_id: int, chain_id: int, symbol: str, network: str) -> str:
+    """The ticker a token added by address gets: its symbol, lowercased, if the symbol rules allow it."""
     if not TICKER_PATTERN.fullmatch(symbol):
         shown = symbol[:24] + ("…" if len(symbol) > 24 else "")
         raise CustomTokenError(
@@ -198,4 +220,4 @@ def inspect_custom_token(user_id: int, chain_id: int, address: str, wallet_addre
             f"You already added a different token called {symbol.upper()} ({clash['address']}). "
             "Remove that one first to add this one."
         )
-    return {**token, "ticker": ticker, "symbol": symbol, "listed": False}
+    return ticker

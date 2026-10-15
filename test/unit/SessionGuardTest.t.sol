@@ -714,6 +714,245 @@ contract SessionGuardTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+            GAS BUDGET ACROSS OPS (THREAT_MODEL §3.12)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev `count` session-key ops with consecutive nonces, each priced at just under `perOp` wei,
+    ///      signed and ready to go in ONE handleOps -- the bundle a stolen key would build.
+    function _pricedSessionOps(uint256 count, uint256 perOp) internal view returns (PackedUserOperation[] memory ops) {
+        ops = new PackedUserOperation[](count);
+        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(address(wallet), 0);
+        for (uint256 i = 0; i < count; i++) {
+            (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
+                address(wallet),
+                config,
+                address(usdc),
+                0,
+                abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
+                sessionKey,
+                sessionKeyPk
+            );
+            op.nonce = nonce + i;
+            uint256 fee = perOp / (_expectedCost(op) / uint128(uint256(op.gasFees)));
+            op.gasFees = bytes32(fee << 128 | fee);
+            ops[i] = _resign(op, sessionKeyPk);
+        }
+    }
+
+    /// @dev Has the EntryPoint validate a signed op directly with `missingAccountFunds` of `amount`,
+    ///      signed by `signer` -- how the per-window charge is driven without running the op.
+    function _validateDirectly(address signer, uint256 signerKey, uint256 amount) internal {
+        (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), signer, signerKey
+        );
+        vm.prank(config.entryPoint);
+        wallet.validateUserOp(_toOz(op), hash, amount);
+    }
+
+    function test_gasCeilings_startAtTheChainsDefaults() public view {
+        assertEq(wallet.maxOpGasCost(), config.maxOpGasCost);
+        assertEq(wallet.sessionGasBudget(), config.sessionGasBudget);
+        assertEq(wallet.DEFAULT_MAX_OP_GAS_COST(), config.maxOpGasCost);
+        assertEq(wallet.DEFAULT_SESSION_GAS_BUDGET(), config.sessionGasBudget);
+        assertEq(wallet.sessionGasRemaining(), config.sessionGasBudget);
+    }
+
+    function test_gasCeilings_zeroIsRefusedAtDeploy() public {
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidGasCeilings.selector);
+        new SHFactory(
+            address(this), address(registry), SessionHandler.GasCeilings({maxOpGasCost: 0, sessionGasBudget: 1 ether})
+        );
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidGasCeilings.selector);
+        new SHFactory(
+            address(this), address(registry), SessionHandler.GasCeilings({maxOpGasCost: 1 ether, sessionGasBudget: 0})
+        );
+    }
+
+    /// @notice THE MULTI-OP DRAIN, refused. A stolen key that runs its own bundler packs many ops
+    ///         into one handleOps, each priced just under maxOpGasCost, and collects their gas as the
+    ///         beneficiary. The per-op ceiling passes every one of them; the budget refuses the op
+    ///         that would take the window past it, and the whole bundle reverts with it.
+    function test_sessionGasBudget_refusesTheOpThatWouldPassIt() public {
+        uint256 perOp = wallet.maxOpGasCost() * 9 / 10;
+        uint256 budget = wallet.sessionGasBudget();
+        uint256 fits = budget / perOp;
+        PackedUserOperation[] memory ops = _pricedSessionOps(fits + 1, perOp);
+        // With no deposit to draw on, the EntryPoint asks each op for its whole price.
+        uint256 price = _expectedCost(ops[0]);
+        uint256 bundlerBefore = bundler.balance;
+
+        vm.prank(bundler, bundler);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IEntryPoint.FailedOpWithRevert.selector,
+                fits,
+                "AA23 reverted",
+                abi.encodeWithSelector(
+                    SessionHandler.SessionHandler_SessionGasBudgetExceeded.selector, price * (fits + 1), budget
+                )
+            )
+        );
+        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+        assertEq(bundler.balance, bundlerBefore, "the bundler collected nothing");
+    }
+
+    /// @notice The same bundle, one op shorter, goes through: the budget bounds what the ops pay,
+    ///         so a bundler running them collects at most that.
+    function test_sessionGasBudget_letsOpsThroughUpToIt() public {
+        uint256 perOp = wallet.maxOpGasCost() * 9 / 10;
+        uint256 budget = wallet.sessionGasBudget();
+        uint256 fits = budget / perOp;
+        PackedUserOperation[] memory ops = _pricedSessionOps(fits, perOp);
+        uint256 bundlerBefore = bundler.balance;
+
+        vm.prank(bundler, bundler);
+        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+
+        assertEq(usdc.balanceOf(kani), fits * 1e6, "every op ran");
+        assertEq(wallet.sessionGasSpent(), fits * _expectedCost(ops[0]), "each op's top-up was charged");
+        assertLe(bundler.balance - bundlerBefore, budget, "the bundler collected no more than the budget");
+    }
+
+    function test_sessionGasBudget_refillsWhenTheWindowEnds() public {
+        uint256 perCall = wallet.maxOpGasCost();
+        uint256 budget = wallet.sessionGasBudget();
+        uint256 calls = budget / perCall;
+        for (uint256 i = 0; i < calls; i++) {
+            _validateDirectly(sessionKey, sessionKeyPk, perCall);
+        }
+        assertEq(wallet.sessionGasRemaining(), budget - calls * perCall);
+
+        (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), sessionKey, sessionKeyPk
+        );
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SessionHandler.SessionHandler_SessionGasBudgetExceeded.selector, (calls + 1) * perCall, budget
+            )
+        );
+        wallet.validateUserOp(_toOz(op), hash, perCall);
+
+        vm.warp(block.timestamp + wallet.SESSION_GAS_WINDOW());
+        assertEq(wallet.sessionGasRemaining(), budget, "a new window starts full");
+        _validateDirectly(sessionKey, sessionKeyPk, perCall);
+        assertEq(wallet.sessionGasSpent(), perCall);
+        assertEq(wallet.sessionGasWindowStart(), block.timestamp);
+    }
+
+    /// @notice An op that fails its signature check is charged too: everything the owner did not
+    ///         sign counts, so a forged op can't move value into the deposit for free.
+    function test_sessionGasBudget_chargesEveryOpTheOwnerDidNotSign() public {
+        (, uint256 strangerKey) = makeAddrAndKey("stranger");
+        (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet),
+            config,
+            address(usdc),
+            0,
+            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
+            sessionKey,
+            sessionKeyPk
+        );
+        op = _resign(op, strangerKey);
+
+        vm.prank(config.entryPoint);
+        uint256 validationData = wallet.validateUserOp(_toOz(op), bytes32(0), 0.01 ether);
+        assertEq(validationData, 1, "the signature fails");
+        assertEq(wallet.sessionGasSpent(), 0.01 ether, "and the top-up is still charged");
+    }
+
+    function test_sessionGasBudget_neverChargesTheOwner() public {
+        uint256 perCall = wallet.maxOpGasCost();
+        for (uint256 i = 0; i < 2 * wallet.sessionGasBudget() / perCall; i++) {
+            _validateDirectly(owner, ANVIL_OWNER_KEY, perCall);
+        }
+        assertEq(wallet.sessionGasSpent(), 0);
+        assertEq(wallet.sessionGasRemaining(), wallet.sessionGasBudget());
+    }
+
+    /// @notice An op the deposit already covers asks for no top-up, and the charge writes nothing.
+    function test_sessionGasBudget_aCoveredOpWritesNothing() public {
+        _validateDirectly(sessionKey, sessionKeyPk, 0);
+        assertEq(wallet.sessionGasSpent(), 0);
+        assertEq(wallet.sessionGasWindowStart(), 0, "no window was started");
+    }
+
+    /// @notice PATH 2, closed: an op whose callData calls validateUserOp is refused in validation,
+    ///         so the EntryPoint never forwards it to the account in the execution phase -- where it
+    ///         could have the account pay any prefund, under a replayed owner signature that the
+    ///         budget would not charge.
+    function test_validateUserOp_refusesAnOpThatCallsValidateUserOp() public {
+        (PackedUserOperation memory ownerOp, bytes32 ownerHash,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), owner, ANVIL_OWNER_KEY
+        );
+        (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet), config, address(usdc), 0, "", sessionKey, sessionKeyPk
+        );
+        op.callData = abi.encodeCall(SessionHandler.validateUserOp, (_toOz(ownerOp), ownerHash, 0.05 ether));
+        op = _resign(op, sessionKeyPk);
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = op;
+        uint256 balanceBefore = address(wallet).balance;
+
+        vm.prank(bundler, bundler);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IEntryPoint.FailedOpWithRevert.selector,
+                0,
+                "AA23 reverted",
+                abi.encodeWithSelector(SessionHandler.SessionHandler_SelfValidationCall.selector)
+            )
+        );
+        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+        assertEq(address(wallet).balance, balanceBefore, "nothing left the wallet");
+    }
+
+    function test_setSessionGasBudget_ownerOnlyNonZeroAndBounded() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        wallet.setSessionGasBudget(1 ether);
+
+        vm.prank(owner);
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionGasBudget.selector);
+        wallet.setSessionGasBudget(0);
+
+        uint256 limit = type(uint80).max;
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionGasBudgetTooHigh.selector, limit + 1, limit)
+        );
+        wallet.setSessionGasBudget(limit + 1);
+
+        uint256 previous = wallet.sessionGasBudget();
+        vm.expectEmit(true, true, true, true, address(wallet));
+        emit SessionHandler.SessionGasBudgetUpdated(previous, 2 ether);
+        vm.prank(owner);
+        wallet.setSessionGasBudget(2 ether);
+        assertEq(wallet.sessionGasBudget(), 2 ether);
+    }
+
+    /// @notice Lowering the budget below what the window has spent claws nothing back; it stops
+    ///         further ops until the window refills.
+    function test_setSessionGasBudget_belowWhatIsSpentStopsFurtherOps() public {
+        uint256 perCall = wallet.maxOpGasCost();
+        _validateDirectly(sessionKey, sessionKeyPk, perCall);
+        _validateDirectly(sessionKey, sessionKeyPk, perCall);
+
+        vm.prank(owner);
+        wallet.setSessionGasBudget(perCall);
+        assertEq(wallet.sessionGasRemaining(), 0);
+
+        (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
+            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), sessionKey, sessionKeyPk
+        );
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionGasBudgetExceeded.selector, 2 * perCall + 1, perCall)
+        );
+        wallet.validateUserOp(_toOz(op), hash, 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                   PROTOCOL FEE (flat wei, native-paid)
     //////////////////////////////////////////////////////////////*/
 

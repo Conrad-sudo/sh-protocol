@@ -30,6 +30,7 @@ from constants import (
     CHAIN_ID_MAINNET,
     CHAIN_ID_SEPOLIA,
 )
+from redact import redact
 
 ETHERSCAN_URL = "https://api.etherscan.io/v2/api"
 # Chains Etherscan's free tier serves. BSC and Base are not among them.
@@ -67,11 +68,7 @@ class ExplorerUnavailable(Exception):
     """
 
     def __init__(self, message: str):
-        for name in KEY_NAMES:
-            key = os.getenv(name, "").strip()
-            if key:
-                message = message.replace(key, "***")
-        super().__init__(message)
+        super().__init__(redact(message))
 
 
 class _TryAgain(Exception):

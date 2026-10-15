@@ -26,9 +26,13 @@ import {configuredTokens} from "../utils/ConfiguredTokens.sol";
 /**
  * @title SHForkTestBase
  * @notice Shared fork-test base for the USD-spending-cap design, parameterized per network by a
- *         swap path and feed list. Each network file (mainnet Uniswap, BSC Pancake, Sepolia
- *         Uniswap) supplies live token/pool specifics; every test here runs identically against
- *         the real router, real Chainlink feeds, and the real (canonical) EntryPoint.
+ *         swap path and feed list. Each network file (Uniswap V3 on mainnet, Sepolia, Arbitrum and
+ *         Base; PancakeSwap V2 on BSC) supplies live token/pool specifics; every test here runs
+ *         identically against the real router, real Chainlink feeds, and the real (canonical)
+ *         EntryPoint. Three things depend on the venue, and each is a virtual hook with its V2
+ *         version here: the swap calldata, the spenders the wallet trusts ({_trustedSpenders}), and
+ *         the liquidity round-trip ({_liquidityRoundTrip}). SHUniswapV3ForkTestBase overrides all
+ *         three for V3; the BSC suite keeps them as they are.
  * @dev Metering assertions are computed from ACTUAL balance diffs priced through the deployed
  *      oracle, never from hardcoded dollar figures — so they hold regardless of pool ratios
  *      (testnet pools price independently of Chainlink; see project memory). Feeds are re-served
@@ -51,7 +55,13 @@ abstract contract SHForkTestBase is Test {
     SessionHandler wallet;
     SpendingLimitModule module;
     SendPackedUserOp sendPackedUserOp;
-    IUniswapV2Router01 router;
+    /// @dev The router the swap tests trade through: Uniswap V3's SwapRouter02, or PancakeSwap's V2
+    ///      router on BSC. See {_swapRouterForChain}.
+    address swapRouter;
+    /// @dev The chain's V2 router. On BSC it is the swap router, the liquidity router and the wallet's
+    ///      trusted spender. The V3 suites resolve it too (setUp is shared) but trade, add liquidity
+    ///      and trust elsewhere, so nothing there touches it.
+    IUniswapV2Router01 v2Router;
 
     int256 constant DAILY_LIMIT = 100_000e18; // $100k window cap: roomy enough for real-pool swaps
     uint256 constant WINDOW = 1 days;
@@ -105,25 +115,28 @@ abstract contract SHForkTestBase is Test {
         feeRegistry = treasury.REGISTRY();
         module = SpendingLimitModule(feeRegistry.spendingLimitModule());
         owner = config.account;
-        router = IUniswapV2Router01(_routerForChain());
+        v2Router = IUniswapV2Router01(_v2RouterForChain());
+        swapRouter = _swapRouterForChain();
 
         address[] memory watched = new address[](2);
         watched[0] = address(_tokenIn());
         watched[1] = address(_tokenOut());
 
         // Deploy exactly as app/deploy_wallet.py does in production: the session key and the chain's
-        // REAL V2 router are seeded through deployWallet, not granted by follow-up owner calls.
+        // REAL default spenders ({_trustedSpenders}) are seeded through deployWallet, not granted by
+        // follow-up owner calls.
         //
-        // This is deliberately the one suite that covers the seeded path against a live router. The
+        // This is deliberately the one suite that covers the seeded path against live routers. The
         // unit tests only ever seed a makeAddr() spender against an ERC20Mock, and if setUp here
-        // re-granted the router with addTrustedSpender afterwards (as it used to), a regression in
+        // re-granted the spenders with addTrustedSpender afterwards (as it used to), a regression in
         // deploy-time seeding would be masked on every fork — the second grant would quietly repair
-        // it and removeLiquidity's unpriced LP-token approval would pass either way.
+        // it. On BSC removeLiquidity's unpriced LP-token approval would pass either way; on the V3
+        // networks nothing else in the suite depends on the grants at all (every approval there is
+        // for a priced token), so test_walletDeploysWithCapConfigOnFork is what proves they landed.
         //
-        // The router is still not protocol configuration: it is passed in by the caller, exactly as
-        // constants.get_router(chain_id) is passed in by the app.
-        address[] memory trustedSpenders = new address[](1);
-        trustedSpenders[0] = address(router);
+        // The spenders are still not protocol configuration: they are passed in by the caller,
+        // exactly as constants.get_default_spenders(chain_id) is passed in by the app.
+        address[] memory trustedSpenders = _trustedSpenders();
 
         vm.prank(owner);
         wallet =
@@ -140,13 +153,60 @@ abstract contract SHForkTestBase is Test {
     /// @dev The canonical V2 router for the forked chain, read straight from Constants.s.sol rather
     ///      than from protocol config. Which venue a wallet trades on is a wallet-level choice now,
     ///      so the test suite picks it the same way an owner would.
-    function _routerForChain() internal view returns (address) {
+    function _v2RouterForChain() internal view returns (address) {
         if (block.chainid == MAINNET_CHAIN_ID) return MNT_UNISWAP_V2_ROUTER_02;
         if (block.chainid == SEPOLIA_CHAIN_ID) return SPO_UNISWAP_V2_ROUTER_02;
         if (block.chainid == BSC_CHAIN_ID) return PANCAKE_V2_ROUTER_02;
         if (block.chainid == ARB_CHAIN_ID) return ARB_UNISWAP_V2_ROUTER;
         if (block.chainid == BASE_CHAIN_ID) return BASE_UNISWAP_V2_ROUTER;
         revert("no router constant for this chain");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+          VENUE HOOKS (V2 here; V3 suites override them)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev The spenders deployWallet trusts, in the same shape the app seeds
+    ///      constants.get_default_spenders(chain_id): the V2 router here (PancakeSwap's, on BSC);
+    ///      [SwapRouter02, position manager] on the V3 networks. setUp calls it after v2Router and
+    ///      swapRouter are set, so an override may read either, and
+    ///      test_walletDeploysWithCapConfigOnFork asserts that every entry ended up trusted.
+    function _trustedSpenders() internal view virtual returns (address[] memory spenders) {
+        spenders = new address[](1);
+        spenders[0] = address(v2Router);
+    }
+
+    /// @dev The router the swap tests trade through. Set after v2Router in setUp.
+    function _swapRouterForChain() internal view virtual returns (address) {
+        return address(v2Router);
+    }
+
+    /// @dev Sells exactly `amountIn` of _tokenIn() along _swapPath(), output to the wallet, no minimum.
+    function _swapCalldata(uint256 amountIn) internal view virtual returns (bytes memory) {
+        return abi.encodeCall(
+            IUniswapV2Router01.swapExactTokensForTokens,
+            (amountIn, 0, _swapPath(), address(wallet), block.timestamp + 1 hours)
+        );
+    }
+
+    /// @dev Sells exactly the forwarded native value for _tokenOut(), output to the wallet.
+    function _nativeInSwapCalldata(uint256 /* value */ ) internal view virtual returns (bytes memory) {
+        address[] memory path = new address[](2);
+        path[0] = v2Router.WETH(); // wrapped native (WETH/WBNB); the router wraps the forwarded value
+        path[1] = address(_tokenOut()); // watched -> received amount is metered as a token inflow
+        return abi.encodeCall(
+            IUniswapV2Router01.swapExactETHForTokens, (0, path, address(wallet), block.timestamp + 1 hours)
+        );
+    }
+
+    /// @dev Sells exactly `amount` of `token` for native value, paid to the wallet.
+    function _nativeOutSwapCalldata(address token, uint256 amount) internal view virtual returns (bytes memory) {
+        address[] memory path = new address[](2);
+        path[0] = token;
+        path[1] = v2Router.WETH();
+        return abi.encodeCall(
+            IUniswapV2Router01.swapExactTokensForETH, (amount, 0, path, address(wallet), block.timestamp + 1 hours)
+        );
     }
 
     /// @dev Re-serves each feed's REAL current price with updatedAt = now, so a pinned fork block
@@ -184,15 +244,8 @@ abstract contract SHForkTestBase is Test {
     /// @dev [approve router for `approveAmount`, swap `amountIn` along _swapPath()] as one batch.
     function _swapBatch(uint256 approveAmount, uint256 amountIn) internal view returns (Execution[] memory execs) {
         execs = new Execution[](2);
-        execs[0] = Execution(address(_tokenIn()), 0, abi.encodeCall(IERC20.approve, (address(router), approveAmount)));
-        execs[1] = Execution(
-            address(router),
-            0,
-            abi.encodeCall(
-                IUniswapV2Router01.swapExactTokensForTokens,
-                (amountIn, 0, _swapPath(), address(wallet), block.timestamp + 1 hours)
-            )
-        );
+        execs[0] = Execution(address(_tokenIn()), 0, abi.encodeCall(IERC20.approve, (swapRouter, approveAmount)));
+        execs[1] = Execution(swapRouter, 0, _swapCalldata(amountIn));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -206,9 +259,17 @@ abstract contract SHForkTestBase is Test {
         assertEq(cfg.dailyLimitUsd, DAILY_LIMIT);
         assertTrue(wallet.isWatched(address(_tokenIn())));
         assertTrue(wallet.isWatched(address(_tokenOut())));
-        // Nothing is trusted at deploy; setUp grants the router explicitly as the owner would, so
-        // unpriced-token approvals to it (LP tokens in removeLiquidity) are permitted.
-        assertTrue(wallet.isTrustedSpender(address(router)), "router not trusted");
+        // deployWallet seeds every spender in _trustedSpenders() (the V2 router on BSC; SwapRouter02
+        // and the position manager on the V3 networks), so unpriced-token approvals to any of them
+        // are permitted. Each one is checked on its own, so a grant that was dropped cannot hide
+        // behind the others that were not.
+        address[] memory spenders = _trustedSpenders();
+        assertGt(spenders.length, 0, "no trusted spenders to check");
+        for (uint256 i = 0; i < spenders.length; i++) {
+            assertTrue(
+                wallet.isTrustedSpender(spenders[i]), string.concat("spender not trusted: ", vm.toString(spenders[i]))
+            );
+        }
     }
 
     /// @dev Every token this chain's config names gets a live price. The unit suite proves each one
@@ -314,7 +375,7 @@ abstract contract SHForkTestBase is Test {
         uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
         assertEq(_tokenIn().balanceOf(address(wallet)), inBefore - amountIn, "swap input not spent");
         assertGt(received, 0, "swap produced no output");
-        assertEq(_tokenIn().allowance(address(wallet), address(router)), 0, "router approval left standing");
+        assertEq(_tokenIn().allowance(address(wallet), swapRouter), 0, "router approval left standing");
 
         int256 netUsd = oracle.getPrice(address(_tokenIn()), amountIn) - oracle.getPrice(address(_tokenOut()), received);
         int256 expected = netUsd > 0 ? netUsd : int256(0);
@@ -322,7 +383,7 @@ abstract contract SHForkTestBase is Test {
     }
 
     /// @notice The headline case for native metering: a session key spends NATIVE value via
-    ///         swapExactETHForTokens (ETH/BNB -> watched token) through the real EntryPoint. The
+    ///         an exact-input native swap (ETH/BNB -> watched token) through the real EntryPoint. The
     ///         metered spend must equal the oracle-priced net (native out - token in), floored at
     ///         zero. Because this runs through the EntryPoint, gas is really charged — yet exact-
     ///         input means the native outflow is EXACTLY the forwarded value, so an exact match
@@ -333,18 +394,12 @@ abstract contract SHForkTestBase is Test {
         uint256 ethIn = _nativeSwapValue();
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
 
-        address[] memory path = new address[](2);
-        path[0] = router.WETH(); // wrapped native (WETH/WBNB); the router wraps the forwarded value
-        path[1] = address(_tokenOut()); // watched -> received amount is metered as a token inflow
-
         (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet),
             config,
-            address(router),
+            swapRouter,
             ethIn, // forwarded as msg.value -> spent from the wallet's native balance
-            abi.encodeCall(
-                IUniswapV2Router01.swapExactETHForTokens, (0, path, address(wallet), block.timestamp + 1 hours)
-            ),
+            _nativeInSwapCalldata(ethIn),
             sessionKey,
             sessionKeyPk
         );
@@ -359,7 +414,7 @@ abstract contract SHForkTestBase is Test {
     }
 
     /// @notice The native-INCREASE branch: selling a watched token for native value
-    ///         (swapExactTokensForETH) makes the wallet's balance rise, and that inflow must be
+    ///         (an exact-input swap paid out in native) makes the wallet's balance rise, and that inflow must be
     ///         credited against the token outflow. Driven owner-side (not via the EntryPoint) so the
     ///         native balance delta is exactly the ETH received — no gas prefund to confound it —
     ///         letting the metered spend be checked to the wei against the oracle-priced net,
@@ -369,22 +424,12 @@ abstract contract SHForkTestBase is Test {
         uint256 amtSold = 10 ** IERC20Metadata(address(tokenSold)).decimals(); // 1 whole token: tiny, in-budget
         deal(address(tokenSold), address(wallet), amtSold * 1000);
 
-        address[] memory path = new address[](2);
-        path[0] = address(tokenSold);
-        path[1] = router.WETH();
-
         uint256 ethBefore = address(wallet).balance;
         uint256 soldBalBefore = tokenSold.balanceOf(address(wallet));
 
         Execution[] memory execs = new Execution[](2);
-        execs[0] = Execution(address(tokenSold), 0, abi.encodeCall(IERC20.approve, (address(router), amtSold)));
-        execs[1] = Execution(
-            address(router),
-            0,
-            abi.encodeCall(
-                IUniswapV2Router01.swapExactTokensForETH, (amtSold, 0, path, address(wallet), block.timestamp + 1 hours)
-            )
-        );
+        execs[0] = Execution(address(tokenSold), 0, abi.encodeCall(IERC20.approve, (swapRouter, amtSold)));
+        execs[1] = Execution(swapRouter, 0, _nativeOutSwapCalldata(address(tokenSold), amtSold));
         vm.prank(owner);
         wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
 
@@ -407,7 +452,7 @@ abstract contract SHForkTestBase is Test {
             abi.encodeWithSelector(
                 SpendingLimitModule.SpendingLimitModule_StandingApprovalNotAllowed.selector,
                 address(_tokenIn()),
-                address(router),
+                swapRouter,
                 uint256(1)
             )
         );
@@ -420,7 +465,7 @@ abstract contract SHForkTestBase is Test {
         wallet.execute(
             bytes32(0),
             abi.encodePacked(
-                address(_tokenIn()), uint256(0), abi.encodeCall(IERC20.approve, (address(router), type(uint256).max))
+                address(_tokenIn()), uint256(0), abi.encodeCall(IERC20.approve, (swapRouter, type(uint256).max))
             )
         );
     }
@@ -447,16 +492,26 @@ abstract contract SHForkTestBase is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-        OPTION C: removeLiquidity via the trusted router (LP approval)
+           LIQUIDITY ROUND-TRIP (the body depends on the venue)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Full round-trip on a real DEX proving the trusted-spender exemption: add liquidity
-    ///         (priced-token approvals), then REMOVE it — which requires approving the pool's
-    ///         UNPRICED LP token to the router. That approval is legal only because initialize()
-    ///         trusts the router (granted by the owner in setUp); the no-standing-approval rule still forces it to zero within
-    ///         the same transaction. Driven owner-side so an illegal LP approval surfaces as a direct
-    ///         revert (SpendingLimitModule_TokenNotPriced) rather than being absorbed by the EntryPoint.
-    function test_removeLiquidity_roundTrip_viaTrustedRouter() public {
+    /// @notice Adds liquidity on this network's real DEX and takes all of it out again, with the
+    ///         spending cap watching. The test is the same on every network and its body is not:
+    ///         {_liquidityRoundTrip} is the V2 version here (the BSC suite runs it) and a V3
+    ///         position in SHUniswapV3ForkTestBase.
+    function test_liquidityRoundTrip() public {
+        _liquidityRoundTrip();
+    }
+
+    /// @dev The V2 round-trip, proving the trusted-spender exemption on a real DEX: add liquidity
+    ///      (priced-token approvals), then REMOVE it — which requires approving the pool's UNPRICED
+    ///      LP token to the router. That approval is legal only because deployWallet seeded the router
+    ///      as a trusted spender (see setUp); the no-standing-approval rule still forces it to zero
+    ///      within the same transaction. Driven owner-side so an illegal LP approval surfaces as a
+    ///      direct revert (SpendingLimitModule_TokenNotPriced) rather than being absorbed by the
+    ///      EntryPoint. The V3 networks override this: a V3 position is an NFT the wallet owns, so
+    ///      taking liquidity out needs no approval at all.
+    function _liquidityRoundTrip() internal virtual {
         IERC20 tokenIn = _tokenIn();
         IERC20 tokenOut = _tokenOut();
         uint256 amtIn = _swapAmount();
@@ -469,10 +524,10 @@ abstract contract SHForkTestBase is Test {
 
         // 1. addLiquidity batch: approve both priced tokens, add, then zero any residual allowance.
         Execution[] memory add = new Execution[](5);
-        add[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(router), amtIn)));
-        add[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(router), tokenOutBudget)));
+        add[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), amtIn)));
+        add[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), tokenOutBudget)));
         add[2] = Execution(
-            address(router),
+            address(v2Router),
             0,
             abi.encodeCall(
                 IUniswapV2Router01.addLiquidity,
@@ -488,12 +543,12 @@ abstract contract SHForkTestBase is Test {
                 )
             )
         );
-        add[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(router), 0)));
-        add[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(router), 0)));
+        add[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
+        add[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
         vm.prank(owner);
         wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(add));
 
-        address pair = IUniswapV2Factory(router.factory()).getPair(address(tokenIn), address(tokenOut));
+        address pair = IUniswapV2Factory(v2Router.factory()).getPair(address(tokenIn), address(tokenOut));
         uint256 lpBal = IERC20(pair).balanceOf(address(wallet));
         assertGt(lpBal, 0, "no LP tokens minted");
 
@@ -503,9 +558,9 @@ abstract contract SHForkTestBase is Test {
         // 2. removeLiquidity batch: approve the UNPRICED LP token to the router (allowed only because
         //    the router is trusted), then burn it. removeLiquidity pulls exactly lpBal -> residual 0.
         Execution[] memory rem = new Execution[](2);
-        rem[0] = Execution(pair, 0, abi.encodeCall(IERC20.approve, (address(router), lpBal)));
+        rem[0] = Execution(pair, 0, abi.encodeCall(IERC20.approve, (address(v2Router), lpBal)));
         rem[1] = Execution(
-            address(router),
+            address(v2Router),
             0,
             abi.encodeCall(
                 IUniswapV2Router01.removeLiquidity,
@@ -518,7 +573,7 @@ abstract contract SHForkTestBase is Test {
         assertEq(IERC20(pair).balanceOf(address(wallet)), 0, "LP tokens not burned");
         assertGt(tokenIn.balanceOf(address(wallet)), inBefore, "tokenIn not returned");
         assertGt(tokenOut.balanceOf(address(wallet)), outBefore, "tokenOut not returned");
-        assertEq(IERC20(pair).allowance(address(wallet), address(router)), 0, "LP approval left standing");
+        assertEq(IERC20(pair).allowance(address(wallet), address(v2Router)), 0, "LP approval left standing");
     }
 
     /// @notice A revoked session key fails validation (AA24) on the real EntryPoint.

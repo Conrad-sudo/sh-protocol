@@ -13,6 +13,59 @@ const ADDRESS = '0x2222222222222222222222222222222222222222'
 const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 const TX_HASH = `0x${'34'.repeat(32)}`
 
+/** One of a pool's two tokens, as a position's `amounts` and `fees` list them. */
+const share = (ticker: string, decimals: number, raw: string) => ({ ticker, decimals, raw })
+
+/**
+ * Three Uniswap V3 positions as GET /api/wallet lists them: ETH/USDC in range, LINK/ETH out of range
+ * (all ETH now, no fees), and ETH/USDC over the full range in another pool. Mirrors makePosition in
+ * src/test/fixtures.ts.
+ */
+const POSITIONS = [
+  {
+    id: 101,
+    pair: 'eth/usdc',
+    base: 'eth',
+    quote: 'usdc',
+    fee_pct: 0.05,
+    min_price: 2850.4321,
+    max_price: 3150.1234,
+    full_range: false,
+    current_price: 3020.2468,
+    in_range: true,
+    amounts: [share('eth', 18, '1200000000000000000'), share('usdc', 6, '3400000000')],
+    fees: [share('eth', 18, '4000000000000000'), share('usdc', 6, '12500000')],
+  },
+  {
+    id: 102,
+    pair: 'link/eth',
+    base: 'link',
+    quote: 'eth',
+    fee_pct: 0.3,
+    min_price: 0.0041234,
+    max_price: 0.0045678,
+    full_range: false,
+    current_price: 0.0049876,
+    in_range: false,
+    amounts: [share('link', 18, '0'), share('eth', 18, '2500000000000000000')],
+    fees: [share('link', 18, '0'), share('eth', 18, '0')],
+  },
+  {
+    id: 103,
+    pair: 'eth/usdc',
+    base: 'eth',
+    quote: 'usdc',
+    fee_pct: 1,
+    min_price: 0,
+    max_price: null,
+    full_range: true,
+    current_price: 3020.2468,
+    in_range: true,
+    amounts: [share('eth', 18, '500000000000000000'), share('usdc', 6, '1510000000')],
+    fees: [share('eth', 18, '0'), share('usdc', 6, '0')],
+  },
+]
+
 /**
  * A signed-in account with a wallet on each chain in `wallets`, in that order. `extra` answers other
  * API routes, keyed by "METHOD /path".
@@ -59,9 +112,30 @@ async function mockServer(
         return route.fulfill({
           json: {
             chains: [
-              { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false },
-              { chain_id: BSC, name: 'bsc', native_ticker: 'BNB', fork: false },
-              { chain_id: 1, name: 'mainnet', native_ticker: 'ETH', fork: false },
+              {
+                chain_id: SEPOLIA,
+                name: 'sepolia',
+                native_ticker: 'ETH',
+                fork: false,
+                exchange: 'uniswap-v3',
+                default_spenders: ['0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E', '0x1238536071E1c677A632429e3655c799b22cDA52'],
+              },
+              {
+                chain_id: BSC,
+                name: 'bsc',
+                native_ticker: 'BNB',
+                fork: false,
+                exchange: 'pancakeswap-v2',
+                default_spenders: ['0x10ED43C718714eb63d5aA57B78B54704E256024E'],
+              },
+              {
+                chain_id: 1,
+                name: 'mainnet',
+                native_ticker: 'ETH',
+                fork: false,
+                exchange: 'uniswap-v3',
+                default_spenders: ['0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45', '0xC36442b4a4522E871399CD717aBDD847Ab11FE88'],
+              },
             ],
           },
         })
@@ -114,6 +188,20 @@ test('a wallet that needs attention', async ({ page }, testInfo) => {
   await expect(page.getByText("Couldn't read")).toBeVisible()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'dashboard-warnings')
+})
+
+test('liquidity positions, in range and out', async ({ page }, testInfo) => {
+  await mockServer(page, new Map([[SEPOLIA, walletState(SEPOLIA, ADDRESS, { positions: POSITIONS })]]))
+  await page.goto('/dashboard')
+
+  const positions = page.getByRole('list', { name: 'Liquidity positions' })
+  await expect(positions.getByRole('listitem')).toHaveCount(3)
+  await expect(positions.getByText('2,850.4 – 3,150.1 USDC per ETH')).toBeVisible()
+  await expect(positions.getByText('Out of range', { exact: true })).toBeVisible()
+  await expect(positions.getByText("It isn't earning fees until the price comes back into this range.")).toBeVisible()
+  await expect(positions.getByText('Full range', { exact: true })).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'dashboard-positions')
 })
 
 test('adding funds from the connected wallet', async ({ page }, testInfo) => {

@@ -2,24 +2,24 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
-import {SHForkTestBase} from "./SHForkTestBase.sol";
+import {SHUniswapV3ForkTestBase} from "./SHUniswapV3ForkTestBase.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
 import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.sol";
 import "../../script/Constants.s.sol";
 
 /**
- * @title SHArbitrumUniswapV2Test
- * @notice Arbitrum-One-fork run of the shared spending-cap fork suite against the real Uniswap V2
- *         router, real Chainlink feeds, the real L2 Sequencer Uptime Feed, and the canonical
- *         EntryPoint.
- * @dev ARBITRUM FORK REQUIRED. Run with:
+ * @title SHArbitrumUniswapV3Test
+ * @notice Arbitrum-One-fork run of the shared spending-cap fork suite against the real Uniswap V3
+ *         SwapRouter02 and position manager, real Chainlink feeds, the real L2 Sequencer Uptime
+ *         Feed, and the canonical EntryPoint.
+ * @dev Forks Arbitrum itself in setUp (foundry.toml `arbitrum` → ARB_RPC_URL). Run with:
  *        make arbitrum-uniswap-test
- *        (forge test --match-path test/fork/SHArbitrumUniswapV2Test.t.sol --fork-url $ARB_RPC_URL)
+ *        (forge test --match-path test/fork/SHArbitrumUniswapV3Test.t.sol)
  *
- *      Swap path: WETH -> USDC. Uniswap V2 is thin on Arbitrum (most volume sits on V3), and this
- *      is the deepest V2 pair on the chain — around 11 WETH against 26k native USDC, and priced
- *      within ~1% of Chainlink. _swapAmount is sized at 0.05 WETH, well under 1% of pool depth, so
- *      the swap tests are not measuring slippage. Both path ends are priced by the deployed oracle.
+ *      Swap pool: WETH/USDC 0.05%, the chain's main WETH/USDC pool (~8,300 WETH against 14M native
+ *      USDC). _swapAmount is 0.05 WETH, a sliver of pool depth, so the swap tests are not measuring
+ *      slippage. Both path ends are priced by the deployed oracle. The liquidity round-trip mints
+ *      a V3 position in this same pool and takes it out again (see SHUniswapV3ForkTestBase).
  *
  *      This is also the only fork network where SHOracle's sequencer gate is live, so the two
  *      tests below are the end-to-end coverage for it against the real uptime feed. Everything
@@ -27,15 +27,24 @@ import "../../script/Constants.s.sol";
  *      every metered assertion in the suite prices through an oracle that is consulting the real
  *      feed on every single valuation.
  */
-contract SHArbitrumUniswapV2Test is SHForkTestBase {
+contract SHArbitrumUniswapV3Test is SHUniswapV3ForkTestBase {
+    function setUp() public override {
+        vm.createSelectFork(vm.rpcUrl("arbitrum"));
+        super.setUp();
+    }
+
     function _swapPath() internal view override returns (address[] memory path) {
         path = new address[](2);
         path[0] = config.weth;
         path[1] = config.usdc;
     }
 
+    function _poolFee() internal pure override returns (uint24) {
+        return 500; // 0.05%
+    }
+
     function _swapAmount() internal pure override returns (uint256) {
-        return 0.05e18; // 0.05 WETH — <1% of the V2 pool, so slippage stays negligible
+        return 0.05e18; // 0.05 WETH — a sliver of the pool, so slippage stays negligible
     }
 
     function _feedsToFreshen() internal view override returns (address[] memory feeds) {

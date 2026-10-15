@@ -17,7 +17,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 
-from checks import check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
+from checks import check, finish, sign_in, set_everywhere   # first: it puts app/ on sys.path for the imports below
 
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
@@ -41,15 +41,19 @@ from web3 import Web3                       # noqa: E402
 from web3.exceptions import TimeExhausted, TransactionNotFound  # noqa: E402
 
 import api                                  # noqa: E402
+import routes.deploy  # noqa: E402
+import routes.deps  # noqa: E402
+import routes.history  # noqa: E402
 import explorers                            # noqa: E402
 import quotes                               # noqa: E402
 import smart_wallet_agent                   # noqa: E402
 import tools                                # noqa: E402
+import tools.sending  # noqa: E402
 import tx_history                           # noqa: E402
 from agent_context import AgentContext      # noqa: E402
 from bundler import UserOpReverted          # noqa: E402
-from constants import get_router            # noqa: E402
-from test_tx_movements import bundle, transfer  # noqa: E402
+from constants import get_router, get_v3_network  # noqa: E402
+from test_tx_movements import bundle, swap_router_call, transfer, withdrawal  # noqa: E402
 from tx_movements import IN, OUT, Moved     # noqa: E402
 
 CHAIN = 11155111
@@ -186,6 +190,7 @@ def test_owner_transactions_are_described_from_their_calldata():
         return tx_history.describe_wallet_tx(w3, user, CHAIN, WALLET_CONTRACT, tx)
 
     in_30_days = int(time.time()) + 30 * 86_400 + 60
+    v3 = get_v3_network(CHAIN)
     cases = [
         (_owner_tx("pause", []), "Pause the wallet"),
         (_owner_tx("unpause", []), "Unpause the wallet"),
@@ -202,8 +207,12 @@ def test_owner_transactions_are_described_from_their_calldata():
         (_owner_tx("removeSession", []), "Turn the assistant off"),
         (_owner_tx("addTrustedSpender", [Web3.to_checksum_address(get_router(CHAIN))]),
          "Trust the exchange router to spend from the wallet"),
+        (_owner_tx("addTrustedSpender", [v3["swap_router"]]), "Trust the Uniswap V3 router to spend from the wallet"),
+        (_owner_tx("addTrustedSpender", [v3["position_manager"]]), "Trust Uniswap V3 positions to spend from the wallet"),
+        (_owner_tx("removeTrustedSpender", [v3["position_manager"]]), "Stop trusting Uniswap V3 positions"),
         (_owner_tx("removeTrustedSpender", [STRANGER]), f"Stop trusting {STRANGER[:6]}…{STRANGER[-4:]}"),
         (_owner_tx("setMaxOpGasCost", [10**16]), "Set the network fee cap to 0.01 ETH"),
+        (_owner_tx("setSessionGasBudget", [2 * 10**16]), "Set the daily network fee budget to 0.02 ETH"),
         ({"to": WALLET, "input": HexBytes(b""), "value": 10**17}, "Add 0.1 ETH to the wallet"),
     ]
     for tx, expected in cases:
@@ -211,6 +220,12 @@ def test_owner_transactions_are_described_from_their_calldata():
         check(f"described as “{expected}”", got == expected, got)
     check("calldata the wallet doesn't know is still a line, not an error",
           says({"to": WALLET, "input": HexBytes(b"\xde\xad\xbe\xef"), "value": 0}) == "Call your wallet")
+    on_bsc = tx_history.describe_wallet_tx(w3, user, BSC, WALLET_CONTRACT, _owner_tx("addTrustedSpender", [get_router(BSC)]))
+    check("on BSC, PancakeSwap's router is the exchange router", on_bsc == "Trust the exchange router to spend from the wallet",
+          on_bsc)
+    elsewhere = tx_history.describe_wallet_tx(w3, user, BSC, WALLET_CONTRACT, _owner_tx("addTrustedSpender", [v3["swap_router"]]))
+    check("...and Sepolia's Uniswap V3 router is nobody it knows there",
+          elsewhere == f"Trust {v3['swap_router'][:6]}…{v3['swap_router'][-4:]} to spend from the wallet", elsewhere)
 
 
 # ── Recording an owner transaction ───────────────────────────────────────────
@@ -282,7 +297,7 @@ def _patch_confirm(w3, broadcast, budget_left):
     if it is an exception -- so a test can change it between sends.
     """
     saved = {
-        name: getattr(tools, name)
+        name: getattr(tools.sending, name)
         for name in ("load_network_config", "_resolve_bundler", "load_session_handler", "load_entry_point",
                      "_prepare_user_op", "_broadcast_user_op", "_get_session_keys")
     }
@@ -293,8 +308,8 @@ def _patch_confirm(w3, broadcast, budget_left):
         op_hash["n"] += 1
         return SimpleNamespace(user_op_hash=bytes([op_hash["n"]]) * 32, op=(WALLET, (7 << 64) | op_hash["n"]), from_block=100)
 
-    tools.load_network_config = lambda _user_id: (w3, CHAIN, NETWORK)
-    tools._resolve_bundler = lambda _w3: "bundler"
+    set_everywhere(tools, "load_network_config", lambda _user_id: (w3, CHAIN, NETWORK))
+    set_everywhere(tools, "_resolve_bundler", lambda _w3: "bundler")
     def remaining():
         if isinstance(budget_left["value"], Exception):
             raise budget_left["value"]
@@ -304,16 +319,16 @@ def _patch_confirm(w3, broadcast, budget_left):
         address=WALLET,
         functions=SimpleNamespace(getRemainingBudget=lambda: SimpleNamespace(call=remaining)),
     )
-    tools.load_session_handler = lambda _user_id: wallet
-    tools._get_session_keys = lambda _user_id: ("0xkey", "vault:v1:x")
-    tools.load_entry_point = lambda _user_id: None
-    tools._prepare_user_op = prepare
-    tools._broadcast_user_op = broadcast
+    set_everywhere(tools, "load_session_handler", lambda _user_id: wallet)
+    set_everywhere(tools, "_get_session_keys", lambda _user_id: ("0xkey", "vault:v1:x"))
+    set_everywhere(tools, "load_entry_point", lambda _user_id: None)
+    set_everywhere(tools, "_prepare_user_op", prepare)
+    set_everywhere(tools, "_broadcast_user_op", broadcast)
     quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None, lp_pool=None, direction="out")
 
     def restore():
         for name, value in saved.items():
-            setattr(tools, name, value)
+            set_everywhere(tools, name, value)
         quotes.take = saved_take
 
     return restore
@@ -349,7 +364,7 @@ def test_assistant_sends_are_recorded_before_they_go():
     budget_left = {"value": 12345 * 10**16}   # $123.45
     restore = _patch_confirm(w3, broadcast, budget_left)
     try:
-        reply = tools.confirm_transaction.func(runtime, "q1")
+        reply = tools.sending.confirm_transaction.func(runtime, "q1")
         newest = db.get_transactions(user)[0]
         check("the row existed, pending, before the op was broadcast", outcome["recorded_before_send"])
         check("a send that went through is confirmed, with the executing transaction's hash and block time",
@@ -363,7 +378,7 @@ def test_assistant_sends_are_recorded_before_they_go():
 
         outcome["next"] = "reverted"
         try:
-            tools.confirm_transaction.func(runtime, "q2")
+            tools.sending.confirm_transaction.func(runtime, "q2")
             raised = False
         except ToolException:
             raised = True
@@ -375,7 +390,7 @@ def test_assistant_sends_are_recorded_before_they_go():
         before = len(db.get_transactions(user))
         outcome["next"] = "not executed"
         try:
-            tools.confirm_transaction.func(runtime, "q3")
+            tools.sending.confirm_transaction.func(runtime, "q3")
         except ToolException:
             pass
         check("an op that never executed is not listed", len(db.get_transactions(user)) == before,
@@ -383,7 +398,7 @@ def test_assistant_sends_are_recorded_before_they_go():
 
         outcome["next"] = "timeout"
         try:
-            tools.confirm_transaction.func(runtime, "q4")
+            tools.sending.confirm_transaction.func(runtime, "q4")
             timed_out = False
         except TimeoutError:
             timed_out = True
@@ -400,18 +415,18 @@ def test_assistant_sends_are_recorded_before_they_go():
 
         tx_history.add_transaction = broken
         try:
-            reply = tools.confirm_transaction.func(runtime, "q5")
+            reply = tools.sending.confirm_transaction.func(runtime, "q5")
         finally:
             tx_history.add_transaction = saved_add
         check("a history that can't be written never turns a sent payment into an error",
               reply.startswith("Sent —"), reply)
 
         budget_left["value"] = RuntimeError("rpc down")
-        reply = tools.confirm_transaction.func(runtime, "q6")
+        reply = tools.sending.confirm_transaction.func(runtime, "q6")
         check("a budget that can't be read never turns a sent payment into an error either",
               reply.startswith("Sent —") and "Spending limit" not in reply, reply)
         budget_left["value"] = -5 * 10**18
-        reply = tools.confirm_transaction.func(runtime, "q7")
+        reply = tools.sending.confirm_transaction.func(runtime, "q7")
         check("a limit lowered below what was spent shows nothing left, not a negative figure",
               reply.endswith("Spending limit left this period: $0.00"), reply)
     finally:
@@ -440,30 +455,30 @@ def test_deposits_put_their_pool_on_the_dashboard():
     deposit = SimpleNamespace(action="Add liquidity: 100 of USDC and 0.04 of ETH", quote=None, direction="out",
                               lp_pool={"token_a": weth, "ticker_a": "eth", "token_b": USDC, "ticker_b": "usdc"})
     restore = _patch_confirm(w3, broadcast, {"value": 10**18})
-    saved_save = tools._save_lp_token
+    saved_save = tools.sending._save_lp_token
     try:
-        reply = tools.confirm_transaction.func(runtime, "q1")
+        reply = tools.sending.confirm_transaction.func(runtime, "q1")
         check("a plain send remembers no pool", seen["pools"] == [] and db.get_lp_tokens(user, CHAIN) == [])
 
         quotes.take = lambda *_args: deposit
-        reply = tools.confirm_transaction.func(runtime, "q2")
+        reply = tools.sending.confirm_transaction.func(runtime, "q2")
         check("the deposit went out as usual", reply.startswith("Sent —"), reply)
         check("its pool was saved before it was broadcast, in the pool's own order (lower address first)",
               [(p["token0"], p["ticker0"], p["token1"], p["ticker1"]) for p in seen["pools"]]
               == [(USDC, "usdc", weth, "eth")], str(seen["pools"]))
         check("...with nothing read about it yet", seen["pools"][0]["pair"] is None, str(seen["pools"]))
 
-        tools.confirm_transaction.func(runtime, "q3")
+        tools.sending.confirm_transaction.func(runtime, "q3")
         check("a second deposit into the same pool keeps one row", len(db.get_lp_tokens(user, CHAIN)) == 1)
 
         def broken(*_args, **_kwargs):
             raise RuntimeError("database is locked")
 
-        tools._save_lp_token = broken
-        reply = tools.confirm_transaction.func(runtime, "q4")
+        set_everywhere(tools, "_save_lp_token", broken)
+        reply = tools.sending.confirm_transaction.func(runtime, "q4")
         check("a pool that can't be saved never turns a sent deposit into an error", reply.startswith("Sent —"), reply)
     finally:
-        tools._save_lp_token = saved_save
+        set_everywhere(tools, "_save_lp_token", saved_save)
         restore()
 
 
@@ -567,8 +582,8 @@ def test_history_route_lists_only_your_own_newest_first():
     db.add_transaction(me, BSC, WALLET, "owner", "mine on bsc", "confirmed", tx_hash=_hash(0x310))
     db.add_transaction(other, CHAIN, WALLET, "owner", "theirs", "confirmed", tx_hash=_hash(0x320))
 
-    saved = api._web3_or_none
-    api._web3_or_none = lambda _chain: None   # no chain to settle against here
+    saved = routes.history._web3_or_none
+    set_everywhere(api, "_web3_or_none", lambda _chain: None)
     try:
         check("the history needs a token", c.get("/api/transactions").status_code == 401)
         r = c.get("/api/transactions", headers=headers)
@@ -595,7 +610,7 @@ def test_history_route_lists_only_your_own_newest_first():
         check("an unsupported chain -> 400", c.get("/api/transactions?chain_id=999999", headers=headers).status_code == 400)
         check("a limit over 100 -> 422", c.get("/api/transactions?limit=101", headers=headers).status_code == 422)
     finally:
-        api._web3_or_none = saved
+        set_everywhere(api, "_web3_or_none", saved)
 
 
 def test_deposits_from_the_fund_drawer_are_listed():
@@ -610,10 +625,10 @@ def test_deposits_from_the_fund_drawer_are_listed():
     w3.eth.receipts[failed] = {"status": 0, "blockNumber": 8}
     w3.eth.blocks[8] = 1_790_000_800
 
-    saved = api._resolve_chain, api._load_wallet_for_chain, api._web3_or_none
-    api._resolve_chain = lambda _chain: (w3, NETWORK)
-    api._load_wallet_for_chain = lambda _w3, _user, _chain: WALLET_CONTRACT
-    api._web3_or_none = lambda _chain: w3
+    saved = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain, routes.history._web3_or_none
+    set_everywhere(api, "_resolve_chain", lambda _chain: (w3, NETWORK))
+    set_everywhere(api, "_load_wallet_for_chain", lambda _w3, _user, _chain: WALLET_CONTRACT)
+    set_everywhere(api, "_web3_or_none", lambda _chain: w3)
     try:
         def post(tx_hash: str):
             return c.post("/api/transactions/deposit", json={"chain_id": CHAIN, "tx_hash": tx_hash}, headers=headers)
@@ -654,7 +669,9 @@ def test_deposits_from_the_fund_drawer_are_listed():
         check("once mined -> 200, confirmed", r.status_code == 200
               and r.json() == {"status": "confirmed", "tx_hash": deposit}, f"{r.status_code} {r.text[:160]}")
     finally:
-        api._resolve_chain, api._load_wallet_for_chain, api._web3_or_none = saved
+        set_everywhere(api, "_resolve_chain", saved[0])
+        set_everywhere(api, "_load_wallet_for_chain", saved[1])
+        set_everywhere(api, "_web3_or_none", saved[2])
 
 
 def test_owner_confirm_says_whether_the_network_has_seen_it():
@@ -671,9 +688,9 @@ def test_owner_confirm_says_whether_the_network_has_seen_it():
     unseen, waiting = _hash(0x501), _hash(0x502)
     w3.eth.txs[waiting] = _owner_tx("pause", [])
 
-    saved = api._resolve_chain, api._load_wallet_for_chain
-    api._resolve_chain = lambda _chain: (w3, NETWORK)
-    api._load_wallet_for_chain = lambda _w3, _user, _chain: WALLET_CONTRACT
+    saved = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain
+    set_everywhere(api, "_resolve_chain", lambda _chain: (w3, NETWORK))
+    set_everywhere(api, "_load_wallet_for_chain", lambda _w3, _user, _chain: WALLET_CONTRACT)
     try:
         for path in ("/api/wallet/tx/confirm", "/api/wallet/session/confirm"):
             r = c.post(path, json={"chain_id": CHAIN, "tx_hash": unseen}, headers=headers)
@@ -685,7 +702,8 @@ def test_owner_confirm_says_whether_the_network_has_seen_it():
                   r.status_code == 202 and r.json() == {"status": "pending", "tx_hash": waiting, "seen": True},
                   f"{r.status_code} {r.text[:160]}")
     finally:
-        api._resolve_chain, api._load_wallet_for_chain = saved
+        set_everywhere(api, "_resolve_chain", saved[0])
+        set_everywhere(api, "_load_wallet_for_chain", saved[1])
 
 
 # Where two accounts' deploys land: the addresses /api/deploy predicted for them.
@@ -757,9 +775,9 @@ def test_deploy_confirm_says_whether_the_network_has_seen_it():
     w3.eth.blocks[37] = 1_790_000_900
     factory.logs = [{"args": {"walletAddress": DEPLOYED}, "transactionHash": sped_up, "blockNumber": 37}]
 
-    saved = api._resolve_chain, api._load_factory_for_chain
-    api._resolve_chain = lambda _chain: (w3, NETWORK)
-    api._load_factory_for_chain = lambda _w3, _chain: factory
+    saved = routes.deps._resolve_chain, routes.deploy._load_factory_for_chain
+    set_everywhere(api, "_resolve_chain", lambda _chain: (w3, NETWORK))
+    set_everywhere(api, "_load_factory_for_chain", lambda _w3, _chain: factory)
     try:
         body, headers, account = sign_in(c)
         me, owner, key = body["user_id"], account.address, _addr(0x5E55)
@@ -809,7 +827,8 @@ def test_deploy_confirm_says_whether_the_network_has_seen_it():
               r.status_code == 200 and db.get_wallet_address(body["user_id"], CHAIN) == DEPLOYED_TOO
               and db.get_transactions(body["user_id"]) == [], f"{r.status_code} {r.text[:200]}")
     finally:
-        api._resolve_chain, api._load_factory_for_chain = saved
+        set_everywhere(api, "_resolve_chain", saved[0])
+        set_everywhere(api, "_load_factory_for_chain", saved[1])
 
 
 # ── The chat starts afresh after a transaction ───────────────────────────────
@@ -1226,9 +1245,9 @@ def test_history_lists_by_time():
     db.add_transaction(me, CHAIN, wallet, "outside", "received yesterday", "confirmed", tx_hash=_hash(0xE03), mined_at=1_700_000_200)
     db.add_transaction(me, CHAIN, wallet, "assistant", "still pending", "pending", user_op_hash=_hash(0xE04))
 
-    pool, saved_pool, saved_web3 = _HeldPool(), tx_history._outside_pool, api._web3_or_none
+    pool, saved_pool, saved_web3 = _HeldPool(), tx_history._outside_pool, routes.history._web3_or_none
     tx_history._outside_pool = pool
-    api._web3_or_none = lambda _chain: None
+    set_everywhere(api, "_web3_or_none", lambda _chain: None)
     try:
         page = c.get("/api/transactions?limit=2", headers=headers).json()
         check("newest first by time, the pending one on top",
@@ -1248,7 +1267,7 @@ def test_history_lists_by_time():
         c.get(f"/api/transactions?before={page['next_before']}", headers=headers)
         check("a later page starts none", len(pool.jobs) == 1)
     finally:
-        tx_history._outside_pool, api._web3_or_none = saved_pool, saved_web3
+        tx_history._outside_pool, routes.history._web3_or_none = saved_pool, saved_web3
 
 
 
@@ -1277,8 +1296,8 @@ def test_history_filters():
     row(5, "paused", "none", [], 1_700_500_000)
     db.add_transaction(me, CHAIN, wallet, "assistant", "sending", "pending", user_op_hash=_hash(0xF06), direction="out")
 
-    saved = api._web3_or_none
-    api._web3_or_none = lambda _chain: None
+    saved = routes.history._web3_or_none
+    set_everywhere(api, "_web3_or_none", lambda _chain: None)
     try:
         def listed(query: str) -> list[str]:
             r = c.get(f"/api/transactions?{query}", headers=headers)
@@ -1328,7 +1347,7 @@ def test_history_filters():
         for bad in ("direction=sideways", "address=0x12", "min_amount=-1", "since=-5", "token=" + "x" * 41):
             check(f"{bad[:24]} -> 422", c.get(f"/api/transactions?{bad}", headers=headers).status_code == 422)
     finally:
-        api._web3_or_none = saved
+        set_everywhere(api, "_web3_or_none", saved)
 
 
 def test_movements_are_read_after_a_transaction_settles():
@@ -1397,6 +1416,37 @@ def test_movements_are_read_after_a_transaction_settles():
 SAM_AMOUNT = bytes(12) + bytes.fromhex(SAM[2:]) + (5_000_000).to_bytes(32, "big")
 
 
+def test_v3_swaps_are_read_with_the_eth_that_came_back():
+    """
+    The reader is given every exchange contract on the op's chain, so the ETH Uniswap V3's router
+    unwraps for the wallet -- which leaves no log of its own -- is read back as coming in.
+    """
+    print("\n[17b] movements: the ETH a Uniswap V3 swap pays the wallet is read back, from the router")
+    user = _create(_addr(0x17B))
+    weth, pool = _addr(0x0E7E), _addr(0x9A13)
+    # The chain's wrapped native token, known to this user alone, so no other check sees it.
+    db.save_custom_token(user, CHAIN, weth, "weth", "Wrapped Ether", 18)
+    router = get_v3_network(CHAIN)["swap_router"]
+    swap = swap_router_call("multicall", [2**32, [
+        swap_router_call("exactInputSingle", [(USDC, weth, 500, router, 100_000_000, 1, 0)]),
+        swap_router_call("unwrapWETH9", [1, WALLET]),
+    ]])
+    w3 = FakeW3()
+    tx_hash = _hash(0x17B0)
+    w3.eth.txs[tx_hash] = bundle([(router, 0, swap)])
+    w3.eth.receipts[tx_hash] = {"status": 1, "logs": [
+        transfer(USDC, WALLET, pool, 100_000_000),
+        transfer(weth, pool, router, 3 * 10**16),
+        withdrawal(router, 3 * 10**16, weth),
+    ]}
+    tx_id = db.add_transaction(user, CHAIN, WALLET, "assistant", "Swap 100 USDC for ETH", "confirmed",
+                               tx_hash=tx_hash, user_op_hash=_hash(0x17B1))
+    tx_history.read_movements(user, lambda _chain: w3)
+    moved = [(m["direction"], m["ticker"], m["amount"], m["counterparty"]) for m in db.get_movements(tx_id)]
+    check("out the USDC to the pool, in the ETH from the Uniswap V3 router",
+          moved == [("out", "USDC", "100000000", pool), ("in", "ETH", str(3 * 10**16), router)], str(moved))
+
+
 def test_outside_rows_carry_their_movements():
     print("\n[18] outside rows are recorded with what they moved, and their group")
     owner = _addr(0x18E)
@@ -1437,14 +1487,14 @@ def test_old_databases_are_migrated():
             VALUES (1, 1, 'w', 'assistant', 'mine', 'confirmed', 1), (1, 1, 'w', 'outside', 'theirs', 'confirmed', 1);
         INSERT INTO history_sync VALUES (1, 'w', 500, 1);
     """)
-    db._migrate_transaction_direction(conn)
+    db.schema._migrate_transaction_direction(conn)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
     rows = [dict(r) for r in conn.execute("SELECT source, direction, movements_read FROM transactions").fetchall()]
     check("direction and movements_read added", {"direction", "movements_read"} <= set(cols), str(cols))
     check("Mitfah's row kept, unread; the outside one gone",
           rows == [{"source": "assistant", "direction": None, "movements_read": 0}], str(rows))
     check("every explorer search starts over", conn.execute("SELECT COUNT(*) FROM history_sync").fetchone()[0] == 0)
-    db._migrate_transaction_direction(conn)
+    db.schema._migrate_transaction_direction(conn)
     check("running it again changes nothing", conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 1)
 
 
@@ -1469,6 +1519,7 @@ if __name__ == "__main__":
         test_history_lists_by_time()
         test_history_filters()
         test_movements_are_read_after_a_transaction_settles()
+        test_v3_swaps_are_read_with_the_eth_that_came_back()
         test_outside_rows_carry_their_movements()
         test_old_databases_are_migrated()
     finally:

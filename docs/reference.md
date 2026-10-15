@@ -7,11 +7,11 @@
 | `make build` | Compile contracts |
 | `make test` | Run Forge test suite |
 | `make unit-test` | Run unit tests (`test/unit/SHProtocolTest.t.sol`) |
-| `make mainnet-uniswap-test` | Run Uniswap V2 fork tests against `MAINNET_RPC_URL` |
-| `make sepolia-uniswap-test` | Run Uniswap V2 fork tests against `SEPOLIA_RPC_URL` (`test/fork/SHSepoliaUniswapV2Test.t.sol`) |
+| `make mainnet-uniswap-test` | Run Uniswap V3 fork tests against `MAINNET_RPC_URL` (`test/fork/SHMainnetUniswapV3Test.t.sol`) |
+| `make sepolia-uniswap-test` | Run Uniswap V3 fork tests against `SEPOLIA_RPC_URL` (`test/fork/SHSepoliaUniswapV3Test.t.sol`) |
 | `make pancakeswap-test` | Run PancakeSwap V2 fork tests against `BSC_RPC_URL` |
-| `make arbitrum-uniswap-test` | Run Uniswap V2 fork tests against `ARB_RPC_URL` (`test/fork/SHArbitrumUniswapV2Test.t.sol`) |
-| `make base-uniswap-test` | Run Uniswap V2 fork tests against `BASE_RPC_URL` (`test/fork/SHBaseUniswapV2Test.t.sol`) |
+| `make arbitrum-uniswap-test` | Run Uniswap V3 fork tests against `ARB_RPC_URL` (`test/fork/SHArbitrumUniswapV3Test.t.sol`) |
+| `make base-uniswap-test` | Run Uniswap V3 fork tests against `BASE_RPC_URL` (`test/fork/SHBaseUniswapV3Test.t.sol`) |
 | `make sepolia-test` | Alias of `make sepolia-uniswap-test` — the standalone Sepolia suite was folded into the shared fork base (`SHForkTestBase.sol`) |
 | `make identity-test` | Check that no agent tool lets the model choose whose wallet it acts on (`app/tests/test_identity.py`, offline) |
 | `make auth-test` | API authentication checks against a throwaway database (`app/tests/test_auth.py`, offline) |
@@ -20,11 +20,17 @@
 | `make movements-test` | What each transaction moved, for the History tab's filters: owner calldata, and the assistant's receipts (token Transfers, the op's executions, wrapped-native events, CELO counted once) (`app/tests/test_tx_movements.py`, offline) |
 | `make explorers-test` | Reading activity outside Mitfah from Etherscan, NodeReal and Alchemy: paging, block windows, rate limits and query timeouts retried, and API keys kept out of errors and logs (`app/tests/test_explorers.py`, offline) |
 | `make explorers-live` | The same against the real services, read-only, with the keys in `.env` (`app/tests/check_explorers_live.py`; not part of `py-test`) |
+| `make speed-test` | What keeps the assistant quick: the chain id asked once, independent reads run together, the wallet checks every transaction tool runs itself, and a UserOp's hash worked out locally (`app/tests/test_speed.py`, offline) |
 | `make bundler-test` | What a UserOp pays for posting its data to Ethereum on the live L2s — Base's L1 fee and Arbitrum's L1 gas, as `preVerificationGas` — and that forks pay none (`app/tests/test_bundler.py`, offline) |
 | `make telebot-test` | The Telegram bots: each acts on its own chain and only in private chats, one link covers them all, replies keep their formatting under the web app's rules and are split to fit, and the daily wallet check reaches the right chats (`app/tests/test_telebot.py`, offline) |
-| `make py-test` | All nine offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` |
-| `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc.; on Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
-| `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`); costs Anthropic credits |
+| `make redact-test` | API keys kept out of HTTP errors, the model's tool results and the logs (`app/tests/test_redact.py`, offline) |
+| `make migrations-test` | The numbered database migrations: a new database, one from before the numbering, each migration run once, a newer database refused (`app/tests/test_migrations.py`, offline) |
+| `make uniswap-v3-test` | The in-repo Uniswap V3 toolkit (`app/langchain_uniswap_v3/`): its tick and liquidity math against Solidity's own values, its addresses against `script/Constants.s.sol`, and every plan it builds (call order, approvals, the deadline multicall, burn at 100%) against a stand-in chain (`app/tests/test_uniswap_v3.py`, offline) |
+| `make positions-test` | The Uniswap V3 positions reader the dashboard, the assistant and Telegram share (`app/positions.py`): spam and empty positions hidden, the native coin named as such, base token first, nothing raised when the chain read fails (`app/tests/test_positions.py`, offline) |
+| `make position-tools-test` | The assistant's six Uniswap V3 liquidity tools: a range picked by name lands on the ticks that were shown, deposits count against the limit, every refusal holds (unknown token, someone else's position, the wrong network), and each network shows the model only its own liquidity tools (`app/tests/test_position_tools.py`, offline) |
+| `make py-test` | All fourteen offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` + `redact-test` + `migrations-test` + `uniswap-v3-test` + `positions-test` + `position-tools-test` |
+| `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc. On the Uniswap V3 forks (Ethereum, Sepolia, Arbitrum, Base) it swaps by every route against ETH/USDC and takes a liquidity position from its range options to its burn; on `bsc-fork`, PancakeSwap V2's swaps and LP tokens. On Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
+| `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`) — on a Uniswap V3 fork that includes adding liquidity: range options first, the user's pick, then one quote; costs DeepSeek credits |
 | `make snapshot` | Generate gas snapshot |
 | `make clean` | Remove build artifacts |
 | `make install` | Install Forge dependencies |
@@ -39,10 +45,11 @@
 | `make fund ARGS=<network>` | Set a 100 ETH balance on `SEPOLIA_ACCOUNT` (the `API_BUNDLER` address) and on the `TELEGRAM_BUNDLER` address via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. Every fork target runs it as soon as the fork starts, and it is a prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
 | `make vault` | Configure Vault and refresh `.env` credentials |
-| `make db` | Initialise SQLite database and run migrations |
+| `make db` | Bring the SQLite database up to date (numbered migrations, `db/schema.py`) and seed reference data |
 | `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) and register its single session key |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
 | `make api` | Start the FastAPI server on port 8000 — what the web app in `web/` talks to |
+| `make api-prod` | The API for production, behind Caddy (`deploy/Caddyfile`): no reload, localhost only, trusting the proxy's `X-Forwarded-For` |
 | `make bot` | Start the Telegram bots, one per network with a `MITFAH_<STEM>_API` token, in one process — **optional**; the only target that needs those tokens and `python-telegram-bot`. Run exactly one copy |
 | `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
 | `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bots |
@@ -87,31 +94,38 @@ sh-protocol/
 │   │   └── SpendingLimitModuleHarness.sol
 │   ├── fork/
 │   │   ├── SHForkTestBase.sol
-│   │   ├── SHUniswapV2Test.t.sol
-│   │   ├── SHSepoliaUniswapV2Test.t.sol
+│   │   ├── SHUniswapV3ForkTestBase.sol
+│   │   ├── SHMainnetUniswapV3Test.t.sol
+│   │   ├── SHSepoliaUniswapV3Test.t.sol
+│   │   ├── SHArbitrumUniswapV3Test.t.sol
+│   │   ├── SHBaseUniswapV3Test.t.sol
 │   │   └── SHPancakeswapV2Test.t.sol
 │   └── invariant/
 │       ├── InvariantSH.t.sol
 │       └── SHHandler.sol
 ├── app/
 │   ├── constants.py
-│   ├── db.py
+│   ├── db/                          ← SQLite data layer, one module per area; numbered migrations in schema.py
 │   ├── seed_data.py
 │   ├── network_config.py
 │   ├── contracts.py
-│   ├── toolkits.py                  ← per-user_id langchain-erc20 / langchain-uniswap-v2 toolkits
+│   ├── toolkits.py                  ← per-user_id toolkits: langchain-erc20, the chain's exchange (V3 or V2), langchain-erc8004
+│   ├── langchain_uniswap_v3/        ← in-repo Uniswap V3 toolkit: swaps through SwapRouter02, positions through the position manager
+│   ├── positions.py                 ← the wallet's Uniswap V3 positions, read one way for the dashboard, the agent and Telegram
 │   ├── userop.py                    ← UserOp calldata, nonce and session-key signing
 │   ├── bundler.py                   ← the app's own ERC-4337 bundler, on every network
 │   ├── tx_sender.py                 ← nonce-safe EOA broadcast
 │   ├── vault_signer.py
 │   ├── deploy_wallet.py
-│   ├── tools.py
+│   ├── tools/                       ← the agent's tools, one module per area
 │   ├── tx_history.py                ← the History tab's record: every transaction on the wallet, Mitfah's and outside it
 │   ├── explorers.py                 ← activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 │   ├── agent_context.py             ← (user_id, chain_id) injected into every tool
 │   ├── smart_wallet_agent.py
 │   ├── auth.py                      ← SIWE sign-in, JWTs, signed (EIP-712) contacts
-│   ├── api.py                       ← FastAPI HTTP API for web/
+│   ├── api.py                       ← FastAPI app for web/; includes the routers in routes/
+│   ├── routes/                      ← the API's routers, one per area
+│   ├── redact.py                    ← masks API keys in errors, tool results and logs
 │   ├── telebot.py                   ← the Telegram bots: one per chain, all in one process
 │   ├── telegram_bots.py             ← each chain's bot token and username, from .env
 │   ├── telegram_format.py           ← the agent's Markdown as Telegram HTML
@@ -132,7 +146,10 @@ sh-protocol/
 │   ├── chainlink-brownie-contracts/  ← AggregatorV3Interface, used by SHOracle
 │   ├── forge-std/
 │   ├── v2-core/
-│   └── v2-periphery/
+│   ├── v2-periphery/
+│   ├── v3-core/                      ← `0.8` branch
+│   ├── v3-periphery/                 ← `0.8` branch
+│   └── swap-router-contracts/        ← IV3SwapRouter (SwapRouter02)
 ├── setup_vault.sh
 ├── Makefile
 ├── foundry.toml
@@ -150,7 +167,8 @@ sh-protocol/
 | `eth-infinitism/account-abstraction` | ERC-4337 `IAccount`, `EntryPoint`, `PackedUserOperation` |
 | `OpenZeppelin Contracts` | `AccountERC7579Hooked`, ERC-7579 module interfaces/utils (`draft-`), `ECDSA`, `Ownable`, `ReentrancyGuard`, `Pausable`, `SafeERC20`, `IERC20Metadata`, `ERC721`, `ERC721URIStorage`, `EIP712` |
 | `chainlink-brownie-contracts` | `AggregatorV3Interface` for `SHOracle`'s Chainlink price feeds |
-| `Uniswap v2-core / v2-periphery` | `IUniswapV2Router01/02`, `IUniswapV2Factory`, `IUniswapV2Pair` interfaces (shared by both Uniswap V2 on mainnet and PancakeSwap V2 on BSC, which expose the same ABI). Solidity side only — the Python app gets its router/pair ABIs from `langchain-uniswap-v2` |
+| `Uniswap v2-core / v2-periphery` | `IUniswapV2Router01` and `IUniswapV2Factory`, for the fork suite's V2 venue hooks, which the PancakeSwap V2 suite on BSC runs (PancakeSwap exposes the same ABI). Solidity side only — the Python app gets its V2 ABIs from `langchain-uniswap-v2` |
+| `Uniswap v3-core / v3-periphery / swap-router-contracts` | `IUniswapV3Factory`, `IUniswapV3Pool`, `INonfungiblePositionManager`, `IPeripheryImmutableState`, `IPeripheryPayments`, `IMulticall` and `IV3SwapRouter`, for the Uniswap V3 fork suites (`SHUniswapV3ForkTestBase`). v3-core and v3-periphery are on their `0.8` branches. SwapRouter02 is called through `IV3SwapRouter`, not v3-periphery's `ISwapRouter`: its swap params have no `deadline`, so the selectors differ. Solidity side only — the app has its own V3 ABIs (`app/langchain_uniswap_v3/abis.py`) |
 | `forge-std` | Foundry testing and scripting utilities |
 | ERC-8004 canonical registries (external) | `IIdentityRegistry`, `IReputationRegistry` — deployed on Sepolia and mainnet; `MockIdentityRegistry` / `MockReputationRegistry` used on Anvil |
 
@@ -163,11 +181,11 @@ sh-protocol/
 | `web3` | Ethereum JSON-RPC client |
 | `eth-account` | Key management and EIP-191 message signing |
 | `langchain-erc20` | ERC20 balances, allowances, transfers and native wrap/unwrap, as execution plans. Pinned exactly — pre-1.0 |
-| `langchain-uniswap-v2` | Uniswap V2 quotes, liquidity previews and swap/liquidity execution plans, including approval sequencing. Pinned exactly — pre-1.0 |
+| `langchain-uniswap-v2` | V2 quotes, liquidity previews and swap/liquidity execution plans, including approval sequencing — pointed at PancakeSwap's router on BSC, the one chain still on V2. The app also reads its V2 ABIs for the dashboard's old V2 LP tokens and the History tab. Pinned exactly — pre-1.0. (Uniswap V3 on the other chains is the in-repo `app/langchain_uniswap_v3/`, not a dependency) |
 | `hvac` | HashiCorp Vault Python client (Transit encrypt/decrypt) |
 | `requests` | HTTP client for bundler JSON-RPC calls |
 | `langchain` | Tool definitions and agent framework |
-| `langchain-anthropic` | Default Claude LLM integration — swappable for any [LangChain-supported provider](https://python.langchain.com/docs/integrations/chat/) |
+| `langchain-deepseek` | Default DeepSeek LLM integration — swappable for any [LangChain-supported provider](https://python.langchain.com/docs/integrations/chat/) |
 | `langgraph` | Stateful agent execution with `AsyncSqliteSaver` checkpointer |
 | `python-telegram-bot[job-queue]` | Telegram Bot API client (v22 async) with APScheduler — only used by `make bot`; not needed for the CLI agent |
 | `markdown-it-py` | Parses the agent's Markdown so the Telegram bots can show it as Telegram formatting (`telegram_format.py`) |

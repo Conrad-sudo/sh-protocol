@@ -15,6 +15,30 @@ if APP_DIR not in sys.path:
 failures: list[str] = []
 
 
+def set_everywhere(module, name: str, value):
+    """
+    Replaces `name` in `module` and in every module of its package that binds it, and returns what
+    it replaced.
+
+    The app's big modules are packages (tools/, db/, and api.py's routes/), so a function a test
+    swaps out -- a chain read, a loader -- is bound separately in each module that calls it.
+    Replacing only one binding would leave the others calling the real thing.
+
+    @param module  tools or db, or api for its routes.
+    """
+    prefixes = ("routes",) if module.__name__ == "api" else (module.__name__,)
+    replaced, found = None, False
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is not None and any(mod_name == p or mod_name.startswith(p + ".") for p in prefixes) \
+                and name in vars(mod):
+            if not found:
+                replaced, found = vars(mod)[name], True
+            setattr(mod, name, value)
+    if not found:
+        raise AttributeError(f"nothing under {prefixes} binds {name}")
+    return replaced
+
+
 def check(label: str, condition: bool, detail: str = ""):
     """Prints one PASS/FAIL line. A failure is recorded, not raised, so one run reports every broken check."""
     if condition:

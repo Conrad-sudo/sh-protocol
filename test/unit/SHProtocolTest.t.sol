@@ -165,7 +165,11 @@ contract SHProtocolTest is Test {
             config.entryPoint,
             1
         );
-        SHFactory bareFactory = new SHFactory(address(this), address(bareRegistry));
+        SHFactory bareFactory = new SHFactory(
+            address(this),
+            address(bareRegistry),
+            SessionHandler.GasCeilings({maxOpGasCost: config.maxOpGasCost, sessionGasBudget: config.sessionGasBudget})
+        );
 
         address[] memory watched = new address[](0);
         vm.expectRevert(SHFactory.SHFactory_SpendingLimitModuleNotSet.selector);

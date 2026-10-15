@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {IReputationRegistry} from "../interfaces/IReputationRegistry.sol";
 import {IIdentityRegistry} from "../interfaces/IIdentityRegistry.sol";

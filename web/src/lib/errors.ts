@@ -19,6 +19,8 @@ const PLAIN: Record<string, string> = {
   SessionHandler_SessionTtlTooLong: "The assistant's access can last at most 90 days.",
   SessionHandler_InvalidMaxOpGasCost: 'The gas limit must be more than zero.',
   SessionHandler_MaxOpGasCostTooHigh: 'That gas limit is too high. Choose one under 1.2 million ETH.',
+  SessionHandler_InvalidSessionGasBudget: 'The daily fee budget must be more than zero.',
+  SessionHandler_SessionGasBudgetTooHigh: 'That budget is too high. Choose one under 1.2 million ETH.',
   SpendingLimitModule_InvalidDailyLimit: "The limit can't be negative.",
   SpendingLimitModule_InvalidWindowDuration: 'The period must be longer than zero.',
   SpendingLimitModule_TokenNotPriced: "Mitfah can't price this token, so it can't count toward your limit.",

@@ -1,8 +1,8 @@
 """
 Offline checks for tx_movements: what a transaction moved into or out of the wallet, which the
 History tab's filters search. Owner calls are read from their calldata; the assistant's ops from a
-scripted bundle transaction and receipt -- token Transfer logs, the op's own executions, and the
-wrapped native token's events.
+scripted bundle transaction and receipt -- token Transfer logs, the op's own executions (a V2 router
+call, or a Uniswap V3 multicall), and the wrapped native token's events.
 
 Pure functions, scripted data: no database, no node.
 
@@ -12,6 +12,7 @@ from checks import check, finish   # first: it puts app/ on sys.path for the imp
 
 from eth_abi import encode           # noqa: E402
 from langchain_uniswap_v2.abis import router_abi  # noqa: E402
+from langchain_uniswap_v3.abis import position_manager_abi, swap_router_abi  # noqa: E402
 from web3 import Web3                # noqa: E402
 
 import db                            # noqa: E402
@@ -33,6 +34,9 @@ SPAM = _addr(0x5BA3)
 CELO = _addr(0xCE10)
 ROUTER = _addr(0x7007E)
 PAIR = _addr(0x9A12)
+SWAP_ROUTER = _addr(0x5207E)        # Uniswap V3's SwapRouter02
+POSITION_MANAGER = _addr(0x9051)    # Uniswap V3's position manager
+V3_POOL = _addr(0x9A13)
 ZERO = _addr(0)
 
 KNOWN = {USDC: ("USDC", 6), WETH: ("WETH", 18), LP: ("ETH/USDC LP", 18), CELO: ("CELO", 18)}
@@ -45,7 +49,9 @@ def token_info(address: str):
 HANDLER_ABI = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
 WALLET_CONTRACT = Web3().eth.contract(address=WALLET, abi=HANDLER_ABI)
 ROUTER_CONTRACT = Web3().eth.contract(abi=router_abi)
-TRANSFER = Web3.keccak(text="Transfer(address,address,uint256)")
+SWAP_ROUTER_CONTRACT = Web3().eth.contract(abi=swap_router_abi)
+POSITION_MANAGER_CONTRACT = Web3().eth.contract(abi=position_manager_abi)
+TRANSFER =Web3.keccak(text="Transfer(address,address,uint256)")
 DEPOSIT = Web3.keccak(text="Deposit(address,uint256)")
 WITHDRAWAL = Web3.keccak(text="Withdrawal(address,uint256)")
 SINGLE, BATCH = b"\x00" * 32, b"\x01" + b"\x00" * 31
@@ -91,10 +97,10 @@ def bundle(executions: list[tuple[str, int, bytes]], sender: str = WALLET) -> di
     }
 
 
-def moved(executions, logs, *, native_contract=None) -> list[Moved]:
+def moved(executions, logs, *, native_contract=None, exchanges=(ROUTER, SWAP_ROUTER, POSITION_MANAGER)) -> list[Moved]:
     return tx_movements.assistant_movements(
         WALLET, bundle(executions), {"logs": logs}, token_info,
-        native="ETH", wrapped=WETH, router=ROUTER, native_contract=native_contract,
+        native="ETH", wrapped=WETH, exchanges=exchanges, native_contract=native_contract,
     )
 
 
@@ -105,6 +111,14 @@ def _erc20(fn: str, args: list) -> bytes:
 
 def router_call(fn: str, args: list) -> bytes:
     return bytes.fromhex(ROUTER_CONTRACT.encode_abi(fn, args=args)[2:])
+
+
+def swap_router_call(fn: str, args: list) -> bytes:
+    return bytes.fromhex(SWAP_ROUTER_CONTRACT.encode_abi(fn, args=args)[2:])
+
+
+def position_manager_call(fn: str, args: list) -> bytes:
+    return bytes.fromhex(POSITION_MANAGER_CONTRACT.encode_abi(fn, args=args)[2:])
 
 
 # ── The assistant's ops ───────────────────────────────────────────────────────
@@ -192,6 +206,76 @@ def test_wrapping_and_liquidity():
                   Moved(IN, None, "ETH", 39 * 10**15, 18, ROUTER)], str(got))
 
 
+def test_uniswap_v3():
+    print("\n[3b] Uniswap V3: the ETH a multicall's unwrapWETH9 pays out counts only when it pays the wallet")
+    deadline = 2**32
+
+    def sell_for_eth(recipient: str) -> list:
+        """USDC -> ETH as the V3 toolkit sends it: the swap pays the router, whose unwrapWETH9 pays `recipient`."""
+        return [
+            (USDC, 0, _erc20("approve", [SWAP_ROUTER, 100_000_000])),
+            (SWAP_ROUTER, 0, swap_router_call("multicall", [deadline, [
+                swap_router_call("exactInputSingle", [(USDC, WETH, 500, SWAP_ROUTER, 100_000_000, 1, 0)]),
+                swap_router_call("unwrapWETH9", [1, recipient]),
+            ]])),
+        ]
+
+    logs = [
+        transfer(USDC, WALLET, V3_POOL, 100_000_000),
+        transfer(WETH, V3_POOL, SWAP_ROUTER, 3 * 10**16),
+        withdrawal(SWAP_ROUTER, 3 * 10**16),
+    ]
+    usdc_out = Moved(OUT, USDC, "USDC", 100_000_000, 6, V3_POOL)
+    got = moved(sell_for_eth(WALLET), logs)
+    check("USDC -> ETH through SwapRouter02: out USDC to the pool, in ETH from the router",
+          got == [usdc_out, Moved(IN, None, "ETH", 3 * 10**16, 18, SWAP_ROUTER)], str(got))
+    got = moved(sell_for_eth(SAM), logs)
+    check("the same swap with unwrapWETH9 paying Sam: only the USDC that left", got == [usdc_out], str(got))
+    got = moved(sell_for_eth(WALLET), logs, exchanges=(ROUTER,))
+    check("...and nothing from a router that isn't one of the chain's exchanges", got == [usdc_out], str(got))
+
+    buy = [(SWAP_ROUTER, 10**17, swap_router_call("multicall", [deadline, [
+        swap_router_call("exactInputSingle", [(WETH, USDC, 500, WALLET, 10**17, 1, 0)]),
+    ]]))]
+    logs = [deposit(SWAP_ROUTER, 10**17), transfer(WETH, SWAP_ROUTER, V3_POOL, 10**17),
+            transfer(USDC, V3_POOL, WALLET, 300_000_000)]
+    got = moved(buy, logs)
+    check("ETH -> USDC through SwapRouter02: out ETH to the router, in USDC from the pool, nothing back",
+          sorted(got, key=str) == sorted([Moved(OUT, None, "ETH", 10**17, 18, SWAP_ROUTER),
+                                          Moved(IN, USDC, "USDC", 300_000_000, 6, V3_POOL)], key=str), str(got))
+
+    token_id, max128 = 7, 2**128 - 1
+
+    def withdraw_in_eth(recipient: str) -> list:
+        """A whole ETH/USDC position taken out in ETH, as the V3 toolkit sends it: one position-manager
+        multicall whose collect pays the position manager, which unwraps the WETH and sweeps the USDC on."""
+        return [(POSITION_MANAGER, 0, position_manager_call("multicall", [[
+            position_manager_call("decreaseLiquidity", [(token_id, 10**15, 1, 1, deadline)]),
+            position_manager_call("collect", [(token_id, ZERO, max128, max128)]),
+            position_manager_call("unwrapWETH9", [0, recipient]),
+            position_manager_call("sweepToken", [USDC, 0, recipient]),
+            position_manager_call("burn", [token_id]),
+        ]]))]
+
+    def logs_paying(recipient: str) -> list:
+        nft_burn = {"address": POSITION_MANAGER, "topics": [TRANSFER, _topic(WALLET), _topic(ZERO),
+                                                             token_id.to_bytes(32, "big")], "data": b""}
+        return [
+            transfer(WETH, V3_POOL, POSITION_MANAGER, 4 * 10**16),
+            transfer(USDC, V3_POOL, POSITION_MANAGER, 99_000_000),
+            withdrawal(POSITION_MANAGER, 4 * 10**16),
+            transfer(USDC, POSITION_MANAGER, recipient, 99_000_000),
+            nft_burn,
+        ]
+
+    got = moved(withdraw_in_eth(WALLET), logs_paying(WALLET))
+    check("a position taken out in ETH: in USDC and in ETH, both from the position manager; the burned NFT is no amount",
+          got == [Moved(IN, USDC, "USDC", 99_000_000, 6, POSITION_MANAGER),
+                  Moved(IN, None, "ETH", 4 * 10**16, 18, POSITION_MANAGER)], str(got))
+    got = moved(withdraw_in_eth(SAM), logs_paying(SAM))
+    check("the same withdrawal paying Sam: nothing came into the wallet", got == [], str(got))
+
+
 def test_celo_and_odd_calldata():
     print("\n[4] the native coin as an ERC-20 (CELO) is counted once; calldata that isn't an op gives nothing")
     got = moved([(SAM, 10**18, b"")], [transfer(CELO, WALLET, SAM, 10**18)], native_contract=CELO)
@@ -204,6 +288,9 @@ def test_celo_and_odd_calldata():
     check("a batch is read call by call",
           tx_movements.executions_of(WALLET, bundle([(SAM, 1, b"\x01"), (USDC, 0, b"\x02")])["input"])
           == [(SAM, 1, b"\x01"), (USDC, 0, b"\x02")])
+    truncated = swap_router_call("multicall", [2**32, [swap_router_call("unwrapWETH9", [1, WALLET])]])[:40]
+    check("an exchange call cut short names no recipient, rather than failing the read",
+          tx_movements._native_recipients(truncated) == set())
 
 
 # ── The owner's calls ─────────────────────────────────────────────────────────
@@ -245,6 +332,7 @@ if __name__ == "__main__":
     test_token_and_native_sends()
     test_swaps()
     test_wrapping_and_liquidity()
+    test_uniswap_v3()
     test_celo_and_odd_calldata()
     test_owner_calls()
     test_direction_of()

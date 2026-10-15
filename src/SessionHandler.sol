@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Conrad Japhet
 // Use of this software is governed by the Business Source License included in the LICENSE file.
 // Change Date: 2029-06-12. Change License: MIT.
-pragma solidity ^0.8.24;
+pragma solidity 0.8.33;
 
 import {IEntryPoint, PackedUserOperation} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
 import {AccountERC7579Hooked} from "@openzeppelin/contracts/account/extensions/draft-AccountERC7579Hooked.sol";
@@ -46,9 +46,10 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  *      (see {addSession}) and narrowed optionally by the owner-managed target allowlist (see
  *      {enableAllowList}).
  * @dev The USD cap cannot see ETH spent as GAS (the prefund leaves before the hook's preCheck,
- *      refunds land in the EntryPoint deposit after postCheck). {maxOpGasCost} bounds it instead,
- *      and the EntryPoint is a restricted target so a key cannot withdraw the deposit.
- *      THREAT_MODEL §3.12.
+ *      refunds land in the EntryPoint deposit after postCheck). Two ceilings bound it instead:
+ *      {maxOpGasCost} per UserOp, and {sessionGasBudget} across every UserOp the owner did not sign
+ *      in a {SESSION_GAS_WINDOW}. The EntryPoint is a restricted target, so a key cannot withdraw
+ *      the deposit either. THREAT_MODEL §3.12.
  * @dev Deliberate deviation from stock AccountERC7579Hooked, which makes `execute`, `installModule`,
  *      and `uninstallModule` `onlyEntryPointOrSelf` -- an EOA owner cannot call them directly. The
  *      three overrides below reopen a direct-owner path so the owner never has to submit a UserOp for
@@ -104,6 +105,19 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev Thrown when setMaxOpGasCost is given more than {maxOpGasCost} can hold (type(uint80).max,
     ///      ~1.2 million ETH).
     error SessionHandler_MaxOpGasCostTooHigh(uint256 newMax, uint256 limit);
+    /// @dev Thrown when the UserOps the owner did not sign would have paid more native coin as gas,
+    ///      within one {SESSION_GAS_WINDOW}, than {sessionGasBudget} allows.
+    error SessionHandler_SessionGasBudgetExceeded(uint256 spent, uint256 budget);
+    /// @dev Thrown on setSessionGasBudget(0), which would stop every UserOp the owner did not sign.
+    error SessionHandler_InvalidSessionGasBudget();
+    /// @dev Thrown when setSessionGasBudget is given more than {sessionGasBudget} can hold
+    ///      (type(uint80).max).
+    error SessionHandler_SessionGasBudgetTooHigh(uint256 newBudget, uint256 limit);
+    /// @dev Thrown by the constructor when either default gas ceiling is zero.
+    error SessionHandler_InvalidGasCeilings();
+    /// @dev Thrown when a UserOp's callData calls this account's own {validateUserOp}: the one call
+    ///      that would make the account pay a prefund outside validation (THREAT_MODEL §3.12).
+    error SessionHandler_SelfValidationCall();
     /// @dev Thrown on enabling an empty allowlist, which would reject every session-key execution.
     error SessionHandler_EmptyAllowlist();
     /// @dev Thrown when address(0) is passed as a session-key allowlist target.
@@ -123,6 +137,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     /// @notice Emitted when the owner changes the per-UserOp gas-cost ceiling.
     event MaxOpGasCostUpdated(uint256 oldMax, uint256 newMax);
+    /// @notice Emitted when the owner changes the per-window gas budget for UserOps it did not sign.
+    event SessionGasBudgetUpdated(uint256 oldBudget, uint256 newBudget);
     /// @notice Emitted when the owner enables or disables the session-key target allowlist.
     event SessionAllowlistToggled(bool enabled);
     /// @notice Emitted when a target is added to the session-key allowlist.
@@ -133,18 +149,25 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Emitted when a session-key execution pays the protocol fee. Owner-initiated executions
     ///         pay no fee and emit nothing.
     /// @param treasury The registry-configured recipient at the time of payment.
-    /// @param fee      The amount paid in wei. The fee is configured in USD, so this is the converted
-    ///        amount at the oracle price that applied to this execution, not the configured figure.
+    /// @param fee      The amount paid in wei: the registry's flat fee at the time of payment.
     event ProtocolFeePaid(address indexed treasury, uint256 fee);
 
     /*//////////////////////////////////////////////////////////////
                              STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Default {maxOpGasCost} written by {initialize}, in wei.
-    /// @dev Deliberately generous — it clears a ~600k-gas swap at 2x a spiking base fee, so a fee
-    ///      spike never rejects a legitimate op. A bound on abuse, not a gas budget.
-    uint256 public constant DEFAULT_MAX_OP_GAS_COST = 0.1 ether;
+    /// @notice Default {maxOpGasCost} written by {initialize}, in wei. Set per chain when the
+    ///         implementation is built; see {GasCeilings}.
+    /// @dev Sized to clear a ~600k-gas swap at 2x a spiking base fee on its chain, so a fee spike
+    ///      never rejects a legitimate op. A bound on one op's abuse, not a budget.
+    uint256 public immutable DEFAULT_MAX_OP_GAS_COST;
+
+    /// @notice Default {sessionGasBudget} written by {initialize}, in wei. Set per chain when the
+    ///         implementation is built; see {GasCeilings}.
+    uint256 public immutable DEFAULT_SESSION_GAS_BUDGET;
+
+    /// @notice How long one {sessionGasBudget} lasts before it refills.
+    uint256 public constant SESSION_GAS_WINDOW = 1 days;
 
     /// @notice Longest a session key may be authorized for, from the moment it is granted.
     /// @dev A hard ceiling rather than an owner setting: a settable one would be raised to "forever"
@@ -181,7 +204,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Maximum total ETH (wei) one UserOp may cost this account, however it is paid.
     /// @dev Owner-settable because gas prices differ per chain and over time; a compile-time constant
     ///      would be too tight somewhere (legitimate ops fail in a fee spike) and too loose elsewhere.
-    ///      Enforced in both {_validateUserOp} and {_payPrefund} — see each for why one is not enough.
+    ///      Enforced on the op's own gas fields in {_authenticate} and on the prefund transfer in
+    ///      {validateUserOp}. It bounds ONE op; {sessionGasBudget} bounds all of them per window.
     /// @dev uint80 holds up to ~1.2 million ETH per op, against a 0.1 ETH default; {setMaxOpGasCost}
     ///      rejects anything larger.
     uint80 public maxOpGasCost;
@@ -209,13 +233,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     EnumerableSet.AddressSet private _sessionTargets;
 
     /// @notice The ONE session key this wallet authorizes, or address(0) for none. The owner is
-    ///         always authorized separately, in {_validateUserOp}.
+    ///         always authorized separately, in {_authenticate}.
     /// @dev One key at a time, not an allowlist: a wallet that can authorize several keys can drift
     ///      out of step with whatever off-chain system holds them, and a mapping cannot be
     ///      enumerated, so nothing on chain could answer "which keys does this wallet trust?".
     ///      {addSession} evicts whatever was here before. Within its window the key is still a BARE
     ///      signer -- it may drive ANY execute() call, bounded by the SpendingLimitModule spending
-    ///      cap, {_guardSessionExecution}, and {maxOpGasCost}.
+    ///      cap, {_guardSessionExecution}, and the two gas ceilings ({maxOpGasCost}, {sessionGasBudget}).
     /// @dev Packs with {currentSessionValidUntil} into one slot; the two are always written together
     ///      so `currentSession != address(0)` iff `currentSessionValidUntil != 0`. {_validateUserOp}
     ///      depends on that: the EntryPoint reads a zero deadline as "valid forever".
@@ -223,6 +247,22 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Unix timestamp at which {currentSession} stops being accepted. Inclusive: an op is
     ///         still valid in the second that equals it, matching the EntryPoint's own comparison.
     uint48 public currentSessionValidUntil;
+
+    /// @notice Native coin (wei) that UserOps NOT signed by the owner have paid as gas in the current
+    ///         {SESSION_GAS_WINDOW}. See {sessionGasBudget}.
+    /// @dev These three share slot 10. They come after {currentSession}'s slot 9 because
+    ///      app/bundler.py reads that slot by number, and this first one is too wide for slot 9's six
+    ///      free bytes, which keeps all three out of it. Never above {sessionGasBudget}, so a uint128
+    ///      holds it with room to spare.
+    uint128 public sessionGasSpent;
+    /// @notice When the current {SESSION_GAS_WINDOW} began, or 0 before the first charge.
+    uint48 public sessionGasWindowStart;
+    /// @notice The most native coin (wei) UserOps NOT signed by the owner may pay as gas per
+    ///         {SESSION_GAS_WINDOW}, all together. Owner-settable; see {setSessionGasBudget}.
+    /// @dev The cumulative bound {maxOpGasCost} cannot give: the EntryPoint takes many ops from one
+    ///      account in a single bundle, so a per-op ceiling alone lets a stolen key that runs its own
+    ///      bundler collect the ceiling once per op until the balance is gone (THREAT_MODEL §3.12).
+    uint80 public sessionGasBudget;
 
     /*//////////////////////////////////////////////////////////////
                                 Constructor
@@ -247,12 +287,32 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         address registry;
     }
 
-    /// @param protocol See {ProtocolAddresses}.
-    constructor(ProtocolAddresses memory protocol) {
+    /**
+     * @notice The starting values of the two gas ceilings for every wallet of this implementation,
+     *         in the chain's native coin. Chosen per chain at deploy (HelperConfig), because one
+     *         figure cannot suit them all: 0.1 ETH of gas is a fee spike on Ethereum and a thousand
+     *         ops on an L2. The owner can change either afterwards.
+     * @param maxOpGasCost     Default {maxOpGasCost}: the most one UserOp may cost. Must be > 0.
+     * @param sessionGasBudget Default {sessionGasBudget}: the most all UserOps the owner did not sign
+     *                         may cost per {SESSION_GAS_WINDOW}. Must be > 0.
+     */
+    struct GasCeilings {
+        uint80 maxOpGasCost;
+        uint80 sessionGasBudget;
+    }
+
+    /// @param protocol    See {ProtocolAddresses}.
+    /// @param gasCeilings See {GasCeilings}.
+    constructor(ProtocolAddresses memory protocol, GasCeilings memory gasCeilings) {
+        if (gasCeilings.maxOpGasCost == 0 || gasCeilings.sessionGasBudget == 0) {
+            revert SessionHandler_InvalidGasCeilings();
+        }
         ENTRY_POINT = protocol.entryPoint;
         REPUTATION_REGISTRY = protocol.reputationRegistry;
         IDENTITY_REGISTRY = protocol.identityRegistry;
         REGISTRY = SHRegistry(protocol.registry);
+        DEFAULT_MAX_OP_GAS_COST = gasCeilings.maxOpGasCost;
+        DEFAULT_SESSION_GAS_BUDGET = gasCeilings.sessionGasBudget;
         _disableInitializers();
     }
 
@@ -305,9 +365,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         __Ownable_init(cfg.owner);
         WALLET_ID = cfg.walletId;
         SH_MODULE = SpendingLimitModule(cfg.spendingLimitModule);
-        // Safe: the default is 0.1 ETH, far inside uint80.
+        // Safe: both defaults arrived in the constructor as uint80s.
         // forge-lint: disable-next-line(unsafe-typecast)
         maxOpGasCost = uint80(DEFAULT_MAX_OP_GAS_COST);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        sessionGasBudget = uint80(DEFAULT_SESSION_GAS_BUDGET);
 
         // Install the spending-limit hook. Its onInstall
         // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens) tuple, so the config
@@ -369,9 +431,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      the account's USD spending cap around whatever runs here. For non-owner (session-key)
      *      executions, {_guardSessionExecution} additionally blocks any sub-call to the account's own
      *      admin surface, so a session key cannot uninstall the hook or raise the cap to escape it.
-            possibly add a address[] calledContracts
      */
-    function execute(bytes32 mode, bytes calldata executionCalldata) 
+    function execute(bytes32 mode, bytes calldata executionCalldata)
         public
         payable
         override
@@ -596,6 +657,35 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         emit MaxOpGasCostUpdated(oldMax, newMax);
     }
 
+    /**
+     * @notice Sets the most native coin UserOps not signed by the owner may pay as gas per
+     *         {SESSION_GAS_WINDOW}, all together. See {sessionGasBudget}.
+     * @dev Takes effect at once, and does not reset what the current window has already spent:
+     *      lowering it below that stops the key's ops until the window refills, raising it lets them
+     *      continue. Reverts on 0 (use {removeSession} or {pause} to stop the key) and above
+     *      type(uint80).max, which the storage slot cannot hold.
+     * @param newBudget New budget in wei. Must be > 0 and <= type(uint80).max.
+     */
+    function setSessionGasBudget(uint256 newBudget) external onlyOwner {
+        if (newBudget == 0) revert SessionHandler_InvalidSessionGasBudget();
+        if (newBudget > type(uint80).max) {
+            revert SessionHandler_SessionGasBudgetTooHigh(newBudget, type(uint80).max);
+        }
+        uint256 oldBudget = sessionGasBudget;
+        // Safe: bounded by type(uint80).max above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        sessionGasBudget = uint80(newBudget);
+        emit SessionGasBudgetUpdated(oldBudget, newBudget);
+    }
+
+    /// @notice What UserOps not signed by the owner may still pay as gas before the budget refills:
+    ///         the whole {sessionGasBudget} once the current window has ended.
+    function sessionGasRemaining() external view returns (uint256) {
+        if (block.timestamp >= uint256(sessionGasWindowStart) + SESSION_GAS_WINDOW) return sessionGasBudget;
+        uint256 spent = sessionGasSpent;
+        return spent >= sessionGasBudget ? 0 : sessionGasBudget - spent;
+    }
+
     /*//////////////////////////////////////////////////////////////
                        SESSION-KEY AUTH (owner-managed)
     //////////////////////////////////////////////////////////////*/
@@ -676,20 +766,87 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     /**
      * @notice ERC-4337 entry point for validating a UserOp against this account.
-     * @dev Overridden only to add {whenNotPaused}, so a paused wallet fails in validation and pays no
-     *      prefund, rather than paying one and then reverting in `execute`. `onlyEntryPoint` comes
-     *      from {Account-validateUserOp} via `super`.
+     * @dev Written out rather than calling {Account-validateUserOp} so the signer is recovered ONCE
+     *      and both answers -- the validation data and whether the owner signed -- come from that
+     *      one recovery. In order:
+     *        1. {_authenticate}: the op's own gas price against {maxOpGasCost}, and who signed it.
+     *        2. The prefund itself against {maxOpGasCost}. In validation it can't exceed the op's
+     *           price, which step 1 bounds; kept so the transfer has a bound of its own whatever the
+     *           EntryPoint asks for.
+     *        3. Unless the owner signed, the prefund is charged to {sessionGasBudget}. That is the
+     *           bound across ops: the EntryPoint takes many from one account in a single bundle,
+     *           and a stolen key that runs its own bundler is paid every one of them.
+     *        4. The prefund is paid -- after the charge, so the state change comes before the call.
+     *      {whenNotPaused} makes a paused wallet fail here and pay nothing, rather than pay a prefund
+     *      and then revert in `execute`.
+     * @dev Step 3 charges the TOP-UP (`missingAccountFunds`), not the op's maximum price, so an
+     *      ordinary op uses up about what it really cost: refunds of unused gas stay in the deposit
+     *      and shrink the next op's top-up. The deposit can be spent without a charge, but it only
+     *      ever holds what charged top-ups (or the owner, depositing directly) put there -- which is
+     *      why {_authenticate} refuses an op whose callData calls this function, the one way a key
+     *      could otherwise have the account pay a prefund outside validation.
      */
     function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         public
         override
+        onlyEntryPoint
         whenNotPaused
-        returns (uint256)
+        returns (uint256 validationData)
     {
-        return super.validateUserOp(userOp, userOpHash, missingAccountFunds);
+        bool byOwner;
+        (validationData, byOwner) = _authenticate(userOp, userOpHash, userOp.signature);
+        if (missingAccountFunds > maxOpGasCost) {
+            revert SessionHandler_PrefundTooHigh(missingAccountFunds, maxOpGasCost);
+        }
+        if (!byOwner) _chargeSessionGas(missingAccountFunds);
+        _payPrefund(missingAccountFunds);
     }
 
     /**
+     * @dev Adds `amount` to what this {SESSION_GAS_WINDOW} has spent, starting a new window when the
+     *      last one has ended, and reverts past {sessionGasBudget}. A zero amount (the deposit covered
+     *      the op) writes nothing.
+     * @dev Reads block.timestamp during validation, which ERC-7562's bundler rules ban: a public
+     *      bundler would refuse this account's session-key ops. Every op here goes through the
+     *      protocol's own bundler (app/bundler.py), which doesn't apply those rules, so it holds;
+     *      moving to public bundlers would need the window carried another way.
+     */
+    function _chargeSessionGas(uint256 amount) internal {
+        if (amount == 0) return;
+        uint256 windowStart = sessionGasWindowStart;
+        uint256 spent = sessionGasSpent;
+        if (block.timestamp >= windowStart + SESSION_GAS_WINDOW) {
+            windowStart = block.timestamp;
+            spent = 0;
+        }
+        spent += amount;
+        uint256 budget = sessionGasBudget;
+        if (spent > budget) revert SessionHandler_SessionGasBudgetExceeded(spent, budget);
+        // Safe: spent <= budget <= type(uint80).max, and the timestamp fits a uint48 for millions of
+        // years.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        sessionGasSpent = uint128(spent);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        sessionGasWindowStart = uint48(windowStart);
+    }
+
+    /// @dev Kept for anything in the base contracts that asks: the same answer {validateUserOp} gets.
+    function _validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, bytes calldata signature)
+        internal
+        view
+        override
+        returns (uint256 validationData)
+    {
+        (validationData,) = _authenticate(userOp, userOpHash, signature);
+    }
+
+    /**
+     * @dev Who signed the op, and its ERC-4337 validation data.
+     * @dev Refuses any op whose callData calls {validateUserOp} itself. The EntryPoint forwards an
+     *      op's callData to the account in the EXECUTION phase with msg.sender == EntryPoint, so such
+     *      an op would reach validateUserOp a second time, with a struct and a `missingAccountFunds`
+     *      of its own choosing -- and could replay an old owner signature to skip the gas budget.
+     *      No legitimate op does this.
      * @dev Rejects any UserOp whose own gas parameters price it above {maxOpGasCost}. Stops a
      *      compromised key signing an op with absurd gas fields and bundling it itself: the inflated
      *      `preVerificationGas` is charged as if consumed and paid to the bundler beneficiary.
@@ -719,13 +876,18 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      EntryPoint does that comparison inside handleOps. A zero deadline would read as "valid
      *      forever" there, which is why {_grantSession} refuses one and why the key and its deadline
      *      are always written together.
+     * @return validationData The ERC-4337 validation data for the EntryPoint.
+     * @return byOwner        Whether the owner signed: true only for a valid owner signature.
      */
-    function _validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, bytes calldata signature)
+    function _authenticate(PackedUserOperation calldata userOp, bytes32 userOpHash, bytes calldata signature)
         internal
         view
-        override
-        returns (uint256)
+        returns (uint256 validationData, bool byOwner)
     {
+        if (bytes4(userOp.callData) == this.validateUserOp.selector) {
+            revert SessionHandler_SelfValidationCall();
+        }
+
         uint256 verificationGasLimit = uint256(userOp.accountGasLimits) >> 128;
         uint256 callGasLimit = uint128(uint256(userOp.accountGasLimits));
         uint256 maxFeePerGas = uint128(uint256(userOp.gasFees));
@@ -737,16 +899,16 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(
             MessageHashUtils.toEthSignedMessageHash(_signableUserOpHash(userOp, userOpHash)), signature
         );
-        if (err != ECDSA.RecoverError.NoError) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        if (err != ECDSA.RecoverError.NoError) return (ERC4337Utils.SIG_VALIDATION_FAILED, false);
 
         // The owner is authorized unconditionally and carries no validity window.
-        if (signer == owner()) return ERC4337Utils.SIG_VALIDATION_SUCCESS;
+        if (signer == owner()) return (ERC4337Utils.SIG_VALIDATION_SUCCESS, true);
 
         // Also covers "no session key at all": currentSession is then address(0), which no
         // successfully recovered signer can equal.
-        if (signer != currentSession) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        if (signer != currentSession) return (ERC4337Utils.SIG_VALIDATION_FAILED, false);
 
-        return ERC4337Utils.packValidationData(true, 0, currentSessionValidUntil);
+        return (ERC4337Utils.packValidationData(true, 0, currentSessionValidUntil), false);
     }
 
     /**
@@ -840,22 +1002,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         address treasury = REGISTRY.treasury();
         uint256 fee = REGISTRY.getFee();
         if (address(this).balance < fee) revert SessionHandler_NotEnoughBalance();
+        // The recipient is the registry's treasury, set by the protocol's admin, never by the caller.
+        // slither-disable-next-line arbitrary-send-eth
         (bool success,) = treasury.call{value: fee}("");
         if (!success) revert SessionHandler_TransferFailed();
         emit ProtocolFeePaid(treasury, fee);
-    }
-
-    /**
-     * @dev Bounds the prefund this account will pay for one UserOp. Not redundant with the ceiling in
-     *      {_validateUserOp}: the EntryPoint also forwards a UserOp's callData to the account in the
-     *      EXECUTION phase, where a key can call `validateUserOp` with a hand-crafted op (harmless gas
-     *      fields) and any `missingAccountFunds`. Only this check stops that transfer.
-     */
-    function _payPrefund(uint256 missingAccountFunds) internal override {
-        if (missingAccountFunds > maxOpGasCost) {
-            revert SessionHandler_PrefundTooHigh(missingAccountFunds, maxOpGasCost);
-        }
-        super._payPrefund(missingAccountFunds);
     }
 
     /**

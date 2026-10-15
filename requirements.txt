@@ -18,7 +18,7 @@ langchain-erc8004==0.1.1
 
 # LangChain agent stack
 langchain==1.2.10
-langchain-anthropic==1.3.4
+langchain-deepseek==1.1.1
 langgraph==1.0.10
 langgraph-checkpoint-sqlite==3.1.0
 aiosqlite==0.22.1

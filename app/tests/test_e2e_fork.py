@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from dotenv import load_dotenv
 
 from checks import add_contact, check, finish, sign_in   # first: it puts app/ on sys.path for the imports below
+import db  # noqa: E402
 
 load_dotenv()
 os.environ["COOKIE_SECURE"] = "0"
@@ -40,32 +41,46 @@ from fastapi.testclient import TestClient             # noqa: E402
 from web3 import Web3                                 # noqa: E402
 
 import api                                            # noqa: E402
+import routes.catalog  # noqa: E402
+import routes.deps  # noqa: E402
 from abi import ientry_point                          # noqa: E402
 import bundler                                        # noqa: E402
 import smart_wallet_agent                             # noqa: E402
 import tools                                          # noqa: E402
+import tools.checks  # noqa: E402
+import tools.positions  # noqa: E402
+import tools.sending  # noqa: E402
+import tools.transfers  # noqa: E402
+import tools.uniswap  # noqa: E402
+import tools.wallet_reads  # noqa: E402
 from agent_context import AgentContext                # noqa: E402
 from constants import (  # noqa: E402
-    ETH_SENTINEL, get_always_counted_ticker, get_chain_display_name, get_native_asset_ticker, get_router,
+    ETH_SENTINEL, get_always_counted_ticker, get_chain_display_name, get_default_spenders, get_exchange,
+    get_native_asset_ticker, get_native_wrapped_ticker, get_router, get_v3_network,
 )
 from contracts import load_registry, read_spending_config  # noqa: E402
 from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
 from langchain_uniswap_v2.abis import factory_abi, pair_abi, router_abi  # noqa: E402
+from langchain_uniswap_v3 import v3math               # noqa: E402
+from langchain_uniswap_v3.abis import position_manager_abi  # noqa: E402
 import quotes                                         # noqa: E402
 from userop import prepare_execute_call               # noqa: E402
+from web3.exceptions import ContractLogicError        # noqa: E402
 from web3.logs import DISCARD                         # noqa: E402
 
 # Where test_self_bundling writes the measured cost of each transfer, for reporting.
 COST_REPORT_PATH = os.getenv("E2E_COST_REPORT_PATH", "/tmp/e2e_cost_report.json")
 # The fork under test, named as `make setup-test ARGS=...` names it. Requests speak its chain ID,
 # which is the live chain's: a fork reports its parent's id.
-FORK_CHAIN_IDS = {f"{name}-fork": cid for cid, name in api.CHAIN_NAME_BY_ID.items() if cid in api.FORKABLE_CHAIN_IDS}
+FORK_CHAIN_IDS = {f"{name}-fork": cid for cid, name in routes.catalog.CHAIN_NAME_BY_ID.items() if cid in routes.catalog.FORKABLE_CHAIN_IDS}
 NETWORK = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "sepolia-fork"
 if NETWORK not in FORK_CHAIN_IDS:
     raise SystemExit(f"Unknown fork '{NETWORK}'. One of: {sorted(FORK_CHAIN_IDS)}")
 CHAIN_ID = FORK_CHAIN_IDS[NETWORK]
+# The wrapped native coin: WETH on the Ethereum chains, WBNB on BSC (where "weth" is bridged ETH).
+WRAPPED = get_native_wrapped_ticker(CHAIN_ID)
 # The same rpcs row the API reads, so the test and the API always talk to the same node: each fork
 # runs on its own port (the Makefile's FORK_PORT_*).
 RPC = get_rpc_url(NETWORK)
@@ -96,7 +111,7 @@ def require_local_fork():
             f"anvil_setBalance failed ({e}). This does not look like a local fork — refusing to "
             f"sign anything. Check APP_FORK_MODE=1 and that `make {NETWORK}` is what is on {RPC}."
         )
-    if not api.FORK_MODE:
+    if not routes.catalog.FORK_MODE:
         raise SystemExit("APP_FORK_MODE is not set; the API would target the live chain. Refusing.")
     print(f"  local fork confirmed: {NETWORK}, chain {CHAIN_ID} at block {w3.eth.block_number}")
 
@@ -202,7 +217,7 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
         raise SystemExit("cannot continue without a wallet")
     prepared = r.json()
     predicted, session_key = prepared["predicted_address"], prepared["session_key"]
-    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED))
     check("WETH is watched though the request picked nothing", prepared["watched_tokens"] == [weth],
           str(prepared["watched_tokens"]))
 
@@ -229,7 +244,7 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
     check("the wallet holds the prefund", w3.eth.get_balance(wallet) == 10**18,
           str(w3.eth.get_balance(wallet)))
 
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     on_chain = w3.eth.contract(address=wallet, abi=abi)
     check("the owner is the signer", on_chain.functions.owner().call() == acct.address)
     check("currentSession agrees on chain",
@@ -255,7 +270,7 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
         return
     state = r.json()
 
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     on_chain = w3.eth.contract(address=wallet, abi=abi)
     cfg = read_spending_config(on_chain)
 
@@ -263,21 +278,29 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
     check("the owner matches chain", state["owner"] == on_chain.functions.owner().call())
     check("is_owner true for the SIWE-bound deployer", state["is_owner"] is True)
     check("not paused", state["paused"] is False)
-    check("the cap matches chain", state["spending"]["daily_limit_usd"] == cfg["dailyLimitUsd"] / api.USD_DECIMALS,
-          f'{state["spending"]["daily_limit_usd"]} vs {cfg["dailyLimitUsd"] / api.USD_DECIMALS}')
+    check("the cap matches chain", state["spending"]["daily_limit_usd"] == cfg["dailyLimitUsd"] / routes.deps.USD_DECIMALS,
+          f'{state["spending"]["daily_limit_usd"]} vs {cfg["dailyLimitUsd"] / routes.deps.USD_DECIMALS}')
     check("nothing spent yet", state["spending"]["spent_usd"] == 0.0, str(state["spending"]["spent_usd"]))
     check("remaining matches getRemainingBudget",
-          state["spending"]["remaining_usd"] == on_chain.functions.getRemainingBudget().call() / api.USD_DECIMALS)
+          state["spending"]["remaining_usd"] == on_chain.functions.getRemainingBudget().call() / routes.deps.USD_DECIMALS)
     check("weth is watched and named, not a bare address",
-          [t["ticker"] for t in state["spending"]["watched_tokens"]] == ["weth"],
+          [t["ticker"] for t in state["spending"]["watched_tokens"]] == [WRAPPED],
           str(state["spending"]["watched_tokens"]))
     check("the app holds the session key and it is active on chain",
           state["session"]["key"] is not None and state["session"]["active"] is True,
           str(state["session"]))
     check("the gas ceiling is a string, not a float64-mangled int",
           isinstance(state["limits"]["max_op_gas_cost_wei"], str))
-    check("the router was seeded as a trusted spender", len(state["limits"]["trusted_spenders"]) == 1,
-          str(state["limits"]["trusted_spenders"]))
+    gas_budget = state["limits"]["session_gas"] or {}
+    check("the daily fee budget is the wallet's, whole: the assistant has paid no fees yet",
+          gas_budget.get("budget_wei") == str(on_chain.functions.sessionGasBudget().call())
+          and gas_budget.get("remaining_wei") == gas_budget.get("budget_wei") and gas_budget.get("refills_at") is None,
+          str(gas_budget))
+    # SwapRouter02 and the position manager on a Uniswap V3 chain, PancakeSwap's router on BSC.
+    check("the exchange's contracts were seeded as trusted spenders",
+          sorted(state["limits"]["trusted_spenders"]) == sorted(get_default_spenders(CHAIN_ID)),
+          f'{state["limits"]["trusted_spenders"]} vs {get_default_spenders(CHAIN_ID)}')
+    check("a new wallet holds no Uniswap V3 positions", state["positions"] == [], str(state.get("positions")))
 
     native = [b for b in state["balances"] if b["native"]][0]
     check("the native balance matches chain",
@@ -304,7 +327,7 @@ def test_dashboard_tokens(c: TestClient, acct, headers: dict, wallet: str):
     Leaves USDC as it found it -- uncounted and off the dashboard -- for the tests after it.
     """
     print("\n[2b] dashboard tokens: add a listed token, count it, stop counting, remove it")
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     sh = w3.eth.contract(address=wallet, abi=abi)
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
 
@@ -341,7 +364,7 @@ def test_dashboard_tokens(c: TestClient, acct, headers: dict, wallet: str):
 def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
     """Every owner endpoint, with the on-chain effect asserted after each."""
     print("\n[3] owner actions: each one changes real chain state")
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     sh = w3.eth.contract(address=wallet, abi=abi)
 
     owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 1234})
@@ -355,6 +378,10 @@ def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
     owner_action(c, headers, acct, "/api/wallet/max-op-gas-cost/prepare", {"max_cost_eth": "0.25"})
     check("gas ceiling changed on chain",
           sh.functions.maxOpGasCost().call() == w3.to_wei("0.25", "ether"))
+
+    owner_action(c, headers, acct, "/api/wallet/session-gas-budget/prepare", {"budget_eth": "0.3"})
+    check("daily fee budget changed on chain",
+          sh.functions.sessionGasBudget().call() == w3.to_wei("0.3", "ether"))
 
     link = Web3.to_checksum_address(get_token_address(CHAIN_ID, "link"))
     owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare",
@@ -482,7 +509,7 @@ def test_simulations_bite(c: TestClient, acct, headers: dict, wallet: str):
         check("watching a priced token is allowed", r.status_code == 200, f"{r.status_code} {r.text[:150]}")
 
     r = c.post("/api/wallet/watched-tokens/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "token": "weth", "action": "remove"})
+               json={"chain_id": CHAIN_ID, "token": WRAPPED, "action": "remove"})
     check("removing WETH -> 400: it always counts", r.status_code == 400 and "always counts" in r.text,
           f"{r.status_code} {r.text[:150]}")
 
@@ -566,7 +593,7 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
     needs to go out to prove what it lets through.
     """
     print("\n[7b] the contract allowlist: one signature to turn on, refusals the assistant can explain")
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     sh = w3.eth.contract(address=wallet, abi=abi)
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
     turn = itertools.count(100_000)
@@ -590,7 +617,19 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
     body = read()
     suggested = {s["address"]: s["label"] for s in body["suggested"]}
     check("the list starts off and empty", body["enabled"] is False and body["targets"] == [], str(body)[:200])
-    check("the exchange router is suggested", api._router_or_none(CHAIN_ID) in suggested, str(suggested))
+    check("every contract the assistant trades through is suggested",
+          all(spender in suggested for spender in get_default_spenders(CHAIN_ID)), str(suggested))
+    if get_exchange(CHAIN_ID) == "uniswap-v3":
+        v3 = get_v3_network(CHAIN_ID)
+        check("...by name: the Uniswap V3 router and its positions",
+              (suggested.get(v3["swap_router"]), suggested.get(v3["position_manager"]))
+              == ("Uniswap V3 router", "Uniswap V3 positions"), str(suggested))
+        try:
+            v2_router = get_router(CHAIN_ID)
+        except ValueError:
+            v2_router = None
+        check("...and not the V2 router the assistant no longer trades through", v2_router not in suggested,
+              str(suggested))
     check("USDC, on the dashboard, is suggested by name", suggested.get(usdc) == "USDC", str(suggested))
     check("a listed token that isn't on the dashboard is not", dai not in suggested, str(suggested))
     check("the review registry is suggested", sh.functions.REPUTATION_REGISTRY().call() in suggested)
@@ -603,20 +642,20 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
     check("the read names the entry", body["targets"] == [{"address": usdc, "label": "USDC"}], str(body)[:200])
     check("...and stops suggesting it", usdc not in {s["address"] for s in body["suggested"]})
 
-    quoted = tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
+    quoted = tools.transfers.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
     check("a listed token still quotes", "quote_id" in quoted, str(quoted)[:200])
-    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
-    quoted = tools.send_eth.func(next_turn(), recipient="payee", amount_eth=0.001)
+    tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    quoted = tools.transfers.send_eth.func(next_turn(), recipient="payee", amount_eth=0.001)
     check("a plain wallet needs no entry: sending it the native asset still quotes",
           "quote_id" in quoted, str(quoted)[:200])
-    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
 
     # An unlisted contract. The wallet holds the token, so the balance check passes and the refusal
     # is the guard's own.
     link = Web3.to_checksum_address(get_token_address(CHAIN_ID, "link"))
     deal_erc20(link, wallet, 10 * 10**18)
     try:
-        tools.transfer_erc20.func(next_turn(), token="link", recipient="payee", amount=1)
+        tools.transfers.transfer_erc20.func(next_turn(), token="link", recipient="payee", amount=1)
         check("an unlisted contract is refused", False, "it was quoted")
     except ToolException as e:
         check("an unlisted contract is refused, naming it", link in str(e), str(e)[:300])
@@ -705,7 +744,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     oracle shows up in the numbers.
     """
     print("\n[7] self-bundling: ERC20 transfers, their real cost, and the live-chain failure modes")
-    abi = api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     sh = w3.eth.contract(address=wallet, abi=abi)
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
     _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
@@ -741,14 +780,14 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
 
     def quote_transfer(amount: float) -> dict:
         """The quote half: builds and prices the transfer. Sends nothing."""
-        return tools.transfer_erc20.func(
+        return tools.transfers.transfer_erc20.func(
             next_turn(), token="usdc",
             recipient="payee", amount=amount,
         )
 
     def confirm(quoted: dict):
         """The send half, a turn later -- as it would be after the user replied."""
-        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
     def transfer(amount: float) -> tuple[dict, int]:
@@ -782,7 +821,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     sent_before = w3.eth.get_transaction_count(api_bundler)
     held_before = token.functions.balanceOf(payee).call()
     same_turn = next_turn()
-    quoted = tools.transfer_erc20.func(
+    quoted = tools.transfers.transfer_erc20.func(
         same_turn, token="usdc", recipient="payee", amount=7
     )
     check("a quote says plainly that nothing was sent", "NOT SENT" in quoted["status"], quoted["status"])
@@ -808,7 +847,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
           f'{quoted.get("remaining_usd")} / {quoted.get("session_expires_in_secs")}')
 
     try:
-        tools.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
+        tools.sending.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
         check("confirming in the quoting turn is refused", False, "it was sent")
     except ToolException as e:
         check("confirming in the quoting turn is refused", "has not seen the cost" in str(e), str(e)[:160])
@@ -840,7 +879,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     }
 
     try:
-        tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
         check("a quote cannot be confirmed twice", False, "it was sent again")
     except ToolException as e:
         check("a quote cannot be confirmed twice", "no pending transaction" in str(e), str(e)[:160])
@@ -852,7 +891,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     nonce_before = w3.eth.get_transaction_count(api_bundler)
     native_before = w3.eth.get_balance(wallet)
     try:
-        tools.transfer_erc20.func(next_turn(), token="usdc",
+        tools.transfers.transfer_erc20.func(next_turn(), token="usdc",
                                   recipient="payee", amount=2_000)
         check("a transfer over the cap is refused", False, "it was sent")
     except ToolException as e:
@@ -864,7 +903,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     # A paused wallet: refused with the reason, rather than as a failed simulation.
     owner_action(c, headers, acct, "/api/wallet/pause/prepare", {})
     try:
-        tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
+        tools.transfers.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
         check("a paused wallet's transfer is refused", False, "it was quoted")
     except ToolException as e:
         check("a paused wallet's transfer is refused, saying it is paused",
@@ -918,7 +957,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     w3.provider.make_request("anvil_setBalance", [api_bundler, hex(10**6)])
     before = token.functions.balanceOf(payee).call()
     try:
-        tools.transfer_erc20.func(next_turn(), token="usdc",
+        tools.transfers.transfer_erc20.func(next_turn(), token="usdc",
                                   recipient="payee", amount=1)
         check("an unfunded bundler refuses", False, "it was sent")
     except ToolException as e:
@@ -942,6 +981,8 @@ def eoa_call(acct, fn, value: int = 0):
         "from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address),
         "chainId": CHAIN_ID, "value": value,
     })
+    # Headroom over the estimate: the V3 seed mint ran out of gas at exactly the estimate on base-fork.
+    tx["gas"] = tx["gas"] * 13 // 10
     receipt = w3.eth.wait_for_transaction_receipt(
         w3.eth.send_raw_transaction(acct.sign_transaction(tx).raw_transaction), timeout=60
     )
@@ -953,7 +994,7 @@ def spend_metered(sh, receipt) -> list[int]:
     """The netOutflowUsd of every SpendMetered the wallet's hook emitted in `receipt` (none = nothing charged)."""
     module = w3.eth.contract(
         address=sh.functions.SH_MODULE().call(),
-        abi=api.get_json("./out/SpendingLimitModule.sol/SpendingLimitModule.json")["abi"],
+        abi=db.get_json("./out/SpendingLimitModule.sol/SpendingLimitModule.json")["abi"],
     )
     return [
         e["args"]["netOutflowUsd"]
@@ -962,11 +1003,61 @@ def spend_metered(sh, receipt) -> list[int]:
     ]
 
 
+# The one position-manager function the V3 toolkit leaves out on purpose -- it never creates a
+# pool -- and a test seeding a fresh token's pool needs.
+_CREATE_POOL_ABI = [{
+    "type": "function", "name": "createAndInitializePoolIfNecessary", "stateMutability": "payable",
+    "inputs": [{"name": "token0", "type": "address"}, {"name": "token1", "type": "address"},
+               {"name": "fee", "type": "uint24"}, {"name": "sqrtPriceX96", "type": "uint160"}],
+    "outputs": [{"name": "pool", "type": "address"}],
+}]
+# The fee tier a seeded Uniswap V3 pool gets: 0.3%, whose ticks are 60 apart.
+_SEED_FEE, _SEED_TICK_SPACING = 3000, 60
+
+
+def seed_weth_pool(deployer, token, token_amount: int, eth_amount: int):
+    """
+    Gives a fresh token one TOKEN/WETH pool on the chain's exchange, seeded by `deployer` with
+    `token_amount` of it against `eth_amount` of ETH -- which sets its price.
+
+    On PancakeSwap V2 (BSC) that is the router's addLiquidityETH. On Uniswap V3 the pool is created
+    and priced at that ratio, then given a full-range position, so it trades like the V2 pool at any
+    price the tests move it to; the ETH goes in as value and the position manager wraps it.
+    """
+    eoa_call(deployer, token.functions.mint(deployer.address, token_amount))
+    deadline = w3.eth.get_block("latest")["timestamp"] + 600
+    if get_exchange(CHAIN_ID) != "uniswap-v3":
+        router = w3.eth.contract(address=get_router(CHAIN_ID), abi=router_abi)
+        eoa_call(deployer, token.functions.approve(router.address, token_amount))
+        eoa_call(deployer, router.functions.addLiquidityETH(
+            token.address, token_amount, 0, 0, deployer.address, deadline,
+        ), value=eth_amount)
+        return
+    v3 = get_v3_network(CHAIN_ID)
+    manager = w3.eth.contract(address=v3["position_manager"], abi=position_manager_abi + _CREATE_POOL_ABI)
+    weth = v3["native_wrapped"]
+    token0, token1 = sorted((token.address, weth), key=lambda a: int(a, 16))
+    amount0, amount1 = (token_amount, eth_amount) if token0 == token.address else (eth_amount, token_amount)
+    # sqrtPriceX96 = sqrt(amount1 / amount0) * 2**96, in integers.
+    eoa_call(deployer, manager.functions.createAndInitializePoolIfNecessary(
+        token0, token1, _SEED_FEE, math.isqrt(amount1 * 2**192 // amount0),
+    ))
+    eoa_call(deployer, token.functions.approve(manager.address, token_amount))
+    tick_lower, tick_upper = v3math.full_range_ticks(_SEED_TICK_SPACING)
+    mint = manager.encode_abi("mint", args=[(
+        token0, token1, _SEED_FEE, tick_lower, tick_upper, amount0, amount1, 0, 0, deployer.address, deadline,
+    )])
+    refund = manager.encode_abi("refundETH", args=[])
+    eoa_call(deployer, manager.functions.multicall([bytes.fromhex(mint[2:]), bytes.fromhex(refund[2:])]),
+             value=eth_amount)
+
+
 def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     """
     A token the user adds by address, on a real chain: a brand-new ERC-20 with no price feed and one
-    TOKEN/WETH pool, the usual shape. Buying it with ETH goes straight through that pool; paying in
-    USDC hops through WETH (the Uniswap package's own routing).
+    TOKEN/WETH pool on the chain's exchange (seed_weth_pool), the usual shape. Buying it with ETH
+    goes straight through that pool; paying in USDC hops through WETH (the toolkit's own routing,
+    on Uniswap V3 and PancakeSwap V2 alike).
 
     Covers the add rules against real contracts, the wallet read, the assistant sending it (not
     charged), buying it with ETH (the FULL amount charged, exactly), the assistant refusing a token
@@ -975,7 +1066,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     removing it from the list.
     """
     print("\n[7b] tokens the user adds: added by address, sent, bought with ETH, sold, withdrawn")
-    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    sh = w3.eth.contract(address=wallet, abi=db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
     turn = itertools.count(1_000)
 
@@ -983,12 +1074,12 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
         return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
 
     def confirm(quoted: dict):
-        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
     # A fresh token nobody prices, and a fake one calling itself USDC.
     deployer = new_funded_account()
-    mock = api.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
+    mock = db.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
     factory = w3.eth.contract(abi=mock["abi"], bytecode=mock["bytecode"]["object"])
     symbol = f"MF{int(time.time()) % 100_000}"
     token_address = eoa_call(deployer, factory.constructor("Mitfah Test Token", symbol, 18))["contractAddress"]
@@ -1005,8 +1096,9 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     for label, address, expected in (
         ("a token copying a listed symbol is refused", fake_usdc, "fake a token"),
         ("an address with no contract asks to check it again", Account.create().address, "Check the token address again"),
-        # The exchange router: a contract, but with no symbol() or decimals().
-        ("a contract that isn't a token asks to check it again", get_router(CHAIN_ID), "Check the token address again"),
+        # The exchange's router: a contract, but with no symbol() or decimals().
+        ("a contract that isn't a token asks to check it again", get_default_spenders(CHAIN_ID)[0],
+         "Check the token address again"),
     ):
         r = c.post("/api/tokens/custom/lookup", headers=headers, json={"chain_id": CHAIN_ID, "address": address})
         check(label, r.status_code == 400 and expected in r.json()["detail"], f"{r.status_code} {r.text[:160]}")
@@ -1024,21 +1116,21 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     check("the wallet read shows it, marked custom, with its balance",
           row is not None and row["custom"] and row["raw"] == str(1_000 * unit) and row["ticker"] == ticker, str(row))
     check("listed tokens are marked not custom", all(b["custom"] is False for b in balances if not b["native"] and b is not row))
-    check("the assistant lists it as custom", ticker in tools.get_supported_tokens.func(next_turn())["custom"])
+    check("the assistant lists it as custom", ticker in tools.wallet_reads.get_supported_tokens.func(next_turn())["custom"])
 
     try:
-        tools.get_price.func(next_turn(), token=ticker)
+        tools.wallet_reads.get_price.func(next_turn(), token=ticker)
         check("get_price refuses it by name", False, "it answered a price")
     except ToolException as e:
         check("get_price refuses it by name", "no price" in str(e), str(e)[:160])
-    pre = tools.preflight_check.func(next_turn(), token=ticker, amount=10)
+    pre = tools.checks.preflight_check.func(next_turn(), token=ticker, amount=10)
     check("preflight: no USD value, nothing charged, passes",
           pre["usd_value"] is None and pre["charged_usd"] == 0 and pre["within_budget"], str(pre))
 
     # The assistant sends it to a contact: not charged.
     payee = c.get("/api/contacts", headers=headers).json()["contacts"]
     payee = next(p for p in payee if p["name"] == "payee")["address"]
-    quoted = tools.transfer_erc20.func(next_turn(), token=ticker,
+    quoted = tools.transfers.transfer_erc20.func(next_turn(), token=ticker,
                                        recipient="payee", amount=10)
     check("the transfer quote says it isn't covered", "isn't covered by the spending limit" in quoted.get("details", ""),
           str(quoted.get("details")))
@@ -1046,25 +1138,19 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     check("the contact received it", token.functions.balanceOf(payee).call() == 10 * unit)
     check("and nothing was charged to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
 
-    # One TOKEN/WETH pool, seeded from the deployer.
-    router = w3.eth.contract(address=get_router(CHAIN_ID), abi=router_abi)
-    eoa_call(deployer, token.functions.mint(deployer.address, 1_000_000 * unit))
-    eoa_call(deployer, token.functions.approve(router.address, 1_000_000 * unit))
-    eoa_call(deployer, router.functions.addLiquidityETH(
-        token_address, 1_000_000 * unit, 0, 0, deployer.address,
-        w3.eth.get_block("latest")["timestamp"] + 600,
-    ), value=w3.to_wei(1, "ether"))
+    # One TOKEN/WETH pool on the chain's exchange, seeded from the deployer.
+    seed_weth_pool(deployer, token, 1_000_000 * unit, w3.to_wei(1, "ether"))
 
-    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
-    quote = tools.get_quote_out.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001)
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED))
+    quote = tools.uniswap.get_quote_out.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001)
     check("buying it with ETH goes through its WETH pool",
           [Web3.to_checksum_address(a) for a in quote["path"]] == [weth, token_address], str(quote.get("path")))
-    quote = tools.get_quote_out.func(next_turn(), token_in="usdc", token_out=ticker, amount_in=1)
+    quote = tools.uniswap.get_quote_out.func(next_turn(), token_in="usdc", token_out=ticker, amount_in=1)
     check("paying in USDC hops through WETH",
           [Web3.to_checksum_address(a) for a in quote["path"]] == [usdc, weth, token_address], str(quote.get("path")))
 
     held = token.functions.balanceOf(wallet).call()
-    quoted = tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=500)
+    quoted = tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=500)
     check("the buy quote says the full amount paid counts", "full amount" in quoted.get("details", ""),
           str(quoted.get("details")))
     check("...and shows what should come back, the least it will accept, and the tolerance",
@@ -1083,27 +1169,27 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     api_bundler = bundler.resolve_bundler(w3).address
     sent_before = w3.eth.get_transaction_count(api_bundler)
     try:
-        tools.swap.func(next_turn(), token_in="eth", token_out=fake_usdc, amount_in=0.001)
+        tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=fake_usdc, amount_in=0.001)
         check("a token the user never added is refused by address", False, "it was quoted")
     except ToolException as e:
         check("a token the user never added is refused by address",
               "not a token this wallet knows" in str(e), str(e)[:160])
-    quote = tools.get_quote_out.func(next_turn(), token_in="eth", token_out=token_address, amount_in=0.001)
+    quote = tools.uniswap.get_quote_out.func(next_turn(), token_in="eth", token_out=token_address, amount_in=0.001)
     check("the user's own token still works by address",
           [Web3.to_checksum_address(a) for a in quote["path"]] == [weth, token_address], str(quote.get("path")))
     try:
-        tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1201)
+        tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1201)
         check("a slippage over 12% is refused", False, "it was quoted")
     except ToolException as e:
         check("a slippage over 12% is refused", "outside what this wallet allows" in str(e), str(e)[:160])
-    quoted = tools.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1200)
+    quoted = tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1200)
     check("exactly 12% is quoted", "NOT SENT" in quoted["status"], str(quoted.get("status")))
-    tools.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
     check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
 
     # Selling it back: the unpriced approval clears (the router is a trusted spender), nothing charged.
     native_before = w3.eth.get_balance(wallet)
-    quoted = tools.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_in=100, slippage_bps=500)
+    quoted = tools.uniswap.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_in=100, slippage_bps=500)
     check("the sell quote says selling costs nothing", "selling it costs nothing" in quoted.get("details", ""),
           str(quoted.get("details")))
     check("...counts nothing toward the limit and states no price for it",
@@ -1123,7 +1209,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     balances = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["balances"]
     check("the wallet read no longer shows it", all(b["address"] != token_address for b in balances))
     try:
-        tools.transfer_erc20.func(next_turn(), token=ticker,
+        tools.transfers.transfer_erc20.func(next_turn(), token=ticker,
                                   recipient="payee", amount=1)
         check("the assistant no longer recognises it", False, "it quoted a transfer")
     except ToolException as e:
@@ -1132,20 +1218,14 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
 
 def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     """
-    The one swap tool and the two liquidity tools on a real chain, by every route they can take: a
-    fresh token with one TOKEN/WETH pool, as in [7b]. Every swap route is quoted and checked to have
-    reached its own router function -- the quote's action is the router call's own description --
-    and the routes never sent before are sent and read back from the chain. Both forms of adding
-    and of removing liquidity are sent: with the native asset (the default) and with WETH.
+    The one swap tool and the chain's liquidity tools on a real chain. Where it trades on Uniswap
+    V3 (Ethereum, Sepolia, Arbitrum, Base), _swaps_and_positions: every swap route against the
+    chain's own ETH/USDC pools, and a position from its range options to its burn. On BSC,
+    _swaps_and_lp_tokens: PancakeSwap V2's swap routes and LP tokens.
 
-    The dashboard follows the pool's LP tokens through it all: they show after the first deposit,
-    match the chain after every change, go when the owner withdraws them all, come back with the
-    next deposit, and go again when the assistant takes it all out.
-
-    Also the refusals that need a real balance: sending more of the native asset than the wallet
-    holds, and sending nearly all of it, which leaves nothing for the fees.
+    Then, on either, the refusals that need a real balance: sending more of the native asset than
+    the wallet holds, and sending nearly all of it, which leaves nothing for the fees.
     """
-    print("\n[7c] one swap tool, one add and one remove: every route, LP tokens on the dashboard, and the balance refusals")
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
     turn = itertools.count(2_000_000)
 
@@ -1153,13 +1233,63 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
         return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
 
     def confirm(quoted: dict):
-        result = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
+    if get_exchange(CHAIN_ID) == "uniswap-v3":
+        _swaps_and_positions(c, headers, wallet, next_turn, confirm)
+    else:
+        _swaps_and_lp_tokens(c, acct, headers, wallet, next_turn, confirm)
+
+    # The native asset has to cover what is sent and the fees. Both refusals happen before anything
+    # is signed, so neither costs the wallet a thing. The limit is raised for them first: nearly all
+    # the ETH is worth more than the $1,234 set in [3], and that refusal would come first.
+    sh = w3.eth.contract(address=wallet, abi=db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    limit = read_spending_config(sh)["dailyLimitUsd"] // 10**18
+    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 100_000})
+    api_bundler = bundler.resolve_bundler(w3).address
+    sent_before = w3.eth.get_transaction_count(api_bundler)
+    balance = w3.eth.get_balance(wallet)
+    ticker_native = get_native_asset_ticker(CHAIN_ID)
+    try:
+        tools.transfers.send_eth.func(next_turn(), recipient="payee", amount_eth=balance / 10**18 + 1)
+        check("sending more than the wallet holds is refused", False, "it was quoted")
+    except ToolException as e:
+        check("sending more than the wallet holds is refused, with what it holds",
+              f"Not enough {ticker_native}: the wallet holds" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
+    fee = load_registry(user_id).functions.getFee().call()
+    try:
+        tools.transfers.send_eth.func(next_turn(), recipient="payee", amount_eth=(balance - fee // 2) / 10**18)
+        check("sending nearly all of it is refused", False, "it was quoted")
+    except ToolException as e:
+        check("sending nearly all of it is refused: too little left for the fees",
+              "leaves too little for the fees" in str(e), str(e)[:200])
+    pre = tools.checks.preflight_check.func(next_turn(), token="eth", amount=balance / 10**18 + 1)
+    check("preflight says the wallet doesn't hold it", pre["enough_balance"] is False
+          and "the wallet holds" in pre.get("balance_short", ""), str(pre)[:200])
+    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": limit})
+    check("the limit is back as it was", read_spending_config(sh)["dailyLimitUsd"] == limit * 10**18)
+
+
+def _swaps_and_lp_tokens(c: TestClient, acct, headers: dict, wallet: str, next_turn, confirm):
+    """
+    PancakeSwap V2 (BSC): the one swap tool and the two liquidity tools, by every route they can
+    take: a fresh token with one TOKEN/WETH pool, as in [7b]. Every swap route is quoted and checked
+    to have reached its own router function -- the quote's action is the router call's own
+    description -- and the routes never sent before are sent and read back from the chain. Both
+    forms of adding and of removing liquidity are sent: with the native asset (the default) and with
+    WETH.
+
+    The dashboard follows the pool's LP tokens through it all: they show after the first deposit,
+    match the chain after every change, go when the owner withdraws them all, come back with the
+    next deposit, and go again when the assistant takes it all out.
+    """
+    print("\n[7c] one swap tool, one add and one remove: every route, LP tokens on the dashboard, and the balance refusals")
     # A fresh token, the wallet holding 10,000 of it, and one TOKEN/WETH pool: 1,000,000 TOKEN
     # against 1 ETH, so 1 TOKEN is worth 0.000001 ETH.
     deployer = new_funded_account()
-    mock = api.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
+    mock = db.get_json("./out/ERC20Mock.sol/ERC20Mock.json")
     factory = w3.eth.contract(abi=mock["abi"], bytecode=mock["bytecode"]["object"])
     symbol = f"MS{int(time.time()) % 100_000}"
     token_address = eoa_call(deployer, factory.constructor("Mitfah Swap Token", symbol, 18))["contractAddress"]
@@ -1177,9 +1307,9 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     r = c.post("/api/tokens/custom", headers=headers, json={"chain_id": CHAIN_ID, "address": token_address})
     check("the token is added", r.status_code == 201, f"{r.status_code} {r.text[:160]}")
 
-    weth = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth")), abi=ERC20_ABI)
+    weth = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED)), abi=ERC20_ABI)
     weth_before = weth.functions.balanceOf(wallet).call()
-    check("wrapping 0.01 ETH lands", confirm(tools.wrap_eth.func(next_turn(), amount_eth=0.01))["status"] == 1)
+    check("wrapping 0.01 ETH lands", confirm(tools.transfers.wrap_eth.func(next_turn(), amount_eth=0.01))["status"] == 1)
     check("...and the wallet holds the WETH", weth.functions.balanceOf(wallet).call() == weth_before + 10**16)
 
     # Every route, by the router call it reached: exact in says "for at least", exact out "Swap up
@@ -1195,12 +1325,12 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
         ("ETH for the token, exact out", dict(token_in="eth", token_out=ticker, amount_out=100), ("out", "native", "token")),
         ("the token for ETH, exact in", dict(token_in=ticker, token_out="eth", amount_in=100), ("in", "token", "native")),
         ("the token for ETH, exact out", dict(token_in=ticker, token_out="eth", amount_out=0.0001), ("out", "token", "native")),
-        ("the token for WETH, exact in", dict(token_in=ticker, token_out="weth", amount_in=100), ("in", "token", "token")),
-        ("WETH for the token, exact out", dict(token_in="weth", token_out=ticker, amount_out=100), ("out", "token", "token")),
+        ("the token for WETH, exact in", dict(token_in=ticker, token_out=WRAPPED, amount_in=100), ("in", "token", "token")),
+        ("WETH for the token, exact out", dict(token_in=WRAPPED, token_out=ticker, amount_out=100), ("out", "token", "token")),
     )
     quoted = {}
     for label, args, expected in routes:
-        quoted[label] = tools.swap.func(next_turn(), **args)
+        quoted[label] = tools.uniswap.swap.func(next_turn(), **args)
         check(f"swap, {label}: quoted through its own router function",
               route(quoted[label]["action"]) == expected, quoted[label]["action"])
     check("a quote's action is the swap itself, without the approvals around it",
@@ -1216,24 +1346,24 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     check("buying exactly 100 of the token with ETH lands", confirm(quoted["ETH for the token, exact out"])["status"] == 1)
     check("...and exactly 100 arrived", token.functions.balanceOf(wallet).call() == held + 100 * unit)
     for label in ("ETH for the token, exact in", "the token for ETH, exact in"):
-        tools.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
+        tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
     # Quoted before the buy above moved the pool, so these are re-quoted at the price it left.
     held = token.functions.balanceOf(wallet).call()
-    receipt = confirm(tools.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_out=0.0001))
+    receipt = confirm(tools.uniswap.swap.func(next_turn(), token_in=ticker, token_out="eth", amount_out=0.0001))
     check("selling the token for exactly 0.0001 ETH lands", receipt["status"] == 1)
     check("...spending some of the token", token.functions.balanceOf(wallet).call() < held)
     held, weth_held = token.functions.balanceOf(wallet).call(), weth.functions.balanceOf(wallet).call()
     check("selling exactly 100 of the token for WETH lands",
-          confirm(tools.swap.func(next_turn(), token_in=ticker, token_out="weth", amount_in=100))["status"] == 1)
+          confirm(tools.uniswap.swap.func(next_turn(), token_in=ticker, token_out=WRAPPED, amount_in=100))["status"] == 1)
     check("...100 left and WETH came back", token.functions.balanceOf(wallet).call() == held - 100 * unit
           and weth.functions.balanceOf(wallet).call() > weth_held)
     held, weth_held = token.functions.balanceOf(wallet).call(), weth.functions.balanceOf(wallet).call()
     check("buying exactly 100 of the token with WETH lands",
-          confirm(tools.swap.func(next_turn(), token_in="weth", token_out=ticker, amount_out=100))["status"] == 1)
+          confirm(tools.uniswap.swap.func(next_turn(), token_in=WRAPPED, token_out=ticker, amount_out=100))["status"] == 1)
     check("...100 arrived and WETH paid for it", token.functions.balanceOf(wallet).call() == held + 100 * unit
           and weth.functions.balanceOf(wallet).call() < weth_held)
     for label in ("the token for ETH, exact out", "the token for WETH, exact in", "WETH for the token, exact out"):
-        tools.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
+        tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted[label]["quote_id"])
 
     # Liquidity: the native asset by default, WETH when named. The dashboard's row for the pool is
     # checked against the chain after each step.
@@ -1261,19 +1391,19 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
 
     check("the dashboard shows no LP tokens before the first deposit", lp_rows() == [])
     try:
-        tools.add_liquidity.func(next_turn(), token_a="eth", amount_a=0.001, token_b=ticker)
+        tools.uniswap.add_liquidity.func(next_turn(), token_a="eth", amount_a=0.001, token_b=ticker)
         check("adding with the native amount fixed is refused", False, "it was quoted")
     except ToolException as e:
         check("adding with the native amount fixed is refused, asking for the token's amount first",
               f"Name how much {ticker.upper()} to deposit first" in str(e), str(e)[:200])
-    quote = tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000)
+    quote = tools.uniswap.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000)
     check("adding liquidity pairs with the native asset by default", quote["action"].endswith("of the native asset"),
           quote["action"])
     check("...counting the ETH deposited, not the token, which has no price",
           quote["charged_usd"] > 0 and quote["usd_value"] is None, f'{quote.get("charged_usd")} / {quote.get("usd_value")}')
     held = token.functions.balanceOf(wallet).call()
     check("...and it lands", confirm(quote)["status"] == 1)
-    lp_native = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
+    lp_native = tools.uniswap.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
     check("the wallet holds LP tokens for the pool, and the token went in",
           lp_native > 0 and token.functions.balanceOf(wallet).call() == held - 1000 * unit, str(lp_native))
     shows_pool("the dashboard shows them, native side first, with what they hold in the pool")
@@ -1281,17 +1411,17 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     suggested = {s["address"]: s["label"] for s in r.json()["suggested"]} if r.status_code == 200 else {}
     check("...and the contract allowlist suggests the pool, which taking liquidity out calls",
           suggested.get(pool.address) == f"{native.upper()}/{ticker.upper()} pool", f"{r.status_code} {suggested}"[:300])
-    quote = tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000, token_b="weth")
+    quote = tools.uniswap.add_liquidity.func(next_turn(), token_a=ticker, amount_a=1000, token_b=WRAPPED)
     check("naming WETH deposits WETH instead", "native asset" not in quote["action"], quote["action"])
     weth_held = weth.functions.balanceOf(wallet).call()
     check("...and it lands, paying in WETH", confirm(quote)["status"] == 1
           and weth.functions.balanceOf(wallet).call() < weth_held)
-    lp = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker, token_b="weth")
+    lp = tools.uniswap.get_liquidity_token_balance.func(next_turn(), token_a=ticker, token_b=WRAPPED)
     check("...into the same pool, so the LP tokens add up", lp > lp_native, f"{lp} vs {lp_native}")
     shows_pool("...and the dashboard has one row for the pool, with the new total")
 
     held, native_held = token.functions.balanceOf(wallet).call(), w3.eth.get_balance(wallet)
-    quote = tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6))
+    quote = tools.uniswap.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6))
     check("removing liquidity returns the native asset by default", "native asset" in quote["action"],
           quote["action"])
     check("...shows what should come back and the least it will accept",
@@ -1299,11 +1429,11 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     check("...and it lands, the token coming back", confirm(quote)["status"] == 1
           and token.functions.balanceOf(wallet).call() > held)
     weth_held = weth.functions.balanceOf(wallet).call()
-    quote = tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6), token_b="weth")
+    quote = tools.uniswap.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=round(lp / 4, 6), token_b=WRAPPED)
     check("naming WETH takes WETH back instead", "native asset" not in quote["action"], quote["action"])
     check("...and it lands, WETH coming back", confirm(quote)["status"] == 1
           and weth.functions.balanceOf(wallet).call() > weth_held)
-    check("half the LP tokens are left", tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker) < lp)
+    check("half the LP tokens are left", tools.uniswap.get_liquidity_token_balance.func(next_turn(), token_a=ticker) < lp)
     shows_pool("...and the dashboard shows what is left")
 
     held = pool.functions.balanceOf(wallet).call()
@@ -1312,52 +1442,260 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     check("the owner can withdraw LP tokens like any other token", pool.functions.balanceOf(wallet).call() == 0
           and pool.functions.balanceOf(acct.address).call() >= held)
     check("...and with none left, the pool is gone from the dashboard", lp_rows() == [])
-    check("a new deposit lands", confirm(tools.add_liquidity.func(next_turn(), token_a=ticker, amount_a=500))["status"] == 1)
+    check("a new deposit lands", confirm(tools.uniswap.add_liquidity.func(next_turn(), token_a=ticker, amount_a=500))["status"] == 1)
     shows_pool("...and brings the pool back to the dashboard")
 
     # "All of it", as the assistant asks for it: the balance it reads, in whole units. That passes
     # through a float, which the package scales back up to a few wei more than the wallet holds
     # (refused) or a few wei less (accepted, leaving them behind) -- about half the time each. The
     # largest amount it accepts is what lands, and the few wei it leaves must not keep the row.
-    everything = tools.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
+    everything = tools.uniswap.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
     held = pool.functions.balanceOf(wallet).call()
     while int(Decimal(str(everything)) * 10**18) > held:
         everything = math.nextafter(everything, 0)
     check("the assistant taking it all out lands",
-          confirm(tools.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=everything))["status"] == 1)
+          confirm(tools.uniswap.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=everything))["status"] == 1)
     check("...leaving at most a few wei", pool.functions.balanceOf(wallet).call() < 1000,
           str(pool.functions.balanceOf(wallet).call()))
     check("...which the dashboard counts as none: the pool is gone", lp_rows() == [])
 
-    # The native asset has to cover what is sent and the fees. Both refusals happen before anything
-    # is signed, so neither costs the wallet a thing. The limit is raised for them first: nearly all
-    # the ETH is worth more than the $1,234 set in [3], and that refusal would come first.
-    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
-    limit = read_spending_config(sh)["dailyLimitUsd"] // 10**18
-    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 100_000})
-    api_bundler = bundler.resolve_bundler(w3).address
-    sent_before = w3.eth.get_transaction_count(api_bundler)
-    balance = w3.eth.get_balance(wallet)
-    ticker_native = get_native_asset_ticker(CHAIN_ID)
+
+def _swaps_and_positions(c: TestClient, headers: dict, wallet: str, next_turn, confirm):
+    """
+    Uniswap V3 (Ethereum, Sepolia, Arbitrum, Base), against the chain's own ETH/USDC pools: the one
+    swap tool by each of its six router functions, sent and read back from the chain, then a
+    position's whole life -- the range options, a position opened on one of them, listed by the
+    assistant and on the dashboard, its fees, half of it taken out, then the rest, which burns it --
+    and the History rows that leaves.
+
+    Every USDC amount is set from what 0.001 ETH buys on the pool, never in dollars: a testnet
+    pool's price can be anything, and amounts of a milli-ETH or two cost little on any fork.
+    """
+    print("\n[7c] Uniswap V3: every swap route on ETH/USDC, a position from its range options to its burn, and the "
+          "balance refusals")
+    sh = w3.eth.contract(address=wallet, abi=db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    manager = w3.eth.contract(address=get_v3_network(CHAIN_ID)["position_manager"], abi=position_manager_abi)
+    usdc = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc")), abi=ERC20_ABI)
+    weth = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED)), abi=ERC20_ABI)
+    usdc_unit = 10 ** usdc.functions.decimals().call()
+
+    def raw(amount: float) -> int:
+        """Whole USDC in base units, converted exactly as the toolkit converts them."""
+        return int(Decimal(str(amount)) * usdc_unit)
+
+    def held() -> tuple[int, int]:
+        return usdc.functions.balanceOf(wallet).call(), weth.functions.balanceOf(wallet).call()
+
+    def state() -> dict:
+        r = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers)
+        assert r.status_code == 200, f"wallet read failed: {r.status_code} {r.text[:250]}"
+        return r.json()
+
+    per_milli_eth = tools.uniswap.get_quote_out.func(
+        next_turn(), token_in="eth", token_out="usdc", amount_in=0.001
+    )["amount_out"]
+    small = round(per_milli_eth / 2, 6)  # about half a milli-ETH's worth
+    check("the chain's ETH/USDC pool prices a milli-ETH", small > 0, str(per_milli_eth))
+    if small <= 0:
+        return
+    deal_erc20(usdc.address, wallet, max(1_000 * usdc_unit, raw(round(per_milli_eth * 20, 6))))
+    check("wrapping 0.002 ETH lands", confirm(tools.transfers.wrap_eth.func(next_turn(), amount_eth=0.002))["status"] == 1)
+
+    # Every route, by the router function it reached: exact in says "for at least", exact out "Swap
+    # up to ... for exactly", and the native side is "the native asset". The description ends by
+    # naming the pool or pools it goes through, "(Uniswap V3, 0.05% pool)"; that part is dropped first.
+    def route(action: str) -> tuple[str, str, str]:
+        action = action.split(" (Uniswap V3")[0]
+        exact = "in" if "for at least" in action else "out" if action.startswith("Swap up to") else "?"
+        spends = "native" if "of the native asset for" in action else "token"
+        gets = "native" if action.endswith("of the native asset") else "token"
+        return exact, spends, gets
+
+    def moved_as(delta: int, rule) -> bool:
+        """rule: the exact change, or "+" (rose), "-" (fell) or "=" (unchanged)."""
+        return delta == rule if isinstance(rule, int) else {"+": delta > 0, "-": delta < 0, "=": delta == 0}[rule]
+
+    # (label, swap arguments, the route it must take, how USDC moves, how WETH moves). Each is quoted
+    # and sent in turn, so each is priced where the one before left the pool. The native side never
+    # touches the wallet's WETH: the router wraps what comes in and unwraps what goes out.
+    routes = (
+        ("ETH for USDC, exact in", dict(token_in="eth", token_out="usdc", amount_in=0.001),
+         ("in", "native", "token"), "+", "="),
+        ("ETH for USDC, exact out", dict(token_in="eth", token_out="usdc", amount_out=small),
+         ("out", "native", "token"), raw(small), "="),
+        ("USDC for ETH, exact in", dict(token_in="usdc", token_out="eth", amount_in=small),
+         ("in", "token", "native"), -raw(small), "="),
+        ("USDC for ETH, exact out", dict(token_in="usdc", token_out="eth", amount_out=0.0005),
+         ("out", "token", "native"), "-", "="),
+        ("USDC for WETH, exact in", dict(token_in="usdc", token_out=WRAPPED, amount_in=small),
+         ("in", "token", "token"), -raw(small), "+"),
+        ("WETH for USDC, exact out", dict(token_in=WRAPPED, token_out="usdc", amount_out=small),
+         ("out", "token", "token"), raw(small), "-"),
+    )
+    for label, args, expected, usdc_rule, weth_rule in routes:
+        quoted = tools.uniswap.swap.func(next_turn(), **args)
+        check(f"swap, {label}: quoted through its own router function, on Uniswap V3",
+              route(quoted["action"]) == expected and "(Uniswap V3" in quoted["action"], quoted["action"])
+        if label == "USDC for ETH, exact out":
+            check("a quote's action is the swap itself, without the approvals around it",
+                  quoted["action"].startswith("Swap up to") and "Approve" not in quoted["action"], quoted["action"])
+        if label == "ETH for USDC, exact out":
+            check("an exact-out quote says what it should cost and the most it will pay",
+                  all(part in quoted.get("details", "") for part in ("spent: about", "at most")),
+                  str(quoted.get("details")))
+        usdc_before, weth_before = held()
+        check(f"swap, {label}: it lands", confirm(quoted)["status"] == 1)
+        usdc_after, weth_after = held()
+        check(f"swap, {label}: USDC moved as it should ({usdc_rule}), and WETH ({weth_rule})",
+              moved_as(usdc_after - usdc_before, usdc_rule) and moved_as(weth_after - weth_before, weth_rule),
+              f"USDC {usdc_after - usdc_before:+}, WETH {weth_after - weth_before:+}")
+
+    # The other exchange's liquidity tools are hidden from the model here; called anyway, they refuse.
     try:
-        tools.send_eth.func(next_turn(), recipient="payee", amount_eth=balance / 10**18 + 1)
-        check("sending more than the wallet holds is refused", False, "it was quoted")
+        tools.uniswap.add_liquidity.func(next_turn(), token_a="usdc", amount_a=1)
+        check("PancakeSwap V2's add_liquidity is refused on a Uniswap V3 chain", False, "it was quoted")
     except ToolException as e:
-        check("sending more than the wallet holds is refused, with what it holds",
-              f"Not enough {ticker_native}: the wallet holds" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
-    fee = load_registry(user_id).functions.getFee().call()
+        check("PancakeSwap V2's add_liquidity is refused on a Uniswap V3 chain, pointing at the position tools",
+              "suggest_price_ranges" in str(e), str(e)[:200])
+
+    # A position, from the range options to its burn.
+    listed = tools.positions.get_positions.func(next_turn())
+    check("the assistant finds no positions before the first", listed["positions"] == [], str(listed)[:200])
+    nfts_before = manager.functions.balanceOf(wallet).call()
+
+    offered = tools.positions.suggest_price_ranges.func(next_turn(), token_a="usdc")
+    check("the range options for USDC and the native asset are ETH/USDC's, priced in USDC per ETH",
+          offered["pair"] == "ETH/USDC" and offered["current_price"].endswith("USDC per ETH"), str(offered)[:300])
+    check("...narrow, medium and wide bands of 5%, 15% and 50% -- not a stablecoin pair -- and the full range",
+          [(o["range"], o["width"]) for o in offered["options"]]
+          == [("narrow", "±5% around today's price"), ("medium", "±15% around today's price"),
+              ("wide", "±50% around today's price"), ("full", "every price")],
+          str([(o["range"], o["width"]) for o in offered["options"]]))
+
+    # The wide band: today's price stays inside it whatever the fork does meanwhile, so the deposit
+    # takes both tokens, about half and half by value.
+    quoted = tools.positions.open_position.func(
+        next_turn(), token_a="usdc", amount_a=round(per_milli_eth * 2, 6), range="wide"
+    )
+    check("opening a position on the wide option quotes a mint, nothing sent",
+          quoted["action"].startswith("Open a Uniswap V3 position") and "NOT SENT" in quoted["status"],
+          f'{quoted.get("action")} / {quoted.get("status")}')
+    check("...on the range that was shown, with today's price inside it",
+          "(the wide option)" in quoted.get("details", "") and "inside the range" in quoted.get("details", ""),
+          str(quoted.get("details")))
+    check("...counting the ETH deposited toward the limit", quoted["charged_usd"] > 0, str(quoted.get("charged_usd")))
+    usdc_before, _ = held()
+    receipt = confirm(quoted)
+    sent = {"open": (receipt, quoted["action"], "out")}
+    check("...and it lands", receipt["status"] == 1)
+    check("...the USDC going in", held()[0] < usdc_before)
+    charged = spend_metered(sh, receipt)
+    check("...charged to the limit: the position that comes back has no price", charged and charged[0] > 0, str(charged))
+    check("the wallet holds one more position NFT", manager.functions.balanceOf(wallet).call() == nfts_before + 1)
+
+    listed = tools.positions.get_positions.func(next_turn())["positions"]
+    check("the assistant lists it: ETH/USDC, in range, with its range in USDC per ETH",
+          len(listed) == 1 and listed[0]["pair"] == "ETH/USDC" and listed[0]["in_range"] is True
+          and listed[0]["range"].endswith("USDC per ETH"), str(listed)[:400])
+    if len(listed) != 1:
+        return
+    position_id = listed[0]["position_id"]
+    check("...under the id of the NFT the wallet now holds",
+          manager.functions.tokenOfOwnerByIndex(wallet, nfts_before).call() == position_id
+          and manager.functions.ownerOf(position_id).call() == wallet, str(position_id))
+    liquidity = manager.functions.positions(position_id).call()[7]
+    check("...holding liquidity", liquidity > 0, str(liquidity))
+
+    wallet_state = state()
+    rows = [p for p in wallet_state["positions"] if p["id"] == position_id]
+    check("the dashboard shows it: ETH/USDC, in range, ETH side first, holding both",
+          len(rows) == 1 and rows[0]["pair"] == "eth/usdc" and rows[0]["in_range"] is True
+          and rows[0]["full_range"] is False and [a["ticker"] for a in rows[0]["amounts"]] == ["eth", "usdc"]
+          and all(int(a["raw"]) > 0 for a in rows[0]["amounts"]), str(rows)[:400])
+    check("...as a position, not an LP token", not [b for b in wallet_state["balances"] if b.get("lp")])
+
+    # Fees: a position earns only from swaps that cross it after it opened, and on a fork nothing
+    # else trades, so it has usually earned nothing -- and collecting nothing is refused.
+    fees = [int(f["raw"]) for f in rows[0]["fees"]] if rows else [0, 0]
+    if not any(fees):
+        try:
+            tools.positions.collect_fees.func(next_turn(), position_id=position_id)
+            check("collecting from a position that has earned nothing is refused", False, "it was quoted")
+        except ToolException as e:
+            check("collecting from a position that has earned nothing is refused",
+                  "no fees to collect" in str(e), str(e)[:200])
+    else:
+        quoted = tools.positions.collect_fees.func(next_turn(), position_id=position_id)
+        receipt = confirm(quoted)
+        check("collecting the fees it has earned lands", receipt["status"] == 1)
+        check("...leaving the position as it was", manager.functions.positions(position_id).call()[7] == liquidity)
+        check("...charging nothing to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
+
+    usdc_before, weth_before = held()
+    quoted = tools.positions.withdraw_from_position.func(next_turn(), position_id=position_id, percent=50)
+    check("taking half out quotes it, with its fees, without closing it",
+          f"Takes 50% of position #{position_id}" in quoted.get("details", "")
+          and "burned" not in quoted.get("details", ""), str(quoted.get("details")))
+    receipt = confirm(quoted)
+    sent["half"] = (receipt, quoted["action"], "in")
+    check("...and it lands", receipt["status"] == 1)
+    check("...halving the position's liquidity", manager.functions.positions(position_id).call()[7]
+          == liquidity - liquidity // 2, str(manager.functions.positions(position_id).call()[7]))
+    usdc_after, weth_after = held()
+    check("...the USDC coming back, and the ETH side as ETH rather than WETH",
+          usdc_after > usdc_before and weth_after == weth_before, f"{usdc_after - usdc_before} / {weth_after - weth_before}")
+    check("...charging nothing to the limit: value only came back", spend_metered(sh, receipt) == [],
+          str(spend_metered(sh, receipt)))
+    shown = [p for p in state()["positions"] if p["id"] == position_id]
+    check("the dashboard still shows it, holding less of each",
+          len(shown) == 1 and len(rows) == 1 and all(
+              int(now["raw"]) < int(then["raw"]) for now, then in zip(shown[0]["amounts"], rows[0]["amounts"])
+          ), str(shown)[:300])
+
+    quoted = tools.positions.withdraw_from_position.func(next_turn(), position_id=position_id, percent=100)
+    check("taking the rest out says it closes the position", "its NFT is burned" in quoted.get("details", ""),
+          str(quoted.get("details")))
+    usdc_before, _ = held()
+    receipt = confirm(quoted)
+    sent["rest"] = (receipt, quoted["action"], "in")
+    check("...and it lands", receipt["status"] == 1)
     try:
-        tools.send_eth.func(next_turn(), recipient="payee", amount_eth=(balance - fee // 2) / 10**18)
-        check("sending nearly all of it is refused", False, "it was quoted")
+        manager.functions.ownerOf(position_id).call()
+        burned = False
+    except ContractLogicError:
+        burned = True
+    check("...burning the NFT", burned and manager.functions.balanceOf(wallet).call() == nfts_before)
+    check("...the rest of the USDC coming back", held()[0] > usdc_before)
+    check("...charging nothing to the limit", spend_metered(sh, receipt) == [], str(spend_metered(sh, receipt)))
+    check("the assistant finds no positions again", tools.positions.get_positions.func(next_turn())["positions"] == [])
+    check("...nor does the dashboard", state()["positions"] == [])
+    try:
+        tools.positions.withdraw_from_position.func(next_turn(), position_id=position_id, percent=100)
+        check("the burned position is refused", False, "it was quoted")
     except ToolException as e:
-        check("sending nearly all of it is refused: too little left for the fees",
-              "leaves too little for the fees" in str(e), str(e)[:200])
-    pre = tools.preflight_check.func(next_turn(), token="eth", amount=balance / 10**18 + 1)
-    check("preflight says the wallet doesn't hold it", pre["enough_balance"] is False
-          and "the wallet holds" in pre.get("balance_short", ""), str(pre)[:200])
-    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
-    owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": limit})
-    check("the limit is back as it was", read_spending_config(sh)["dailyLimitUsd"] == limit * 10**18)
+        check("the burned position is refused: it is no longer one of the wallet's",
+              "this wallet's own positions" in str(e), str(e)[:200])
+    for token, ticker in ((usdc, "USDC"), (weth, "WETH")):
+        for spender in get_default_spenders(CHAIN_ID):
+            check(f"no {ticker} allowance is left on {spender}", token.functions.allowance(wallet, spender).call() == 0)
+
+    # The History tab. Each read of its first page works out what a few transactions moved
+    # (tx_history.read_movements), newest first, so these settle within a read or two.
+    hashes = {name: Web3.to_hex(receipt["transactionHash"]).lower() for name, (receipt, _, _) in sent.items()}
+    for _ in range(5):
+        r = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=50", headers=headers)
+        assert r.status_code == 200, f"history read failed: {r.status_code} {r.text[:250]}"
+        by_hash = {t["tx_hash"]: t for t in r.json()["transactions"]}
+        if all(by_hash.get(h, {}).get("direction") is not None for h in hashes.values()):
+            break
+    described = {"open": "the deposit that opened it", "half": "taking half out", "rest": "taking the rest out"}
+    for name, (_, action, direction) in sent.items():
+        row = by_hash.get(hashes[name])
+        check(f"History lists {described[name]} as the assistant's, confirmed, described by its quote",
+              row is not None and row["source"] == "assistant" and row["status"] == "confirmed"
+              and row["action"] == action, str(row))
+        check(f"...as {'outgoing' if direction == 'out' else 'incoming'}",
+              row is not None and row["direction"] == direction, str(row and row["direction"]))
 
 
 def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
@@ -1378,11 +1716,11 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
     Last in the run on purpose: it swaps a live feed's code, and restores it only at the end.
     """
     print("\n[8] a sequencer outage: named for the agent, no lock-out for the owner")
-    sh = w3.eth.contract(address=wallet, abi=api.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    sh = w3.eth.contract(address=wallet, abi=db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
     registry = w3.eth.contract(address=sh.functions.REGISTRY().call(),
-                               abi=api.get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"])
+                               abi=db.get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"])
     oracle = w3.eth.contract(address=registry.functions.priceOracle().call(),
-                             abi=api.get_json("./out/SHOracle.sol/SHOracle.json")["abi"])
+                             abi=db.get_json("./out/SHOracle.sol/SHOracle.json")["abi"])
     feed = oracle.functions.SEQUENCER_UPTIME_FEED().call()
     if int(feed, 16) == 0:
         print("  (skipped: this chain's oracle has no sequencer uptime feed)")
@@ -1417,8 +1755,8 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
 
     sink = Account.create().address
     withdraw = {"chain_id": CHAIN_ID, "token": "eth", "amount": "0.01", "to": sink}
-    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, "weth"))
-    mock_runtime = api.get_json("./out/MockV3Aggregator.sol/MockV3Aggregator.json")["deployedBytecode"]["object"]
+    weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED))
+    mock_runtime = db.get_json("./out/MockV3Aggregator.sol/MockV3Aggregator.json")["deployedBytecode"]["object"]
     w3.provider.make_request("anvil_setCode", [feed, mock_runtime])
     try:
         now = w3.eth.get_block("latest")["timestamp"]
@@ -1473,8 +1811,8 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
 
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
     deal_erc20(usdc, wallet, 10 * 10 ** w3.eth.contract(address=usdc, abi=ERC20_ABI).functions.decimals().call())
-    quoted = tools.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
-    reply = tools.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    quoted = tools.transfers.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
+    reply = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
     sent_hash = reply.split("`")[1]
     check("the reply reports a 0x-prefixed hash", sent_hash.startswith("0x") and len(sent_hash) == 66, sent_hash)
     sent_receipt = w3.eth.get_transaction_receipt(sent_hash)
@@ -1504,7 +1842,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
               sent["mined_at"] == w3.eth.get_block(sent_receipt["blockNumber"])["timestamp"], str(sent))
     added = by_hash.get(deposit_hash.lower())
     check("the deposit is listed, confirmed, described from the transaction",
-          added is not None and added["status"] == "confirmed" and added["action"] == "Add 0.05 ETH to the wallet"
+          added is not None and added["status"] == "confirmed" and added["action"] == f"Add 0.05 {get_native_asset_ticker(CHAIN_ID).upper()} to the wallet"
           and added["source"] == "owner", str(added))
 
     for expected in ("Set the spending limit to $1,234", "Set the spending period to 1 hour", "Pause the wallet",
@@ -1512,7 +1850,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
                      "Stop counting USDC toward the limit"):
         check(f"the owner action “{expected}” is listed", expected in actions, str(actions))
     check("the withdrawal is listed with its amount",
-          any(a.startswith("Withdraw 0.1 ETH to 0x") for a in actions), str(actions))
+          any(a.startswith(f"Withdraw 0.1 {get_native_asset_ticker(CHAIN_ID).upper()} to 0x") for a in actions), str(actions))
     deploys = [t for t in listed if t["action"] == "Create your Mitfah smart wallet"]
     check("the deploy is listed as confirmed, and the out-of-gas one as failed",
           sorted(t["status"] for t in deploys) == ["confirmed", "failed"], str(deploys))

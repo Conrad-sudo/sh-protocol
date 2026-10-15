@@ -16,7 +16,7 @@ Before running any setup, make sure you have completed the one-time steps:
 
 4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). The bots' usernames (`MITFAH_<STEM>_USERNAME`) are needed only to mint Telegram deep links and to list the bots in the web app, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a sign-in message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from replaying a victim's signature to sign in as them. Signing in with the wallet (SIWE) is the only way in: there is no email, password or Google sign-in.
    >
-   > **The LLM provider is optional too.** The agent defaults to Anthropic's Claude (`ANTHROPIC_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
+   > **The LLM provider is optional too.** The agent defaults to DeepSeek (`DEEPSEEK_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
 
 ---
 
@@ -35,9 +35,9 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
 
    > **Watch for stale addresses.** Every re-run of `forge script script/DeploySHProtocol.s.sol --broadcast` on the same chain overwrites that chain's `run-latest.json` with a fresh set of addresses (new nonces → different addresses for every contract, including `SHFactory`). If you deploy again without re-running `make db`, the DB keeps pointing at the old (now-wrong) addresses — this can fail in a confusing way, since the old address might still have *some* contract's bytecode at it (e.g. a previous deployment's `SpendingLimitModule`), producing an empty-revert rather than an obvious "no code" error.
 
-5. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens, sessionKey, trustedSpenders)` to create a per-user `SessionHandler` in **one transaction**: `SpendingLimitModule` is installed as a spending-cap hook seeded with a $50k/24h cap over the network's default watched tokens, the wallet's single session key is authorized, and the chain's V2 router is granted as a trusted spender. It is funded with ETH by the same call (`deployWallet` is `payable`).
+5. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens, sessionKey, sessionKeyValidUntil, trustedSpenders)` to create a per-user `SessionHandler` in **one transaction**: `SpendingLimitModule` is installed as a spending-cap hook seeded with a $50k/24h cap over the network's default watched tokens, the wallet's single session key is authorized, and the chain's exchange contracts are granted as trusted spenders (`constants.get_default_spenders`: Uniswap V3's SwapRouter02 and position manager on Ethereum, Sepolia, Arbitrum and Base, PancakeSwap's V2 router on BSC, none on bare Anvil). It is funded with ETH by the same call (`deployWallet` is `payable`).
 
-   > **One transaction, not three.** `addSession` and `addTrustedSpender` used to be separate owner-signed follow-ups. They are now seeded inside `initialize`, so `deploy_wallet.py`'s `add_default_session()` / `trust_router()` are recovery helpers only and are no longer called by `__main__`. Because the wallet is deployed with CREATE2, its address is known before the transaction is sent, which is what lets the session key (whose Vault entry is keyed by wallet address) be minted up front and passed in.
+   > **One transaction, not three.** `addSession` and `addTrustedSpender` used to be separate owner-signed follow-ups. They are now seeded inside `initialize`, so `deploy_wallet.py`'s `add_default_session()` / `trust_default_spenders()` are recovery helpers only and are no longer called by `__main__`. Because the wallet is deployed with CREATE2, its address is known before the transaction is sent, which is what lets the session key (whose Vault entry is keyed by wallet address) be minted up front and passed in.
 
    > **Re-running gives you a NEW wallet, not the same one.** The CREATE2 salt is derived from `(deployer, factory.deployCount[deployer])` and the factory consumes that counter on every deploy, so each `make deploy-wallet` lands on a fresh address with no salt bookkeeping on the Python side. It does **not** migrate anything: `session_handlers` is overwritten for that `chat_id`, and the previous wallet keeps its prefund, tokens and LP positions with nothing pointing at it. The script warns when it is about to do this — withdraw first if the old wallet holds anything you want.
 
@@ -249,7 +249,7 @@ make bot
 make agent
 ```
 
-> Uniswap V2 is officially deployed on Sepolia, so swap/liquidity tools work here. The wallet is seeded with a $50k/24h USD cap over the default Sepolia watched tokens (WETH, USDC, LINK) and one session key that can drive any of them — see [docs/app.md](app.md#deploy_walletpy).
+> Uniswap V3 is officially deployed on Sepolia, so the swap and liquidity-position tools work here. The wallet is seeded with a $50k/24h USD cap over the default Sepolia watched tokens (WETH, USDC, LINK) and one session key that can drive any of them — see [docs/app.md](app.md#deploy_walletpy).
 
 > **Shortcut — full setup in two commands** (once Vault, step 3, is configured):
 >
@@ -366,7 +366,7 @@ make deploy-wallet ARGS="sepolia"
 
 On Sepolia, as everywhere, the app is its own bundler: `bundler.py` submits UserOps inside `handleOps` from `API_BUNDLER` (the API) or `TELEGRAM_BUNDLER` (the bot), which the EntryPoint repays out of each wallet's prefund. Nothing tops those keys up on a live chain, so keep them funded. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
 
-> Uniswap V2 is officially deployed on Sepolia, so swap, liquidity, and quote tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and one session key that can drive any external call within that cap.
+> Uniswap V3 is officially deployed on Sepolia, so the swap, quote and liquidity-position tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and one session key that can drive any external call within that cap.
 
 **Step 5 — Start:**
 

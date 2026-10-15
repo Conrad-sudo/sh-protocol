@@ -1,7 +1,6 @@
 # SessionHandler Protocol 🔑🤖⛓️
 
 [![CI](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml)
-[![Tests](https://img.shields.io/badge/tests-269-brightgreen)](test/)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.33-363636?logo=solidity)](https://soliditylang.org)
 [![Built with Foundry](https://img.shields.io/badge/built%20with-Foundry-FFDB1C)](https://getfoundry.sh)
@@ -39,10 +38,10 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 │  SERVICE LAYER      FastAPI  ·  accounts, wallet sign-in (SIWE)             │
 │                     wallet-signed contacts  ·  owner actions in-browser     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  AGENT RUNTIME      LangChain agent (Claude by default, any chat model)     │
+│  AGENT RUNTIME      LangChain agent (DeepSeek by default, any chat model)   │
 │                     the account is injected — the model can't choose it     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  INTEGRATIONS       ERC-20 · Uniswap V2 / PancakeSwap V2 · ERC-8004         │
+│  INTEGRATIONS       ERC-20 · Uniswap V3 / PancakeSwap V2 · ERC-8004         │
 │                     Chainlink pricing · UserOp builder and bundler          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted        │
@@ -63,6 +62,8 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 Every transaction the account executes is wrapped by **`SpendingLimitModule`**, an ERC-7579 hook. It measures how much US-dollar value left the wallet (native coin plus the watched tokens, before vs. after) and refuses anything that would go past the owner's limit for the current window. Because it measures the result rather than reading calldata, it works the same for a transfer, a swap on any venue, or a liquidity move: a fair swap costs almost nothing against the limit, a bad-rate or draining swap costs what was actually lost. It also forbids standing token approvals — an approval must be used up within the same transaction, unless it goes to a spender the owner trusts (like the DEX router).
 
+The account also caps what the session key can spend on **gas**, which the hook cannot see: a ceiling per operation and a budget per day across all of them, both set per chain at deploy and adjustable by the owner.
+
 This hook is what turns "an AI holds a key to my money" into "an AI can spend at most $X per day from my money". Everything above it in the stack can fail — a confused model, a bad prompt, a compromised server — and the most that can leave the wallet is still bounded here. It is a standalone module, so any ERC-7579 account can install it.
 
 Owners also keep full control of the wallet: pause the wallet, switch the agent off, change the limit and window, choose which tokens count, trust spenders, cap network fees, and withdraw.
@@ -74,7 +75,7 @@ Owners also keep full control of the wallet: pause the wallet, switch the agent 
 | **`SHTreasury`** | The admin root. Owns the registry, oracle and factory, and collects protocol fees. |
 | **`SHRegistry`** | Central settings every wallet reads live: EntryPoint, ERC-8004 registries, oracle, fee, treasury, agent id, and the module new wallets install. A change here reaches every wallet with no redeploy. Swapping the oracle takes a **2-day timelock**. |
 | **`SHOracle`** | Turns token amounts into US dollars with Chainlink feeds. Refuses stale prices, and on L2s refuses to price while the sequencer is down. |
-| **`SHFactory`** | Deploys wallets with CREATE2, so the address is known before the transaction. One signature creates the wallet, installs the hook with its limit, authorizes the session key, trusts the router and funds it. |
+| **`SHFactory`** | Deploys wallets with CREATE2, so the address is known before the transaction. One signature creates the wallet, installs the hook with its limit, authorizes the session key, trusts the chain's exchange contracts and funds it. |
 
 ```
 SHTreasury  (operator — admin root, fee sink)
@@ -108,18 +109,18 @@ SHTreasury  (operator — admin root, fee sink)
 
 ### What the agent can do
 
-The agent has 60+ tools across four areas:
+The agent has 43 tools across four areas (each network shows it only its own exchange's liquidity tools):
 
 - **Payments** — native and ERC-20 transfers to contacts the owner has saved on the web, each one signed by the owner's wallet (the contact list is the destination allowlist; the agent can read it, never edit it)
-- **DeFi trading and liquidity** — quotes, all six V2 swap types, add/remove liquidity, wrapping, with sufficiency and preflight checks before any write
+- **DeFi trading and liquidity** — quotes, one swap tool for every swap shape, Uniswap V3 liquidity positions (price ranges to pick from, deposits, fee collection, withdrawals) and PancakeSwap V2 liquidity on BNB Chain, wrapping, with the wallet's checks run before any write
 - **Budget awareness** — remaining limit, whether a planned spend fits, live USD prices
 - **Identity and reputation (ERC-8004)** — look up agents, read and give feedback, resolve registration files; the protocol's own agent is registered on-chain and user wallets act as its reviewers
 
-The LLM is Anthropic's Claude by default; any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) can be swapped in with a small edit to `app/smart_wallet_agent.py`.
+The LLM is DeepSeek (`deepseek-flash`) by default; any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) can be swapped in with a small edit to `app/smart_wallet_agent.py`.
 
 ### Security model in one paragraph
 
-The owner key never leaves the user's browser wallet — deploying and every owner action are signed there, so the service is non-custodial. Session keys live encrypted in Vault. The agent is handed the user's account by the runtime and cannot pick another. And every agent transaction, no matter which layer produced it, passes through the spending-limit hook on-chain. Full analysis: [THREAT_MODEL.md](THREAT_MODEL.md).
+The owner key never leaves the user's browser wallet — deploying and every owner action are signed there, so the service is non-custodial. Session keys live encrypted in Vault. The agent is handed the user's account by the runtime and cannot pick another. And every agent transaction, no matter which layer produced it, passes through the spending-limit hook on-chain, with its gas capped per operation and per day. API keys are masked in every error, log line and tool result before they leave the server. Full analysis: [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ---
 
@@ -127,11 +128,11 @@ The owner key never leaves the user's browser wallet — deploying and every own
 
 | Network | Chain ID | DEX | Status |
 |---|---|---|---|
-| Ethereum mainnet | 1 | Uniswap V2 | fork-tested |
-| Arbitrum One | 42161 | Uniswap V2 | fork-tested, with L2 sequencer check |
-| Base | 8453 | Uniswap V2 | fork-tested, with L2 sequencer check |
+| Ethereum mainnet | 1 | Uniswap V3 | fork-tested |
+| Arbitrum One | 42161 | Uniswap V3 | fork-tested, with L2 sequencer check |
+| Base | 8453 | Uniswap V3 | fork-tested, with L2 sequencer check |
 | BNB Chain | 56 | PancakeSwap V2 | fork-tested, live deploy path |
-| Sepolia | 11155111 | Uniswap V2 | live testnet + fork |
+| Sepolia | 11155111 | Uniswap V3 | live testnet + fork |
 | Anvil | 31337 | mocks | local |
 
 Celo has partial scaffolding in the Python layer but no contract deployment path yet. New chains are added with the `add-network` skill in `.claude/skills/`.
@@ -144,7 +145,7 @@ Celo has partial scaffolding in the Python layer but no contract deployment path
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) — for HashiCorp Vault
 - Python 3.12+
 - Node 22.22+ — only for the web app in `web/`
-- An LLM API key — `ANTHROPIC_API_KEY` by default, or any other LangChain chat model
+- An LLM API key — `DEEPSEEK_API_KEY` by default, or any other LangChain chat model
 - An Alchemy API key — for live Sepolia, the mainnet / BSC / Arbitrum / Base forks, and the History tab on Base
 - *(Optional)* Telegram bots from [@BotFather](https://t.me/BotFather), one per network — only for `make bot`
 
@@ -181,12 +182,18 @@ To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run d
 ## Tests
 
 ```bash
-forge test                  # unit, invariant and fork suites
-make py-test                # identity, auth and custom-token tests
+forge test --no-match-path "test/fork/*"   # unit, guard, admin and invariant suites
+make py-test                # the fourteen offline Python suites (no chain, no Vault, no model)
 make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork, ARGS=base-fork, ...)
 make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
 ```
+
+CI (`.github/workflows/test.yml`) runs everything that needs no live chain on every push: the Foundry suites with contract sizes, Slither (failing on any high-impact finding), the Python suites with a syntax and undefined-name check, the web app's type check, lint, unit tests, production audit and build, and the mocked end-to-end suite. The fork suites run nightly when their RPC secrets (`MAINNET_RPC_URL`, `SEPOLIA_RPC_URL`, `BSC_RPC_URL`, `ARB_RPC_URL`, `BASE_RPC_URL`) are set. Dependabot opens weekly update pull requests.
+
+## Deploying
+
+`deploy/Caddyfile` runs the whole service on one server: HTTPS, security headers (a Content-Security-Policy among them, kept in step with the web app by `web/src/securityHeaders.test.ts`), the built web app, and `/api` passed to the API started with `make api-prod`. Its header comment lists what to set first. Before real money goes in, the protocol's admin key must be separate from the API's (THREAT_MODEL.md §4.4) and Vault must run in production mode ([docs/vault-security.md](docs/vault-security.md)).
 
 ---
 
