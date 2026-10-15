@@ -275,7 +275,8 @@ def _begin(user_id: int, chain_id: int | None, strict: bool = False) -> Callable
             shown = _shown(request, rows)
             return lambda: shown
     except Exception as e:  # noqa: BLE001 -- shown as no positions unless strict
-        return lambda: _failed(user_id, chain_id, e, strict)
+        # Bound now: Python unbinds `e` when the except block ends, before the lambda runs.
+        return lambda error=e: _failed(user_id, chain_id, error, strict)
 
     def finish() -> list[dict]:
         try:

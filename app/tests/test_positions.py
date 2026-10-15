@@ -283,6 +283,20 @@ def test_failures_show_as_nothing():
         check("... with a message that carries neither the key nor the URL",
               raised is not None and "SECRETKEY" not in str(raised) and "https://" not in str(raised), str(raised))
         tool.error = None
+
+        # The database half failing (before any chain read) takes the same path.
+        real_request = positions._request
+        positions._request = lambda *_: (_ for _ in ()).throw(RuntimeError("database locked"))
+        try:
+            check("a failed database half shows nothing too", positions.read_positions(user, SEPOLIA) == [])
+            try:
+                positions.read_positions(user, SEPOLIA, strict=True)
+                raised = None
+            except positions.PositionsReadError as e:
+                raised = e
+            check("... and raises when strict", raised is not None, repr(raised))
+        finally:
+            positions._request = real_request
     finally:
         positions.logger.removeHandler(handler)
 
