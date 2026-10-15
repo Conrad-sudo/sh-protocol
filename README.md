@@ -189,7 +189,7 @@ make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
 ```
 
-CI (`.github/workflows/test.yml`) runs everything that needs no live chain on every push: the Foundry suites with contract sizes, Slither (failing on any high-impact finding), the Python suites with a syntax and undefined-name check, the web app's type check, lint, unit tests, production audit and build, and the mocked end-to-end suite. The fork suites run nightly when their RPC secrets (`MAINNET_RPC_URL`, `SEPOLIA_RPC_URL`, `BSC_RPC_URL`, `ARB_RPC_URL`, `BASE_RPC_URL`) are set. Dependabot opens weekly update pull requests.
+CI (`.github/workflows/test.yml`) checks the smart contracts only, on every push: the Foundry suites with contract sizes and Slither (failing on any high-impact finding). The fork suites run nightly when their RPC secrets (`MAINNET_RPC_URL`, `SEPOLIA_RPC_URL`, `BSC_RPC_URL`, `ARB_RPC_URL`, `BASE_RPC_URL`) are set. The Python and web suites run locally (see the Makefile and `web/package.json`).
 
 ## Deploying
 
