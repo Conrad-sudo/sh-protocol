@@ -27,6 +27,8 @@ interface ServerOptions {
   deleteStatus?: 404 | 500
   /** The address the account signs in as; the mock wallet's by default. */
   ownerAddr?: string
+  /** ENS names the lookup knows, by lowercase name. down.eth fails; a name starting "bad" is invalid. */
+  ens?: Record<string, string>
 }
 
 /** What the mock wallet was asked to sign, as eth_signTypedData_v4 received it. */
@@ -49,8 +51,10 @@ function stubServer({
   saveError,
   deleteStatus,
   ownerAddr = WALLET,
+  ens = {},
 }: ServerOptions = {}) {
   let saved = [...contacts]
+  const lookups: string[] = []
   let lists = 0
   let nonces = 0
   const posted: unknown[] = []
@@ -90,6 +94,16 @@ function stubServer({
           }),
         )
       }
+      if (url.startsWith('/api/contacts/resolve?') && method === 'GET') {
+        const name = new URLSearchParams(url.slice(url.indexOf('?'))).get('name')!.toLowerCase()
+        lookups.push(name)
+        if (name === 'down.eth') return Promise.resolve(json(503, { detail: `Couldn't look up ${name} right now` }))
+        if (name.startsWith('bad')) return Promise.resolve(json(422, { detail: `'${name}' isn't a valid ENS name` }))
+        const address = ens[name]
+        return Promise.resolve(
+          address ? json(200, { name, address }) : json(404, { detail: `${name} doesn't point to an address` }),
+        )
+      }
       if (url === '/api/contacts' && method === 'GET') {
         lists++
         if (listFailures-- > 0 || (listFailsLater && lists > 1)) return Promise.resolve(serverError())
@@ -119,7 +133,7 @@ function stubServer({
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { posted, deleted, signed }
+  return { posted, deleted, signed, lookups }
 }
 
 /** Connects the mock wallet from the dialog's "Connect wallet", the one that approves the contact. */
@@ -287,7 +301,7 @@ describe('ContactsPage', () => {
     ['a/b', SAM, 'A name can\'t contain "/", "\\" or tabs.'],
     ['..', SAM, "A name can't be just dots."],
     ['sam', '0x1234', 'An address is 0x and 40 more characters. This one has 4.'],
-    ['sam', 'sam.eth', "Paste the 0x address. Names such as sam.eth aren't supported."],
+    ['sam', '0x7099...79C8', 'Paste the whole 0x address.'],
     ['sam', SAM.replace('C5', 'c5'), "This address has a typo: its capital letters don't match. Copy it again from where you got it."],
     ['sam', `0x${'0'.repeat(40)}`, 'This is the zero address. Money sent there is lost for good.'],
   ])('refuses the name %j with the address %s', async (name, address, problem) => {
@@ -301,6 +315,61 @@ describe('ContactsPage', () => {
     expect(within(dialog).getByRole('button', { name: 'Continue' })).toBeDisabled()
     await user.keyboard('{Enter}')
     expect(within(dialog).getByRole('heading', { name: 'Add a contact' })).toBeInTheDocument()
+    expect(posted).toEqual([])
+  })
+
+  it('adds a contact by ENS name, saved under that name unless another is typed', async () => {
+    const { posted, lookups } = stubServer({ ens: { 'sam.eth': SAM } })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts')
+
+    const dialog = await openAddDialog(user)
+    await fillContact(user, dialog, '', 'Sam.eth')
+    expect(within(dialog).getByText('Looking up Sam.eth…')).toBeInTheDocument()
+    expect(await within(dialog).findByText(/sam\.eth points to/)).toBeInTheDocument()
+    expect(within(dialog).getByText('Saved as “sam.eth” unless you type another name.')).toBeInTheDocument()
+    // Looked up once typing paused, not once per letter.
+    expect(lookups).toEqual(['sam.eth'])
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+
+    expect(within(dialog).getByRole('heading', { name: 'Check the address' })).toBeInTheDocument()
+    expect(within(dialog.querySelector<HTMLElement>('.mf-address-box')!).getByText(SAM)).toBeInTheDocument()
+    expect(within(dialog).getByText(/this contact keeps this address/)).toBeInTheDocument()
+    await connectInDialog(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
+
+    expect(await screen.findByText('sam.eth saved. Your assistant can now pay them.')).toBeInTheDocument()
+    expect(posted).toEqual([signedSave('sam.eth', SAM, 'nonce1')])
+  })
+
+  it('keeps a typed name for a contact added by ENS name', async () => {
+    const { posted } = stubServer({ ens: { 'sam.eth': SAM } })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts')
+
+    const dialog = await openAddDialog(user)
+    await fillContact(user, dialog, 'Sammy', 'sam.eth')
+    await within(dialog).findByText(/sam\.eth points to/)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await connectInDialog(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
+
+    await waitFor(() => expect(posted).toEqual([signedSave('sammy', SAM, 'nonce1')]))
+  })
+
+  it.each([
+    ['nobody.eth', "nobody.eth doesn't point to an address. Check the spelling, or paste their 0x address."],
+    ['bad.eth', '“bad.eth” isn\'t a valid ENS name.'],
+    ['down.eth', "Couldn't look up down.eth. Try again, or paste their 0x address."],
+  ])("says why %s can't be used", async (typed, problem) => {
+    const { posted } = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts')
+
+    const dialog = await openAddDialog(user)
+    await fillContact(user, dialog, 'sam', typed)
+    expect(await within(dialog).findByText(problem)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Continue' })).toBeDisabled()
     expect(posted).toEqual([])
   })
 

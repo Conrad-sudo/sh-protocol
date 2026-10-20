@@ -13,11 +13,12 @@ app/
 ├── contracts.py           ← Contract loading with per-user_id caching; ERC-7579 calldata/nonce helpers
 ├── toolkits.py            ← Per-user_id toolkits (cached): langchain-erc20, the chain's exchange (Uniswap V3 or PancakeSwap V2), langchain-erc8004
 ├── langchain_uniswap_v3/  ← In-repo Uniswap V3 toolkit: swaps through SwapRouter02, positions through the position manager; no app imports
-├── positions.py           ← The wallet's Uniswap V3 positions, read one way for the dashboard, the agent and the Telegram bots
+├── positions.py           ← The wallet's Uniswap V3 positions, read one way for the dashboard, the agent and the Telegram bot
 ├── userop.py              ← UserOp calldata, nonce and session-key signing
 ├── bundler.py             ← The app's own ERC-4337 bundler, on every network — single + batch
 ├── parallel.py            ← Runs independent chain reads at the same time (two pools: reads, tasks)
-├── tx_sender.py           ← Nonce-safe EOA broadcast: locked nonce allocation + fee-bump/timeout
+├── tx_sender.py           ← Nonce-safe EOA broadcast: locked nonce allocation + fee-bump/timeout; sending and waiting apart
+├── landing.py             ← Waits for a Confirm button's transaction to land, on daemon threads, off the request
 ├── contract_errors.py     ← Names contract reverts (custom errors incl. SHOracle's, Error(string)) for the API and the agent
 ├── vault_signer.py        ← HashiCorp Vault Transit encrypt/decrypt wrapper
 ├── deploy_wallet.py       ← Per-user wallet deployment + single session-key registration
@@ -26,6 +27,7 @@ app/
 ├── tx_movements.py        ← What each transaction moved in or out of the wallet, for the History tab's filters
 ├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
+├── ens_names.py           ← ENS name → address on Ethereum mainnet, for adding a contact by name (sam.eth)
 ├── tools/                 ← LangChain tool wrappers for the AI agent, one module per area; get_tools() in tools/__init__.py
 ├── agent_context.py       ← The runtime context (user_id, turn_id) injected into every tool
 ├── smart_wallet_agent.py  ← LangChain agent and system prompt
@@ -33,8 +35,9 @@ app/
 ├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
 ├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share
 ├── redact.py              ← Masks API keys in HTTP errors, the model's tool results and the logs
-├── telebot.py             ← Telegram front end: one bot per chain, all in one process
-├── telegram_bots.py       ← Each chain's bot token and username, from .env
+├── chat_limits.py         ← How often an account may message the assistant (web and Telegram), and Telegram's turn gate
+├── telebot.py             ← Telegram front end: one bot for every chain, the network picked with /chain, read and action commands, Confirm/Cancel buttons
+├── telegram_bots.py       ← The bot's token and username, from .env, and the chains it serves
 ├── telegram_format.py     ← The agent's Markdown as Telegram HTML, under the web app's rules
 ├── agent_card.json        ← ERC-8004/v1 agent card (hosted publicly, referenced by tokenURI)
 ├── abi.py                 ← ABIs for EntryPoint, ERC20, the ERC-8004 registry, and mocks
@@ -43,13 +46,15 @@ app/
     ├── test_identity.py   ← No tool lets the model choose the account (make identity-test)
     ├── test_auth.py       ← API auth against a throwaway DB (make auth-test)
     ├── test_custom_tokens.py ← Tokens a user adds: rules, routes, tools; fake chain (make custom-tokens-test)
-    ├── test_history.py    ← History tab + short chat memory; fake chain, scripted model (make history-test)
+    ├── test_history.py    ← History tab + short chat memory + the Confirm buttons (Telegram's and the web chat's routes); fake chain, scripted model (make history-test)
     ├── test_tx_movements.py ← What a transaction moved: owner calldata, assistant receipts (make movements-test)
     ├── test_explorers.py  ← Etherscan/NodeReal/Alchemy answers read, paged, retried; keys kept out of logs (make explorers-test)
     ├── check_explorers_live.py ← The same against the real services, read-only, with .env's keys (make explorers-live)
-    ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too), local userOpHash (make speed-test)
-    ├── test_bundler.py    ← The L1 data charge in preVerificationGas: Base's fee, Arbitrum's gas, none on forks; fake node (make bundler-test)
-    ├── test_telebot.py    ← The Telegram bots: own chain each, private chats only, one link for all, formatting, daily check (make telebot-test)
+    ├── test_speed.py      ← Chain id asked once, parallel reads, the quote's wallet checks (balance and fee headroom too) and what it shows the model, local userOpHash (make speed-test)
+    ├── test_bundler.py    ← The L1 data charge in preVerificationGas (Base's fee, Arbitrum's gas, none on forks), tx_sender's waits, and how lanes bundle ops; fake nodes (make bundler-test)
+    ├── test_telebot.py    ← The Telegram bot: /chain and its checks, a quote stays with its network, private chats only, rationing, formatting, daily check, the commands, the quote card and its buttons (make telebot-test)
+    ├── load_test.py       ← How many chat turns one API process carries at once, and its CPU per turn; a DeepSeek stand-in, no chain (make load-test)
+    ├── test_chat_limits.py ← The chat's rationing: the limits, one running and one waiting, one notice per kind of refusal, the web route on the same limit (make chat-limits-test)
     ├── test_redact.py     ← API keys kept out of HTTP errors, tool results and logs (make redact-test)
     ├── test_migrations.py ← The numbered database migrations (make migrations-test)
     ├── test_uniswap_v3.py ← The V3 toolkit: tick math vs Solidity, addresses vs Constants.s.sol, every plan's calls; stand-in chain (make uniswap-v3-test)
@@ -149,7 +154,7 @@ The data persistence layer. All SQLite reads and writes go through this package.
 
 > Before 2026-09-10 the key was `chat_id` and *was* the Telegram chat id. `db._migrate_chat_id_to_user_id` mints a `users` row per legacy chat id, remaps every table, and rewrites the LangGraph `thread_id`s. It runs from `init_db`, after `_migrate_add_chain_id` — that order matters, since the older migration still reads `chat_id` columns.
 
-**One wallet per chain, per user.** The protocol is deployed on several chains and a user runs a `SessionHandler` on each, reached by a Telegram bot per chain. So `session_handlers` and `session_keys` are both keyed by `(user_id, chain_id, …)`, and `user_network` holds the chain the user last deployed on — the chain the CLI harness acts on, since it names no network per message. A web chat turn does name one (the network picked on the page), and so does a Telegram turn (the chain of the bot it was sent to); `db.acting_network` makes every tool of that turn act on it instead. Before 2026-09-28 the web chat followed `user_network` too, so on the BNB Smart Chain page the agent answered from whichever wallet was deployed last, and until 2026-10-07 so did the single Telegram bot. Deploying on one chain never disturbs another. Two consequences worth knowing:
+**One wallet per chain, per user.** The protocol is deployed on several chains and a user runs a `SessionHandler` on each. So `session_handlers` and `session_keys` are both keyed by `(user_id, chain_id, …)`, and `user_network` holds the chain the user last deployed on — the chain the CLI harness acts on, since it names no network per message. A web chat turn does name one (the network picked on the page), and so does a Telegram turn (the network the user picked with `/chain`, kept apart in `users.telegram_chain_id` so choosing one in Telegram never moves `user_network`); `db.acting_network` makes every tool of that turn act on it instead. Before 2026-09-28 the web chat followed `user_network` too, so on the BNB Smart Chain page the agent answered from whichever wallet was deployed last, and until 2026-10-07 so did Telegram. Deploying on one chain never disturbs another. Two consequences worth knowing:
 
 - **Every contract cache in `contracts.py` is keyed `(user_id, chain_id)`.** Keyed by `user_id` alone, switching a user's network would hand back the previous chain's wallet, EntryPoint and module bound to the new chain's RPC.
 - **Each chain gets its own session key**, even when a user's wallet has the *same address* on two chains — which is possible, since an identical protocol deploy can land `SHFactory` at the same address on each and the CREATE2 salt is the same too. Without `chain_id` in the key those wallets would share one row and one key, so a single key compromise would reach every chain.
@@ -160,7 +165,9 @@ CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_addr TEXT UNIQUE,                     -- signs in, and owns the wallets; NULL only for Telegram-only legacy rows
     telegram_chat_id INTEGER UNIQUE,            -- NULL until linked; UNIQUE stops two accounts claiming one chat
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    telegram_chain_id INTEGER                   -- the network picked with /chain in the Telegram bot (migration 6);
+                                                --   NULL until one is picked, and again once Telegram is unlinked
 );
 
 -- Single-use, short-TTL nonces. Telegram links are redeemed by the bot's /start; SIWE nonces are
@@ -247,7 +254,7 @@ CREATE TABLE history_sync (chain_id INTEGER NOT NULL, wallet TEXT NOT NULL,
 
 **Token seeding.** Mainnet/Sepolia/BSC/Celo/Arbitrum/Base token addresses are static: one dict per chain in `seed_data.SUPPORTED_TOKENS`, keyed by chain ID. `make db` makes each chain's rows match its dict **exactly** — a token deleted from `seed_data.py` is deleted from `wallet.db` too. The Arbitrum and Base sets are exactly the tokens `HelperConfig.getArbConfig` / `getBaseConfig` price, and every address matches the corresponding `ARB_*` / `BASE_*` constant in `script/Constants.s.sol` — an unpriced token would only offer a watched-token choice that makes `deployWallet` revert with `TokenNotPriced`. **Anvil tokens are recovered from the Forge broadcast file** (`broadcast/DeploySHProtocol.s.sol/31337/run-latest.json`): the mocks are deployed at fresh addresses every run, so `seed_reference_data()` reads each `ERC20Mock`/`MockWeth` deployment's decoded constructor arguments (symbol = arg index 1) and maps ticker → address. This is the only writer of anvil's rows, and it replaces them outright too (left alone when there is no broadcast).
 
-**Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through (the owner's withdraw endpoint relies on that). The agent's tools add one rule on top, in `tools._token_address`: an address is accepted only for a listed or added token, so the chat can never trade or send a token the owner didn't choose (THREAT_MODEL §4.2). It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bots' process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
+**Tokens a user adds (`custom_tokens`).** Besides the listed tokens above, each user can add tokens by contract address from the web app, per chain (MetaMask-style). They have no price feed, so they can never be watched and never count toward the cap; the list only decides what the dashboard shows and which names the agent resolves. `db.resolve_token(user_id, chain_id, ref)` is the one lookup every tool, the withdraw endpoint and the balance read share: a listed ticker first, then the user's own, and a raw `0x` address passes through (the owner's withdraw endpoint relies on that). The agent's tools add one rule on top, in `tools._token_address`: an address is accepted only for a listed or added token, so the chat can never trade or send a token the owner didn't choose (THREAT_MODEL §4.2). It reads the table on every call — no snapshot — so a token added on the web works in the Telegram bot's process at once. See `custom_tokens.py` below and THREAT_MODEL §4.9.
 
 **The dashboard's tokens (`dashboard_tokens`).** The dashboard shows only the tokens the user chose: the native token, the listed tokens in `dashboard_tokens`, and their `custom_tokens`. Every wallet read copies the wallet's counted (watched) tokens into `dashboard_tokens`, plus the wrapped native token (`routes/wallet._show_counted_tokens`) — so the tokens picked at deploy, tokens counted later in Controls, and wallets made before the list existed all show without a separate write. A listed token can also be added by address (it keeps its listed ticker and skips the symbol rules and the 25-token cap). Any token can be removed except the native token and WETH/WBNB; a listed token is refused (409) while the wallet still counts it, so the dashboard always shows everything the limit covers. The list is dashboard-only: the agent still knows every listed token. Read as a join on `supported_tokens`, so a token Mitfah stops listing drops off every dashboard.
 
@@ -286,6 +293,13 @@ app sent were that one question (22 of the 37 in quoting a transfer). Every conn
 the node's real answer, not the database's, so the middleware's check still means something; an
 error is not kept. (web3's own request cache keys entries by thread, and LangGraph runs each turn's
 tools on fresh threads, so it would still have asked about once per tool call.)
+
+**One connection pool per chain (2026-10-19).** `_ChainIdOnceProvider` also hands web3 one
+`requests` session, shared by every thread, with room for `RPC_POOL_SIZE` (256) kept-open
+connections. Without it web3 keeps a session per thread, so each fresh thread paid a new TLS
+handshake. The session ignores the environment's proxy and certificate settings (`trust_env` off):
+with them on, `requests` reread every environment variable and `~/.netrc` on each request, about
+0.7 ms of CPU per chain read. An RPC that has to be reached through a proxy would need it set there.
 
 ---
 
@@ -361,17 +375,24 @@ Every transaction the app signs with one of *its own* EOAs goes out through here
 
 Two problems it exists to solve, both invisible on a single-user Anvil run:
 
-- **Nonce races.** `telebot.py` serves each user request on its own thread (`asyncio.to_thread`), but a handful of shared keys sign for everyone — one bundler EOA per process, one deployer per chain. Reading the nonce per-thread hands the same value to two threads, and the second transaction is dropped or replaces the first. `send_tx()` allocates from a cached `(chain_name, address) → nonce` counter under a process-wide lock spanning allocate → sign → broadcast. The counter is seeded from `pending` (not `latest`, which does not count the mempool) and advanced locally; any failure clears it so the next caller re-seeds, which also self-heals a counter left stale by an out-of-band transaction. The lock covers **one process**: that is why the API and the Telegram bots bundle with different keys (`API_BUNDLER`, `TELEGRAM_BUNDLER`) — sharing one, each process would keep its own counter and hand out the same nonces. The five bots can share theirs only because they run in one process.
-- **Stuck transactions.** A fee cap the base fee has since overtaken will never be mined, so an unbounded `wait_for_transaction_receipt` hangs a user's request permanently. `send_and_confirm()` gives each attempt `ATTEMPT_TIMEOUT_SECS`, then replaces the transaction at its own nonce with both fee fields bumped past the node's price floor, up to `MAX_FEE_BUMPS` times, and raises `TimeoutError` rather than hanging. The replacement cap is floored against the *current* base fee, not just scaled from the stale one. All broadcast hashes are polled, every `RECEIPT_POLL_INTERVAL_SECS` (0.5 s — the user is waiting on it), since a replacement races the transaction it replaces and either may win.
+- **Nonce races.** `telebot.py` runs each chat turn on a thread of its own pool (and its wallet reads on `asyncio.to_thread`), but a handful of shared keys sign for everyone — each process's pool of bundler EOAs, one deployer per chain. Reading the nonce per-thread hands the same value to two threads, and the second transaction is dropped or replaces the first. `send_tx()` allocates from a cached `(chain_name, address) → nonce` counter under that key's own lock, spanning allocate → sign → broadcast (one lock per key, so a slow broadcast from one bundler key never holds up another's). The counter is seeded from `pending` (not `latest`, which does not count the mempool) and advanced locally; any failure clears it so the next caller re-seeds, which also self-heals a counter left stale by an out-of-band transaction. The lock covers **one process**: that is why the API and the Telegram bot bundle with different keys (`API_BUNDLER_n`, `TELEGRAM_BUNDLER_n`) — sharing one, each process would keep its own counter and hand out the same nonces.
+- **Stuck transactions.** A fee cap the base fee has since overtaken will never be mined, so an unbounded `wait_for_transaction_receipt` hangs the waiting thread permanently. `confirm()` gives each attempt `ATTEMPT_TIMEOUT_SECS`, then replaces the transaction at its own nonce with both fee fields bumped past the node's price floor, up to `MAX_FEE_BUMPS` times, and raises `TimeoutError` rather than hanging. The replacement cap is floored against the *current* base fee, not just scaled from the stale one. All broadcast hashes are polled, every `RECEIPT_POLL_INTERVAL_SECS` (0.5 s — the user is waiting on it), since a replacement races the transaction it replaces and either may win.
 
 Only the outer transaction is ever re-signed; an ERC-4337 UserOp in its calldata is untouched and its session-key signature stays valid, because the EntryPoint prices reimbursement purely from the UserOp's own gas fields.
 
 ```python
 send_tx(w3, chain_name, account, tx, send_w3=None)          # → tx_hash, nonce allocated under the lock
-send_and_confirm(w3, chain_name, account, tx, send_w3=None) # → receipt, with bounded wait + replace-by-fee
+send(w3, chain_name, account, tx, send_w3=None)             # → Broadcast: on the wire, not waited for
+confirm(sent)                                               # → receipt, with bounded wait + replace-by-fee
+send_and_confirm(w3, chain_name, account, tx, send_w3=None) # → receipt: send, then confirm
 ```
 
-`send_w3` broadcasts through a different endpoint than the one nonces and receipts are read from — the bundler passes a private RPC on live mainnet. A privately sent transaction is invisible to the normal node until mined, so after a restart with one still pending the counter re-seeds below it.
+Sending and waiting are apart so a Confirm button can answer once its transaction is on the wire and
+leave the wait to another thread (`landing.py`). Each send takes the next nonce at once, so many can be
+pending from one key; the chain still mines them in nonce order, so one that stalls holds up the rest
+until `confirm` replaces it (see the PRODUCTION note in `bundler.py`).
+
+`send_w3` broadcasts through a different endpoint than the one nonces and receipts are read from — the bundler passes a private RPC on live mainnet and live BSC. A privately sent transaction is invisible to the normal node until mined, so after a restart with one still pending the counter re-seeds below it.
 
 ## `bundler.py`
 
@@ -384,12 +405,14 @@ send_batch_user_op_as_session(user_id, key_ciphertext, executions)     # atomic 
 quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler) -> UserOpQuote  # nonce=None: read with the rest
 check_bundler_funds(user_id, quote, bundler, outer_gas=None, balance=None)  # can the service afford to send it
 prepare_user_op(user_id, key_ciphertext, session_handler, entry_point, quote, bundler) -> PreparedUserOp
-broadcast_user_op(user_id, prepared, bundler) -> (tx_hash, receipt)
+submit_user_op(user_id, prepared, bundler) -> SubmittedUserOp           # into the next bundle; returns once it's on the wire
+await_user_op(submitted) -> (tx_hash, receipt)                         # waits; any thread, no acting network
+broadcast_user_op(user_id, prepared, bundler) -> (tx_hash, receipt)    # submit, then await
 use_bundler_key(env_name)                                              # which key this process signs with
 ```
 
 **Quote, then send.** `quote_user_op` does everything except sign; `prepare_user_op` signs a quote
-and `broadcast_user_op` sends it. The split is what lets the user be shown a price before an
+and `submit_user_op` sends it; `await_user_op` waits for it to land (`broadcast_user_op` does both). The split is what lets the user be shown a price before an
 executable transaction exists anywhere — see `quotes.py`. `send_user_op_as_session` runs all three
 back to back for the unattended path (tests, and anything with nobody to ask).
 
@@ -404,7 +427,9 @@ once, then the signed estimate. The op's hash is no longer asked of the EntryPoi
 (chain, EntryPoint) against `getUserOpHash`, and asks the EntryPoint every time after if they ever
 disagree. (Signing used to ask for the same hash twice.)
 
-**Which key signs.** Chosen by the *process*, not the chain: the API bundles with `API_BUNDLER` (the default), and `telebot.py` switches to `TELEGRAM_BUNDLER` at startup. `tx_sender`'s nonce lock only coordinates threads within one process, so two processes sharing a key would hand out the same nonces. Anything else that runs the agent in its own process (`make agent`, `make agent-smoke`) uses `API_BUNDLER` and must not run beside the API. Both keys must be plain EOAs with no code on every chain they bundle for — the EntryPoint's bare ETH send to the beneficiary reverts AA91 against code — which is why the well-known Anvil keys are never used. `make fund` tops both up on a local node; on a live chain the operator funds them.
+**Which key signs.** Chosen by the *process*, not the chain: each process has a **pool** of keys, numbered from 1 in `.env` — the API's `API_BUNDLER_1`, `API_BUNDLER_2`, … (the default), and `TELEGRAM_BUNDLER_1`, `_2`, … that `telebot.py` switches to at startup (`bundler.bundler_keys` reads them up to the first number not set). `tx_sender`'s nonce lock only coordinates threads within one process, so two processes sharing a key would hand out the same nonces. Anything else that runs the agent in its own process (`make agent`, `make agent-smoke`) uses the API's keys and must not run beside the API. `API_BUNDLER_1` is also the deployer and protocol owner on every fork and on live Sepolia (`SEPOLIA_ACCOUNT` is its address). Every key must be a plain EOA with no code on every chain it bundles for — the EntryPoint's bare ETH send to the beneficiary reverts AA91 against code — which is why the well-known Anvil keys are never used. `make fund` tops every key up on a local node; on a live chain the operator funds them, all of them.
+
+**Which key of the pool (`bundler.pick_bundler`, 2026-10-20).** A Confirm picks its key just before the op is signed and holds it until the op is on the wire (`tools.sending.submit_quoted`). A wallet with an op still held against a key goes with that key again, so its ops land in order and the lane's one-op-per-wallet rule keeps them in separate bundles. Any other op goes to the key with the fewest ops held — picked, queued, or in a bundle not landed yet (`Lane.load`) — on a tie the first. Counting from the pick, not from the queue, is what spreads Confirms tapped together across the keys (120 at once go 40/40/40) instead of sending them all to whichever key was idle; counting until the bundle lands is what sends new ops round a key whose transaction is stuck. A quote is simulated from `API_BUNDLER_1` and checks its balance (`resolve_bundler`), since which key sends isn't known yet.
 
 **UserOp lifecycle:**
 1. Build `SessionHandler.execute(mode, executionCalldata)` — single-call (`pack_execution_calldata`) or batch (`encode_batch_execution_calldata`) — and fetch a nonce keyed via `session_key_nonce_key()`.
@@ -423,9 +448,20 @@ disagree. (Signing used to ask for the same hash twice.)
 5. **Decrypt the session key from Vault transiently, sign the EIP-191 digest, wipe.** Nothing before
    this point produced a transaction anyone could execute.
 6. Re-read the nonce (only that: the gas limits and fee cap come from the quote unchanged, so what is sent is what was quoted) and estimate the whole `handleOps` with the real op — catches anything that moved between the quote and the user agreeing, and sizes the outer transaction.
-7. Broadcast via `tx_sender.send_and_confirm` — through Flashbots Protect on live mainnet (`MAINNET_PRIVATE_RPC_URL` overrides it), the chain's normal RPC everywhere else.
-8. If our transaction reverted or stalled, look the op up on chain by its hash: the signature does not cover the beneficiary, so someone else may have landed it first. The user's action then *has* happened, and that transaction is returned instead of a failure the user might retry.
+7. Hand it to the chain's **lane** (`submit_user_op`, see below), which broadcasts it inside a `handleOps` via `tx_sender.send` — alone, or with other users' ops — and waits for it via `tx_sender.confirm`; `await_user_op` reads the op's own result from that receipt. Broadcasts go through a private RPC on live mainnet (Flashbots Protect; `MAINNET_PRIVATE_RPC_URL` overrides it) and live BSC (BlockRazor's full-privacy endpoint; `BSC_PRIVATE_RPC_URL` overrides it), the chain's normal RPC everywhere else. Arbitrum and Base have no public mempool.
+8. If its bundle reverted or stalled, look the op up on chain by its hash: the signature does not cover the beneficiary, so someone else may have landed it first. The user's action then *has* happened, and that transaction is returned instead of a failure the user might retry. If nobody ran it and the bundle reverted, simulate it alone: if it now fails, that is the error the user gets; if not, it goes out in a later bundle, up to `MAX_RESENDS` (2) times.
 9. Surface an inner-call revert from `UserOperationRevertReason`, named via `contract_errors`.
+
+**Bundles (2026-10-20).** Each process used to send every op in a `handleOps` of its own, and since one key's transactions are signed and sent one at a time (`tx_sender`'s nonce lock), that held it to about ten ops a second. Now there is one **`Lane`** per (chain, bundler key, EntryPoint) in each process — so one per key of the pool: a queue and a sender thread that sends whatever ops have piled up while it was busy as **one** `handleOps`. There is no timer — an op that finds the lane idle goes out at once, alone and unsimulated (it was just simulated by step 6), at its own fees, exactly as before — so a quiet server is no slower, and under load bundles grow on their own:
+
+- **Limits.** At most `BUNDLE_MAX_OPS` (40) ops and `BUNDLE_MAX_GAS` (20M) gas, counted as the sum of each op's outer gas as a bundle of one, and **one op per wallet** (two of a wallet's ops carry the same nonce; the second waits for the next bundle). The gas is also held under the chain's per-transaction limit, `bundle_gas_cap`: EIP-7825's 2²⁴ (16,777,216) on Ethereum, Sepolia, BSC (BEP-652) and Base (Azul), so 20M applies on Arbitrum (32M per transaction) only. A fork gets its live chain's limit.
+- **Checked first.** A bundle of several is simulated (`Lane._check`) with the base fee and the bundler's balance read alongside. An op that fails validation (`FailedOp(index)`) is refused to its own user as `NotSent` — `submit_quoted` then drops its History row and says nothing was sent — and the rest are simulated again. A revert that names no op sends each op alone instead.
+- **One fee.** The EntryPoint repays each op at min(its cap, base fee + its tip), so a bundle is priced at the lowest cap and the lowest tip among its ops (`_bundle_fees`): the bundler is never repaid less than it pays. An op whose cap the base fee has already passed goes out alone, so it can't hold everyone's price down.
+- **Funds.** The bundle is refused (`NotSent`, "top it up") if the bundler's balance can't cover it at its cap *on top of* the bundles still in flight — a node refuses a transaction its sender couldn't pay for alongside its pending ones.
+- **One wait.** Each bundle has one `tx_sender.confirm` (`Lane._wait`), fee bumps and all; every op's `await_user_op` reads its own `UserOperationEvent` from that receipt.
+- **History.** `tx_movements.op_logs` gives each op only its own logs — after the previous op's `UserOperationEvent` (or `BeforeExecution`), up to its own, counting only the EntryPoint's events as boundaries. Read whole, a shared receipt credited a wallet with other wallets' swap payouts: two sales for ETH through the same router emit two `Withdrawal`s from the router, and neither says whose.
+
+A stalled bundle still holds up the bundles behind it **on its own key** until `confirm` replaces it; new ops go round it to the other keys of the pool (`pick_bundler`, above). Still open: both private RPCs leave out a transaction that would revert rather than mine it, so a bundle that goes wrong after its simulation stalls instead of reverting. Users' quotes still price each op as a bundle of one, so in a bigger bundle the shared 21,000 base cost stays with the bundler (user's call, 2026-10-20).
 
 Two gaps remain. **Celo** is now an OP-stack L2, and any L1 data fee it charges the outer transaction is *not* priced into `preVerificationGas` — the bundler would absorb it, so watch its balance there before relying on it. **Forks** charge no L1 fee at all, so Arbitrum's and Base's L1 pricing is only exercised on the live chains (`make bundler-test` covers it offline against a fake node).
 
@@ -441,7 +477,8 @@ a random id. `confirm_transaction(quote_id)` is the only thing in the app that s
 QUOTE_TTL_SECONDS = 300
 put(user_id, chain_id, turn_id, action, calls, quote, cost) -> PendingTransaction   # holds no key
 take(user_id, chain_id, quote_id, turn_id) -> PendingTransaction   # claims it; single-use
-drop(user_id, quote_id) -> bool                                    # the user said no
+drop(user_id, quote_id, chain_id=None) -> bool                     # the user said no
+raised_in(user_id, chain_id, turn_id) -> list[PendingTransaction]  # a turn's quotes (Telegram's card)
 ```
 
 Three properties do the work:
@@ -451,12 +488,27 @@ Three properties do the work:
   `action` is composed from the calls themselves (the packages' own `description` fields, or
   `tools/transfers.py` for a bare native send) rather than by the model. The most a confirmed quote can do is
   what its quote said.
+- **Asking again is not agreeing (2026-10-20).** Each quote keeps the user's message that raised it (`AgentContext.message`, set by `chat_turn`), and `confirm_transaction` refuses a typed message that repeats it word for word (`quotes.repeats`: case, spacing and closing punctuation aside; replies of one or two words never count). The quote is dropped and the model told to quote afresh and wait. It came from the 120-wallet smoke test: a page that lost its quote, the user asking again, and the model sending the old quote as if they had said yes. Reworded repeats are left to the system prompt's "a repeated request is not a yes" rule. Confirm buttons are unaffected.
 - **Confirming takes a real turn boundary.** `take` refuses a quote whose `turn_id` is not strictly
   less than the current one. `turn_id` comes from `smart_wallet_agent._next_turn_id()`, bumped once
   per user message, so text arriving *within* a turn — a tool result, a token name, a registration
   file, anything the model read rather than the user typed — cannot quote and confirm on its own.
 - **Quotes go stale and are single-use.** Five minutes, one claim. A broadcast that fails may still
   have landed (§4.4a), so a quote must never be replayable.
+
+A quote also belongs to one chain: `take` refuses a quote raised on another, with the same answer as
+for an unknown id. In Telegram, where one chat serves every network, that is what stops a "yes"
+sent after `/chain` switched network from confirming the other network's quote.
+
+There are two ways to confirm, and both end in `take`. The model calls `confirm_transaction`, whose
+body is the plain function `tools.sending.send_quoted(user_id, chain_id, quote_id, turn_id)`: it puts
+the transaction on the wire (`submit_quoted`) and waits for it to land (`settle_quoted`), on the turn's
+thread. Or, in Telegram or the web chat, the user taps the quote card's Confirm button and
+`smart_wallet_agent.confirm_quote` calls `submit_quoted` directly, with no model call and a turn id of
+its own, and answers once the transaction is on the wire: `settle_quoted` runs in the background
+(`landing.watch`), which writes the outcome into the History tab, and `Confirmed.landed` is a future of
+what to tell the user then (Section 4, and the web chat's card below). A turn that raised exactly one quote offers it
+for the buttons (`quotes.offer`); with several, or a turn that failed, there is no card.
 
 What it does *not* do: a user who approves without reading is still approving whatever the quote
 says. This makes the agent's claims checkable against text the agent did not write, and bounds one
@@ -516,13 +568,13 @@ Order matters here, and CREATE2 is what makes it possible. `predictWalletAddress
 
 ⚠️ **`deployCount` cannot answer "does this user have a wallet?" here.** It is keyed by `msg.sender`, and `_private_key_env` resolves ONE deployer EOA for every user on a chain, so it counts all of them. That check only works when the end user signs their own deploy (the web-app flow). In the bot flow, per-user ownership is the `session_handlers` table's job — `deploy_wallet` warns when it is about to replace an existing row **for this chain**, because that wallet keeps its funds and becomes unreachable from the app. Wallets on other chains are expected and are left alone. `trusted_spenders` is `constants.get_default_spenders(chain_id)` — SwapRouter02 and the position manager on a Uniswap V3 chain, PancakeSwap's router on BSC — or empty on bare Anvil, which has no exchange. The wallet is seeded with ETH in the deployment call itself — `deployWallet` is `payable` and forwards its `msg.value` straight to the new clone (`WALLET_PREFUND_ETH_LIVE` on live chains, `WALLET_PREFUND_ETH_LOCAL` on anvil/forks), so no follow-up transfer is needed.
 
-The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. On a fork the deployer is also the API's bundler (`API_BUNDLER`, see `bundler.resolve_bundler`), and `make fund` tops up the Telegram bot's bundler (`TELEGRAM_BUNDLER`) at the same time, so there is no separate bundler-funding step.
+The deployer must already hold gas when this runs. On a fork it inherits the forked chain's real balance — **zero** on `mainnet-fork` and `bsc-fork` — so `make fund` (an `anvil_setBalance` cheat RPC) has to come first. The Makefile makes `fund` a prerequisite of both `deploy` and `deploy-wallet`, so this holds for every target, including a standalone `make deploy-wallet ARGS=<fork>`. On a fork the deployer is also the API's first bundler key (`API_BUNDLER_1`, see `bundler.bundler_keys`), and `make fund` tops up every other bundler key, the API's and the Telegram bot's, at the same time, so there is no separate bundler-funding step.
 
 **`add_default_session(user_id)`** registers the wallet's **single** session key. It mints a **fresh** key via `create_pending_session_key` (Vault-encrypted, keyed to the wallet address), calls **`SessionHandler.addSession(key, validUntil)`** as the owner, and promotes the key out of pending once that mines. Granting evicts whatever key the wallet held. **No longer part of the deploy path** — `deploy_wallet` seeds the key inside `deployWallet` — it is kept for re-granting a key on a wallet deployed without one, or after `removeSession`. There are no per-target sessions, selectors or budgets to configure — the wallet-wide cap and the admin guard replace all of that; the one thing a key carries is its deadline. (The old `add_session(targets, functions, ...)` and the `approve()` router-pre-approval helper were removed: standing approvals now revert on-chain, so approvals only ever happen atomically inside the swap/liquidity tools.)
 
 **`deploy(user_id, network)`** is the top-level dispatcher (validates the network, then calls `deploy_wallet`) — invoked by `make deploy-wallet` via the `__main__` block, which also seeds a demo contact. `__main__` no longer calls `add_default_session` or `trust_default_spenders`: `deployWallet` does both. `trust_default_spenders(user_id)` stays as a recovery helper — for a wallet deployed with no spenders, one deployed before its chain moved to Uniswap V3 (it trusts only the V2 router), or after `removeTrustedSpender` — and adds only the defaults the wallet doesn't trust yet.
 
-**Signing-key resolution** (`LIVE_PRIVATE_KEY_ENV`): live BSC and Celo use their own key (`BSC_PRIVATE_KEY`, `CELO_PRIVATE_KEY`); **every fork plus live Sepolia uses `API_BUNDLER`** (formerly `SEPOLIA_PRIVATE_KEY`); plain `anvil` falls back to `ANVIL_PRIVATE_KEY`. Forks of a real chain must avoid the well-known Anvil burner key: it is EIP-7702-delegated to drainers on real Sepolia/BSC/mainnet, and a fork inherits that code — which both breaks fork tests and disqualifies it as a `handleOps` beneficiary (the EntryPoint's bare ETH send reverts AA91 against an address with code).
+**Signing-key resolution** (`LIVE_PRIVATE_KEY_ENV`): live BSC and Celo use their own key (`BSC_PRIVATE_KEY`, `CELO_PRIVATE_KEY`); **every fork plus live Sepolia uses `API_BUNDLER_1`** (formerly `API_BUNDLER`, and before that `SEPOLIA_PRIVATE_KEY`); plain `anvil` falls back to `ANVIL_PRIVATE_KEY`. Forks of a real chain must avoid the well-known Anvil burner key: it is EIP-7702-delegated to drainers on real Sepolia/BSC/mainnet, and a fork inherits that code — which both breaks fork tests and disqualifies it as a `handleOps` beneficiary (the EntryPoint's bare ETH send reverts AA91 against an address with code).
 
 ---
 
@@ -556,7 +608,7 @@ Removed on 2026-10-02: `get_contact_erc20_balance` (now `get_erc20_balance`'s `c
 
 Every token argument accepts a listed ticker, a ticker the user added, or a `0x` address; `_token_address` resolves it through `db.resolve_token` and the packages are always handed an address. A quote that moves a token Mitfah doesn't list carries a `details` sentence from `_limit_note` saying how the cap treats it: sending or selling one costs nothing; buying one with the native asset or a watched token counts the **full** amount paid, because what comes back has no price.
 
-> **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts/prepare`, `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. Adding (or changing) one also takes the owner wallet's EIP-712 signature over the exact name and address: `prepare` checks the contact and returns the typed data (`AddContact`, domain `Mitfah`/`1`, a single-use nonce), and the save verifies the signature against `owner_addr` — so even a stolen web session cannot add a payee. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
+> **The agent reads the contact list and never writes it.** There is no `save_contact` and no `delete_contact` tool. The contact list is the allowlist of destinations for the wallet's funds — `_resolve_contact` takes a saved name and refuses a raw address — so changing it is an owner action and lives on the API instead: `POST /api/contacts/prepare`, `POST /api/contacts`, `GET /api/contacts`, `DELETE /api/contacts/{name}`, all requiring a signed-in account. `GET /api/contacts/resolve?name=sam.eth` lets the web app add a contact by its ENS name: it answers the normalised name and the address it points to on Ethereum mainnet (`ens_names.py`), saves nothing, and the address is then signed and stored like a typed one — so the contact keeps it even if the name changes later. The agent never resolves names; an unsaved `sam.eth` is refused like any unsaved name. Adding (or changing) one also takes the owner wallet's EIP-712 signature over the exact name and address: `prepare` checks the contact and returns the typed data (`AddContact`, domain `Mitfah`/`1`, a single-use nonce), and the save verifies the signature against `owner_addr` — so even a stolen web session cannot add a payee. Whoever holds a chat surface can pay the people the owner saved and cannot add a new one; the case that motivates it is an unlocked stolen phone. Deleting moved too, even though it only ever shrinks the allowlist and steals nothing — one boundary ("reads, never writes") is easier to hold than a rule with an exception. See THREAT_MODEL §4.2.
 
 > **The quote tools return whole units only.** `get_quote_in` / `get_quote_out` return `{amount_in, amount_out, path}` (plus `fees`, each hop's fee tier, on Uniswap V3), and `get_pool_quote` / `get_lp_amounts` return only their whole-unit fields. The old `*_base`, `decimals_a/b`, `liquidity` and `token_*_address` keys are gone: they existed so the swap tools could do their own base-unit and slippage arithmetic, which now happens inside the packages.
 >
@@ -583,15 +635,20 @@ The swaps' quotes carry the router's figures, so no `get_quote_*` first: the pac
 | `add_to_position(position_id, token, amount, wrapped?, slippage_bps)` | (Uniswap V3) Adds to one of the wallet's positions, keeping its range; the ETH side in ETH unless `wrapped` |
 | `withdraw_from_position(position_id, percent, wrapped?, slippage_bps)` | (Uniswap V3) Takes a percent out with all the fees it has earned; 100 also burns the NFT. No approval; counts nothing; the ETH side back as ETH unless `wrapped` |
 | `collect_fees(position_id, wrapped?)` | (Uniswap V3) Claims a position's fees and leaves it as it is; refused when there is nothing to collect |
-| `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the wallet's current session key and broadcasts it. Its result ends with what is left of the spending limit (`_budget_left`; omitted if the read fails — never an error after a send), so the agent needs no `get_wallet_status` call |
+| `confirm_transaction(quote_id)` | **The only tool that sends.** Signs the quoted op with the wallet's current session key and broadcasts it (`send_quoted`, which the Confirm buttons, in Telegram and the web chat, also call). Its result — "Sent — <action>. Tx hash: \`0x…\`" — ends with what is left of the spending limit (`_budget_left`; omitted if the read fails — never an error after a send), so the agent needs no `get_wallet_status` call |
 | `cancel_transaction(quote_id)` | Discards a quote the user declined |
 
 > **Every row above except the last two returns a QUOTE, not a receipt.** The tool builds the exact
 > calldata, prices the whole UserOperation against the chain, and returns `action` (what it does,
 > composed from the calls rather than by the model; `_action_of` leaves out the approvals around the
 > step, by their `approve`/`approve_reset` roles — until 2026-10-02 it kept only an `action` role,
-> which the Uniswap package doesn't use, so swap and liquidity quotes listed every approval), `network`, `total_usd`, `max_total_usd`,
-> `protocol_fee_usd`, the wallet-check figures, a `quote_id` and a `next_step` saying what to show.
+> which the Uniswap package doesn't use, so swap and liquidity quotes listed every approval), `network`,
+> the fees as **one** figure (`fees_usd`, network and protocol together; `fees` in the native asset
+> when it can't be priced), what it is worth and counts (`usd_value`, `charged_usd`), a `quote_id`
+> and a `next_step` saying what to show. Since 2026-10-17 that is all the model sees (`_shown_fees`,
+> `_shown_figures`): a model handed the network fee, the protocol fee, the ceiling and what is left
+> of the limit read every one of them out. The breakdown and the ceiling stay with the stored quote
+> (`PendingTransaction.cost`); the key's time left is shown only within three days of running out.
 > Nothing is signed and nothing is sent until `confirm_transaction`, which must come in a **later
 > conversation turn** — so the user has actually replied to the price. The swap and liquidity tools
 > put the expected amounts and their slippage bounds in the quote's `details`. Every write tool's
@@ -682,7 +739,7 @@ On Ethereum, Sepolia, Arbitrum and Base a deposit is a **position**: an NFT the 
 
 ## `positions.py`
 
-The wallet's Uniswap V3 positions, read one way for everyone who shows them: the dashboard (`GET /api/wallet/{chain_id}`'s `positions`), the assistant's `get_positions` and the Telegram bots' daily check.
+The wallet's Uniswap V3 positions, read one way for everyone who shows them: the dashboard (`GET /api/wallet/{chain_id}`'s `positions`), the assistant's `get_positions` and the Telegram bot's daily check.
 
 ```python
 read_positions(user_id, chain_id=None, *, strict=False) -> list[dict]   # blocking; chain_id=None is the user's current chain
@@ -695,7 +752,7 @@ Each row is `{id, pair ("eth/usdc"), base, quote, fee_pct, min_price, max_price 
 - **Only positions worth showing.** It is built on the V3 toolkit's `get_positions`, filtered to the tokens the user knows on that chain — the listed ones and the ones they added, the rule the History tab hides unknown tokens by — because anyone can mint a position to any address, out of tokens of their choosing. A position that holds nothing and has earned nothing is left out too. At most `POSITIONS_LIMIT` (20); the toolkit counts only positions that pass the filter, so ones someone else sent can't crowd the real ones out.
 - **A 30-second cache** (`CACHE_TTL_SECS`) per chain and wallet, per process, since each position costs three to five RPC calls: the dashboard polls every 60 s, and a burst of reads shares one. A read filtered by a different token set (the user added a token) isn't reused, and `confirm_transaction` calls `forget` after every send, so the assistant's own deposit or withdrawal shows at once; an epoch counter stops a read already under way from storing what the wallet held before it.
 - **Never raises.** A failed read is logged with URLs and keys masked and shows as no positions: the dashboard and the daily check have other things to show. `strict=True` (the assistant) raises `PositionsReadError`, whose message is safe to show, instead.
-- **Another chain** than the user's current one is read with that chain as the acting network, as the Telegram bots do.
+- **Another chain** than the user's current one is read with that chain as the acting network, as the Telegram bot does.
 
 ---
 
@@ -720,7 +777,7 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
 ```
 
 - **The assistant's sends are recorded before they go.** `tools.confirm_transaction` writes a
-  pending row keyed by the op's `userOpHash` between `prepare_user_op` and `broadcast_user_op`, then
+  pending row keyed by the op's `userOpHash` between `prepare_user_op` and `submit_user_op`, then
   fills in the hash of the transaction that executed it — a rival's, if one landed the op first.
   An op whose call reverted is on chain and paid for, so it is listed as `failed` with its hash
   (`bundler.UserOpReverted` carries it). One that never executed is removed. One that outlives the
@@ -846,10 +903,11 @@ The `SYSTEM_PROMPT` teaches the agent the new model up front:
 - **Liquidity is per network.** BSC has PancakeSwap V2's `add_liquidity` / `remove_liquidity`; Ethereum, Sepolia, Arbitrum and Base have Uniswap V3 positions. For a position the agent calls `suggest_price_ranges`, shows every option (its name, its prices, today's price and how a deposit splits), then **stops** and lets the user pick one or name their own bounds — it never picks — and only then calls `open_position(range=<their pick>)`. It says in plain words that out of range a position earns no fees and holds only one of its two tokens until the price comes back, and that fees are not added to the position: `collect_fees` claims them.
 - **A paused wallet rejects every transaction** until the owner unpauses it in the web app; the agent can't unpause, and says so.
 - **One tool call, one message, one yes.** The agent calls the transaction tool straight away — it resolves the contact, checks the wallet and quotes — and shows the quote with its figures in one message; the user's reply to that is the only yes (swaps state the default 0.5% slippage there instead of asking first). No `preflight_check`, `get_contact`, `get_quote_*` or balance read first: the tool refuses with the reason when a check fails. **Never** estimate swap amounts from prices (`get_quote_in`/`get_quote_out` for questions; a swap's quote carries the router's figures); `"eth"` is the native asset in every token argument, and the wrapped token is named only when meant; never invent addresses.
-- **Figures in plain words.** A reply never shows a field name (`charged_usd`, `total_usd`, …). A quote's `total_usd` is its fees only (network fee plus protocol fee), so it is never called the transaction's total cost, and its `remaining_usd` is what is left of the limit before the transaction, so it is never called what is left after; the confirmation reports that. These rules were added on 2026-10-08, after DeepSeek broke each in the smoke test.
+- **Figures in plain words.** A reply never shows a field name (`charged_usd`, `fees_usd`, …). A quote's fees are one figure, never split into the network fee and the protocol fee, and never called the transaction's total cost. These rules were added on 2026-10-08, after DeepSeek broke each in the smoke test.
+- **Be brief (2026-10-17).** Replies are read on a phone: the answer first, in a sentence or two, with no greeting, recap of the tools used, headings or closing offer. A quote is two or three short lines, and the prompt shows one as an example ("Transfer 10 USDC to 0x… on Base — worth $10.00, counts $10.00 toward your limit. Fees: $0.35. Nothing has been sent yet: reply yes to send it.").
 - **Measured (`make agent-smoke`, Sepolia fork):** a send went from 3 user messages, 8 model calls and 22.6 s to 2 messages, 4 calls and 8.6 s; a swap from 3 messages, 9 calls and 27.7 s to 2, 4 and 9.9 s. With 0.2 s added to every RPC request (to stand in for a live provider), quoting a send went from 37 requests and 7.9 s to 16 and 0.7 s, confirming it from 20 and 4.3 s to 8 and 1.1 s, and quoting a swap from 45 and 9.6 s to 22 and 1.35 s.
 
-The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point. It returns the reply as plain text (joining the text blocks of a model that answers in blocks, as Claude did). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
+The user's message goes to the model verbatim; the `user_id` travels beside it as runtime context (`AgentContext`), so nothing typed can change whose wallet is acted on. `chat(user_id, chain_id, user_input, network)` is the synchronous entry point; `chat_turn` is the same and also returns the turn's id (None for a failed turn), which the web route and the Telegram bot offer the turn's quote by (`quotes.offer`). It returns the reply as plain text (joining the text blocks of a model that answers in blocks, as Claude did). A failed turn returns a fixed apology, and the exception goes to the log, never to the user: its text can hold RPC URLs with API keys. `get_history(user_id, chain_id, limit)` returns only what was said, never tool traffic, for `GET /api/chat/history`.
 
 ### Short memory: the chat starts afresh after each transaction
 
@@ -861,8 +919,9 @@ only the **text** of the last exchange (the user's last message and the reply; n
 results or ciphertext, marked `carried_over`). That way a "yes" to the assistant's last question
 still makes sense. It does this when:
 
-- the conversation holds a `confirm_transaction` that succeeded (a failed one is kept, so the user
-  can ask why), or it has grown past `HISTORY_TOKEN_LIMIT` (40k approximate tokens) — a user who
+- the conversation holds a `confirm_transaction` that succeeded, or a quote sent with a Confirm
+  button (`confirm_quote` marks its reply `sent_transaction`) — a failed one is kept, so the
+  user can ask why — or it has grown past `HISTORY_TOKEN_LIMIT` (40k approximate tokens) — a user who
   only asks questions never sends a transaction;
 - **and** the user has no quote waiting for an answer on that chain (`quotes.has_pending`): its
   description and id live only in the conversation, so clearing it would leave the next "yes" with
@@ -877,41 +936,71 @@ transactions.
 **Deleting on request.** `DELETE /api/chat/history?chain_id=` (or with no chain, every chain) runs
 `clear_history`. It deletes the threads and drops the quotes raised in them. The request is refused
 with 409 while a turn is running on one of them in this process, because a turn that finishes after
-its thread was deleted writes the whole history back. A turn running in a Telegram bot (another
+its thread was deleted writes the whole history back. A turn running in the Telegram bot (another
 process) can't be seen, so that rare overlap can still undo a delete. The transaction history is
 never touched.
 
 ---
 
-## Section 4 — Telegram Bots
+## Section 4 — Telegram Bot
 
-`app/telebot.py` exposes the agent as Telegram bots ([python-telegram-bot v22](https://docs.python-telegram-bot.org/)): **one bot per chain**, all run by one process, `make bot`.
+`app/telebot.py` exposes the agent as **one Telegram bot for every chain** ([python-telegram-bot v22](https://docs.python-telegram-bot.org/)), run by `make bot`. Each user picks the network inside the chat, with `/chain`.
 
-> **The entire Telegram layer is optional.** `telebot.py` is just one front end over the same agent; `smart_wallet_agent.py`'s `main()` provides an equivalent interactive CLI (`make agent`) that needs no bot and no Telegram account. Only `make bot` needs the bot tokens and the `python-telegram-bot` dependency. Everything below applies to `make bot` only.
+> **The entire Telegram layer is optional.** `telebot.py` is just one front end over the same agent; `smart_wallet_agent.py`'s `main()` provides an equivalent interactive CLI (`make agent`) that needs no bot and no Telegram account. Only `make bot` needs the bot's token and the `python-telegram-bot` dependency. Everything below applies to `make bot` only.
 
-**One bot per chain.** Each chain's bot is its own BotFather bot, configured in `.env` under a stem (`app/telegram_bots.py`): `MITFAH_<STEM>_API` holds its token and `MITFAH_<STEM>_USERNAME` its username (no @), with the stems `ETH` (Ethereum), `SEPOLIA`, `BSC`, `ARB` (Arbitrum One) and `BASE`. `make bot` starts a bot for every chain with a token. A bot is tied to its chain when it is built — the chain and this server's network name for it (`network_config.network_name`, the `-fork` twin when `APP_FORK_MODE` is on) sit in its `bot_data` — and every turn passes them to `chat()`, so a message to the Base bot acts on the user's Base wallet whatever network they last deployed on. Nothing in a message can move a turn to another chain: the user picks the network by picking the chat. Before a bot starts, its network's RPC is asked which chain it is, and a bot whose network is unreachable or answers as another chain is left off (`check_network`); on forks, only the forks that are running get a bot. The process exits if no bot can start.
+**One bot for every chain (2026-10-16).** It is one BotFather bot, set up in `.env` (`app/telegram_bots.py`): `MITFAH_API` holds its token and `MITFAH_USERNAME` its username (an @ in front is dropped). It can serve five chains (`BOT_CHAINS`, in the order `/chain` lists them: Ethereum, Sepolia, BNB Smart Chain, Arbitrum One, Base). At startup each one's RPC is asked which chain it is, under this server's network name for it (`network_config.network_name`, the `-fork` twin when `APP_FORK_MODE` is on); a network that is unreachable or answers as another chain is left out until the next start (`check_network`), so on forks only the running forks are offered. The ones that pass are kept in `bot_data["networks"]`, and the process exits if none does. The bot refuses to start on a database `make db` hasn't brought up to date, since the chosen network lives in a column migration 6 adds; and if `MITFAH_API` is missing while the old per-chain variables are set, it names them (`telegram_bots.legacy_vars_set`). Until 2026-10-16 each chain had a bot of its own (`MITFAH_<STEM>_API` / `MITFAH_<STEM>_USERNAME`, all five in this one process); the move is in [setup.md](setup.md#moving-from-five-telegram-bots-to-one).
 
-**One link covers every bot.** In a private chat Telegram gives a user the same chat id in every bot, and `users.telegram_chat_id` holds that one number. The web app's link (`POST /api/integrations/telegram/link?chain_id=`) opens the bot of the network the page is showing, or the first bot with a username when that network has none; once the chat is linked through any bot, the others know it too. The user still presses Start in each bot they want, because a bot may only write to someone who has.
+**Which network a turn acts on.** `/chain` shows a button for each network where the account has a wallet and whose RPC passed the start-up check (`available_chains`), with a ✓ on the current one (`chain_keyboard`). Pressing one stores it for the account in `users.telegram_chain_id` (`db.set_telegram_chain`). The button's data (`chain:<id>`) comes from the user's Telegram client, so it is checked, never trusted: when a press arrives, `chain_chosen` checks again that it comes from a private chat, from that chat's own user, whose account is linked, and that the data matches one of that account's `available_chains` (compared, never parsed), and refuses anything else. The stored choice is used for as long as that network stays available. With none stored, a user who can use only one network gets it without asking, and it is stored. Otherwise a message gets the buttons and "Which network should I use?" instead of a turn; it isn't held, so the user sends it again once they have picked. A stored network that is no longer available (down when the bot started, say) is never swapped for another without asking: the user is told it isn't available and asked to pick (`resolve_active_chain`, `require_active_chain`). A user with no wallet on any network the bot serves is told so. Every turn passes the chosen chain and its network name to `chat()`, so it acts on that network's wallet whatever network the user last deployed on, and every reply starts with the network's name. Nothing typed in a message can change the network or the account: the account comes only from the linked chat id, and the network only from a checked button press (or, with just one to choose from, that one).
 
-**Private chats only.** Every handler is registered with `PRIVATE_MESSAGES` (`filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE`). In a group, everyone in it could talk to the agent of whoever linked it, so a group gets no answer at all — not even to `/start`, which is what would link it. Groups are also turned off in BotFather; the filter holds even if that setting changes. Edited messages are ignored too: an edit is not a new instruction.
+**One link.** The web app's link (`POST /api/integrations/telegram/link`, which no longer takes a chain) opens the bot, and `/start <nonce>` binds the chat id taken from the update (THREAT_MODEL §4.5). In a private chat Telegram gives a user the same chat id in every bot, so an account linked through one of the old per-chain bots stays linked: the user just presses Start in the new one, since a bot may only write to someone who has. Unlinking (`DELETE /api/integrations/telegram/link`) also forgets the chosen network.
 
-| Handler | Trigger | Action |
-|---|---|---|
-| `start` | `/start [nonce]` | Completes a link if the deep link carried a nonce; then a welcome naming the chain and a first wallet check 10 s later — or, with no wallet on this chain, where to set one up |
-| `help_cmd` | `/help` | What the bot does, with examples for its chain |
-| `start_chat` | Any other text | Runs a turn on this bot's chain via `asyncio.to_thread`, showing "typing…" meanwhile, and replies |
+**A quote stays with its network.** Each network is a conversation of its own (`thread_id(user_id, chain_id)`, the one the web chat shows on that network too), and `quotes.take` refuses a quote raised on another chain. So a "yes" sent after switching runs in the new network's conversation and cannot confirm the old network's quote. Switching back within the quote's five minutes finds it again: it is that network's conversation, and the reply names the network.
+
+**Private chats only.** Every message handler is registered with `PRIVATE_MESSAGES` (`filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE`), and `chain_chosen` checks the chat itself, since a button press is not a message. In a group, everyone in it could talk to the agent of whoever linked it, so a group gets no answer at all — not even to `/start`, which is what would link it. Groups are also turned off in BotFather (and inline mode is off); the filter holds even if that changes. Edited messages are ignored too: an edit is not a new instruction.
+
+| Trigger | What happens |
+|---|---|
+| `/start [nonce]` | `start` completes a link if the deep link carried a nonce, then welcomes the user, naming the active network (or asking for one) and pointing to `/chain`, and checks their wallets 10 s later — or, with no wallet on a network the bot serves, says where to set one up |
+| `/help` | `help_cmd`: what the bot does and every command, with examples for the active network (`/positions` only where it trades on Uniswap V3), and how to switch with `/chain` |
+| `/chain` | `chain_cmd`: the network picker, a button per network the account can use, ✓ on the current one |
+| A `/chain` button | `chain_chosen` checks the tap and the chain again, stores the choice, says so and takes the buttons off |
+| `/balance` | `balance_cmd`: the dashboard's own balance read (`routes.wallet._token_balances`): the native coin first, then every token with something in it, LP tokens too, then any that couldn't be read |
+| `/limit` | `limit_cmd`: what is left of the spending limit and per what window, a pause, and the assistant's access — its warning when one is due (`_key_warning`), else the date it runs out |
+| `/history` | `history_cmd`: the last 5 transactions on the network, from the database (UTC time, action, status, short hash), and a pointer to the History tab |
+| `/positions` | `positions_cmd`: the Uniswap V3 positions, one line each (range, earning or not, what it holds, fees to collect); on BSC it says the LP tokens are in `/balance` |
+| `/contacts` | `contacts_cmd`: the saved contacts with their addresses, and that they are changed in the web app |
+| `/web` | `web_cmd`: a link to the web app — `WEB_APP_URL`, or else the first of `CORS_ORIGINS` |
+| `/send <amount> <token> [to] <contact>` | `send_cmd`: checked (`send_words`), then put to the assistant as "Send 10 USDC to Sam" |
+| `/swap <amount> <token> [for\|to] <token>` | `swap_cmd`: checked (`swap_words`), then put to the assistant as "Swap 1 ETH for USDC" |
+| `/cancel` | `cancel_cmd`: drops every quote waiting on the network (`smart_wallet_agent.cancel_quotes`) and records it in the conversation |
+| `/feedback <text>` | `feedback_cmd`: stores a note for the team (below) |
+| A quote's Confirm or Cancel button | `quote_button` checks the tap, then sends the quote (`confirm_quote`) or discards it (`cancel_quote`) — below |
+| Any other text | `start_chat` admits the message (rationing, below), then runs a turn on the active network on the bot's chat pool, showing "typing…" meanwhile, and replies with the network's name first |
+| Any other command | `unknown_cmd` says so and points to `/help` |
+
+**Read commands cost no model call (2026-10-17).** `/balance`, `/limit`, `/history`, `/positions`, `/contacts` and `/web` answer from the chain and the database directly, on the default thread pool, without the assistant, `_turn_locks` or the rationing. Their replies are written by the bot as Telegram HTML (`_reply_lines`), not as Markdown: what goes in them — a token's own symbol, a contact's name, a transaction's description — is escaped line by line, so a symbol shaped like `[Claim](https://…)` stays text instead of becoming a link.
+
+**`/send` and `/swap` are checked first.** Only the assistant can quote (its tools need the turn's runtime, and the quote must live in its conversation), so these put fixed words to it, as a message would be. Before that, at no cost: the amount must be digits with at most 18 decimals and above zero; each token must be one the wallet knows on the network (listed or added in the web app, by ticker or address), named back by its ticker; and the contact must be saved. The network's own coin is recognised by its own ticker only — on BSC "ETH" is looked up as a token and refused, since the assistant reads "eth" as the native coin and would send BNB. A swap of a token for itself (or the native coin for its wrapped form) is refused. A command that doesn't check out gets the bot's own reply and costs no turn and none of the rationing; one that does goes through the same gate and lock as a message.
+
+**The quote card and its buttons.** A turn that raised exactly one quote (`quotes.offer` with the turn's id from `chat_turn`) is followed by a card the bot writes from the stored quote, never the model: "Confirm on Base?", the quote's `action` (escaped), the fees as one figure and how long it stays good, with **✅ Confirm** and **✖️ Cancel** buttons carrying `q:ok:<chain>:<quote_id>` / `q:no:…`. Tapping Confirm sends exactly that quote, so the card — not the assistant's reply — is what the user agrees to. With several quotes in one turn there is no card, and the user says which in words; a failed turn shows none. The button's data comes from the client, so `quote_button` checks it, never trusts it: a private chat, that chat's own user, a linked account, a well-formed button, and the network in it equal to the account's active network. The account comes from the chat and the network from `resolve_active_chain`; the quote id is only looked up, and `quotes.take` refuses it unless it is this account's, on this network, unexpired and unused. The buttons come off the card before anything runs. Confirm then runs `confirm_quote` in the conversation's turn (`_turn_locks`), with no model call, on a pool of its own (`_tap_threads`, `CONFIRM_MAX_CONCURRENT` threads, default 64) — never queued behind other people's model turns while its 5-minute quote runs out. It answers "Sending — <action>. Waiting for the network to confirm it." once the transaction is on the wire; when it lands (`landing.py`), a second message says how it went ("Sent — …, Tx hash …", or why not), sent after the turn is over so the user can carry on meanwhile; a quote already gone gets a fixed "expired or already used. Nothing was sent." Both buttons, and `/cancel`, write the tap and its outcome into the conversation as a user message and the assistant's reply (`_record_button`, `update_state` as the model node), so the next turn knows the quote is gone and the web chat shows it; a confirm that sent marks its reply `sent_transaction`, so the next turn starts the conversation afresh as after a `confirm_transaction`. A send whose outcome is unknown (its broadcast failed in doubt, or its wait ran out) says to check the History tab before trying again.
+
+**`/feedback`.** Stored in `app_feedback` (migration 7: account, network if one is in use, `source = "telegram"`, the text as written, time), between 3 and 1,000 characters, at most 3 an hour and 10 a day per account, counted in the database so a restart doesn't reset them. It is feedback about the app, read by the team from the table; rating the service's ERC-8004 agent stays a transaction the assistant quotes.
 
 **Replies keep their formatting.** The agent writes Markdown for the web app, which Telegram can't show as it is: no tables or headings, and its own Markdown dialect refuses a whole message over one stray character. `app/telegram_format.py` parses each reply with `markdown-it-py` and rebuilds it in the HTML subset Telegram accepts (`parse_mode=HTML`), under the web app's rules (`ChatMarkdown.tsx`): raw HTML in the text stays text, an image is never loaded (its alt text shows instead), and only `http`, `https` and `mailto` links become links. Headings become bold; lists keep their markers; a table becomes one line per row (`**USDC**: 25`, or `**USDC** — Balance: 25 · Value: $25` with more columns), since a phone has no room for columns. Link previews are off (`NO_PREVIEW`), so Telegram never fetches what a link points at. If Telegram still refuses a message's formatting, the same words go out plain (`_send_reply`).
 
 Replies longer than Telegram's 4096-character limit are split between paragraphs, list items or table rows, so formatting is never cut in half; messages hold at most 4000 characters, since Telegram counts most emoji as two. A single block too long for one message goes out plain, split at line breaks (`split_message`). Different users are answered side by side (`concurrent_updates`), but one user's messages on one chain take turns (`_turn_locks`), so a "yes" sent while its quote is still being worked out finds that quote.
 
+**Rationed like the web chat (2026-10-16).** Every message to the agent costs model credits. Until 2026-10-16 only the web chat was rationed (Section 5), and the bot queued whatever a chat sent behind `_turn_locks`. Now Telegram uses the same limit, `CHAT_RATE_LIMIT` in `app/chat_limits.py` (20 a minute and 1,000 a day per account), which `routes/chat.py` imports too, so both front ends ration by one number. `start_chat` asks a `TurnGate` to admit each message once it knows the account and the network, before it takes `_turn_locks`, so a flood is refused instead of queued; the gate is released when the turn ends, even one that raised. First, an account may have one message running and one waiting (`TELEGRAM_MAX_WAITING`), counted across networks: a third sent before the first is answered is refused at once and uses none of the limit. Then the limits, all checked before any is counted, so a refused message counts against nothing; the reply says whether it was the minute's limit or the day's, and when to try again. An account is told about each kind of refusal (busy, too fast, the day used up) at most once a minute (`REFUSAL_NOTICE_SECS`), so a flood gets a notice, not one reply per message. Turns run on a thread pool of their own, `TELEGRAM_MAX_CONCURRENT` threads (default 64, from `.env`), so at most that many call the model at once across all users, as `CHAT_MAX_CONCURRENT` caps the web chat; a turn beyond that waits for a free thread. DeepSeek sets no rate limit (under load it answers slower instead of refusing), so the ceiling is the one process, whose CPU every turn shares, and the chain RPC's request limit — a turn makes a dozen or more reads. Measured on 2026-10-19 (`make load-test`, and turns on a mainnet fork), a turn that reads the chain costs the process 50–200 ms of CPU (a swap quote 200), so one core is full at about 35–60 such turns at once; past that nobody is refused but every turn slows, hence 64. Quote-card taps and `/cancel` have their own pool (`_tap_threads`), so they never wait behind turns. Wallet reads and the daily check keep the default pool (`asyncio.to_thread`) for themselves.
+
+**Known limits of the rationing.** The counters live in memory, per process, as slowapi's do for the web chat: they start again from zero when `make bot` restarts, and the web chat and Telegram count separately, so one account can have 300 turns a day on each, 600 in all. A cap shared across processes needs Redis or a database counter; that is production work, not done yet.
+
 ### Wallet checks
 
-Every day at **12:00 UTC** (`DAILY_CHECK_TIME`) each bot checks every linked chat whose account has a wallet on its chain (`db.get_telegram_chats_on_chain`), and once more 10 seconds after a `/start`. The check reads the wallet through `_get_wallet_status` with the bot's chain as the acting network, and warns on three counts (`wallet_warnings`): the assistant's key is inactive (turned off, replaced or run out), it runs out within **3 days** (`SESSION_EXPIRY_WARN_SECS`), or less than **10%** (`BUDGET_ALERT_THRESHOLD`) of the limit is left. On a Uniswap V3 chain it also reads the wallet's positions (`positions.read_positions`), side by side with the status, and warns about each one whose price has left its range (`position_warnings`): "⚠️ Your ETH/USDC position on Base (2,850–3,150 USDC per ETH) is out of range: ETH is at 3,420 USDC, so it isn't earning fees. Ask me to move it or take it out." Such a position earns nothing and nothing about it changes to say so, so the warning repeats every day it stays out; a full-range position is never out of range. Either read failing leaves the other's warnings to go out. The list is read afresh each day, so a chat linked or a wallet set up since the bot started is included without a restart, and a fixed time of day means a restart neither repeats a warning nor puts the next one off. A chat whose user never pressed Start in that bot, or blocked it, is skipped.
+Every day at **12:00 UTC** (`DAILY_CHECK_TIME`) one job (`daily_check`) goes through every network the bot serves and checks each linked chat whose account has a wallet there (`db.get_telegram_chats_on_chain`), whichever network the user has picked in `/chain`; and once more 10 seconds after a `/start`. Each check reads the wallet through `_get_wallet_status` with that network as the acting network, and warns on three counts (`wallet_warnings`): the assistant's key is inactive (turned off, replaced or run out), it runs out within **3 days** (`constants.SESSION_RENEWAL_WARNING_SECS`, which the dashboard and the quotes use too), or less than **10%** (`BUDGET_ALERT_THRESHOLD`) of the limit is left. On a Uniswap V3 chain it also reads the wallet's positions (`positions.read_positions`), side by side with the status, and warns about each one whose price has left its range (`position_warnings`): "⚠️ Your ETH/USDC position on Base (2,850–3,150 USDC per ETH) is out of range: ETH is at 3,420 USDC, so it isn't earning fees. Ask me to move it or take it out." Such a position earns nothing and nothing about it changes to say so, so the warning repeats every day it stays out; a full-range position is never out of range. Either read failing leaves the other's warnings to go out. The list is read afresh each day, so a chat linked or a wallet set up since the bot started is included without a restart, and a fixed time of day means a restart neither repeats a warning nor puts the next one off. A chat whose user never pressed Start in the bot, or blocked it, is skipped.
 
 The expiry warning is why this matters to a Telegram-only user: renewing the key is an owner-signed transaction they can only make in the web app (Controls → Assistant), so learning about it after the key lapsed is learning too late.
 
-**Running it.** `serve()` opens the checkpointer and calls `init_agent()` once, then starts every bot in the same event loop (not `run_polling`, which runs one bot and owns the loop) and runs until Ctrl-C or SIGTERM. Each bot's command menu is set at startup. `chat()` is synchronous and runs on a worker thread; SQLite thread safety is handled in `db.py` via `threading.local()`. The bots share one agent, one checkpointer and one bundler key (`TELEGRAM_BUNDLER`), which is safe because `tx_sender` counts nonces per `(chain, address)` — but only within one process, so **run exactly one copy**. Telegram also lets only one process poll a bot; a second copy gets "Conflict" errors.
+**Running it.** `serve()` opens the checkpointer and calls `init_agent()` once, then runs the bot in the same event loop until Ctrl-C or SIGTERM. Its command menu, every command in `COMMANDS` with a line each, is set at startup. `chat_turn()` runs on the turn pool's threads and `confirm_quote()` on the tap pool's, both synchronous; SQLite thread safety is handled in `db/__init__.py` via `threading.local()`. Every network's turns share one agent, one checkpointer and one pool of bundler keys (`TELEGRAM_BUNDLER_1`, `_2`, …), which is safe because `tx_sender` counts nonces per `(chain, address)` — but only within one process, so **run exactly one copy**. Telegram also lets only one process poll a bot; a second copy gets "Conflict" errors.
 
 ---
 
@@ -973,6 +1062,10 @@ What it does that the bot cannot:
   searches: Alchemy's free tier at 10 blocks). Only the caller's own wallet qualifies: the owner
   check and the pending key that only `/api/deploy` for that account mints.
 
+- **One transaction.** `GET /api/transactions/{id}` reads one of the account's rows, as the History
+  tab lists it (404 for another account's): how the web chat follows a send it confirmed while it
+  lands. A pending row the process isn't waiting on is settled from the chain first.
+
 - **The History tab.** Every transaction on the user's wallets, newest first by when it happened, from
   `GET /api/transactions` (paged by the `before` cursor, `"<time>-<id>"`, filterable by `chain_id`):
   what it did, the date and time in the reader's time zone, the network, who sent it ("By your
@@ -993,13 +1086,42 @@ What it does that the bot cannot:
 Contacts are **web-only**: the list is the destination allowlist, so the agent reads it and can
 never write to it, and adding one takes the owner wallet's EIP-712 signature (the dialog's last step). The chat page is a front end over `chat(user_id, chain_id, …, network)` — the same agent,
 the same history, shared with Telegram through the checkpointer's `thread_id`. The turn acts on
-the page's network, and every quote names the network it would run on (`network`).
+the page's network, and every quote names the network it would run on (`network`). Turns are
+rationed (`routes/chat.py`): one at a time per account, across networks and tabs (a second message
+sent before the first is answered gets 409, not a place in a queue); at most `CHAT_MAX_CONCURRENT`
+(default 64) at once across all accounts (429 while every slot is taken); and `CHAT_RATE_LIMIT`
+from `app/chat_limits.py`, 20 a minute and 1,000 a day per account (429 past it). Telegram takes the
+same limit, counted separately (Section 4).
 
-Telegram is linked once, in Settings: the card's link opens the bot of the network the page is
-showing, and once linked it lists the bots of the networks the user has a wallet on, each to be
-started. The Assistant page's "Open in Telegram" opens the current network's bot, for a linked
-account. Both take the usernames from `/api/chains` (`telegram_bot`), so a network without a bot
-offers none.
+**The quote card.** When a turn raised exactly one quote, `post_chat` offers it (`quotes.offer`)
+and the page shows a card above the composer (`components/assistant/QuoteCard.tsx`), read from
+`GET /api/chat/quote?chain_id=` — the newest offered quote still waiting (`quotes.offered`), so it
+is back after a reload. The server writes it from the stored quote, never the model: "Confirm on
+Base?", the `action`, the fees as one figure (`quotes.fee_text`, shared with Telegram) and
+`expires_at`; the page shows it as plain text and counts the minutes down, then says it expired.
+**Confirm** (`POST /api/chat/quote/confirm`) and **Cancel** (`/cancel`), with `{chain_id,
+quote_id}`, run `confirm_quote` / `cancel_quote`, the same code as Telegram's buttons: the account
+from the token, the network from the chain named, the quote id only looked up, so `quotes.take`
+refuses one that isn't this account's, on that chain, unexpired and unused (409 with the fixed
+`STALE_QUOTE`). Each runs as a turn (`_chat_turn(..., tap=True)`): never beside a message being
+answered (409), on a tap's slot (`CONFIRM_MAX_CONCURRENT`, default 64, apart from the chat's, so a
+tap goes through while every chat slot is taken), and a confirm counts against `CHAT_RATE_LIMIT`.
+A confirm answers once the transaction is on the wire, with `{outcome: "Sending — …",
+transaction_id}`; the page follows that History row on `GET /api/transactions/{id}` every two
+seconds (`useLanding`, `components/assistant/SendStatus.tsx`, a line under the chat) until it is
+confirmed, failed or dropped, then reads the wallet and the History tab again. A pending row this
+process isn't waiting on (the wait was lost to a restart) is settled from the chain when read.
+The tap and its outcome go into the conversation like Telegram's, marked `button` in
+`GET /api/chat/history`, so the chat shows them as plain text rather than markdown. A tap that the
+server refused changed nothing; one whose answer never arrived may have sent, so the page says to
+check History before trying again. A quote raised in Telegram never gets a card here: quotes live
+in each process's memory.
+
+Telegram is linked once, in Settings: the card's link opens the bot, and once linked the card shows
+the bot's link and, on a desktop, its QR code, with a note to send `/chain` to switch networks. The Assistant page's
+"Open in Telegram" opens the bot, for a linked account. Both take the username from `/api/me`
+(`telegram_bot`, `null` when the server has no `MITFAH_USERNAME`), so a server without a bot offers
+none. `/api/chains` no longer carries it.
 
 Setup, scripts, the production settings and the front end's own layout are in
 [web/README.md](../web/README.md).

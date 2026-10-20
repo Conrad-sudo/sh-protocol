@@ -8,11 +8,13 @@ from pydantic import BaseModel, Field
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
+import landing
 import tx_history
 from auth import get_current_user
 from db import (
     TransactionFilter,
     get_movement_tickers,
+    get_transaction,
     get_transactions,
     get_wallet_address,
     get_wallet_chains,
@@ -151,6 +153,28 @@ def list_transaction_tokens(chain_id: int | None = None, user_id: int = Depends(
     if chain_id is not None and chain_id not in CHAIN_NAME_BY_ID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported chain ID: {chain_id}")
     return {"tokens": get_movement_tickers(user_id, chain_id)}
+
+
+@router.get("/api/transactions/{tx_id:int}")
+def get_one_transaction(tx_id: int, user_id: int = Depends(get_current_user)):
+    """
+    One transaction of this account's, as the History tab lists it: how the web chat follows a send
+    it confirmed while it waits to land (landing.py).
+
+    A pending row this process isn't waiting on -- the wait was lost to a restart, or the row is an
+    owner transaction -- is settled from the chain first, as reading the History tab would.
+
+    @return  {"id", "chain_id", "source", "action", "status", "tx_hash", "created_at", "mined_at",
+             "direction"}, as GET /api/transactions lists each.
+    @raises HTTPException 404 when the account has no transaction with this id.
+    """
+    row = get_transaction(user_id, tx_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such transaction.")
+    if row["status"] == "pending" and not landing.is_watched(tx_id):
+        tx_history.settle_one(row, _web3_or_none)
+        row = get_transaction(user_id, tx_id)
+    return _transaction_json(row)
 
 
 @router.post("/api/transactions/deposit")

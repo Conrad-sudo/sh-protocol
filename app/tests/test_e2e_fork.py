@@ -23,7 +23,10 @@ import json
 import math
 import os
 import sys
+import threading
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -48,6 +51,7 @@ import bundler                                        # noqa: E402
 import smart_wallet_agent                             # noqa: E402
 import tools                                          # noqa: E402
 import tools.checks  # noqa: E402
+import tools.erc8004  # noqa: E402
 import tools.positions  # noqa: E402
 import tools.sending  # noqa: E402
 import tools.transfers  # noqa: E402
@@ -62,10 +66,12 @@ from contracts import load_registry, read_spending_config  # noqa: E402
 from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
+from langchain_erc8004.abis import REPUTATION_REGISTRY_ABI  # noqa: E402
 from langchain_uniswap_v2.abis import factory_abi, pair_abi, router_abi  # noqa: E402
 from langchain_uniswap_v3 import v3math               # noqa: E402
 from langchain_uniswap_v3.abis import position_manager_abi  # noqa: E402
 import quotes                                         # noqa: E402
+import tx_movements                                   # noqa: E402
 from userop import prepare_execute_call               # noqa: E402
 from web3.exceptions import ContractLogicError        # noqa: E402
 from web3.logs import DISCARD                         # noqa: E402
@@ -694,6 +700,11 @@ def deal_erc20(token: str, holder: str, amount: int):
     raise AssertionError(f"could not find the balances slot of {token}")
 
 
+def sent_by_bundlers() -> int:
+    """How many transactions the API's bundler keys have sent between them: "nothing was sent" is this unmoved."""
+    return sum(w3.eth.get_transaction_count(a.address) for a in bundler.bundler_keys())
+
+
 def user_op_cost(sh, receipt) -> dict:
     """
     What one session-key transaction really cost, read back from its receipt.
@@ -758,17 +769,23 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     def next_turn() -> SimpleNamespace:
         return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
 
-    # One key per process, so the API and the Telegram bot never hand out the same nonce.
-    api_bundler = bundler.resolve_bundler(w3).address
+    # Keys of its own for each process, so the API and the Telegram bot never hand out the same nonce.
+    api_bundlers = [a.address for a in bundler.bundler_keys()]
     bundler.use_bundler_key(bundler.TELEGRAM_BUNDLER_ENV)
     try:
-        telegram_bundler = bundler.resolve_bundler(w3).address
+        telegram_bundlers = [a.address for a in bundler.bundler_keys()]
     finally:
         bundler.use_bundler_key(bundler.API_BUNDLER_ENV)
-    check("the API and the Telegram bot bundle with different keys", api_bundler != telegram_bundler)
-    check("the API's key is the default", bundler.resolve_bundler(w3).address == api_bundler)
+    check(f"the API and the Telegram bot bundle with keys of their own ({len(api_bundlers)} and "
+          f"{len(telegram_bundlers)})", not set(api_bundlers) & set(telegram_bundlers))
+    check("the API's keys are the default", [a.address for a in bundler.bundler_keys()] == api_bundlers)
+    api_bundler = bundler.resolve_bundler().address
+    check("...and the first of them is the deployer", api_bundler == Web3.to_checksum_address(os.environ["SEPOLIA_ACCOUNT"]))
+    check("every bundler key is a plain account holding gas on this fork",
+          all(w3.eth.get_code(a) == b"" and w3.eth.get_balance(a) > 0 for a in api_bundlers + telegram_bundlers))
     check("a fork never broadcasts privately", bundler._send_w3_for(NETWORK) is None)
     check("live mainnet does", bundler._send_w3_for("mainnet") is not None)
+    check("...and so does live BSC", bundler._send_w3_for("bsc") is not None)
 
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
     token = w3.eth.contract(address=usdc, abi=ERC20_ABI)
@@ -818,14 +835,14 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     # The quote/confirm split itself. A quote prices a transaction that is still unsigned and
     # unsent; it cannot be confirmed in the turn that raised it, it belongs to one user, it works
     # once, and what it quoted has to match what the chain then charges.
-    sent_before = w3.eth.get_transaction_count(api_bundler)
+    sent_before = sent_by_bundlers()
     held_before = token.functions.balanceOf(payee).call()
     same_turn = next_turn()
     quoted = tools.transfers.transfer_erc20.func(
         same_turn, token="usdc", recipient="payee", amount=7
     )
     check("a quote says plainly that nothing was sent", "NOT SENT" in quoted["status"], quoted["status"])
-    check("quoting broadcasts nothing", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    check("quoting broadcasts nothing", sent_by_bundlers() == sent_before)
     check("...and moves no tokens", token.functions.balanceOf(payee).call() == held_before)
     check("the quote names the contract the value goes through", quoted["destinations"] == [usdc],
           str(quoted["destinations"]))
@@ -833,25 +850,29 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
           str(quoted.get("network")))
     check("the quote describes the transfer itself", "7" in quoted["action"] and payee[2:10].lower()
           in quoted["action"].lower().replace("0x", ""), quoted["action"])
-    check("the quote prices it in USD", quoted["total_usd"] > 0, str(quoted.get("total_usd")))
-    check("the ceiling is at least the estimate", quoted["max_total_usd"] >= quoted["total_usd"],
-          f'{quoted["max_total_usd"]} vs {quoted["total_usd"]}')
-    check("the protocol fee is quoted separately", quoted["protocol_fee_usd"] > 0,
-          str(quoted.get("protocol_fee_usd")))
+    # The model is shown one fee figure; the breakdown and the ceiling stay with the stored quote.
+    [stored] = quotes.raised_in(user_id, CHAIN_ID, same_turn.context.turn_id)
+    cost = stored.cost
+    check("the quote shows the fees as one USD figure", quoted["fees_usd"] == cost["total_usd"] > 0,
+          f'{quoted.get("fees_usd")} vs {cost.get("total_usd")}')
+    check("...and none of the breakdown", not {"network_fee_usd", "protocol_fee_usd", "max_total_usd"} & set(quoted),
+          str(sorted(quoted)))
+    check("the ceiling is at least the estimate", cost["max_total_usd"] >= cost["total_usd"],
+          f'{cost["max_total_usd"]} vs {cost["total_usd"]}')
+    check("the protocol fee is priced separately", cost["protocol_fee_usd"] > 0, str(cost.get("protocol_fee_usd")))
     # The quote ran the wallet checks itself -- the agent no longer calls preflight_check first.
     check("the quote says what it is worth and what the (watched) USDC counts toward the limit",
           abs(quoted["usd_value"] - 7) < 0.1 and abs(quoted["charged_usd"] - 7) < 0.1,
           f'{quoted.get("usd_value")} / {quoted.get("charged_usd")}')
-    check("...and what is left of the limit, and of the session key",
-          quoted["remaining_usd"] > 0 and quoted["session_expires_in_secs"] > 0,
-          f'{quoted.get("remaining_usd")} / {quoted.get("session_expires_in_secs")}')
+    check("...but not what is left of the limit, nor the key's time while it has weeks",
+          "remaining_usd" not in quoted and "session_expires_in_secs" not in quoted, str(sorted(quoted)))
 
     try:
         tools.sending.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
         check("confirming in the quoting turn is refused", False, "it was sent")
     except ToolException as e:
         check("confirming in the quoting turn is refused", "has not seen the cost" in str(e), str(e)[:160])
-    check("...and still nothing was broadcast", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    check("...and still nothing was broadcast", sent_by_bundlers() == sent_before)
 
     try:
         quotes.take(user_id + 9_999, CHAIN_ID, quoted["quote_id"], next(turn))
@@ -864,17 +885,17 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     check("confirming sends the quoted transfer, once",
           token.functions.balanceOf(payee).call() - held_before == 7 * unit)
     check("the real cost stayed under the quoted ceiling",
-          actual["total_fee_usd"] <= quoted["max_total_usd"], 
-          f'${actual["total_fee_usd"]:.4f} charged vs ${quoted["max_total_usd"]:.4f} quoted as the max')
+          actual["total_fee_usd"] <= cost["max_total_usd"],
+          f'${actual["total_fee_usd"]:.4f} charged vs ${cost["max_total_usd"]:.4f} quoted as the max')
     # Tight on purpose. A quote that is merely an upper bound is not a price: it is the number the
     # user decides on, so it has to track what the chain then charges, not the gas that was merely
     # reserved. 10% leaves room for the base fee moving between the quote and the block.
     check("the quoted cost was within 10% of the real one",
-          abs(actual["total_fee_usd"] - quoted["total_usd"]) <= 0.10 * actual["total_fee_usd"],
-          f'quoted ${quoted["total_usd"]:.4f}, charged ${actual["total_fee_usd"]:.4f}')
+          abs(actual["total_fee_usd"] - quoted["fees_usd"]) <= 0.10 * actual["total_fee_usd"],
+          f'quoted ${quoted["fees_usd"]:.4f}, charged ${actual["total_fee_usd"]:.4f}')
     report["quote_vs_actual"] = {
-        "quoted_total_usd": quoted["total_usd"],
-        "quoted_max_usd": quoted["max_total_usd"],
+        "quoted_total_usd": quoted["fees_usd"],
+        "quoted_max_usd": cost["max_total_usd"],
         "charged_total_usd": actual["total_fee_usd"],
     }
 
@@ -888,7 +909,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     # before anything is signed, sent or paid for. (The bundler's execution estimate would refuse
     # it too, as BudgetExceeded; the check's reason is the one the user can act on.)
     deal_erc20(usdc, wallet, 5_000 * unit)
-    nonce_before = w3.eth.get_transaction_count(api_bundler)
+    nonce_before = sent_by_bundlers()
     native_before = w3.eth.get_balance(wallet)
     try:
         tools.transfers.transfer_erc20.func(next_turn(), token="usdc",
@@ -897,7 +918,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     except ToolException as e:
         check("a transfer over the cap is refused, saying what is left, before sending",
               "spending limit" in str(e) and "is left" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
-    check("...so the bundler sent nothing", w3.eth.get_transaction_count(api_bundler) == nonce_before)
+    check("...so the bundlers sent nothing", sent_by_bundlers() == nonce_before)
     check("...and the wallet paid no gas", w3.eth.get_balance(wallet) == native_before)
 
     # A paused wallet: refused with the reason, rather than as a failed simulation.
@@ -910,7 +931,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
               "paused" in str(e) and "Nothing was sent" in str(e), str(e)[:200])
     finally:
         owner_action(c, headers, acct, "/api/wallet/unpause/prepare", {})
-    check("...and the bundler sent nothing for it either", w3.eth.get_transaction_count(api_bundler) == nonce_before)
+    check("...and the bundlers sent nothing for it either", sent_by_bundlers() == nonce_before)
     owner_action(c, headers, acct, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "remove"})
 
     for t in report["transfers"]:
@@ -928,7 +949,7 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     session_handler, entry_point, calldata, nonce = prepare_execute_call(
         user_id, usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:])
     )
-    bundler_account = bundler.resolve_bundler(w3)
+    bundler_account = bundler.resolve_bundler()
     op_quote = bundler.quote_user_op(
         user_id, session_handler, entry_point, calldata, nonce, bundler_account
     )
@@ -973,6 +994,317 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
               f' = ${t["total_fee_usd"]:.4f}  ({t["op_gas_used"]:,} gas at {t["gas_price_gwei"]:.3f} gwei;'
               f' bundler net {t["bundler_net_wei"]:+,} wei)')
     print(f"  cost report written to {COST_REPORT_PATH}")
+
+
+def deploy_another_wallet(c: TestClient, acct, headers: dict) -> str:
+    """A second account's wallet, deployed the way test_deploy_round_trip does it, minus the checks."""
+    body = {"chain_id": CHAIN_ID, "deployer": acct.address, "daily_limit_usd": 50_000,
+            "watched_tokens": [], "prefund_eth": "1"}
+    prepared = c.post("/api/deploy", headers=headers, json=body).json()
+    tx_hash = sign_and_send(acct, prepared["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    r = c.post("/api/deploy/confirm", headers=headers, json={
+        "chain_id": CHAIN_ID, "deployer": acct.address, "tx_hash": tx_hash,
+        "predicted_address": prepared["predicted_address"],
+    })
+    assert r.status_code == 200, f"second wallet: {r.status_code} {r.text[:250]}"
+    return r.json()["wallet_address"]
+
+
+# How many wallets test_bundling puts in one bundle: the run's own wallet plus new ones. Two by
+# default, to keep the run short; E2E_BUNDLE_WALLETS=40 fills a whole bundle (bundler.BUNDLE_MAX_OPS).
+BUNDLE_WALLETS = int(os.getenv("E2E_BUNDLE_WALLETS", "2"))
+
+
+def test_bundling(c: TestClient, acct, headers: dict, wallet: str):
+    """
+    Several accounts' ops in ONE handleOps (bundler.Lane): every one runs, each from its own wallet,
+    each found by its own hash in the shared receipt, History reads each from its own logs, and
+    the bundler is repaid in full.
+
+    The ops are queued all at once, as ops pile up while the lane is busy, so the lane forms the
+    bundle itself -- caps, one op per wallet, the simulation and the fee -- exactly as under load.
+    """
+    n = BUNDLE_WALLETS
+    print(f"\n[7d] bundling: {n} wallets' transfers in one handleOps")
+    senders = [(headers, wallet)]
+    for _ in range(n - 1):
+        other = new_funded_account()
+        other_headers = sign_in_as(c, other)
+        senders.append((other_headers, deploy_another_wallet(c, other, other_headers)))
+    print(f"  INFO  {n - 1} more wallets deployed")
+
+    usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    token = w3.eth.contract(address=usdc, abi=ERC20_ABI)
+    unit = 10 ** token.functions.decimals().call()
+    account = bundler.resolve_bundler()
+    ops = []  # (user_id, wallet, payee, amount, prepared)
+    for i, (account_headers, sender) in enumerate(senders, start=1):
+        user_id = c.get("/api/me", headers=account_headers).json()["user_id"]
+        deal_erc20(usdc, sender, 100 * unit)
+        payee, amount = Account.create().address, i * unit
+        session_handler, entry_point, calldata, nonce = prepare_execute_call(
+            user_id, usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:])
+        )
+        _, key_ciphertext = get_session_key(user_id, CHAIN_ID, sender)
+        quote = bundler.quote_user_op(user_id, session_handler, entry_point, calldata, nonce, account)
+        prepared = bundler.prepare_user_op(user_id, key_ciphertext, session_handler, entry_point, quote, account)
+        ops.append((user_id, sender, payee, amount, prepared))
+
+    lane = bundler._lane_for(ops[0][0], account)
+    cap = bundler.bundle_gas_cap(NETWORK)
+    counted = sum(prepared.outer_gas for *_, prepared in ops)
+    print(f"  INFO  {n} ops count {counted:,} gas against the bundle cap of {cap:,} on {NETWORK}")
+    nonce_before = w3.eth.get_transaction_count(account.address)
+    balance_before = w3.eth.get_balance(account.address)
+    queued = [bundler._Queued(prepared) for *_, prepared in ops]
+    with lane._ready:
+        lane._queue.extend(queued)
+        lane._ready.notify()
+    bundles = [q.on_wire.result(timeout=120) for q in queued]
+    groups: dict[int, list] = {}
+    for (*_, prepared), bundle in zip(ops, bundles):
+        groups.setdefault(id(bundle), []).append(prepared)
+
+    results = [
+        bundler.await_user_op(bundler.SubmittedUserOp(prepared, lane.w3, lane.entry_point, lane, bundle))
+        for (*_, prepared), bundle in zip(ops, bundles)
+    ]
+    if n <= bundler.BUNDLE_MAX_OPS and counted <= cap:
+        check(f"all {n} ops went out in one transaction", len(groups) == 1, f"{len(groups)} bundles")
+        check("...the bundler's only one", w3.eth.get_transaction_count(account.address) == nonce_before + 1)
+    else:
+        check(f"{n} ops went out in {len(groups)} bundles, each within the op and gas caps",
+              all(len(g) == 1 or (len(g) <= bundler.BUNDLE_MAX_OPS and sum(p.outer_gas for p in g) <= cap)
+                  for g in groups.values()),
+              str([len(g) for g in groups.values()]))
+    check(f"all {n} ran, each in its own bundle's transaction",
+          all(r[1]["status"] == 1 and r[0] in b.sent.hashes for r, b in zip(results, bundles)),
+          str({r[0].hex() for r in results}))
+    paid = [token.functions.balanceOf(payee).call() == amount for _, _, payee, amount, _ in ops]
+    check(f"every payee got exactly its amount ({sum(paid)}/{n})", all(paid))
+
+    entry_point = w3.eth.contract(address=lane.entry_point.address, abi=ientry_point)
+    receipts = list({r[1]["transactionHash"]: r[1] for r in results}.values())
+    events = [e for receipt in receipts
+              for e in entry_point.events.UserOperationEvent().process_receipt(receipt, errors=DISCARD)]
+    check(f"the receipts hold all {n} ops' events, every one successful",
+          sorted(e["args"]["sender"] for e in events) == sorted(Web3.to_checksum_address(s) for _, s, *_ in ops)
+          and all(e["args"]["success"] for e in events), f"{len(events)} events")
+
+    read_right = 0
+    for (_, sender, payee, amount, prepared), (tx_hash, receipt) in zip(ops, results):
+        moved = tx_movements.assistant_movements(
+            sender, w3.eth.get_transaction(tx_hash), receipt, lambda t: ("USDC", 6) if t == usdc else None,
+            native=get_native_asset_ticker(CHAIN_ID), wrapped=None, exchanges=(), user_op_hash=prepared.user_op_hash,
+        )
+        read_right += [(m.direction, m.amount, m.counterparty) for m in moved] == [("out", amount, payee)]
+    check(f"History reads each wallet from its own logs: its one transfer ({read_right}/{n})", read_right == n)
+
+    gas_used = sum(receipt["gasUsed"] for receipt in receipts)
+    net = w3.eth.get_balance(account.address) - balance_before
+    print(f"  INFO  {len(receipts)} transaction(s), {gas_used:,} gas: {gas_used // n:,} gas an op; "
+          f"bundler net {net:+,} wei")
+    check("the bundler was repaid in full", net >= 0, f"net {net} wei")
+
+
+# How many wallets test_bundler_pool sends from at once, spread over the API's bundler keys: nine by
+# default (three a key, every kind of transaction at least once); E2E_POOL_WALLETS=120 gives three
+# keys forty each. E2E_POOL_OUT names a JSON file to list the wallets in, so the agent can be run
+# against the same ones afterwards.
+POOL_WALLETS = int(os.getenv("E2E_POOL_WALLETS", "9"))
+POOL_OUT = os.getenv("E2E_POOL_OUT")
+
+
+def _pool_kinds() -> list[tuple[str, object, dict]]:
+    """
+    What test_bundler_pool's wallets send, wallet by wallet in turn: (label, quoting tool, its
+    arguments). Small enough for any fork's prices, a wallet's 1 native coin and its 100 USDC.
+    """
+    native = get_native_asset_ticker(CHAIN_ID)
+    return [
+        ("USDC transfer", tools.transfers.transfer_erc20, {"token": "usdc", "recipient": "payee", "amount": 1.5}),
+        (f"{native} send", tools.transfers.send_eth, {"recipient": "payee", "amount_eth": 0.001}),
+        (f"wrap {native}", tools.transfers.wrap_eth, {"amount_eth": 0.002}),
+        (f"swap {native} for USDC", tools.uniswap.swap, {"token_in": "eth", "token_out": "usdc", "amount_in": 0.001}),
+        (f"swap USDC for {native}", tools.uniswap.swap, {"token_in": "usdc", "token_out": "eth", "amount_in": 2}),
+        ("swap and send", tools.uniswap.swap,
+         {"token_in": "eth", "token_out": "usdc", "amount_in": 0.001, "recipient": "payee"}),
+        ("ERC-8004 rating", tools.erc8004.post_reputation_feedback, {"score": 87, "tag2": "pool-test"}),
+    ]
+
+
+def test_bundler_pool(c: TestClient):
+    """
+    The API's pool of bundler keys under load: many wallets' Confirms at once, each a different kind
+    of transaction -- transfers, native sends, wraps, swaps both ways, a swap sent on to a contact,
+    ERC-8004 ratings -- through the production path (tools.sending.submit_quoted, then
+    settle_quoted). They spread over the keys (bundler.pick_bundler), each key bundles its own share
+    (bundler.Lane), every op runs and does what it was quoted to do, History lists each under the
+    hash that ran it, and every key is repaid.
+    """
+    n = POOL_WALLETS
+    keys = [a.address for a in bundler.bundler_keys()]
+    kinds = _pool_kinds()
+    print(f"\n[7e] the bundler pool: {n} wallets' mixed transactions confirmed at once over {len(keys)} keys")
+
+    usdc_address = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
+    usdc = w3.eth.contract(address=usdc_address, abi=ERC20_ABI)
+    wrapped = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED)), abi=ERC20_ABI)
+    unit = 10 ** usdc.functions.decimals().call()
+    started = time.monotonic()
+    wallets = []  # one dict per wallet: who it is, what it sends, and what that should change
+    for i in range(n):
+        owner = new_funded_account()
+        owner_headers = sign_in_as(c, owner)
+        wallet = deploy_another_wallet(c, owner, owner_headers)
+        payee = Account.create().address
+        r = add_contact(c, owner_headers, owner, "payee", payee)
+        assert r.status_code == 201, f"contact: {r.status_code} {r.text[:140]}"
+        deal_erc20(usdc_address, wallet, 100 * unit)
+        label, tool, args = kinds[i % len(kinds)]
+        wallets.append({"user_id": c.get("/api/me", headers=owner_headers).json()["user_id"], "wallet": wallet,
+                        "payee": payee, "headers": owner_headers, "kind": label, "tool": tool, "args": args})
+    print(f"  INFO  {n} wallets deployed and funded in {time.monotonic() - started:.0f} s")
+
+    sh_abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    first_sh = w3.eth.contract(address=wallets[0]["wallet"], abi=sh_abi)
+    reputation = w3.eth.contract(address=first_sh.functions.REPUTATION_REGISTRY().call(), abi=REPUTATION_REGISTRY_ABI)
+    agent_id = first_sh.functions.getAgentId().call()
+
+    def effect(item: dict) -> int:
+        """The one figure this wallet's transaction should move."""
+        kind, wallet, payee = item["kind"], item["wallet"], item["payee"]
+        if kind == "USDC transfer" or kind == "swap and send":
+            return usdc.functions.balanceOf(payee).call()
+        if kind.endswith(" send"):
+            return w3.eth.get_balance(payee)
+        if kind.startswith("wrap"):
+            return wrapped.functions.balanceOf(wallet).call()
+        if kind.startswith("swap"):
+            return usdc.functions.balanceOf(wallet).call()
+        return reputation.functions.getLastIndex(agent_id, wallet).call()
+
+    def expected(item: dict, before: int, after: int) -> bool:
+        kind = item["kind"]
+        if kind == "USDC transfer":
+            return after - before == int(Decimal("1.5") * unit)
+        if kind == "swap and send":
+            return after > before
+        if kind.endswith(" send"):
+            return after - before == 10**15
+        if kind.startswith("wrap"):
+            return after - before == 2 * 10**15
+        if kind.startswith("swap USDC"):
+            return before - after == 2 * unit
+        if kind.startswith("swap"):
+            return after > before
+        return after == before + 1
+
+    turn = itertools.count(5_000_000)
+
+    def quote(item: dict) -> dict:
+        runtime = SimpleNamespace(context=AgentContext(user_id=item["user_id"], turn_id=next(turn)))
+        return item["tool"].func(runtime, **item["args"])
+
+    started = time.monotonic()
+    # 8 at a time: each quote is dozens of reads, and an Anvil fork fetching cold state from its
+    # upstream RPC for 32 at once stopped answering altogether (2026-10-20). The Confirms below
+    # still go all at once.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        quoted = list(pool.map(quote, wallets))
+    print(f"  INFO  {n} quotes in {time.monotonic() - started:.1f} s (8 at a time)")
+    check(f"every wallet's transaction is quoted ({n}/{n})", all("quote_id" in q for q in quoted))
+    for item, q in zip(wallets, quoted):
+        item["quote"], item["before"] = q, effect(item)
+
+    nonces = {k: w3.eth.get_transaction_count(k) for k in keys}
+    balances = {k: w3.eth.get_balance(k) for k in keys}
+    barrier = threading.Barrier(n)
+
+    def confirm(item: dict):
+        """One Confirm tap: on the wire, then landed -- or the error a user would see."""
+        barrier.wait(timeout=120)
+        t0 = time.monotonic()
+        try:
+            sending = tools.sending.submit_quoted(item["user_id"], CHAIN_ID, item["quote"]["quote_id"], next(turn))
+            on_wire = time.monotonic() - t0
+            return sending, tools.sending.settle_quoted(sending), on_wire, time.monotonic() - t0
+        except Exception as e:  # noqa: BLE001 -- counted and shown below
+            return None, f"{type(e).__name__}: {e}", None, time.monotonic() - t0
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        results = list(pool.map(confirm, wallets))
+    wall = time.monotonic() - started
+    failed = [(item["kind"], text[:160]) for item, (sending, text, *_) in zip(wallets, results) if sending is None
+              or not text.startswith("Sent")]
+    check(f"all {n} Confirms went out and landed", not failed, str(failed[:5]))
+
+    by_key = Counter(sending.submitted.lane.bundler.address for sending, *_ in results if sending)
+    check(f"the ops spread over all {len(keys)} keys: {[by_key[k] for k in keys]}",
+          set(by_key) == set(keys) and max(by_key.values()) <= 2 * -(-n // len(keys)), str(by_key))
+
+    hashes = {}  # the hash that ran each op, from its reply
+    for item, (sending, text, *_) in zip(wallets, results):
+        if sending and "`" in text:
+            hashes[item["wallet"]] = text.split("`")[1]
+    receipts = {h: w3.eth.get_transaction_receipt(h) for h in set(hashes.values())}
+    entry_point = w3.eth.contract(address=first_sh.functions.ENTRY_POINT().call(), abi=ientry_point)
+    sizes = {h: len(entry_point.events.UserOperationEvent().process_receipt(r, errors=DISCARD)) for h, r in receipts.items()}
+    senders = {h: w3.eth.get_transaction(h)["from"] for h in receipts}
+    cap = bundler.bundle_gas_cap(NETWORK)
+    for k in keys:
+        mine = [h for h in receipts if senders[h] == k]
+        print(f"  INFO  key {keys.index(k) + 1} ({k[:10]}…): {by_key[k]} ops in {len(mine)} transaction(s) of "
+              f"{sorted((sizes[h] for h in mine), reverse=True)} ops, "
+              f"nonce +{w3.eth.get_transaction_count(k) - nonces[k]}, "
+              f"net {w3.eth.get_balance(k) - balances[k]:+,} wei")
+    check("every op ran in a transaction from the key it was given",
+          all(senders[hashes[item["wallet"]]] == sending.submitted.lane.bundler.address
+              for item, (sending, *_) in zip(wallets, results) if sending and item["wallet"] in hashes))
+    check(f"every bundle within the op and gas caps (≤ {bundler.BUNDLE_MAX_OPS} ops, ≤ {cap:,} gas)",
+          all(sizes[h] <= bundler.BUNDLE_MAX_OPS and r["gasUsed"] <= cap for h, r in receipts.items()))
+    check("each key sent only its bundles", all(
+        w3.eth.get_transaction_count(k) - nonces[k] == sum(1 for h in receipts if senders[h] == k) for k in keys))
+    check(f"{n} ops went out in {len(receipts)} transactions", sum(sizes.values()) == n,
+          f"{sum(sizes.values())} ops in the receipts")
+
+    wrong = []
+    for item in wallets:
+        after = effect(item)
+        if not expected(item, item["before"], after):
+            wrong.append((item["kind"], item["before"], after))
+    done = Counter(item["kind"] for item in wallets)
+    check(f"every transaction did what it was quoted to do ({', '.join(f'{k} ×{v}' for k, v in done.items())})",
+          not wrong, str(wrong[:5]))
+
+    listed_right = 0
+    for item in wallets:
+        rows = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=20", headers=item["headers"]).json()["transactions"]
+        ours = [t for t in rows if t["source"] == "assistant"]
+        listed_right += (len(ours) == 1 and ours[0]["status"] == "confirmed"
+                         and ours[0]["tx_hash"] == hashes.get(item["wallet"], "").lower()
+                         and ours[0]["action"] == item["quote"]["action"])
+    check(f"History lists each wallet's one transaction, confirmed, under the hash that ran it ({listed_right}/{n})",
+          listed_right == n)
+
+    net = sum(w3.eth.get_balance(k) - balances[k] for k in keys)
+    check("the keys were repaid in full between them", net >= 0, f"net {net} wei")
+    on_wire = sorted(r[2] for r in results if r[2] is not None)
+    landed = sorted(r[3] for r in results)
+    print(f"  INFO  all {n} at once: on the wire in {on_wire[len(on_wire) // 2]:.2f} s median, "
+          f"{on_wire[-1]:.2f} s slowest; landed in {landed[len(landed) // 2]:.2f} s median, "
+          f"{landed[-1]:.2f} s slowest; {wall:.1f} s for the lot")
+    gas = sum(r["gasUsed"] for r in receipts.values())
+    print(f"  INFO  {gas:,} gas for {n} ops: {gas // n:,} an op")
+
+    if POOL_OUT:
+        with open(POOL_OUT, "w") as f:
+            json.dump({"network": NETWORK, "chain_id": CHAIN_ID, "wallets": [
+                {"user_id": item["user_id"], "wallet": item["wallet"], "payee": item["payee"], "kind": item["kind"]}
+                for item in wallets]}, f, indent=1)
+        print(f"  INFO  wallets listed in {POOL_OUT}")
 
 
 def eoa_call(acct, fn, value: int = 0):
@@ -1166,8 +1498,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
 
     # Only tokens the owner chose, within 12% slippage. Both refusals happen before anything is
     # built or priced, so neither costs the wallet a thing.
-    api_bundler = bundler.resolve_bundler(w3).address
-    sent_before = w3.eth.get_transaction_count(api_bundler)
+    sent_before = sent_by_bundlers()
     try:
         tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=fake_usdc, amount_in=0.001)
         check("a token the user never added is refused by address", False, "it was quoted")
@@ -1185,7 +1516,7 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
     quoted = tools.uniswap.swap.func(next_turn(), token_in="eth", token_out=ticker, amount_in=0.001, slippage_bps=1200)
     check("exactly 12% is quoted", "NOT SENT" in quoted["status"], str(quoted.get("status")))
     tools.sending.cancel_transaction.func(next_turn(), quote_id=quoted["quote_id"])
-    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    check("...and none of that sent anything", sent_by_bundlers() == sent_before)
 
     # Selling it back: the unpriced approval clears (the router is a trusted spender), nothing charged.
     native_before = w3.eth.get_balance(wallet)
@@ -1247,8 +1578,7 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     sh = w3.eth.contract(address=wallet, abi=db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
     limit = read_spending_config(sh)["dailyLimitUsd"] // 10**18
     owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": 100_000})
-    api_bundler = bundler.resolve_bundler(w3).address
-    sent_before = w3.eth.get_transaction_count(api_bundler)
+    sent_before = sent_by_bundlers()
     balance = w3.eth.get_balance(wallet)
     ticker_native = get_native_asset_ticker(CHAIN_ID)
     try:
@@ -1267,7 +1597,7 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
     pre = tools.checks.preflight_check.func(next_turn(), token="eth", amount=balance / 10**18 + 1)
     check("preflight says the wallet doesn't hold it", pre["enough_balance"] is False
           and "the wallet holds" in pre.get("balance_short", ""), str(pre)[:200])
-    check("...and none of that sent anything", w3.eth.get_transaction_count(api_bundler) == sent_before)
+    check("...and none of that sent anything", sent_by_bundlers() == sent_before)
     owner_action(c, headers, acct, "/api/wallet/daily-limit/prepare", {"daily_limit_usd": limit})
     check("the limit is back as it was", read_spending_config(sh)["dailyLimitUsd"] == limit * 10**18)
 
@@ -1867,6 +2197,67 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
     check("newest first", [t["id"] for t in listed] == sorted((t["id"] for t in listed), reverse=True))
 
 
+def test_web_confirm_button(c: TestClient, headers: dict, wallet: str):
+    """
+    The web chat's Confirm button against the real chain: a quote a turn offered shows on
+    GET /api/chat/quote, and POST /api/chat/quote/confirm sends exactly it, with no model, under a
+    turn of its own. It answers once the transaction is on the wire; the History row it names,
+    followed on GET /api/transactions/{id}, lands as a successful transaction.
+    """
+    print("\n[10] the web chat's Confirm button: offered, tapped, sent on chain")
+    import quotes
+
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    # The real turn counter, as a chat turn takes it: a tap needs a later turn than the quote's.
+    turn_id = smart_wallet_agent._next_turn_id()
+    runtime = SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=turn_id))
+    quoted = tools.transfers.transfer_erc20.func(runtime, token="usdc", recipient="payee", amount=1)
+    offered = quotes.offer(user_id, CHAIN_ID, turn_id)
+    check("the turn's one quote is offered", offered is not None and offered.quote_id == quoted["quote_id"])
+
+    card = c.get(f"/api/chat/quote?chain_id={CHAIN_ID}", headers=headers).json()["quote"]
+    check("the card is the stored quote", card is not None and card["quote_id"] == quoted["quote_id"]
+          and card["action"] == quoted["action"], str(card))
+
+    recorded = []
+    saved_record = smart_wallet_agent._record_button
+    # The agent isn't running here; note what would go into the conversation instead.
+    smart_wallet_agent._record_button = lambda *args: recorded.append(args)
+    try:
+        r = c.post("/api/chat/quote/confirm", headers=headers,
+                   json={"chain_id": CHAIN_ID, "quote_id": quoted["quote_id"]})
+    finally:
+        smart_wallet_agent._record_button = saved_record
+    outcome = r.json().get("outcome", "") if r.status_code == 200 else ""
+    row_id = r.json().get("transaction_id") if r.status_code == 200 else None
+    check("the tap sends it, and answers once it's on the wire",
+          r.status_code == 200 and outcome.startswith(f"Sending — {quoted['action']}") and isinstance(row_id, int),
+          f"{r.status_code} {r.text[:200]}")
+    row = {}
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        row = c.get(f"/api/transactions/{row_id}", headers=headers).json()
+        if row.get("status") != "pending":
+            break
+        time.sleep(0.5)
+    sent_hash = row.get("tx_hash") or ""
+    receipt = w3.eth.get_transaction_receipt(sent_hash) if sent_hash else None
+    check("...and the History row it names lands, confirmed, as a transaction that succeeded on chain",
+          row.get("status") == "confirmed" and receipt is not None and receipt["status"] == 1, str(row))
+    check("...recorded as a sent button tap",
+          len(recorded) == 1 and recorded[0][2] == smart_wallet_agent.CONFIRM_BUTTON and recorded[0][4] is True,
+          str(recorded))
+    check("the card is gone, and a second tap sends nothing",
+          c.get(f"/api/chat/quote?chain_id={CHAIN_ID}", headers=headers).json()["quote"] is None
+          and c.post("/api/chat/quote/confirm", headers=headers,
+                     json={"chain_id": CHAIN_ID, "quote_id": quoted["quote_id"]}).status_code == 409)
+
+    listed = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=100", headers=headers).json()["transactions"]
+    row = next((t for t in listed if t["tx_hash"] == sent_hash.lower()), None)
+    check("the History tab lists it as the assistant's, confirmed",
+          row is not None and row["source"] == "assistant" and row["status"] == "confirmed", str(row))
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     require_local_fork()
@@ -1885,10 +2276,13 @@ if __name__ == "__main__":
     test_cross_user_isolation(client, owner, auth_headers, deployed)
     test_contacts_are_owner_managed(client, auth_headers, owner)
     test_self_bundling(client, owner, auth_headers, deployed)
+    test_bundling(client, owner, auth_headers, deployed)
+    test_bundler_pool(client)
     test_allowlist(client, owner, auth_headers, deployed)
     test_custom_tokens(client, owner, auth_headers, deployed)
     test_swaps_and_liquidity(client, owner, auth_headers, deployed)
     test_price_pause_is_named(client, owner, auth_headers, deployed)
     test_transaction_history(client, owner, auth_headers, deployed)
+    test_web_confirm_button(client, auth_headers, deployed)
 
     finish(f"All fork e2e checks passed on {NETWORK}.")

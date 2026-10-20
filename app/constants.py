@@ -15,6 +15,12 @@ CHAIN_ID_CELO = 42220
 CHAIN_ID_ARBITRUM = 42161
 CHAIN_ID_BASE = 8453
 WEI_PER_ETH = 10**18
+
+# How long before the assistant's session key runs out the user starts hearing about it: the
+# dashboard flags it for renewal, the Telegram bot warns, a quote mentions it. A fixed lead time
+# rather than a fraction of the key's life: what the user needs is time to sign a renewal in the web
+# app, and that doesn't scale with how long the key was granted for.
+SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
 # The address(0) sentinel the wallet, SHOracle and both toolkits all use for "native asset".
 # Taken from langchain-erc20 so there is exactly one definition in play: it is what the ERC20
 # toolkit is configured with as native_sentinel, and a mismatch would silently route a native

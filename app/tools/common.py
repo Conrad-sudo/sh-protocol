@@ -286,6 +286,11 @@ def _resolve_contact(user_id: int, name: str, role: str = "recipient", hint: str
 
     "me" names the wallet itself, matching transferFrom_erc20's documented convention.
 
+    An ENS name (sam.eth) gets no special treatment: it is payable only once the owner has saved it
+    as a contact, and then it pays the address the owner signed, not wherever the name points now
+    (see ens_names). Resolving it here would let anyone who can type into the chat register a name
+    and have it paid.
+
     @param role  What this name is being used as, for the error message ("sender", "spender", ...).
     @param hint  Optional extra sentence appended to the error, e.g. how to skip the argument.
     @raises ToolException If the name is not a saved contact.
@@ -295,11 +300,16 @@ def _resolve_contact(user_id: int, name: str, role: str = "recipient", hint: str
 
     address = _get_contact(user_id, name)
     if address is None:
+        ens = (
+            f" The web app can look up '{name}' by its ENS name when the user adds it."
+            if "." in name.strip(". ")
+            else ""
+        )
         raise ToolException(
             f"'{name}' is not a saved contact, so they cannot be used as the {role}. "
             f"Contacts can only be added from the web app, while signed in — you cannot add "
             f"one here, and an address given in this conversation cannot be used instead. "
-            f"Tell the user to add the contact there, then ask them to try again.{hint}"
+            f"Tell the user to add the contact there, then ask them to try again.{ens}{hint}"
         )
     return address
 

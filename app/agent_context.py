@@ -25,3 +25,7 @@ class AgentContext:
     # (a tool result, an on-chain string, a registration file) cannot quote and send in one go.
     # See app/quotes.py.
     turn_id: int = 0
+    # The user's own message that started this turn, verbatim. A quote remembers the one that asked
+    # for it, and confirm_transaction refuses a message that only asks for it again (quotes.repeats):
+    # the same request twice is a new request, not a yes. Empty when the caller has no message.
+    message: str = ""

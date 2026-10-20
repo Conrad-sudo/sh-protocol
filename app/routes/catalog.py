@@ -3,7 +3,6 @@ What this server offers, public and RPC-free: the chains it serves and the token
 """
 from fastapi import APIRouter, HTTPException, status
 
-import telegram_bots
 from constants import (
     get_always_counted_ticker,
     get_default_spenders,
@@ -37,7 +36,7 @@ def list_chains():
     already public on chain, apart from a fork's local node address.
 
     @return  {"chains": [{"chain_id", "name", "native_ticker", "fork", "rpc_url", "exchange",
-             "default_spenders", "telegram_bot"}, ...]}, by chain ID.
+             "default_spenders"}, ...]}, by chain ID.
              `fork` is true when this server points that chain at a local fork (APP_FORK_MODE).
              `rpc_url` is that fork's local node, for the user to set in their browser wallet — each
              fork runs on its own port. None on a live chain: its RPC may carry an API key.
@@ -47,8 +46,7 @@ def list_chains():
              deployed trusting (see /api/deploy), [] where there are none. The Controls page keeps
              them off the removable list, and offers to trust any a wallet is missing: one deployed
              before its chain moved to Uniswap V3 trusts only the V2 router.
-             `telegram_bot` is the username (no @) of that chain's Telegram bot, or None where it
-             has none. Public anyway: anyone can find a bot in Telegram.
+             No Telegram bot here: one bot serves every chain, so /api/me names it.
     """
     chains = []
     for chain_id, name in sorted(CHAIN_NAME_BY_ID.items()):
@@ -69,7 +67,6 @@ def list_chains():
             "rpc_url": get_rpc_url(f"{name}-fork") if fork else None,
             "exchange": get_exchange(chain_id),
             "default_spenders": get_default_spenders(chain_id),
-            "telegram_bot": telegram_bots.bot_username(chain_id),
         })
     return {"chains": chains}
 

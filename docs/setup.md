@@ -12,9 +12,9 @@ Before running any setup, make sure you have completed the one-time steps:
 
    `deploy_wallet.resolve_harness_user` reads it, and `smart_wallet_agent.main` uses the same resolution. If `APP_USER_ID` is unset it falls back to translating `TELEGRAM_CHAT_ID` through the `users` table — which is what keeps a pre-2026-09-10 setup working, since the migration created an account for your old chat id and recorded it as `users.telegram_chat_id`. A raw chat id is never used as a key any more, so an unlinked one is an error rather than a silent new account.
 
-   > **Telegram is optional.** Only the Telegram bots (`make bot`) need bots from [@BotFather](https://t.me/BotFather) — one per network, with groups turned off — and a real Telegram account. Each bot's token goes in `MITFAH_<STEM>_API` and its username (no @) in `MITFAH_<STEM>_USERNAME`, with the stems `ETH`, `SEPOLIA`, `BSC`, `ARB` and `BASE`; a network left out simply has no bot. The bots serve **only private chats that have been linked** to an account through the web app's deep link (`POST /api/integrations/telegram/link`), and one link covers every bot; an unlinked chat is refused. For the interactive CLI (`make agent`), skip all of it and just set `APP_USER_ID`.
+   > **Telegram is optional.** Only the Telegram bot (`make bot`) needs a bot from [@BotFather](https://t.me/BotFather) — one bot for every network, with groups and inline mode turned off — and a real Telegram account. Its token goes in `MITFAH_API` and its username (no @) in `MITFAH_USERNAME`; each user picks the network inside the chat with `/chain`. The bot serves **only private chats that have been linked** to an account through the web app's deep link (`POST /api/integrations/telegram/link`); an unlinked chat is refused. Its `/web` command links the web app: set `WEB_APP_URL` (e.g. `https://mitfah.com`), or it uses the first of `CORS_ORIGINS`. Coming from the five per-network bots? See [Moving from five Telegram bots to one](#moving-from-five-telegram-bots-to-one). For the interactive CLI (`make agent`), skip all of it and just set `APP_USER_ID`.
 
-4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). The bots' usernames (`MITFAH_<STEM>_USERNAME`) are needed only to mint Telegram deep links and to list the bots in the web app, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a sign-in message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from replaying a victim's signature to sign in as them. Signing in with the wallet (SIWE) is the only way in: there is no email, password or Google sign-in.
+4. **Web API secrets** — `make api` needs `JWT_SECRET` (any long random string; `python -c "import secrets;print(secrets.token_hex(32))"`). The bot's username (`MITFAH_USERNAME`) is needed only to mint the Telegram deep link and to show the bot in the web app, and `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`) must list your front end since the refresh cookie requires credentialed CORS. Set `COOKIE_SECURE=0` for local http development. `SIWE_DOMAIN` (comma-separated, default `localhost:3000`) is the site a sign-in message must name — set it to `mitfah.com` in production; a message written for any other site is refused, which is what stops a phishing page from replaying a victim's signature to sign in as them. Signing in with the wallet (SIWE) is the only way in: there is no email, password or Google sign-in.
    >
    > **The LLM provider is optional too.** The agent defaults to DeepSeek (`DEEPSEEK_API_KEY`); swap in any other [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)) and that key is no longer required.
 
@@ -28,7 +28,7 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
 
    > **Each fork has its own port, so several can run at once:** `sepolia-fork` 8545, `bsc-fork` 8546, `mainnet-fork` 8547, `arbitrum-fork` (`make arb-fork`) 8548, `base-fork` 8549. Plain `anvil` and `celo-fork` use 8545 too. The fork targets pass `--port` to Anvil themselves, and `fund`/`deploy` pick the port from `ARGS`, so the commands are the same as before — just always pass `ARGS`. The ports live in two places that must agree: the Makefile's `FORK_PORT_*` variables and the `*-fork` rows of `RPCS` in `app/seed_data.py` (re-run `make db` after changing them). Their chain IDs differ, so one API process with `APP_FORK_MODE=1` serves every running fork. In your browser wallet, point each network at its fork's port.
 
-   > **Starting a fork also funds the bundlers.** As soon as the fork answers, the target gives `API_BUNDLER` and `TELEGRAM_BUNDLER` 100 of the chain's native coin each (the same `anvil_setBalance` as `make fund`). If that port already has a node on it, the target refuses to start instead.
+   > **Starting a fork also funds the bundlers.** As soon as the fork answers, the target gives every bundler key (`API_BUNDLER_n`, `TELEGRAM_BUNDLER_n`) 100 of the chain's native coin each (the same `anvil_setBalance` as `make fund`). If that port already has a node on it, the target refuses to start instead.
 2. **Deploy the shared protocol** — `make deploy ARGS="<network>"`. Runs `script/DeploySHProtocol.s.sol`, which deploys the infrastructure shared by all users: `EntryPoint`, mocks (on Anvil), `SHOracle`, `SHTreasury`, `SHRegistry`, `SpendingLimitModule`, and `SHFactory` (with the module set via the factory constructor). Only needs to be re-run when this infra doesn't exist yet on the target chain (e.g. after restarting Anvil, which wipes all chain state).
 3. **Start and configure Vault** — start the Vault Docker container, then run `make vault`. Vault holds the Transit key that encrypts/decrypts session keys; it must be ready before any session key is created in step 5.
 4. **Sync the database** — `make db`. Seeds reference data (token addresses, selectors, RPC URLs, Chainlink feed addresses) and, critically, reads the `SHFactory` address out of the Forge broadcast file written in step 2 (`broadcast/DeploySHProtocol.s.sol/<chain_id>/run-latest.json`) into the `factory` table. This step must run *after* step 2 — `deploy_wallet.py` resolves the factory address from the DB, not from the broadcast file directly. Safe to re-run any time; it's idempotent.
@@ -45,7 +45,7 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
 
 6. **Start talking to it** — `make bot` (Telegram) or `make agent` (interactive CLI).
 
-   > **The Telegram bots follow `APP_FORK_MODE`, like the API.** Each bot acts on its own network, and with `APP_FORK_MODE=1` that is the network's local fork. A bot whose network isn't running (or answers as another chain) is left off with a message saying why, and the rest start — so on forks, start the forks you want first. Plain Anvil has no bot.
+   > **The Telegram bot follows `APP_FORK_MODE`, like the API.** With `APP_FORK_MODE=1` every network it offers in `/chain` is that network's local fork. A network that isn't running (or answers as another chain) when the bot starts is left out until the next start, with a message saying why — so on forks, start the forks you want first. Plain Anvil is never offered.
 
 > **Shortcut — `make setup-agent ARGS="<network>"`.** Runs steps 2, 4, 5, and 6 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Steps 1 (start the network) and 3 (Vault) are *not* part of this chain — start the network first (skip this for live deployments), and make sure Vault is already running and configured (it persists across redeploys, so you don't need to re-run `make vault` every time). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 5 above.
 >
@@ -118,7 +118,7 @@ Must be re-run (along with steps 1, 2, and 4) whenever Anvil is restarted — ch
 >
 > Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below. No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
 
-**Step 6 — No Telegram here.** There is no Telegram bot for plain Anvil: the bots are per network, for Ethereum, Sepolia, BNB Smart Chain, Arbitrum One and Base (live or forked), so `make bot` has nothing to start. Talk to the agent through the interactive CLI below instead.
+**Step 6 — No Telegram here.** The Telegram bot serves Ethereum, Sepolia, BNB Smart Chain, Arbitrum One and Base (live or forked), not plain Anvil, so it has nothing to offer a wallet on Anvil. Talk to the agent through the interactive CLI below instead.
 
 **Step 7 — Chat:**
 
@@ -152,7 +152,7 @@ make mainnet-fork
 make deploy ARGS="mainnet-fork"
 ```
 
-`ARGS="mainnet-fork"` sends to the mainnet fork's port (8547) and signs with `SEPOLIA_ACCOUNT` / `API_BUNDLER`. Without it, `make deploy` targets plain Anvil on 8545 with the Anvil burner key.
+`ARGS="mainnet-fork"` sends to the mainnet fork's port (8547) and signs with `SEPOLIA_ACCOUNT` / `API_BUNDLER_1`. Without it, `make deploy` targets plain Anvil on 8545 with the Anvil burner key.
 
 **Step 3 — Start and configure Vault:**
 
@@ -182,7 +182,7 @@ make deploy-wallet ARGS="mainnet-fork"
 **Step 6 — Start:**
 
 ```bash
-make bot      # Telegram bots
+make bot      # Telegram bot
 make agent    # Interactive CLI
 ```
 
@@ -215,7 +215,7 @@ make sepolia-fork
 make deploy ARGS="sepolia-fork"
 ```
 
-`ARGS="sepolia-fork"` tells the Makefile to sign with `SEPOLIA_ACCOUNT` / `API_BUNDLER` while still broadcasting to the local fork at `http://127.0.0.1:8545`.
+`ARGS="sepolia-fork"` tells the Makefile to sign with `SEPOLIA_ACCOUNT` / `API_BUNDLER_1` while still broadcasting to the local fork at `http://127.0.0.1:8545`.
 
 **Step 3 — Start and configure Vault:**
 
@@ -327,7 +327,7 @@ make agent
 
 ## Sepolia Deployment (Live)
 
-Requires `SEPOLIA_RPC_URL` (Alchemy endpoint), and `API_BUNDLER` and `TELEGRAM_BUNDLER` funded with Sepolia ETH — the first deploys and bundles for the API, the second bundles for the Telegram bot.
+Requires `SEPOLIA_RPC_URL` (Alchemy endpoint), and every `API_BUNDLER_n` and `TELEGRAM_BUNDLER_n` key funded with Sepolia ETH — `API_BUNDLER_1` deploys, the API's keys bundle for the API, the Telegram ones for the bot.
 
 There's no local node to start for a live deployment, so this flow skips step 1 above.
 
@@ -364,7 +364,7 @@ make db
 make deploy-wallet ARGS="sepolia"
 ```
 
-On Sepolia, as everywhere, the app is its own bundler: `bundler.py` submits UserOps inside `handleOps` from `API_BUNDLER` (the API) or `TELEGRAM_BUNDLER` (the bot), which the EntryPoint repays out of each wallet's prefund. Nothing tops those keys up on a live chain, so keep them funded. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
+On Sepolia, as everywhere, the app is its own bundler: `bundler.py` submits UserOps inside `handleOps` from one of the `API_BUNDLER_n` keys (the API) or the `TELEGRAM_BUNDLER_n` keys (the bot), which the EntryPoint repays out of each wallet's prefund. Nothing tops those keys up on a live chain, so keep them funded. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
 
 > Uniswap V3 is officially deployed on Sepolia, so the swap, quote and liquidity-position tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and one session key that can drive any external call within that cap.
 
@@ -433,7 +433,7 @@ make db
 make deploy-wallet ARGS="bsc"
 ```
 
-BSC is self-bundled like every other network: `bundler.py` signs `handleOps` with `API_BUNDLER` or `TELEGRAM_BUNDLER`, depending on which process is running (see `bundler.resolve_bundler`). On `bsc-fork` `make fund` tops both up; on live BSC they must hold real BNB. Live BSC has not been exercised yet.
+BSC is self-bundled like every other network: `bundler.py` signs `handleOps` with one of the `API_BUNDLER_n` or `TELEGRAM_BUNDLER_n` keys, depending on which process is running (see `bundler.pick_bundler`). On `bsc-fork` `make fund` tops them all up; on live BSC they must hold real BNB. Live BSC has not been exercised yet.
 
 **Step 5 — Start:**
 
@@ -449,3 +449,16 @@ make agent
 > ```
 >
 > Since there's no local node to start for a live deployment, this alone covers steps 1, 3, and 4 above, finishing with `make agent` (not `make bot`) from step 5. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live BSC** — make sure that's what you intend before running it. Also note the `make deploy` gap flagged in step 1 above: confirm `NETWORK_ARGS` actually resolves to a funded BSC broadcast before relying on this shortcut for a live BSC deploy.
+
+---
+
+## Moving from five Telegram bots to one
+
+Until 2026-10-16 each network had a Telegram bot of its own. Now one bot serves every network, and each user picks the network inside the chat with `/chain`. To move an installation that ran the five bots:
+
+1. **Make one bot in [@BotFather](https://t.me/BotFather).** Turn groups off (`/setjoingroups` → Disable) and leave inline mode off (a new bot starts with it off). The bot answers only private chats either way; this stops it being added to a group at all.
+2. **Update `.env`.** Set `MITFAH_API` to the new bot's token and `MITFAH_USERNAME` to its username (no @). Delete the ten old variables: `MITFAH_ETH_API`, `MITFAH_SEPOLIA_API`, `MITFAH_BSC_API`, `MITFAH_ARB_API`, `MITFAH_BASE_API` and the five matching `…_USERNAME`s. Nothing reads them any more; if `MITFAH_API` is missing while some are still set, `make bot` names them. `TELEGRAM_MAX_CONCURRENT` (how many Telegram chat turns run at once, default 64) is optional.
+3. **Run `make db`** before restarting anything. It adds `users.telegram_chain_id`, where each account's `/chain` choice is kept (migration 6). The bot refuses to start without it, and the API writes it too: unlinking Telegram clears it.
+4. **Restart `make api` and `make bot`** (still exactly one copy of the bot). The API now gives the bot's username in `/api/me` (`telegram_bot`) instead of per network in `/api/chains`, and its link endpoint takes no chain. Deploy the matching web build with it: an older one looks for the bots in `/api/chains` and would offer no Telegram link.
+5. **Users press Start in the new bot.** Their link carries over: in a private chat a user's chat id is the same in every bot, so the chat id already stored for their account (`users.telegram_chat_id`) still matches and nobody links again. Until they press Start the bot may not write to them, so they get no daily checks. Each network's conversation is still there and resumes when the user picks that network with `/chain`.
+6. **Retire the five old bots.** Nothing answers in them once `make bot` runs with the new token. Point their users to the new bot (a last message, or each old bot's description in BotFather) before deleting them.

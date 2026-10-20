@@ -7,6 +7,7 @@ nonces and the chat's rationing live in this process.
 import os
 from contextlib import asynccontextmanager
 
+import anyio.to_thread
 import hvac.exceptions
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
@@ -26,7 +27,9 @@ import routes.owner
 import routes.signin
 import routes.telegram_link
 import routes.wallet
+from chat_limits import CONFIRM_MAX_CONCURRENT
 from redact import install_log_redaction
+from routes.chat import CHAT_MAX_CONCURRENT
 from routes.deps import limiter
 from smart_wallet_agent import (
     close_checkpointer,
@@ -40,15 +43,22 @@ load_dotenv()
 # uvicorn configures its log handlers before it imports this module, so they exist by now.
 install_log_redaction()
 
+# The threads every plain-`def` route runs on. anyio's default is 40; chat turns and quote-card taps
+# hold up to CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT of them, for seconds at a time, so the
+# pool is that plus the default's 40 for everything else -- the dashboard, sign-in, History.
+API_THREADS = CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT + 40
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
-    Opens the agent's checkpointer and builds the agent on startup, closing it on shutdown.
+    Sizes the route threads (API_THREADS), opens the agent's checkpointer and builds the agent on
+    startup, closing it on shutdown.
 
-    Exactly what telebot.py does around its bots. Without it `agent` stays None and every
+    Exactly what telebot.py does around its bot. Without it `agent` stays None and every
     /api/chat request fails on the first attribute access.
     """
+    anyio.to_thread.current_default_thread_limiter().total_tokens = API_THREADS
     await open_checkpointer()
     init_agent()
     try:

@@ -1,17 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { QRCodeSVG } from 'qrcode.react'
-import { Button, Loader, Message, Modal, Text, useToaster } from 'rsuite'
+import { Button, Loader, Message, Text, useToaster } from 'rsuite'
 import { ApiError } from '../../api/client'
 import { createTelegramLink, telegramBotUrl, unlinkTelegram } from '../../api/telegram'
 import type { Me } from '../../api/types'
-import { useSelectedChain } from '../../chain/useSelectedChain'
 import { useMe } from '../../hooks/useMe'
 import { useNow } from '../../hooks/useNow'
-import { chainName } from '../../wallet/chains'
 import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
-import { ChainLogo } from '../wallet/ChainSwitcher'
 
 const POLL_MS = 3_000
 
@@ -82,117 +79,47 @@ function WaitingForTelegram({ link, onRenew }: { link: PendingLink; onRenew: () 
   )
 }
 
-/** A network's Telegram bot. */
-interface Bot {
-  chainId: number
-  username: string
-}
-
 /**
- * One bot's QR code, large and on its own. Side by side, the small codes confuse a phone's camera,
- * which can read the neighbour of the one it's aimed at.
+ * Where to chat once linked: the bot, as a link and, on a desktop, a QR code to scan with a phone.
+ * A bot may only write to someone who pressed Start in it, hence the ask (an account linked before
+ * there was one bot hasn't yet). It serves every network, and /chain there picks the one it acts on.
  */
-function BotQrModal({ bot, open, onClose }: { bot: Bot | null; open: boolean; onClose: () => void }) {
-  if (!bot) return null
-  const name = chainName(bot.chainId)
-  const url = telegramBotUrl(bot.username)
+function TelegramBot({ username }: { username: string }) {
+  const url = telegramBotUrl(username)
   return (
-    <Modal open={open} onClose={onClose} size="xs">
-      <Modal.Header>
-        <Modal.Title>{`${name} bot`}</Modal.Title>
-      </Modal.Header>
-      <Modal.Body className="mf-telegram-bot-large">
-        <div className="mf-qr">
-          <QRCodeSVG value={url} size={256} marginSize={2} title={`QR code of the ${name} bot`} />
-        </div>
-        <Text>
-          Scan this with your phone's camera, then press <strong>Start</strong>.
-        </Text>
-        <a href={url} target="_blank" rel="noopener noreferrer">
-          @{bot.username}
-        </a>
-      </Modal.Body>
-      <Modal.Footer className="mf-modal-actions">
-        <Button appearance="subtle" onClick={onClose}>
-          Close
-        </Button>
-      </Modal.Footer>
-    </Modal>
-  )
-}
-
-/**
- * Where to chat once linked: the bots of the networks this account has a wallet on, each as a link
- * and, on a desktop, a QR code that opens large on its own, to scan with a phone. A bot may only
- * write to someone who pressed Start in it, hence the ask.
- */
-function TelegramBots({ bots }: { bots: Bot[] }) {
-  // The bot whose code is shown large. Kept after closing, so the dialog doesn't empty as it animates out.
-  const [enlarged, setEnlarged] = useState<Bot | null>(null)
-  const [open, setOpen] = useState(false)
-
-  return (
-    // While one code is large, the small ones are hidden, so the camera sees only that one.
-    <div className="mf-telegram-bots" data-enlarged={open || undefined}>
+    <div className="mf-telegram-bot">
       <Text muted size="sm">
-        Each network has its own bot. Open the ones you want and press <strong>Start</strong>.
+        Open the bot and press <strong>Start</strong>. Send <strong>/chain</strong> there to switch networks.
       </Text>
-      <ul>
-        {bots.map(bot => {
-          const url = telegramBotUrl(bot.username)
-          return (
-            <li key={bot.chainId}>
-              <span className="mf-chain-option">
-                <ChainLogo chainId={bot.chainId} />
-                {chainName(bot.chainId)}
-              </span>
-              <button
-                type="button"
-                className="mf-qr mf-telegram-bot-qr"
-                aria-label={`Enlarge the ${chainName(bot.chainId)} bot's QR code`}
-                onClick={() => {
-                  setEnlarged(bot)
-                  setOpen(true)
-                }}
-              >
-                <QRCodeSVG value={url} size={112} marginSize={2} aria-hidden />
-              </button>
-              <a href={url} target="_blank" rel="noopener noreferrer">
-                @{bot.username}
-              </a>
-            </li>
-          )
-        })}
-      </ul>
-      <Text muted size="sm" className="mf-telegram-bot-qr">
-        Or click a code to enlarge it, and scan it with your phone's camera.
-      </Text>
-      <BotQrModal bot={enlarged} open={open} onClose={() => setOpen(false)} />
+      <div className="mf-telegram-qr">
+        <div className="mf-qr">
+          <QRCodeSVG value={url} size={144} marginSize={2} title="QR code of the Telegram bot" />
+        </div>
+        <Text muted size="sm">
+          Or scan this with your phone's camera.
+        </Text>
+      </div>
+      <a href={url} target="_blank" rel="noopener noreferrer">
+        @{username}
+      </a>
     </div>
   )
 }
 
 /**
- * Linking the Telegram bots to this account. The server hands out a one-time t.me link; the bot
+ * Linking the Telegram bot to this account. The server hands out a one-time t.me link; the bot
  * learns the chat from Telegram itself when the user presses Start, so nothing here asks for a
- * chat id (one that could be typed could be someone else's). Each network has a bot of its own and
- * one link covers them all, so the link opens the bot of the network the app is showing.
+ * chat id (one that could be typed could be someone else's).
  */
 export function TelegramCard({ me }: { me: Me }) {
   const queryClient = useQueryClient()
   const toaster = useToaster()
-  const { chainId, chains } = useSelectedChain()
   const [link, setLink] = useState<PendingLink | null>(null)
   const linked = me.telegram_linked
   const waiting = link !== null && !linked
-  const bots = chains.flatMap(chain =>
-    chain.telegram_bot && me.wallet_chains.includes(chain.chain_id)
-      ? [{ chainId: chain.chain_id, username: chain.telegram_bot }]
-      : [],
-  )
 
   const create = useMutation({
-    mutationFn: () => createTelegramLink(chainId),
+    mutationFn: createTelegramLink,
     onSuccess: data => setLink({ url: data.url, expiresAt: Date.now() + data.expires_in * 1000 }),
   })
 
@@ -247,18 +174,18 @@ export function TelegramCard({ me }: { me: Me }) {
     <GlassPanel bordered header="Telegram" id="telegram" className="mf-anchor">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
-          <Text weight="medium">Telegram bots</Text>
+          <Text weight="medium">Telegram bot</Text>
           <Text muted size="sm">
             {linked
               ? 'You can chat with your assistant in Telegram, and it warns you there when your limit runs low.'
-              : 'Chat with your assistant from Telegram too. One link covers every network.'}
+              : 'Chat with your assistant from Telegram too.'}
           </Text>
         </div>
         {action && <div className="mf-settings-row-action">{action}</div>}
       </div>
 
       {waiting && <WaitingForTelegram link={link} onRenew={startLink} />}
-      {linked && bots.length > 0 && <TelegramBots bots={bots} />}
+      {linked && me.telegram_bot && <TelegramBot username={me.telegram_bot} />}
 
       {create.error && !waiting && (
         <Message type="error" showIcon className="mf-settings-note">

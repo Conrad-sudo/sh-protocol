@@ -7,7 +7,7 @@ export function PrivacyPage() {
       title="Privacy Policy"
       description="What Mitfah stores about you and why, what stays in your browser, who else sees your data, how long it is kept and your choices."
       path="/privacy"
-      updated="8 October 2026"
+      updated="16 October 2026"
     >
       <p>
         This policy explains what Mitfah stores about you, why, and who else sees it. Mitfah is an AI assistant that
@@ -40,7 +40,12 @@ export function PrivacyPage() {
           public on the blockchain anyway.
         </li>
         <li>
-          <strong>Telegram:</strong> if you link Telegram, the numeric ID of that chat.
+          <strong>Telegram:</strong> if you link Telegram, the numeric ID of that chat, and the network you last chose
+          in it.
+        </li>
+        <li>
+          <strong>Feedback:</strong> what you send with the Telegram bot's /feedback command, with the network you were
+          on, so the team can read it.
         </li>
         <li>
           <strong>Sign-in sessions:</strong> a fingerprint (hash) of each session token, so we can sign you out and
@@ -73,7 +78,7 @@ export function PrivacyPage() {
           blockchain node providers.
         </li>
         <li>
-          <strong>Telegram</strong>, only if you link it. Messages you send the bots pass through Telegram.
+          <strong>Telegram</strong>, only if you link it. Messages you send the bot pass through Telegram.
         </li>
         <li>
           <strong>WalletConnect</strong>, only if you connect a wallet with it.

@@ -17,6 +17,11 @@ export interface Me {
    */
   owner_addr: string | null
   telegram_linked: boolean
+  /**
+   * The username (no @) of this server's Telegram bot, or null when it runs none. The one bot serves
+   * every network; /chain in the chat picks the one it acts on.
+   */
+  telegram_bot: string | null
   wallet_chains: number[]
 }
 
@@ -105,8 +110,6 @@ export interface Chain {
   default_spenders: string[]
   /** The exchange the assistant swaps and provides liquidity on, or null where it can do neither. */
   exchange: Exchange | null
-  /** The username (no @) of this network's Telegram bot, or null where it has none. */
-  telegram_bot: string | null
 }
 
 /** Uniswap V3 on Ethereum, Sepolia, Arbitrum and Base; PancakeSwap V2 on BSC. */
@@ -363,6 +366,23 @@ export interface ChatMessage {
    * each transaction and keeps only the last exchange.
    */
   carried_over?: boolean
+  /** True on a quote card's button tap and its outcome: the server wrote them, so they show as plain text. */
+  button?: boolean
+}
+
+/**
+ * A quoted transaction waiting for a Confirm or Cancel tap, from GET /api/chat/quote. Written by
+ * the server from the stored quote, never by the assistant: Confirm sends exactly this.
+ */
+export interface QuoteOffer {
+  quote_id: string
+  chain_id: number
+  /** What it does, in one line. */
+  action: string
+  /** The fees, network and Mitfah's together, as one figure: "$0.35", or in the native coin. */
+  fees: string
+  /** Unix seconds: when it stops being good to confirm. */
+  expires_at: number
 }
 
 /** One transaction on the account's wallets, from GET /api/transactions. */

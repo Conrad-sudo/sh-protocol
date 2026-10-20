@@ -232,6 +232,41 @@ def _migrate_transaction_direction(db: sqlite3.Connection):
     print(f"Added transaction directions; {outside} outside row(s) will be searched for again.")
 
 
+def _migrate_telegram_chain(db: sqlite3.Connection):
+    """
+    Adds `telegram_chain_id` to users: the network the account last chose with /chain in the one
+    Telegram bot. NULL until it chooses, and whenever no Telegram chat is linked.
+
+    Kept apart from user_network, which is the chain the account last deployed on: choosing a chain
+    in Telegram must not move what the CLI and the web app read from there.
+    """
+    cols = [r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+    if "telegram_chain_id" in cols:
+        return
+    db.execute("ALTER TABLE users ADD COLUMN telegram_chain_id INTEGER")
+    db.commit()
+
+
+def _migrate_app_feedback(db: sqlite3.Connection):
+    """
+    Adds app_feedback: what users tell the team about the app with the Telegram bot's /feedback.
+    Indexed by account and time, which is how the bot counts each account's feedback against its
+    hourly and daily allowance.
+    """
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS app_feedback (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            chain_id   INTEGER,
+            source     TEXT NOT NULL,
+            text       TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_feedback_user_time ON app_feedback (user_id, created_at);
+    """)
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -531,6 +566,8 @@ MIGRATIONS = (
     _create_schema,                  # 3: every table and index
     _migrate_token_tables,           # 4: one supported_tokens table for every chain
     _migrate_transaction_direction,  # 5: the History tab's filters
+    _migrate_telegram_chain,         # 6: the network chosen in the one Telegram bot
+    _migrate_app_feedback,           # 7: the bot's /feedback
 )
 
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from web3 import Web3
 
 import auth
+import telegram_bots
 from auth import get_current_user
 from db import (
     create_user,
@@ -200,12 +201,15 @@ def me(user_id: int = Depends(get_current_user)):
     Returns the signed-in account, without anything secret.
 
     @return  The account's id, the address it signs in as (which owns its wallets), whether
-             Telegram is linked, and its wallets.
+             Telegram is linked, the Telegram bot's username (no @; None when MITFAH_USERNAME is
+             not set), and its wallets. The bot is the same for every account and every chain, and
+             public anyway: anyone can find it in Telegram.
     """
     user = get_user_by_id(user_id)
     return {
         "user_id": user["id"],
         "owner_addr": user["owner_addr"],
         "telegram_linked": user["telegram_chat_id"] is not None,
+        "telegram_bot": telegram_bots.bot_username(),
         "wallet_chains": get_wallet_chains(user_id),
     }

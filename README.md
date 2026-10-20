@@ -33,7 +33,7 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  APPLICATIONS       web app  ·  Telegram bots  ·  CLI agent                 │
+│  APPLICATIONS       web app  ·  Telegram bot  ·  CLI agent                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  SERVICE LAYER      FastAPI  ·  accounts, wallet sign-in (SIWE)             │
 │                     wallet-signed contacts  ·  owner actions in-browser     │
@@ -147,7 +147,7 @@ Celo has partial scaffolding in the Python layer but no contract deployment path
 - Node 22.22+ — only for the web app in `web/`
 - An LLM API key — `DEEPSEEK_API_KEY` by default, or any other LangChain chat model
 - An Alchemy API key — for live Sepolia, the mainnet / BSC / Arbitrum / Base forks, and the History tab on Base
-- *(Optional)* Telegram bots from [@BotFather](https://t.me/BotFather), one per network — only for `make bot`
+- *(Optional)* A Telegram bot from [@BotFather](https://t.me/BotFather) — one bot serves every network — only for `make bot`
 
 ## Clone and install
 
@@ -183,7 +183,7 @@ To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run d
 
 ```bash
 forge test --no-match-path "test/fork/*"   # unit, guard, admin and invariant suites
-make py-test                # the fourteen offline Python suites (no chain, no Vault, no model)
+make py-test                # the fifteen offline Python suites (no chain, no Vault, no model)
 make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork, ARGS=base-fork, ...)
 make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
@@ -202,7 +202,7 @@ CI (`.github/workflows/test.yml`) checks the smart contracts only, on every push
 | Document | Contents |
 |---|---|
 | [docs/contracts.md](docs/contracts.md) | Every contract, the spending-limit design, the fee, the test suite |
-| [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bots |
+| [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bot |
 | [web/README.md](web/README.md) | The web app |
 | [docs/vault-security.md](docs/vault-security.md) | Environment variables, Vault setup, session-key security |
 | [docs/setup.md](docs/setup.md) | Local, fork and live deployments |

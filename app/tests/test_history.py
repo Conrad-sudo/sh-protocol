@@ -13,8 +13,9 @@ import logging
 import os
 import sqlite3
 import tempfile
+import threading
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from types import SimpleNamespace
 
 from checks import check, finish, sign_in, set_everywhere   # first: it puts app/ on sys.path for the imports below
@@ -45,13 +46,14 @@ import routes.deploy  # noqa: E402
 import routes.deps  # noqa: E402
 import routes.history  # noqa: E402
 import explorers                            # noqa: E402
+import landing                              # noqa: E402
 import quotes                               # noqa: E402
 import smart_wallet_agent                   # noqa: E402
 import tools                                # noqa: E402
 import tools.sending  # noqa: E402
 import tx_history                           # noqa: E402
 from agent_context import AgentContext      # noqa: E402
-from bundler import UserOpReverted          # noqa: E402
+from bundler import NotSent, UserOpReverted  # noqa: E402
 from constants import get_router, get_v3_network  # noqa: E402
 from test_tx_movements import bundle, swap_router_call, transfer, withdrawal  # noqa: E402
 from tx_movements import IN, OUT, Moved     # noqa: E402
@@ -293,13 +295,16 @@ def _patch_confirm(w3, broadcast, budget_left):
     """
     Stubs everything confirm_transaction calls, so only its recording is under test.
 
+    `broadcast(user_id, prepared, bundler)` stands for sending the op and waiting for it: it runs
+    when the send is waited on (bundler.await_user_op), after it was submitted.
+
     `budget_left` is a dict whose "value" the fake wallet's getRemainingBudget returns -- or raises,
     if it is an exception -- so a test can change it between sends.
     """
     saved = {
         name: getattr(tools.sending, name)
-        for name in ("load_network_config", "_resolve_bundler", "load_session_handler", "load_entry_point",
-                     "_prepare_user_op", "_broadcast_user_op", "_get_session_keys")
+        for name in ("load_network_config", "_pick_bundler", "load_session_handler", "load_entry_point",
+                     "_prepare_user_op", "_submit_user_op", "_await_user_op", "_get_session_keys")
     }
     saved_take = quotes.take
     op_hash = {"n": 0}
@@ -309,7 +314,7 @@ def _patch_confirm(w3, broadcast, budget_left):
         return SimpleNamespace(user_op_hash=bytes([op_hash["n"]]) * 32, op=(WALLET, (7 << 64) | op_hash["n"]), from_block=100)
 
     set_everywhere(tools, "load_network_config", lambda _user_id: (w3, CHAIN, NETWORK))
-    set_everywhere(tools, "_resolve_bundler", lambda _w3: "bundler")
+    set_everywhere(tools, "_pick_bundler", lambda _user_id, _wallet: nullcontext("bundler"))
     def remaining():
         if isinstance(budget_left["value"], Exception):
             raise budget_left["value"]
@@ -323,7 +328,10 @@ def _patch_confirm(w3, broadcast, budget_left):
     set_everywhere(tools, "_get_session_keys", lambda _user_id: ("0xkey", "vault:v1:x"))
     set_everywhere(tools, "load_entry_point", lambda _user_id: None)
     set_everywhere(tools, "_prepare_user_op", prepare)
-    set_everywhere(tools, "_broadcast_user_op", broadcast)
+    set_everywhere(tools, "_submit_user_op",
+                   lambda user_id, prepared, bundler: SimpleNamespace(
+                       w3=w3, wait=lambda: broadcast(user_id, prepared, bundler)))
+    set_everywhere(tools, "_await_user_op", lambda submitted: submitted.wait())
     quotes.take = lambda *_args: SimpleNamespace(action="Transfer 5 USDC to 0x5A3…", quote=None, lp_pool=None, direction="out")
 
     def restore():
@@ -396,6 +404,22 @@ def test_assistant_sends_are_recorded_before_they_go():
         check("an op that never executed is not listed", len(db.get_transactions(user)) == before,
               str(db.get_transactions(user)))
 
+        # Turned away from its bundle before anything carried it (bundler.Lane._check).
+        def turned_away(*_args):
+            raise NotSent("Submitting this transaction would fail: AA25 invalid account nonce. Nothing was sent.")
+
+        submit = set_everywhere(tools, "_submit_user_op", turned_away)
+        try:
+            tools.sending.confirm_transaction.func(runtime, "q3b")
+            refused = None
+        except ToolException as e:
+            refused = str(e)
+        finally:
+            set_everywhere(tools, "_submit_user_op", submit)
+        check("an op its bundle turned away fails the tool, saying nothing was sent",
+              refused is not None and "Nothing was sent" in refused, str(refused))
+        check("...and is not listed", len(db.get_transactions(user)) == before, str(db.get_transactions(user)))
+
         outcome["next"] = "timeout"
         try:
             tools.sending.confirm_transaction.func(runtime, "q4")
@@ -431,6 +455,56 @@ def test_assistant_sends_are_recorded_before_they_go():
               reply.endswith("Spending limit left this period: $0.00"), reply)
     finally:
         restore()
+
+
+def test_a_repeated_request_is_not_a_yes():
+    """
+    A typed message that repeats the request a quote was raised by, word for word, cannot confirm
+    it: the quote is void and the agent is told to quote afresh. A reply agreeing to it still
+    confirms, and so does a one- or two-word reply even when the same words raised the quote.
+    """
+    print("\n[3c] a repeated request is a new request, not a yes")
+    user = _create()
+    w3 = FakeW3()
+    w3.eth.blocks[101] = 1_790_000_123
+    landed = HexBytes(b"\x33" * 32)
+
+    def broadcast(_user_id, _prepared, _bundler):
+        return landed, {"status": 1, "transactionHash": landed, "blockNumber": 101}
+
+    def says(message: str, turn: int = 2) -> SimpleNamespace:
+        return SimpleNamespace(context=AgentContext(user_id=user, turn_id=turn, message=message))
+
+    restore = _patch_confirm(w3, broadcast, {"value": 10**18})
+    try:
+        asked = quotes.put(user, CHAIN, 1, "Transfer 1 USDC to sam", [], None, {}, request="Send 1 USDC to Sam.")
+        try:
+            tools.sending.confirm_transaction.func(says("send 1 usdc to sam"), asked.quote_id)
+            check("the same request again is refused as a confirmation", False, "it was sent")
+        except ToolException as e:
+            check("the same request again (case and full stop aside) is refused as a confirmation",
+                  "asked for this transaction again" in str(e) and "Nothing was sent" in str(e), str(e))
+        check("...and its quote is void", asked.quote_id not in quotes._pending)
+
+        again = quotes.put(user, CHAIN, 2, "Transfer 1 USDC to sam", [], None, {}, request="send 1 usdc to sam")
+        reply = tools.sending.confirm_transaction.func(says("Yes, send it", 3), again.quote_id)
+        check("a reply agreeing to the new quote sends it", reply.startswith("Sent"), reply)
+
+        other = quotes.put(user, CHAIN, 3, "Transfer 1 USDC to sam", [], None, {}, request="Send 1 USDC to Sam.")
+        reply = tools.sending.confirm_transaction.func(says("Send 2 USDC to Sam.", 4), other.quote_id)
+        check("a different message is the model's to judge, not refused here", reply.startswith("Sent"), reply)
+
+        short = quotes.put(user, CHAIN, 4, "Transfer 1 USDC to sam", [], None, {}, request="yes")
+        reply = tools.sending.confirm_transaction.func(says("Yes!", 5), short.quote_id)
+        check("a quote raised by a \"yes\" can still be confirmed with \"yes\"", reply.startswith("Sent"), reply)
+
+        unknown = quotes.put(user, CHAIN, 5, "Transfer 1 USDC to sam", [], None, {})
+        reply = tools.sending.confirm_transaction.func(says("Transfer 1 USDC to sam", 6), unknown.quote_id)
+        check("a quote raised without a message is never taken for a repeat", reply.startswith("Sent"), reply)
+    finally:
+        restore()
+        for pending in (again, other, short, unknown):
+            quotes.drop(user, pending.quote_id)
 
 
 def test_deposits_put_their_pool_on_the_dashboard():
@@ -938,6 +1012,319 @@ def test_the_chat_starts_afresh_after_a_transaction():
               and _thread(long_user)[0].additional_kwargs.get("carried_over"), str([m.content[:12] for m in _thread(long_user)]))
     finally:
         smart_wallet_agent.agent = original
+
+
+def test_telegram_buttons():
+    """
+    A Telegram Confirm button sends a quote with no model call, under a turn of its own, and only
+    for the quote's own account and network, once. It answers once the transaction is on the wire
+    and waits for it to land in the background (landing.py). The tap and its first outcome go into
+    the conversation, and one that went out starts it afresh on the next turn, as a
+    confirm_transaction would. Cancel and /cancel discard, and are recorded the same way.
+    """
+    print("\n[7b] Telegram's Confirm and Cancel buttons: no model call, recorded in the conversation")
+    original_agent = smart_wallet_agent.agent
+    original_send = smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted
+    user, other = _create(), _create()
+    sends = []
+
+    def fake_submit(user_id, chain_id, quote_id, turn_id):
+        # The real claim, with the real checks: whose, which network, which turn, once.
+        pending = quotes.take(user_id, chain_id, quote_id, turn_id)
+        sends.append((user_id, chain_id, db.get_user_network(user_id), pending.action))
+        if pending.action == "fails":
+            raise ToolException("UserOp failed! tx: 0xdead")
+        if pending.action == "unknown":
+            raise ConnectionError("the node hung up")
+        return SimpleNamespace(user_id=user_id, chain_id=chain_id, action=pending.action, record=None,
+                               text=f"Sending — {pending.action}. Waiting for the network to confirm it.")
+
+    def fake_settle(sending):
+        if sending.action == "reverts":
+            raise ToolException("UserOp failed! tx: 0xbeef")
+        if sending.action == "times out":
+            raise TimeoutError("no receipt in 120 s")
+        return f"Sent — {sending.action}. Tx hash: `0x{'ab' * 32}`"
+
+    def refused(call) -> bool:
+        try:
+            call()
+        except quotes.QuoteError:
+            return True
+        return False
+
+    def last_two(user_id: int) -> list[tuple]:
+        return [(type(m).__name__, m.content) for m in _thread(user_id)[-2:]]
+
+    try:
+        _use_scripted_agent([AIMessage(content="Transfer 5 USDC to sam. Fees: $0.30. Reply yes to send it."),
+                             AIMessage(content="Your balance is 20 USDC.")])
+        smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted = fake_submit, fake_settle
+        reply, turn_id = smart_wallet_agent.chat_turn(user, CHAIN, "send 5 usdc to sam", NETWORK)
+        check("a turn gives its id with its reply", turn_id is not None and reply.startswith("Transfer 5 USDC"), reply)
+        pending = quotes.put(user, CHAIN, turn_id, "Transfer 5 USDC to sam", [], None, {})
+        check("raised_in finds the quote the turn raised",
+              [p.quote_id for p in quotes.raised_in(user, CHAIN, turn_id)] == [pending.quote_id])
+        check("and nothing for another turn, network or account",
+              quotes.raised_in(user, CHAIN, turn_id + 1) == [] and quotes.raised_in(user, BSC, turn_id) == []
+              and quotes.raised_in(other, CHAIN, turn_id) == [])
+
+        check("another account's tap is refused",
+              refused(lambda: smart_wallet_agent.confirm_quote(other, CHAIN, pending.quote_id, NETWORK)))
+        check("so is one on another network",
+              refused(lambda: smart_wallet_agent.confirm_quote(user, BSC, pending.quote_id, BSC_NETWORK)))
+        check("neither sent anything, nor touched the conversation", sends == [] and len(_thread(user)) == 2,
+              f"{sends} {len(_thread(user))}")
+
+        confirmed = smart_wallet_agent.confirm_quote(user, CHAIN, pending.quote_id, NETWORK)
+        result = confirmed.text
+        check("the account's own tap sends it, on its network, and answers before it lands",
+              sends == [(user, CHAIN, NETWORK, "Transfer 5 USDC to sam")]
+              and result == "Sending — Transfer 5 USDC to sam. Waiting for the network to confirm it.",
+              f"{sends} {result}")
+        check("what it says once it lands comes from the background wait",
+              confirmed.landed is not None and confirmed.landed.result(timeout=5).startswith("Sent — Transfer 5 USDC"),
+              str(confirmed))
+        check("the tap and its outcome are in the conversation",
+              last_two(user) == [("HumanMessage", "✅ Confirm"), ("AIMessage", result)], str(last_two(user)))
+        check("...and the landing writes nothing more there", len(_thread(user)) == 4, str(len(_thread(user))))
+        check("marked as a transaction that went out", _thread(user)[-1].additional_kwargs.get("sent_transaction") is True)
+        check("a second tap sends nothing, and records nothing",
+              refused(lambda: smart_wallet_agent.confirm_quote(user, CHAIN, pending.quote_id, NETWORK))
+              and len(sends) == 1 and len(_thread(user)) == 4, f"{sends} {len(_thread(user))}")
+
+        smart_wallet_agent.chat(user, CHAIN, "what's my balance?", NETWORK)
+        check("the next turn starts afresh, carrying the button's exchange",
+              [(type(m).__name__, m.content) for m in _thread(user)] == [
+                  ("HumanMessage", "✅ Confirm"), ("AIMessage", result),
+                  ("HumanMessage", "what's my balance?"), ("AIMessage", "Your balance is 20 USDC."),
+              ], str([(type(m).__name__, m.content[:20]) for m in _thread(user)]))
+        check("the web chat shows the button as what the user said",
+              smart_wallet_agent.get_history(user, CHAIN, 50)[0]["text"] == "✅ Confirm")
+
+        failing = quotes.put(user, CHAIN, turn_id, "fails", [], None, {})
+        confirmed = smart_wallet_agent.confirm_quote(user, CHAIN, failing.quote_id, NETWORK)
+        check("a send that can't go out says so, waits for nothing, and isn't marked as gone out",
+              confirmed.text == "That didn't go through: UserOp failed! tx: 0xdead"
+              and confirmed.landed is None and confirmed.transaction_id is None
+              and not _thread(user)[-1].additional_kwargs.get("sent_transaction"), str(confirmed))
+        unknown = quotes.put(user, CHAIN, turn_id, "unknown", [], None, {})
+        result = smart_wallet_agent.confirm_quote(user, CHAIN, unknown.quote_id, NETWORK).text
+        check("one whose broadcast is in doubt says to check History before trying again",
+              result == smart_wallet_agent.UNKNOWN_OUTCOME
+              and last_two(user) == [("HumanMessage", "✅ Confirm"), ("AIMessage", result)], result)
+        reverts = quotes.put(user, CHAIN, turn_id, "reverts", [], None, {})
+        landed = smart_wallet_agent.confirm_quote(user, CHAIN, reverts.quote_id, NETWORK).landed
+        check("one that went out and then failed says so once it lands",
+              landed.result(timeout=5) == "That didn't go through: UserOp failed! tx: 0xbeef")
+        stuck = quotes.put(user, CHAIN, turn_id, "times out", [], None, {})
+        landed = smart_wallet_agent.confirm_quote(user, CHAIN, stuck.quote_id, NETWORK).landed
+        check("one that outlives the wait says to check History before trying again",
+              landed.result(timeout=5) == smart_wallet_agent.UNKNOWN_OUTCOME)
+
+        doomed = quotes.put(user, CHAIN, turn_id, "Transfer 1 USDC to sam", [], None, {})
+        check("Cancel on another network discards nothing", not smart_wallet_agent.cancel_quote(user, BSC, doomed.quote_id))
+        check("nor another account's", not smart_wallet_agent.cancel_quote(other, CHAIN, doomed.quote_id))
+        check("the account's own Cancel discards it, and records it",
+              smart_wallet_agent.cancel_quote(user, CHAIN, doomed.quote_id) and not quotes.has_pending(user, CHAIN)
+              and last_two(user) == [("HumanMessage", "✖️ Cancel"), ("AIMessage", "Cancelled. Nothing was sent.")],
+              str(last_two(user)))
+        check("a second Cancel finds nothing", not smart_wallet_agent.cancel_quote(user, CHAIN, doomed.quote_id))
+
+        for action in ("one", "two"):
+            quotes.put(user, CHAIN, turn_id, action, [], None, {})
+        kept = quotes.put(user, BSC, turn_id, "on BSC", [], None, {})
+        check("/cancel drops every quote on the network in use, and only there",
+              smart_wallet_agent.cancel_quotes(user, CHAIN) == 2 and not quotes.has_pending(user, CHAIN)
+              and quotes.has_pending(user, BSC))
+        check("and records it", last_two(user) == [("HumanMessage", "/cancel"), ("AIMessage", "Cancelled. Nothing was sent.")],
+              str(last_two(user)))
+        size = len(_thread(user))
+        check("with nothing to drop, it records nothing",
+              smart_wallet_agent.cancel_quotes(user, CHAIN) == 0 and len(_thread(user)) == size)
+        quotes.drop(user, kept.quote_id)
+    finally:
+        smart_wallet_agent.agent = original_agent
+        smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted = original_send
+
+
+def test_web_quote_buttons():
+    """
+    The web chat's quote card: a turn that raised exactly one quote offers it, GET /api/chat/quote
+    shows it (after a reload too), and its Confirm and Cancel buttons go through the same code as
+    Telegram's -- for the token's own account and the chain named, once. A Confirm answers once the
+    transaction is on the wire, with the History row GET /api/transactions/{id} follows, and runs
+    on a tap's slot, so it goes through while every chat slot is taken.
+    """
+    print("\n[7c] the web chat's Confirm and Cancel buttons: offered by the turn, checked on the tap")
+    import routes.chat
+    original_agent, original_turn = smart_wallet_agent.agent, routes.chat.chat_turn
+    original_send = smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted
+    c = make_client()
+    me, headers = _sign_up(c)
+    other, other_headers = _sign_up(c)
+    sends, to_quote = [], []
+    land = threading.Event()
+
+    def fake_submit(user_id, chain_id, quote_id, turn_id):
+        pending = quotes.take(user_id, chain_id, quote_id, turn_id)
+        sends.append((user_id, chain_id, db.get_user_network(user_id), pending.action))
+        record = db.add_transaction(user_id, chain_id, WALLET, "assistant", pending.action, "pending",
+                                    user_op_hash="0x" + quote_id.encode().hex().ljust(64, "0"))
+        return SimpleNamespace(user_id=user_id, chain_id=chain_id, action=pending.action, record=record,
+                               text=f"Sending — {pending.action}. Waiting for the network to confirm it.")
+
+    def fake_settle(sending):
+        land.wait(timeout=10)
+        db.settle_transaction(sending.record, "confirmed", "0x" + "ab" * 32, 1_790_000_000)
+        return f"Sent — {sending.action}. Tx hash: `0x{'ab' * 32}`"
+
+    def quoting_turn(user_id, chain_id, text, network):
+        # The real turn, then the quotes a write tool would have raised in it.
+        reply, turn_id = original_turn(user_id, chain_id, text, network)
+        for action in to_quote:
+            quotes.put(user_id, chain_id, turn_id, action, [], None, {"total_usd": 0.3512})
+        return reply, turn_id
+
+    def card(headers=headers, chain=CHAIN):
+        r = c.get(f"/api/chat/quote?chain_id={chain}", headers=headers)
+        return r.json()["quote"] if r.status_code == 200 else r.status_code
+
+    def ask(text: str, *actions: str) -> int:
+        to_quote[:] = actions
+        return c.post("/api/chat", json={"chain_id": CHAIN, "message": text}, headers=headers).status_code
+
+    def tap(button: str, quote_id: str, chain=CHAIN, headers=headers):
+        return c.post(f"/api/chat/quote/{button}", json={"chain_id": chain, "quote_id": quote_id}, headers=headers)
+
+    def history() -> list:
+        return c.get(f"/api/chat/history?chain_id={CHAIN}", headers=headers).json()["messages"]
+
+    try:
+        _use_scripted_agent([AIMessage(content=f"reply {n}") for n in range(12)])
+        smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted = fake_submit, fake_settle
+        routes.chat.chat_turn = quoting_turn
+
+        check("the card needs a token", c.get(f"/api/chat/quote?chain_id={CHAIN}").status_code == 401)
+        check("an unsupported chain -> 400", card(chain=999999) == 400)
+        check("no quote, no card", card() is None)
+
+        r = c.post("/api/chat", json={"chain_id": CHAIN, "message": "send 5 usdc to sam"}, headers=headers)
+        to_quote[:] = []
+        check("a chat reply is unchanged", r.status_code == 200 and r.json() == {"reply": "reply 0"}, r.text[:160])
+        check("with no quote raised, still no card", card() is None)
+
+        check("a turn that raised one quote", ask("send 5 usdc to sam", "Transfer 5 USDC to sam") == 200)
+        shown = card()
+        pending = quotes._pending.get(shown["quote_id"]) if isinstance(shown, dict) else None
+        check("offers it on a card written from the stored quote",
+              pending is not None and shown == {
+                  "quote_id": pending.quote_id, "chain_id": CHAIN, "action": "Transfer 5 USDC to sam",
+                  "fees": "$0.35", "expires_at": int(pending.created_at + quotes.QUOTE_TTL_SECONDS)}, str(shown))
+        check("only to its own account, on its own chain", card(other_headers) is None and card(chain=BSC) is None)
+
+        check("a malformed quote id -> 422", tap("confirm", "../x").status_code == 422)
+        check("another account's tap -> 409", tap("confirm", pending.quote_id, headers=other_headers).status_code == 409)
+        r = tap("confirm", pending.quote_id, chain=BSC)
+        check("so is one naming another chain", r.status_code == 409 and r.json()["detail"] == smart_wallet_agent.STALE_QUOTE,
+              f"{r.status_code} {r.text[:160]}")
+        with routes.chat._chat_turn(me):
+            r = tap("confirm", pending.quote_id)
+        check("a tap while a message is being answered -> 409", r.status_code == 409 and "still answering" in r.text,
+              f"{r.status_code} {r.text[:160]}")
+        check("none of them sent anything", sends == [], str(sends))
+
+        # Every chat slot taken by other people's turns: a tap has slots of its own.
+        taken = [routes.chat._chat_slots.acquire(blocking=False) for _ in range(routes.chat.CHAT_MAX_CONCURRENT)]
+        try:
+            r = tap("confirm", pending.quote_id)
+        finally:
+            for _ in filter(None, taken):
+                routes.chat._chat_slots.release()
+        sent_row = r.json().get("transaction_id") if r.status_code == 200 else None
+        check("the account's own tap sends exactly the quote, on the chain's network, though every chat slot is taken",
+              all(taken) and r.status_code == 200
+              and r.json() == {"outcome": "Sending — Transfer 5 USDC to sam. Waiting for the network to confirm it.",
+                               "transaction_id": sent_row}
+              and isinstance(sent_row, int)
+              and sends == [(me, CHAIN, routes.deps._network_name(CHAIN), "Transfer 5 USDC to sam")],
+              f"{r.status_code} {r.text[:160]} {sends}")
+        row = c.get(f"/api/transactions/{sent_row}", headers=headers)
+        check("it answered before landing: its History row is pending, and waited on",
+              row.status_code == 200 and row.json()["status"] == "pending" and landing.is_watched(sent_row)
+              and row.json()["action"] == "Transfer 5 USDC to sam", f"{row.status_code} {row.text[:160]}")
+        check("another account can't read it", c.get(f"/api/transactions/{sent_row}", headers=other_headers).status_code == 404)
+        check("the History tab's token list is still its own route",
+              c.get("/api/transactions/tokens", headers=headers).status_code == 200)
+        land.set()
+        deadline = time.time() + 5
+        while landing.is_watched(sent_row) and time.time() < deadline:
+            time.sleep(0.02)
+        row = c.get(f"/api/transactions/{sent_row}", headers=headers).json()
+        check("once it lands, the same row is confirmed, with its hash",
+              row["status"] == "confirmed" and row["tx_hash"] == "0x" + "ab" * 32 and not landing.is_watched(sent_row),
+              str(row))
+        orphan = db.add_transaction(me, CHAIN, WALLET, "assistant", "Lost wait", "pending", user_op_hash="0x" + "cd" * 32)
+        settled, saved_settle = [], tx_history.settle_one
+
+        def settle_from_chain(found, _web3_for):
+            settled.append(found["id"])
+            db.settle_transaction(found["id"], "confirmed", "0x" + "ef" * 32, 1_790_000_001)
+
+        tx_history.settle_one = settle_from_chain
+        try:
+            row = c.get(f"/api/transactions/{orphan}", headers=headers).json()
+        finally:
+            tx_history.settle_one = saved_settle
+        check("a pending row nobody here waits on (a wait lost to a restart) is settled from the chain when read",
+              settled == [orphan] and row["status"] == "confirmed", f"{settled} {row}")
+        check("the tap and its outcome are in the history, marked as a button's",
+              history()[-2:] == [{"role": "user", "text": "✅ Confirm", "button": True},
+                                 {"role": "assistant", "text": r.json()["outcome"], "button": True}], str(history()[-2:]))
+        check("the card is gone", card() is None)
+        check("a second tap sends nothing", tap("confirm", pending.quote_id).status_code == 409 and len(sends) == 1)
+
+        check("the next turn starts afresh", ask("thanks") == 200)
+        check("carrying the button's exchange, still marked as one",
+              history()[0] == {"role": "user", "text": "✅ Confirm", "carried_over": True, "button": True}
+              and history()[1]["button"] is True, str(history()[:2]))
+
+        ask("two things", "one", "two")
+        check("two quotes from one turn: no card, the user says which in words", card() is None)
+        quotes.drop_all(me, CHAIN)
+
+        ask("first", "Transfer 1 USDC to sam")
+        first = card()
+        ask("second", "Transfer 2 USDC to sam")
+        second = card()
+        check("the newest offer is the card", second["action"] == "Transfer 2 USDC to sam", str(second))
+        r = tap("cancel", second["quote_id"])
+        check("Cancel discards it", r.status_code == 200 and r.json() == {"outcome": smart_wallet_agent.CANCELLED_REPLY}
+              and second["quote_id"] not in quotes._pending, f"{r.status_code} {r.text[:160]}")
+        check("and is recorded as a button's",
+              history()[-2:] == [{"role": "user", "text": "✖️ Cancel", "button": True},
+                                 {"role": "assistant", "text": smart_wallet_agent.CANCELLED_REPLY, "button": True}],
+              str(history()[-2:]))
+        check("the earlier quote, still waiting, is the card again", card() == first, str(card()))
+        check("a second Cancel -> 409", tap("cancel", second["quote_id"]).status_code == 409)
+        check("another account's Cancel -> 409, and keeps it",
+              tap("cancel", first["quote_id"], headers=other_headers).status_code == 409 and first["quote_id"] in quotes._pending)
+
+        def failed_turn(user_id, chain_id, text, network):
+            quotes.put(user_id, chain_id, 99_999, "half-quoted", [], None, {"total_usd": 1})
+            return "Sorry, something went wrong while handling that. Please try again.", None
+
+        routes.chat.chat_turn = failed_turn
+        ask("send it")
+        check("a turn that failed offers nothing, whatever it raised", card() == first, str(card()))
+
+        check("clearing the chat takes the card with it",
+              c.delete(f"/api/chat/history?chain_id={CHAIN}", headers=headers).status_code == 200 and card() is None)
+    finally:
+        land.set()
+        smart_wallet_agent.agent, routes.chat.chat_turn = original_agent, original_turn
+        smart_wallet_agent.submit_quoted, smart_wallet_agent.settle_quoted = original_send
+        quotes.drop_all(me, CHAIN)
 
 
 def test_deleting_the_chat():
@@ -1504,6 +1891,7 @@ if __name__ == "__main__":
         test_owner_transactions_are_described_from_their_calldata()
         test_owner_transactions_are_recorded_once_and_settled()
         test_assistant_sends_are_recorded_before_they_go()
+        test_a_repeated_request_is_not_a_yes()
         test_deposits_put_their_pool_on_the_dashboard()
         test_pending_rows_are_settled_later()
         test_history_route_lists_only_your_own_newest_first()
@@ -1511,6 +1899,8 @@ if __name__ == "__main__":
         test_owner_confirm_says_whether_the_network_has_seen_it()
         test_deploy_confirm_says_whether_the_network_has_seen_it()
         test_the_chat_starts_afresh_after_a_transaction()
+        test_telegram_buttons()
+        test_web_quote_buttons()
         test_deleting_the_chat()
         test_outside_activity_is_recorded_and_worded()
         test_outside_rows_never_repeat_mitfahs_own()

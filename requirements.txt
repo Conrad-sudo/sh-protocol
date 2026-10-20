@@ -42,5 +42,8 @@ uvicorn[standard]==0.52.4
 pydantic==2.12.5
 PyJWT==2.13.0
 slowapi==0.1.10
+# Already installed with slowapi; named because the Telegram bot parses CHAT_RATE_LIMIT with it
+# (chat_limits.py), and pinned so both front ends keep reading the limit the same way.
+limits==5.8.0
 # Required by fastapi.testclient, which app/tests/test_auth.py drives the API through.
 httpx==0.28.1

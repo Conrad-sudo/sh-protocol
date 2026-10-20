@@ -1,21 +1,22 @@
 """
 Nonce-safe broadcast of transactions sent from the app's own EOAs.
 
-telebot.py runs every user request in its own thread (asyncio.to_thread), but the app signs its
+telebot.py runs every user request on a worker thread of its own, but the app signs its
 outer transactions with a small number of SHARED keys -- one bundler EOA per process in bundler.py,
 one deployer/owner EOA per chain in deploy_wallet.py. Reading the nonce per-thread races: two
 threads read the same value, and the second transaction either silently replaces the first (same
 nonce) or is rejected as a duplicate. This never showed on a single-user Anvil run; it appears
 the moment two users act at once.
 
-Nonces are therefore handed out from a cached per-key counter under a process-wide lock instead
-of being read from the node on every send. The lock covers ONE process only, which is why the API
-and the Telegram bot each bundle with a key of their own (see bundler.use_bundler_key): two
+Nonces are therefore handed out from a cached per-key counter, under a lock of that key's own,
+instead of being read from the node on every send. The lock covers ONE process only, which is why
+the API and the Telegram bot each bundle with keys of their own (see bundler.use_bundler_key): two
 processes sharing a key would each keep their own counter and hand out the same nonces.
 """
 
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from eth_account.signers.local import LocalAccount
@@ -25,11 +26,19 @@ from web3.exceptions import TransactionNotFound
 from web3.types import TxReceipt
 
 # (chain_name, address) -> the next nonce to hand out. Keyed by chain as well as address because
-# one key is reused across networks (API_BUNDLER spans every fork plus live Sepolia), and
-# each has its own nonce state. Guarded by _nonce_lock, which also covers the signing and
-# broadcast that consume a value.
-_nonce_lock = threading.Lock()
+# one key is reused across networks (API_BUNDLER_1 spans every fork plus live Sepolia), and
+# each has its own nonce state. Each entry is guarded by its own lock (_nonce_lock), which also
+# covers the signing and broadcast that consume a value -- so a slow broadcast from one of the
+# bundler keys never holds up another's.
 _next_nonce: dict[tuple[str, str], int] = {}
+_nonce_locks: dict[tuple[str, str], threading.Lock] = {}
+_nonce_locks_lock = threading.Lock()
+
+
+def _nonce_lock(key: tuple[str, str]) -> threading.Lock:
+    """The lock over one (chain_name, address) counter, made on first use."""
+    with _nonce_locks_lock:
+        return _nonce_locks.setdefault(key, threading.Lock())
 
 # A replacement must outbid the transaction it replaces on EVERY fee field by the node's price
 # bump -- geth's default is 10% -- or it is rejected as underpriced and the original stays stuck.
@@ -51,7 +60,7 @@ def send_tx(
     w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any], send_w3: Web3 | None = None
 ) -> HexBytes:
     """
-    Signs and broadcasts `tx` from `account`, allocating its nonce under a process-wide lock.
+    Signs and broadcasts `tx` from `account`, allocating its nonce under that key's lock.
 
     Any "nonce" already present in `tx` is overwritten. The lock spans allocate -> sign ->
     broadcast so no two threads can be handed the same value, but it deliberately excludes gas
@@ -74,7 +83,7 @@ def send_tx(
     @return            The broadcast transaction hash.
     """
     key = (chain_name, account.address)
-    with _nonce_lock:
+    with _nonce_lock(key):
         for attempt in range(2):
             if key not in _next_nonce:
                 # "pending" counts what is already in the mempool; web3's default of "latest"
@@ -149,21 +158,41 @@ def _await_receipt(w3: Web3, tx_hashes: list[HexBytes], timeout: float) -> TxRec
         time.sleep(RECEIPT_POLL_INTERVAL_SECS)
 
 
-def send_and_confirm(
-    w3: Web3,
-    chain_name: str,
-    account: LocalAccount,
-    tx: dict[str, Any],
-    send_w3: Web3 | None = None,
-) -> TxReceipt:
+@dataclass
+class Broadcast:
     """
-    Broadcasts `tx` and returns its receipt, replacing it at a higher fee if it stalls.
+    A transaction on the wire and not yet mined: what confirm needs to wait for it, and to replace
+    it at a higher fee if it stalls. Made by send; `hashes` grows with each replacement.
+    """
+
+    w3: Web3
+    account: LocalAccount
+    tx: dict[str, Any]
+    send_w3: Web3 | None
+    hashes: list[HexBytes] = field(default_factory=list)
+
+
+def send(
+    w3: Web3, chain_name: str, account: LocalAccount, tx: dict[str, Any], send_w3: Web3 | None = None
+) -> Broadcast:
+    """
+    Broadcasts `tx` (send_tx) and returns what confirm waits on. Returns as soon as the node has
+    taken it, so the wait can run elsewhere -- off a user request (landing.py).
+
+    @param send_w3  Optional private RPC to broadcast (and re-broadcast) through; see send_tx.
+    """
+    tx_hash = send_tx(w3, chain_name, account, tx, send_w3)
+    return Broadcast(w3, account, tx, send_w3, [tx_hash])
+
+
+def confirm(sent: Broadcast) -> TxReceipt:
+    """
+    Waits for a broadcast transaction's receipt, replacing it at a higher fee if it stalls.
 
     web3's wait_for_transaction_receipt only waits. A transaction whose fee cap the base fee has
     since overtaken will never be mined however long it is waited on, so an unbounded wait hangs
-    the calling thread for good -- and the caller is a user request. Here each attempt gets
-    ATTEMPT_TIMEOUT_SECS, after which the transaction replaces itself at its own nonce with
-    bumped fees, up to MAX_FEE_BUMPS times.
+    the waiting thread for good. Here each attempt gets ATTEMPT_TIMEOUT_SECS, after which the
+    transaction replaces itself at its own nonce with bumped fees, up to MAX_FEE_BUMPS times.
 
     Only the OUTER transaction is re-signed, with the account key held here. Any ERC-4337 UserOp
     in its calldata is untouched and its session-key signature stays valid, because the EntryPoint
@@ -171,19 +200,14 @@ def send_and_confirm(
     that calculation. The gap between the two is the bundler's own subsidy: bumping buys inclusion
     with gas the account will not repay, which is the intended trade at these amounts.
 
-    @param w3          Web3 connection for the target network.
-    @param chain_name  Network name, forwarded to send_tx for nonce bookkeeping.
-    @param account     Local signing account. Must match the transaction's "from".
-    @param tx          Transaction dict, fully populated apart from "nonce". EIP-1559 fee fields
-                       are bumped when present, otherwise a legacy "gasPrice" is.
-    @param send_w3     Optional private RPC to broadcast (and re-broadcast) through; see send_tx.
-                       Receipts are always polled from `w3`.
-    @return            The mined transaction receipt, whichever broadcast won.
+    Receipts are always polled from `sent.w3`, even when the transaction went out privately.
+
+    @return  The mined transaction receipt, whichever broadcast won.
     @raises TimeoutError if no attempt is mined. The nonce stays allocated on purpose: the
             transactions are still live in the mempool and one may yet be included, so rolling
             the counter back would hand the same nonce out twice.
     """
-    tx_hashes = [send_tx(w3, chain_name, account, tx, send_w3)]
+    w3, account, tx, tx_hashes = sent.w3, sent.account, sent.tx, sent.hashes
     rebroadcast_error: Exception | None = None
 
     for attempt in range(MAX_FEE_BUMPS + 1):
@@ -199,7 +223,7 @@ def send_and_confirm(
             f"replacing at a higher fee (bump {attempt + 1}/{MAX_FEE_BUMPS})"
         )
         try:
-            tx_hashes.append(_broadcast(send_w3 or w3, account, tx))
+            tx_hashes.append(_broadcast(sent.send_w3 or w3, account, tx))
         except Exception as exc:
             # "already known" and "nonce too low" both mean a transaction we already sent is
             # pending or mined, so the hashes in hand are still the right things to poll. A
@@ -214,3 +238,25 @@ def send_and_confirm(
         + (f"; last replacement failed: {rebroadcast_error}" if rebroadcast_error else "")
         + ". The nonce stays held — later sends from this key queue behind it until one is mined."
     )
+
+
+def send_and_confirm(
+    w3: Web3,
+    chain_name: str,
+    account: LocalAccount,
+    tx: dict[str, Any],
+    send_w3: Web3 | None = None,
+) -> TxReceipt:
+    """
+    Broadcasts `tx` and returns its receipt: send, then confirm, on the calling thread.
+
+    @param w3          Web3 connection for the target network.
+    @param chain_name  Network name, forwarded to send_tx for nonce bookkeeping.
+    @param account     Local signing account. Must match the transaction's "from".
+    @param tx          Transaction dict, fully populated apart from "nonce". EIP-1559 fee fields
+                       are bumped when present, otherwise a legacy "gasPrice" is.
+    @param send_w3     Optional private RPC to broadcast (and re-broadcast) through; see send_tx.
+    @return            The mined transaction receipt, whichever broadcast won.
+    @raises TimeoutError as confirm does.
+    """
+    return confirm(send(w3, chain_name, account, tx, send_w3))

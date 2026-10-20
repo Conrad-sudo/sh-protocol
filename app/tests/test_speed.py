@@ -245,6 +245,25 @@ def test_quote_refusals():
     check("a limit lowered below what was spent shows nothing left, not a negative figure",
           shown["remaining_usd"] == 0, str(shown))
 
+    # What the model is then shown: only what a short quote needs, so it reads out only that.
+    figures = tools.checks._enforce_wallet_checks({**base, "session_expires_in_secs": 20 * 86_400}, priced=True)
+    check("the model sees what it is worth and counts, not what is left or the key's time",
+          tools.quoting._shown_figures(figures) == {"usd_value": 20.0, "charged_usd": 20.0},
+          str(tools.quoting._shown_figures(figures)))
+    soon = tools.checks._enforce_wallet_checks({**base, "session_expires_in_secs": 2 * 86_400}, priced=True)
+    check("...unless the key runs out within three days",
+          tools.quoting._shown_figures(soon)["session_expires_in_secs"] == 2 * 86_400, str(tools.quoting._shown_figures(soon)))
+
+    cost = {"native_asset": "ETH", "network_fee_native": 0.0001, "protocol_fee_native": 0.000005,
+            "total_native": 0.000105, "max_total_native": 0.00014, "network_fee_usd": 0.3312,
+            "protocol_fee_usd": 0.0157, "total_usd": 0.3469, "max_total_usd": 0.46}
+    check("the fees: one figure, network and protocol together", tools.quoting._shown_fees(cost) == {"fees_usd": 0.3469},
+          str(tools.quoting._shown_fees(cost)))
+    unpriced = {k: v for k, v in cost.items() if not k.endswith("_usd")} | {"usd_unavailable": "no price"}
+    check("...in the native asset when it can't be priced in USD",
+          tools.quoting._shown_fees(unpriced) == {"fees": "0.000105 ETH", "usd_unavailable": "no price"},
+          str(tools.quoting._shown_fees(unpriced)))
+
 
 def test_native_headroom():
     print("\n[5] the native asset has to cover what is sent AND the fees")
@@ -327,6 +346,97 @@ def test_abis_are_parsed_once():
         check("a rebuilt file is read again", db.get_json(path)["abi"][0]["name"] == "new", str(db.get_json(path)))
 
 
+def test_threads_share_rpc_connections():
+    print("\n[8] every thread sends over the same kept-open connections to the RPC")
+    import json
+    import os
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    opened = []
+
+    class Node(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"   # keeps each connection open between requests
+
+        def setup(self):
+            super().setup()
+            opened.append(self.client_address)
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": "0x1"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    class Server(ThreadingHTTPServer):
+        request_queue_size = 64         # the default, 5, turns away part of a burst
+
+    server = Server(("127.0.0.1", 0), Node)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    provider = network_config._ChainIdOnceProvider(f"http://127.0.0.1:{server.server_port}")
+    at_once = 8
+    hold = threading.Event()
+    failed = []
+
+    def burst() -> list[threading.Thread]:
+        """
+        `at_once` fresh threads that each send one request at the same moment, then stay alive
+        until `hold` is set -- so no later thread reuses one's id, and with it web3's per-thread
+        session. Returns once every request has its answer.
+        """
+        start, sent = threading.Barrier(at_once), threading.Barrier(at_once + 1)
+
+        def send():
+            start.wait()
+            try:
+                provider.make_request("eth_blockNumber", [])
+            except Exception as err:   # noqa: BLE001 -- reported below, not left to hang the burst
+                failed.append(err)
+            sent.wait()
+            hold.wait()
+
+        threads = [threading.Thread(target=send) for _ in range(at_once)]
+        for thread in threads:
+            thread.start()
+        sent.wait()
+        return threads
+
+    threads = []
+    try:
+        threads += burst()
+        first = len(opened)
+        threads += burst()
+        check("every request was answered", not failed, str(failed[:1]))
+        check("a burst of new threads opens no new connections", len(opened) == first, f"{first}, then {len(opened)}")
+
+        # A session that trusted the environment would send this through the proxy named there --
+        # and reread every variable, and ~/.netrc, on each request to find that out.
+        saved = {name: os.environ.pop(name, None) for name in ("HTTP_PROXY", "NO_PROXY", "no_proxy")}
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:1"
+        try:
+            answer = provider.make_request("eth_blockNumber", [])
+        except Exception as err:   # noqa: BLE001 -- shown in the check below
+            answer = err
+        finally:
+            for name, value in saved.items():
+                os.environ.pop(name, None)
+                if value is not None:
+                    os.environ[name] = value
+        check("the environment's proxy settings are not read",
+              isinstance(answer, dict) and answer.get("result") == "0x1", repr(answer)[:160])
+    finally:
+        hold.set()
+        for thread in threads:
+            thread.join()
+        server.shutdown()
+        server.server_close()
+
+
 if __name__ == "__main__":
     test_chain_id_is_asked_once()
     test_reads_run_together()
@@ -335,4 +445,5 @@ if __name__ == "__main__":
     test_native_headroom()
     test_user_op_hash()
     test_abis_are_parsed_once()
+    test_threads_share_rpc_connections()
     finish("All speed checks passed.")

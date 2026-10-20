@@ -1,13 +1,15 @@
 import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getAddress, type Address } from 'viem'
 import { useConnection, useSignTypedData } from 'wagmi'
 import { Button, Form, Input, Loader, Message, Modal, Text } from 'rsuite'
-import { prepareContact, saveContact } from '../../api/contacts'
+import { ApiError } from '../../api/client'
+import { prepareContact, resolveEnsName, saveContact } from '../../api/contacts'
 import type { Contact } from '../../api/types'
 import { CONTACTS_KEY } from '../../hooks/useContacts'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { useMe } from '../../hooks/useMe'
-import { addressProblem, nameProblem, normalizeName } from '../../lib/contacts'
+import { addressProblem, looksLikeEnsName, nameProblem, normalizeName } from '../../lib/contacts'
 import { errorText, isUserRejection } from '../../lib/tx'
 import { AddressText } from '../AddressText'
 import { FullAddress } from '../FullAddress'
@@ -27,11 +29,28 @@ interface Review {
   contact: Contact
   /** The contact this one replaces. */
   previous?: Contact
+  /** The ENS name the address was looked up from, when it was. */
+  ens?: string
+}
+
+/** How long typing must pause before an ENS name is looked up. */
+const LOOKUP_DELAY_MS = 400
+
+/** Why an ENS name couldn't be used, in plain words. */
+function lookupProblem(name: string, error: unknown) {
+  if (error instanceof ApiError && error.status === 404) {
+    return `${name} doesn't point to an address. Check the spelling, or paste their 0x address.`
+  }
+  if (error instanceof ApiError && error.status === 422) return `“${name}” isn't a valid ENS name.`
+  return `Couldn't look up ${name}. Try again, or paste their 0x address.`
 }
 
 /**
  * Adds someone the assistant may pay, in two steps: the details, then a look at the whole address
  * before it is saved. A name that is already saved gets the new address, so that look shows both.
+ *
+ * The address can be typed as an ENS name (sam.eth). The server looks it up, and from then on it is
+ * an address like any other: signed, saved and kept even if the name is later pointed elsewhere.
  *
  * Saving takes the signature of the wallet the user signed in with, over the exact name and address
  * (EIP-712, from POST /api/contacts/prepare): the contact list is where the assistant may send
@@ -70,14 +89,30 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
     },
   })
 
-  const normalized = normalizeName(name)
-  const nameError = name === '' ? null : nameProblem(name)
-  const addressError = address === '' ? null : addressProblem(address)
-  const checksummed = address !== '' && !addressError ? getAddress(address) : null
+  const ensInput = looksLikeEnsName(address)
+  const lookupName = useDebouncedValue(ensInput ? address : '', LOOKUP_DELAY_MS)
+  const lookup = useQuery({
+    queryKey: ['ens', lookupName],
+    queryFn: ({ signal }) => resolveEnsName(lookupName, signal),
+    enabled: lookupName !== '',
+    retry: false,
+    staleTime: 60_000,
+  })
+  // Only an answer about what is in the field now, never about what was there a moment ago.
+  const looked = ensInput && lookupName === address
+  const ens = looked && lookup.isSuccess ? lookup.data : null
+
+  // Left empty, the name is the ENS name, so "send 10 USDC to sam.eth" works as typed.
+  const contactName = name === '' && ens ? ens.name : name
+  const normalized = normalizeName(contactName)
+  const nameError = contactName === '' ? null : nameProblem(contactName)
+  const addressError = address === '' || ensInput ? null : addressProblem(address)
+  const typedAddress = address !== '' && !ensInput && !addressError ? getAddress(address) : null
+  const checksummed = ens ? getAddress(ens.address) : typedAddress
   const existing = nameError ? undefined : contacts.find(c => c.name === normalized)
   const unchanged = !!existing && existing.address === checksummed
   const savedAs = checksummed ? contacts.find(c => c.address === checksummed && c.name !== normalized) : undefined
-  const ready = name !== '' && !nameError && checksummed !== null && !unchanged
+  const ready = contactName !== '' && !nameError && checksummed !== null && !unchanged
 
   const change = (setter: (value: string) => void) => (value: string) => {
     setter(value)
@@ -87,8 +122,23 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
   let nameHelp
   if (nameError) nameHelp = <Form.Text className="mf-error-text">{nameError}</Form.Text>
   else if (unchanged) nameHelp = <Form.Text className="mf-error-text">{normalized} already has this address.</Form.Text>
+  else if (name === '' && ens) nameHelp = <Form.Text>Saved as “{normalized}” unless you type another name.</Form.Text>
   else if (normalized !== '' && normalized !== name.trim()) nameHelp = <Form.Text>Saved as “{normalized}”.</Form.Text>
   else nameHelp = <Form.Text>The name you'll use with your assistant, as in “send 10 USDC to sam”.</Form.Text>
+
+  let addressHelp
+  if (addressError) addressHelp = <Form.Text className="mf-error-text">{addressError}</Form.Text>
+  else if (ens) {
+    addressHelp = (
+      <Form.Text>
+        {ens.name} points to <AddressText address={ens.address} />.{savedAs && ` Already saved as ${savedAs.name}.`}
+      </Form.Text>
+    )
+  } else if (looked && lookup.isError) {
+    addressHelp = <Form.Text className="mf-error-text">{lookupProblem(address, lookup.error)}</Form.Text>
+  } else if (ensInput) addressHelp = <Form.Text>Looking up {address}…</Form.Text>
+  else if (savedAs) addressHelp = <Form.Text>Already saved as {savedAs.name}.</Form.Text>
+  else addressHelp = <Form.Text>Their 0x address, or an ENS name such as sam.eth.</Form.Text>
 
   const fields = (
     <>
@@ -111,19 +161,15 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
           <Input
             id="contact-address"
             className="mf-mono"
-            placeholder="0x…"
+            placeholder="0x… or sam.eth"
             autoComplete="off"
             spellCheck={false}
             value={address}
             onChange={change(value => setAddress(value.trim()))}
-            aria-describedby={addressError || savedAs ? 'contact-address-help-text' : undefined}
-            aria-invalid={!!addressError}
+            aria-describedby="contact-address-help-text"
+            aria-invalid={!!addressError || (looked && lookup.isError)}
           />
-          {addressError ? (
-            <Form.Text className="mf-error-text">{addressError}</Form.Text>
-          ) : (
-            savedAs && <Form.Text>Already saved as {savedAs.name}.</Form.Text>
-          )}
+          {addressHelp}
         </Form.Group>
       </Form.Stack>
       {existing && !unchanged && (
@@ -158,10 +204,17 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
           </div>
         </>
       )}
-      <Message type="warning" showIcon>
-        Please check {review.contact.name}'s address carefully and make sure all characters match. 
-        Scam addresses often match only the first and last few characters.
-      </Message>
+      {review.ens ? (
+        <Message type="warning" showIcon>
+          This is where {review.ens} points today. Make sure it's the right name: scammers register look-alike
+          names. If {review.ens} is pointed somewhere else later, this contact keeps this address.
+        </Message>
+      ) : (
+        <Message type="warning" showIcon>
+          Please check {review.contact.name}'s address carefully and make sure all characters match.
+          Scam addresses often match only the first and last few characters.
+        </Message>
+      )}
       {owner && <SignerBar owner={owner} />}
       {signerReady &&
         (signing ? (
@@ -221,7 +274,9 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
         // would stack the body and footer as fields, shrunk to their content.
         <Form
           onSubmit={() => {
-            if (ready) setReview({ contact: { name: normalized, address: checksummed }, previous: existing })
+            if (ready) {
+              setReview({ contact: { name: normalized, address: checksummed }, previous: existing, ens: ens?.name })
+            }
           }}
         >
           <Modal.Body>{fields}</Modal.Body>

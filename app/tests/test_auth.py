@@ -20,9 +20,8 @@ _tmp_db.close()
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-0123456789abcdef")
 os.environ["COOKIE_SECURE"] = "0"          # the test client speaks http
 os.environ["SIWE_DOMAIN"] = "localhost:3000"   # explicit, so a SIWE_DOMAIN in .env cannot move it
-# Every chain's Telegram bot, set here so the bots in .env cannot move what the tests expect.
-TELEGRAM_BOT_ENV = {f"MITFAH_{stem}_USERNAME": f"test_{stem.lower()}_bot"
-                    for stem in ("ETH", "SEPOLIA", "BSC", "ARB", "BASE")}
+# The Telegram bot, set here so the bot in .env cannot move what the tests expect.
+TELEGRAM_BOT_ENV = {"MITFAH_USERNAME": "test_bot"}
 os.environ.update(TELEGRAM_BOT_ENV)
 
 import db                                   # noqa: E402
@@ -44,6 +43,13 @@ import routes.signin  # noqa: E402
 import auth                                 # noqa: E402
 from constants import get_router, get_v3_network  # noqa: E402
 from contract_errors import describe_revert_data  # noqa: E402
+
+# The per-chain bot usernames from when every chain had a bot of its own. The imports above ran
+# load_dotenv, which copies any still in .env into the environment; dropped, so no check here can
+# pass by leaning on one.
+for _name in [n for n in os.environ
+              if n.startswith("MITFAH_") and n.endswith("_USERNAME") and n not in TELEGRAM_BOT_ENV]:
+    del os.environ[_name]
 
 # A checksummed address, used by the contacts tests to prove the API normalises what it stores.
 ADDR = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
@@ -328,17 +334,23 @@ def test_siwe_checks_and_deployer_check():
 
 
 def test_telegram_link_nonce():
-    print("\n[6] Telegram links are minted server-side and are single-use")
+    print("\n[6] one Telegram bot: /api/me names it, and links to it are minted server-side and single-use")
     c = make_client()
     signed_in, headers, _ = sign_in(c)
 
-    r = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453})
+    me = c.get("/api/me", headers=headers).json()
+    check("/api/me names the bot", me["telegram_bot"] == "test_bot", str(me))
+
+    r = c.post("/api/integrations/telegram/link", headers=headers)
     check("a link is minted", r.status_code == 200, r.text[:160])
-    check("it opens the bot of the network the page is on",
-          r.json()["url"].startswith("https://t.me/test_base_bot?start="), r.json()["url"])
+    link = r.json()
+    check("it opens the bot, carrying the nonce", link["url"] == f"https://t.me/test_bot?start={link['nonce']}",
+          link["url"])
+    check("...and says how long it lasts",
+          set(link) == {"url", "nonce", "expires_in"} and link["expires_in"] == auth.TELEGRAM_NONCE_TTL_SECS, str(link))
     check("linking needs a token", c.post("/api/integrations/telegram/link").status_code == 401)
 
-    nonce = r.json()["nonce"]
+    nonce = link["nonce"]
     check("the nonce redeems to its account",
           db.consume_telegram_link_nonce(nonce) == signed_in["user_id"])
     check("and only once", db.consume_telegram_link_nonce(nonce) is None)
@@ -346,24 +358,36 @@ def test_telegram_link_nonce():
     # An unknown nonce cannot bind anything.
     check("an unknown nonce redeems to nothing", db.consume_telegram_link_nonce("made-up") is None)
 
-    # Any bot can finish a link, so a network without one, or no network, still gets one.
-    for label, params in (("a network without a bot", {"chain_id": 31337}), ("no network", {})):
-        r = c.post("/api/integrations/telegram/link", headers=headers, params=params)
-        check(f"{label} gets the first bot's link",
-              r.status_code == 200 and r.json()["url"].startswith("https://t.me/test_eth_bot?start="),
-              f"{r.status_code} {r.text[:160]}")
+    # The network is picked in the chat now (/chain), so a chain_id from a page loaded before the
+    # change makes no difference.
+    r = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453})
+    check("a chain_id from an older page is ignored: the same bot",
+          r.status_code == 200 and r.json()["url"].startswith("https://t.me/test_bot?start="),
+          f"{r.status_code} {r.text[:160]}")
 
     try:
-        os.environ["MITFAH_BASE_USERNAME"] = "@test_base_bot"
-        url = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453}).json()["url"]
-        check("an @ in .env is dropped from the link", url.startswith("https://t.me/test_base_bot?start="), url)
+        os.environ["MITFAH_USERNAME"] = "@test_bot"
+        url = c.post("/api/integrations/telegram/link", headers=headers).json()["url"]
+        check("an @ in .env is dropped from the link", url.startswith("https://t.me/test_bot?start="), url)
+        me = c.get("/api/me", headers=headers).json()
+        check("...and from /api/me", me["telegram_bot"] == "test_bot", str(me))
 
-        for name in TELEGRAM_BOT_ENV:
-            os.environ[name] = ""
-        r = c.post("/api/integrations/telegram/link", headers=headers, params={"chain_id": 8453})
-        check("with no bot configured, the server says so",
-              r.status_code == 500 and "not configured" in r.json()["detail"], f"{r.status_code} {r.text[:160]}")
+        del os.environ["MITFAH_USERNAME"]
+        r = c.post("/api/integrations/telegram/link", headers=headers)
+        check("with MITFAH_USERNAME unset, the server says so",
+              r.status_code == 500 and r.json()["detail"] == "Telegram is not configured: MITFAH_USERNAME is not set",
+              f"{r.status_code} {r.text[:160]}")
+        r = c.get("/api/me", headers=headers)
+        check("...and /api/me still answers, naming no bot",
+              r.status_code == 200 and r.json()["telegram_bot"] is None, f"{r.status_code} {r.text[:160]}")
+
+        os.environ["MITFAH_BASE_USERNAME"] = "test_base_bot"
+        r = c.post("/api/integrations/telegram/link", headers=headers)
+        check("an old per-chain username doesn't stand in for it",
+              r.status_code == 500 and c.get("/api/me", headers=headers).json()["telegram_bot"] is None,
+              f"{r.status_code} {r.text[:160]}")
     finally:
+        os.environ.pop("MITFAH_BASE_USERNAME", None)
         os.environ.update(TELEGRAM_BOT_ENV)
 
 
@@ -391,14 +415,14 @@ def test_bot_start_explains_a_chat_linked_elsewhere():
         ).json()
         replies = []
 
-        async def reply_text(text):
+        async def reply_text(text, **_):
             replies.append(text)
 
         update = SimpleNamespace(message=SimpleNamespace(chat_id=chat_id, reply_text=reply_text))
         context = SimpleNamespace(
             args=[link["nonce"]],
             job_queue=SimpleNamespace(run_once=lambda *a, **k: None),
-            bot_data={"chain_id": 11155111, "network": "sepolia"},
+            bot_data={"networks": {11155111: "sepolia"}},   # the networks the bot is serving
         )
         asyncio.run(telebot.start(update, context))
         return link["nonce"], replies
@@ -815,6 +839,71 @@ def test_contacts_are_web_only_and_per_account():
     check("an account with no owner address can't prepare one -> 403", r.status_code == 403, f"{r.status_code}")
 
 
+def test_contacts_can_be_found_by_ens_name():
+    """
+    The owner can look a contact up by its ENS name, and the lookup only ever answers.
+
+    It saves nothing and issues no nonce -- the address it finds goes through the usual signed save,
+    so the owner approves the address itself. The resolver is stubbed: this is offline.
+    """
+    print("\n[9b] a contact can be looked up by its ENS name")
+    import ens_names
+
+    c = make_client()
+    _, headers, _ = sign_in(c)
+    asked: list[str] = []
+
+    def fake_resolve(name: str):
+        asked.append(name)
+        if name == "down.eth":
+            raise ConnectionError("https://eth-mainnet.g.alchemy.com/v2/SECRET-KEY unreachable")
+        return {"sam.eth": ADDR, "jesse.base.eth": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}.get(name)
+
+    original = ens_names.resolve
+    ens_names.resolve = fake_resolve
+    try:
+        check("looking up needs a token",
+              c.get("/api/contacts/resolve", params={"name": "sam.eth"}).status_code == 401)
+
+        r = c.get("/api/contacts/resolve", headers=headers, params={"name": " Sam.ETH "})
+        check("a name answers its address", r.status_code == 200 and r.json()["address"] == ADDR,
+              f"{r.status_code} {r.text[:120]}")
+        check("and the name as ENS normalises it", r.json().get("name") == "sam.eth", r.text[:120])
+        check("the lookup uses the normalised name", asked == ["sam.eth"], str(asked))
+
+        r = c.get("/api/contacts/resolve", headers=headers, params={"name": "jesse.base.eth"})
+        check("a Basename works the same way", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+
+        r = c.get("/api/contacts/resolve", headers=headers, params={"name": "nobody.eth"})
+        check("a name that points nowhere -> 404", r.status_code == 404, f"{r.status_code} {r.text[:120]}")
+
+        asked.clear()
+        for label, name in [
+            ("an empty label", "a..eth"),
+            ("a space", "sam smith.eth"),
+            ("a bare label", "sam"),
+            ("a right-to-left override", "‮sam.eth"),
+        ]:
+            r = c.get("/api/contacts/resolve", headers=headers, params={"name": name})
+            check(f"a name with {label} -> 422", r.status_code == 422, f"{r.status_code} {r.text[:90]}")
+        check("and none of them reached the chain", asked == [], str(asked))
+
+        r = c.get("/api/contacts/resolve", headers=headers, params={"name": "down.eth"})
+        check("an unreachable RPC -> 503", r.status_code == 503, f"{r.status_code} {r.text[:120]}")
+        check("without the RPC's key", "SECRET-KEY" not in r.text and "alchemy" not in r.text, r.text[:160])
+
+        check("looking up saved nothing", c.get("/api/contacts", headers=headers).json()["contacts"] == [])
+
+        # Each lookup is an RPC round trip (and maybe a gateway's), so it is rationed.
+        c = make_client(rate_limit=True)
+        codes = [c.get("/api/contacts/resolve", headers=headers, params={"name": "sam.eth"}).status_code
+                 for _ in range(34)]
+        check("looking up without end gets 429", 429 in codes, f"codes: {codes}")
+    finally:
+        ens_names.resolve = original
+        api.limiter.enabled = False
+
+
 def test_chat_history_shows_only_the_conversation():
     """
     GET /api/chat/history returns what was SAID, never the tool traffic around it.
@@ -1020,8 +1109,10 @@ def test_chat_is_rationed():
     from types import SimpleNamespace
 
     from langchain_core.messages import AIMessage
+    from limits import parse_many
 
     import smart_wallet_agent
+    from chat_limits import CHAT_RATE_LIMIT
 
     entered, release = threading.Event(), threading.Event()
 
@@ -1071,8 +1162,10 @@ def test_chat_is_rationed():
         c = make_client(rate_limit=True)
         _, carol, _ = sign_in(c)
         _, dave, _ = sign_in(c)
-        codes = [c.post("/api/chat", json=ask, headers=carol).status_code for _ in range(12)]
-        check("an account past 10 messages a minute gets 429", codes[:10] == [200] * 10 and 429 in codes[10:], str(codes))
+        per_minute = next(item.amount for item in parse_many(CHAT_RATE_LIMIT) if item.get_expiry() == 60)
+        codes = [c.post("/api/chat", json=ask, headers=carol).status_code for _ in range(per_minute + 2)]
+        check(f"an account past {per_minute} messages a minute gets 429",
+              codes[:per_minute] == [200] * per_minute and 429 in codes[per_minute:], str(codes))
         check("the limit is per account, not per address",
               c.post("/api/chat", json=ask, headers=dave).status_code == 200)
     finally:
@@ -1148,15 +1241,8 @@ def test_chains_lists_only_deployed_served_chains():
           anvil["exchange"] is None and anvil["default_spenders"] == [], str(anvil))
     conn.execute("DELETE FROM factory WHERE chain_id = ?", (31337,))
     conn.commit()
-    check("each carries its own Telegram bot",
-          by_id[11155111]["telegram_bot"] == "test_sepolia_bot" and by_id[56]["telegram_bot"] == "test_bsc_bot",
-          str(chains))
-    try:
-        os.environ["MITFAH_BSC_USERNAME"] = ""
-        bsc = next(x for x in make_client().get("/api/chains").json()["chains"] if x["chain_id"] == 56)
-        check("a network without a bot says so", bsc["telegram_bot"] is None, str(bsc))
-    finally:
-        os.environ.update(TELEGRAM_BOT_ENV)
+    check("no chain names a Telegram bot: one serves them all, and /api/me names it",
+          all("telegram_bot" not in x for x in chains), str(chains))
 
 
 def test_rate_limit():
@@ -1188,6 +1274,7 @@ if __name__ == "__main__":
         test_wrapped_native_always_counts()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
+        test_contacts_can_be_found_by_ens_name()
         test_chat_history_shows_only_the_conversation()
         test_chat_turn_returns_text_and_hides_failures()
         test_chat_acts_on_the_pages_network()

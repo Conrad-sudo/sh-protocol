@@ -1747,7 +1747,7 @@ main p a {
   gap: 12px 16px;
 }
 
-.mf-telegram-bots {
+.mf-telegram-bot {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1755,83 +1755,19 @@ main p a {
   border-top: 1px solid var(--rs-border-primary);
 }
 
-/* On a desktop each bot is a tile: its network, a QR code to scan with a phone, and its link. */
-.mf-telegram-bots ul {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 16px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.mf-telegram-bots li {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  text-align: center;
-}
-
-.mf-telegram-bots .mf-qr {
-  margin: 0;
-}
-
-/* Each small code is a button: a click shows it large, on its own (BotQrModal). */
-.mf-telegram-bots button.mf-qr {
-  border: 0;
-  cursor: zoom-in;
-  transition: box-shadow 0.15s;
-}
-
-.mf-telegram-bots button.mf-qr:hover {
-  box-shadow: 0 0 0 3px var(--rs-primary-500);
-}
-
 /*
- * While one is large, the small ones go: side by side they confuse a phone's camera. Faded out
- * rather than hidden, so the one clicked keeps the focus the dialog hands back when it closes.
+ * The bot's link sits under its QR code, the two as one item. The username is long and unbroken:
+ * on a narrow phone it may wrap rather than push sideways.
  */
-.mf-telegram-bots[data-enlarged] li .mf-qr {
-  opacity: 0;
-}
-
-.mf-telegram-bot-large {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  text-align: center;
-}
-
-.mf-telegram-bot-large .mf-qr {
-  margin: 0 0 4px;
-}
-
-/* Bot usernames are long and unbroken; on a narrow phone one may wrap rather than push sideways. */
-.mf-telegram-bots a {
+.mf-telegram-bot a {
+  align-self: center;
   overflow-wrap: anywhere;
 }
 
-/* A touch screen opens the links themselves, so the codes go and each bot is one line. */
+/* A touch screen shows no code (.mf-telegram-qr), so there the link sits under the text. */
 @media (pointer: coarse) {
-  /* Two classes: .mf-qr, further down, would otherwise show the codes again. */
-  .mf-telegram-bots .mf-telegram-bot-qr {
-    display: none;
-  }
-
-  .mf-telegram-bots ul {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .mf-telegram-bots li {
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 2px 16px;
-    text-align: start;
+  .mf-telegram-bot a {
+    align-self: flex-start;
   }
 }
 
@@ -3057,6 +2993,53 @@ main p a {
   margin: 8px 0 0;
   font-size: 14px;
   text-align: right;
+}
+
+/* A quoted transaction with Confirm and Cancel: the server's text, so it reads as a form, not a reply. */
+.mf-quote {
+  box-sizing: border-box;
+  max-width: min(85%, 44rem);
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rs-primary-500);
+  border-radius: 16px 16px 16px 4px;
+  background: var(--rs-bg-card);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.mf-quote p {
+  margin: 0;
+}
+
+.mf-quote-title {
+  font-weight: 600;
+}
+
+.mf-quote .mf-quote-meta,
+.mf-quote .mf-quote-sending {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--rs-text-secondary);
+}
+
+.mf-quote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.mf-quote-expired {
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+
+/* How a confirmed send is getting on, until it lands: a line under the chat, not a reply. */
+.mf-send-status {
+  margin: 12px 0 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .mf-chat-start {

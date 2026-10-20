@@ -45,9 +45,10 @@ def test_new_database():
     check("it reports the latest version", db.schema_version(conn) == len(db.MIGRATIONS),
           f"{db.schema_version(conn)} of {len(db.MIGRATIONS)}")
     check("every table is there",
-          {"users", "transactions", "transaction_movements", "supported_tokens", "session_keys", "lp_tokens"}
+          {"users", "transactions", "transaction_movements", "supported_tokens", "session_keys", "lp_tokens", "app_feedback"}
           <= _tables(conn), str(sorted(_tables(conn))))
-    check("with the newest columns", {"direction", "movements_read"} <= _columns(conn, "transactions"))
+    check("with the newest columns", {"direction", "movements_read"} <= _columns(conn, "transactions")
+          and "telegram_chain_id" in _columns(conn, "users"))
 
 
 def test_database_from_before_the_numbering():
@@ -114,12 +115,73 @@ def test_newer_database_is_refused():
     check("init_db stops with a reason", error is not None and "newer version" in error, str(error))
 
 
+def test_telegram_chain_column():
+    print("\n[5] migration 6 gives accounts a Telegram network, keeping their rows")
+    _use_new_file()
+    original = db.schema.MIGRATIONS
+    db.schema.MIGRATIONS = original[:5]
+    try:
+        db.init_db()
+    finally:
+        db.schema.MIGRATIONS = original
+    conn = db.get_db()
+    user_id = db.create_user("0x00000000000000000000000000000000000000A1")
+    db.link_telegram(user_id, 4242)
+    check("it starts at version 5 without the column",
+          db.schema_version(conn) == 5 and "telegram_chain_id" not in _columns(conn, "users"))
+
+    db.init_db()
+    check("it ends at the latest version with the column",
+          db.schema_version(conn) == len(db.MIGRATIONS) and "telegram_chain_id" in _columns(conn, "users"))
+    check("the account and its Telegram link are kept", db.get_user_id_by_telegram_chat_id(4242) == user_id)
+    check("no network is chosen yet", db.get_telegram_chain(user_id) is None)
+    db.schema._migrate_telegram_chain(conn)
+    check("running it again changes nothing", "telegram_chain_id" in _columns(conn, "users"))
+
+    db.set_telegram_chain(user_id, 8453)
+    check("a chosen network is read back", db.get_telegram_chain(user_id) == 8453)
+    db.unlink_telegram(user_id)
+    check("unlinking Telegram forgets the network too",
+          db.get_telegram_chain(user_id) is None and db.get_user_id_by_telegram_chat_id(4242) is None)
+    check("an account that doesn't exist has no network", db.get_telegram_chain(user_id + 999) is None)
+
+
+def test_feedback_table():
+    print("\n[6] migration 7 adds the table the bot's /feedback writes to")
+    _use_new_file()
+    original = db.schema.MIGRATIONS
+    db.schema.MIGRATIONS = original[:6]
+    try:
+        db.init_db()
+    finally:
+        db.schema.MIGRATIONS = original
+    conn = db.get_db()
+    user_id = db.create_user("0x00000000000000000000000000000000000000B2")
+    check("it starts at version 6 without the table",
+          db.schema_version(conn) == 6 and "app_feedback" not in _tables(conn))
+
+    db.init_db()
+    check("it ends at the latest version with the table",
+          db.schema_version(conn) == len(db.MIGRATIONS) and "app_feedback" in _tables(conn)
+          and {"user_id", "chain_id", "source", "text", "created_at"} <= _columns(conn, "app_feedback"))
+    check("indexed by account and time", "idx_app_feedback_user_time" in
+          {r[1] for r in conn.execute("PRAGMA index_list(app_feedback)")})
+    db.add_feedback(user_id, 8453, "telegram", "first")
+    db.schema._migrate_app_feedback(conn)
+    check("running it again changes nothing, and keeps what's there",
+          db.count_feedback_since(user_id, 0) == 1)
+    check("only an account's own feedback is counted, and only since when asked",
+          db.count_feedback_since(user_id + 1, 0) == 0 and db.count_feedback_since(user_id, 2**40) == 0)
+
+
 if __name__ == "__main__":
     try:
         test_new_database()
         test_database_from_before_the_numbering()
         test_each_migration_runs_once()
         test_newer_database_is_refused()
+        test_telegram_chain_column()
+        test_feedback_table()
     finally:
         if hasattr(db._local, "db"):
             db._local.db.close()

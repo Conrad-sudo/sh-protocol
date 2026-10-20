@@ -1,11 +1,15 @@
 """
 The contact list: the only destinations the assistant may pay, written only by the owner.
 """
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import logging
+
+from ens.exceptions import InvalidName
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from web3 import Web3
 
 import auth
+import ens_names
 from auth import get_current_user
 from db import (
     delete_contact,
@@ -13,9 +17,11 @@ from db import (
     get_contact,
     save_contact,
 )
+from redact import redact
 from routes.deps import _require_owner, limiter
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 #
@@ -89,6 +95,41 @@ def _normalise_contact(req: ContactRequest) -> tuple[str, str]:
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"'{req.address}' is not an Ethereum address"
         )
     return name, address
+
+
+@router.get("/api/contacts/resolve")
+@limiter.limit("30/minute")
+def resolve_contact_name(
+    request: Request,
+    name: str = Query(min_length=1, max_length=255),
+    user_id: int = Depends(get_current_user),
+):
+    """
+    The address an ENS name (sam.eth) points to now, so a contact can be added by its name.
+
+    A lookup only: it saves nothing and issues no nonce. The address then goes through the usual
+    prepare -> sign -> save, so the owner signs the address itself and the contact keeps it even if
+    the name is later pointed elsewhere (see ens_names).
+
+    @param name  The ENS name as typed.
+    @return      {"name": the name as ENS normalises it, "address": the checksummed address}
+    """
+    try:
+        normalized = ens_names.normalize(name)
+    except InvalidName:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"'{name}' isn't a valid ENS name")
+    try:
+        address = ens_names.resolve(normalized)
+    except Exception as e:
+        # The exception can name the RPC's URL, which carries the provider's key: only the log gets
+        # it, masked.
+        logger.warning("Cannot resolve the ENS name %s: %s", normalized, redact(e))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"Couldn't look up {normalized} right now"
+        )
+    if address is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{normalized} doesn't point to an address")
+    return {"name": normalized, "address": address}
 
 
 @router.post("/api/contacts/prepare")

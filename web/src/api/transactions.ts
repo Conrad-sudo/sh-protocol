@@ -1,5 +1,5 @@
 import { apiFetch } from './client'
-import type { DepositConfirmResult, TransactionFilters, TransactionPage, TransactionTokens } from './types'
+import type { DepositConfirmResult, Transaction, TransactionFilters, TransactionPage, TransactionTokens } from './types'
 
 /** How many transactions to load at a time. The server allows up to 100. */
 export const TRANSACTIONS_PAGE_SIZE = 25
@@ -16,6 +16,11 @@ export function fetchTransactions(chainId: number | null, before?: string, filte
     if (value !== undefined) params.set(name, String(value))
   }
   return apiFetch<TransactionPage>(`/api/transactions?${params}`)
+}
+
+/** One of the account's transactions, as the History tab lists it: how the chat follows a send it confirmed. */
+export function fetchTransaction(id: number) {
+  return apiFetch<Transaction>(`/api/transactions/${id}`)
 }
 
 /** The tickers the account's transactions have moved, for the History tab's token filter. */

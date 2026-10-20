@@ -49,11 +49,12 @@ export function ChatLog({ messages, latest, onRetry, onEdit, onCheck }: ChatLogP
   )
 }
 
-function Bubble({ role, text }: Pick<ChatMessage, 'role' | 'text'>) {
+function Bubble({ role, text, button }: Pick<ChatMessage, 'role' | 'text' | 'button'>) {
   return (
     <div className="mf-msg" data-role={role}>
       <span className="mf-visually-hidden">{role === 'user' ? 'You said:' : 'Mitfah said:'}</span>
-      {role === 'user' ? <p className="mf-msg-text">{text}</p> : <ChatMarkdown text={text} />}
+      {/* A button's outcome is the server's own text, not markdown: a token's symbol in it stays text. */}
+      {role === 'user' || button ? <p className="mf-msg-text">{text}</p> : <ChatMarkdown text={text} />}
     </div>
   )
 }

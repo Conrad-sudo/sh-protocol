@@ -1,6 +1,8 @@
 import os
 
+import requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 from constants import (
@@ -68,9 +70,16 @@ def network_name(chain_id: int) -> str:
     return chain_name
 
 
+# How many open connections to its RPC each provider keeps for reuse: at least as many as may send
+# at once -- parallel.py's read pool, plus one tool thread for each turn running. Past it a request
+# still goes out, on a connection that is closed afterwards instead of kept.
+RPC_POOL_SIZE = 256
+
+
 class _ChainIdOnceProvider(HTTPProvider):
     """
-    An HTTPProvider that asks the node for its chain id once, instead of before every call.
+    An HTTPProvider that asks the node for its chain id once, instead of before every call, and
+    sends every thread's requests over one pool of kept-open connections.
 
     web3's validation middleware reads `w3.eth.chain_id` before every eth_call and eth_estimateGas
     (twice per call, in practice), so most of the requests the app sent were that same question:
@@ -80,9 +89,24 @@ class _ChainIdOnceProvider(HTTPProvider):
 
     Not web3's own request cache: that keys its entries by thread, and LangGraph runs each turn's
     tools on fresh threads, so it would still ask about once per tool call.
+
+    The one session is for the same reason. Without one, web3 (7.x) keeps a session per thread, so
+    each fresh thread opened a connection of its own -- a new TLS handshake to a live RPC -- and
+    past 100 threads web3 started closing sessions to make room.
     """
 
     _chain_id_response: dict | None = None
+
+    def __init__(self, endpoint_uri: str):
+        session = requests.Session()
+        # Not the environment's proxy and certificate settings. With them on, requests reads every
+        # environment variable and ~/.netrc again on each request: about 0.7 ms of CPU per chain
+        # read, measured, out of ~4.5. An RPC reached through a proxy would need it set here.
+        session.trust_env = False
+        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=RPC_POOL_SIZE)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        super().__init__(endpoint_uri, session=session)
 
     def make_request(self, method, params):
         if method != "eth_chainId":
@@ -96,10 +120,9 @@ class _ChainIdOnceProvider(HTTPProvider):
 
 # One cached {"instance": Web3, "chain_id": int} per chain_name, so the underlying
 # HTTP keep-alive pool is reused instead of a fresh session being built on every
-# lookup. Shared by both loaders below (both key by chain_name). web3.py's
-# HTTPProvider is safe to share across the bot's worker threads (it sends over a
-# thread-safe requests.Session). RPC URLs are static config; restart to pick up a
-# changed rpcs table.
+# lookup. Shared by both loaders below (both key by chain_name), and by every
+# thread: each provider sends over one requests.Session (see _ChainIdOnceProvider).
+# RPC URLs are static config; restart to pick up a changed rpcs table.
 _web3_cache: dict[str, dict] = {}
 
 

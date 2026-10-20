@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test py-test e2e-test agent-smoke api api-prod
+.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test py-test e2e-test agent-smoke load-test api api-prod
 
 
 
@@ -77,15 +77,26 @@ speed-test:
 	.venv/bin/python3 app/tests/test_speed.py
 
 # What a UserOp pays for posting its data to Ethereum on the live L2s (Base's L1 fee, Arbitrum's L1
-# gas), as preVerificationGas, and that forks pay none. A fake node, so offline.
+# gas), as preVerificationGas, and that forks pay none; and tx_sender's send/confirm split (nonces run
+# ahead, a stalled transaction is replaced at a higher fee). A fake node, so offline.
 bundler-test:
 	.venv/bin/python3 app/tests/test_bundler.py
 
-# The Telegram bots: each acts on its own chain and only in private chats, one link covers them all,
-# replies keep their formatting (web app's rules) and are split to fit, and the daily check reaches
-# the right chats. Stand-ins for Telegram, the chain and the model, so offline.
+# The Telegram bot: /chain offers only the user's networks the bot can reach (picked for them when
+# there is one) and refuses a forged or group button press; replies name the network, and a "yes"
+# after switching can't confirm the other network's quote; private chats only, one link; a flood
+# past the chat limit makes no model call and gets one notice; replies keep their formatting (web
+# app's rules) and are split to fit; the daily check reaches the right chats. Stand-ins for
+# Telegram, the chain and the model, so offline.
 telebot-test:
 	.venv/bin/python3 app/tests/test_telebot.py
+
+# The chat's rationing (app/chat_limits.py): the minute and day limits, one message running and one
+# waiting per account, a refused message counting nothing, one notice a minute per kind of refusal,
+# the slot freed after a turn that raises, and the web route on the same CHAT_RATE_LIMIT. A fake
+# clock, so offline.
+chat-limits-test:
+	.venv/bin/python3 app/tests/test_chat_limits.py
 
 # API keys kept out of HTTP errors, the model's tool results and the logs. Offline.
 redact-test:
@@ -114,7 +125,7 @@ position-tools-test:
 	.venv/bin/python3 app/tests/test_position_tools.py
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
@@ -128,6 +139,13 @@ e2e-test:
 # argument. Costs DeepSeek credits. Needs the same stack as e2e-test.
 agent-smoke:
 	.venv/bin/python3 app/tests/test_agent_smoke.py
+
+# How many chat turns one API process carries at once and the CPU each takes: the real API on a
+# scratch database, a stand-in for DeepSeek, chats from many accounts at 8, 32, 64 and 128 at once
+# (or ARGS="16 256"; it raises the API's CHAT_MAX_CONCURRENT to the highest). About 4 minutes. No
+# chain, no credits.
+load-test:
+	.venv/bin/python3 app/tests/load_test.py $(ARGS)
 
 unit-test:
 	forge test --match-path test/unit/SHProtocolTest.t.sol -vvvv
@@ -182,8 +200,8 @@ LOCAL_RPC_URL := http://127.0.0.1:$(FORK_PORT_$(ARGS))
 endif
 
 # $(call start_fork,<upstream RPC>,<network name>): forks the upstream at its latest block on that
-# network's port, then gives API_BUNDLER and TELEGRAM_BUNDLER 100 of the native coin each (`fund`)
-# as soon as the node answers, so a fresh fork is ready to deploy to.
+# network's port, then gives every bundler key (API_BUNDLER_n, TELEGRAM_BUNDLER_n) 100 of the native
+# coin each (`fund`) as soon as the node answers, so a fresh fork is ready to deploy to.
 #
 # Anvil runs in the background only so the funding can happen after it starts; the recipe then
 # waits on it, so it stays in the foreground as before. The trap is what makes Ctrl+C stop it: a
@@ -208,7 +226,7 @@ until cast chain-id --rpc-url http://127.0.0.1:$(FORK_PORT_$(2)) >/dev/null 2>&1
 done; \
 kill -0 $$pid 2>/dev/null || exit 1; \
 if $(MAKE) --no-print-directory fund ARGS=$(2) >/dev/null; then \
-	echo "Funded API_BUNDLER and TELEGRAM_BUNDLER with 100 native coin each on $(2)."; \
+	echo "Funded every bundler key with 100 native coin each on $(2)."; \
 else \
 	echo "Funding the bundlers on $(2) failed; the fork is still running. Retry: make fund ARGS=$(2)"; \
 fi; \
@@ -242,15 +260,15 @@ celo-fork:
 # ── Funding Wallets────────────────────────────────────────────────────────────────────
 
 # anvil_setBalance is a local-fork-only cheat RPC, so this always targets LOCAL_RPC_URL — the port
-# of the fork ARGS names (see FORK_PORT_* above). Two addresses need gas on a local node:
-#   SEPOLIA_ACCOUNT  API_BUNDLER's address: the deployer and protocol owner on every fork, and the
-#                    API process's bundler everywhere (deploy_wallet.LIVE_PRIVATE_KEY_ENV, bundler.py)
-#   the Telegram bot's bundler, TELEGRAM_BUNDLER -- a separate key, so the two processes never
-#                    hand out the same nonce (bundler.use_bundler_key)
-# The second is derived from its key rather than kept in .env twice. Recursively expanded (=), so
-# cast only runs when `fund` does, and inside an @-silenced recipe, so the key is never echoed.
-FUND_ADDRESS := $(SEPOLIA_ACCOUNT)
-TELEGRAM_BUNDLER_ADDRESS = $(shell cast wallet address --private-key $(TELEGRAM_BUNDLER))
+# of the fork ARGS names (see FORK_PORT_* above). Every bundler key .env sets needs gas on a local
+# node -- each process's pool, numbered from 1 (bundler.bundler_keys):
+#   API_BUNDLER_1, _2, ...       the API's. The first is SEPOLIA_ACCOUNT: the deployer and protocol
+#                                owner on every fork too (deploy_wallet.LIVE_PRIVATE_KEY_ENV)
+#   TELEGRAM_BUNDLER_1, _2, ...  the Telegram bot's -- separate keys, so the two processes never
+#                                hand out the same nonce (bundler.use_bundler_key)
+# The addresses are derived from the keys rather than kept in .env twice. Recursively expanded (=),
+# so cast only runs when `fund` does, and inside an @-silenced recipe, so no key is ever echoed.
+BUNDLER_ADDRESSES = $(foreach key,$(filter API_BUNDLER_% TELEGRAM_BUNDLER_%,$(.VARIABLES)),$(shell cast wallet address --private-key $($(key))))
 
 # anvil_setBalance only exists on a local node, so this runs for fork networks and bare "anvil"
 # and skips everything else. Stated as an ALLOWLIST on purpose: the previous form skipped a
@@ -259,11 +277,12 @@ TELEGRAM_BUNDLER_ADDRESS = $(shell cast wallet address --private-key $(TELEGRAM_
 # than aim a cheat RPC at a real deployment.
 #
 # Plain "anvil" deploys with the pre-funded ANVIL_* keys, but both processes still bundle with
-# their own keys there, so both are funded on it too.
+# their own keys there, so those are funded on it too.
 fund:
 	@if echo "$(ARGS)" | grep -qE 'fork|^anvil$$'; then \
-		cast rpc anvil_setBalance $(FUND_ADDRESS) $(100_ETH) --rpc-url $(LOCAL_RPC_URL); \
-		cast rpc anvil_setBalance $(TELEGRAM_BUNDLER_ADDRESS) $(100_ETH) --rpc-url $(LOCAL_RPC_URL); \
+		for address in $(BUNDLER_ADDRESSES); do \
+			cast rpc anvil_setBalance $$address $(100_ETH) --rpc-url $(LOCAL_RPC_URL) || exit 1; \
+		done; \
 	else \
 		echo "Skipping fund — '$(ARGS)' has no local Anvil node to send anvil_setBalance to."; \
 	fi
@@ -278,7 +297,7 @@ fund:
 #
 #   DEPLOY_RPC     the local Anvil node for anvil and every fork (each fork on its own port, see
 #                  FORK_PORT_*); the real endpoint live
-#   DEPLOY_SIGNER  Anvil's burner on plain anvil, SEPOLIA_ACCOUNT (API_BUNDLER's address)
+#   DEPLOY_SIGNER  Anvil's burner on plain anvil, SEPOLIA_ACCOUNT (API_BUNDLER_1's address)
 #                  everywhere else — see deploy_wallet.LIVE_PRIVATE_KEY_ENV; one address deploys,
 #                  owns, and bundles for the API
 #   DEPLOY_EXTRA   per-network workarounds, each documented where it is set
@@ -294,7 +313,7 @@ DEPLOY_EXTRA  :=
 # label its traces. That took a fork deploy from ~1s to many minutes, and stalls it outright while
 # Sourcify is erroring. A local deploy needs nothing from the network but the fork itself.
 ifneq ($(findstring fork,$(ARGS)),)
-	DEPLOY_SIGNER := --sender $(SEPOLIA_ACCOUNT) --private-key $(API_BUNDLER)
+	DEPLOY_SIGNER := --sender $(SEPOLIA_ACCOUNT) --private-key $(API_BUNDLER_1)
 	DEPLOY_EXTRA  := --offline
 endif
 
@@ -321,7 +340,7 @@ endif
 # Glamsterdam itself.
 ifeq ($(ARGS),sepolia)
 	DEPLOY_RPC    := $(SEPOLIA_RPC_URL)
-	DEPLOY_SIGNER := --private-key $(API_BUNDLER)
+	DEPLOY_SIGNER := --private-key $(API_BUNDLER_1)
 	DEPLOY_EXTRA  := --verify --etherscan-api-key $(ETHERSCAN_API_KEY) -vvvv --gas-estimate-multiplier 1000
 endif
 
@@ -351,11 +370,11 @@ deploy-wallet: fund
 	.venv/bin/python3 app/deploy_wallet.py $(ARGS)
 
 
-# The Telegram bots: one for each chain whose MITFAH_<CHAIN>_API token is set, all in this one
-# process, each acting only on its own chain. A bot whose network doesn't answer as its chain is
-# left off, so on forks only the forks that are running get a bot. Run exactly ONE copy: Telegram
-# lets one process poll a bot (a second gets "Conflict" errors), and the bots share TELEGRAM_BUNDLER,
-# whose nonces are counted per process.
+# The Telegram bot: one bot for every chain (MITFAH_API, MITFAH_USERNAME), each user picking the
+# network with /chain. A network that doesn't answer as its chain at startup isn't offered, so on
+# forks only the forks that are running are. Needs an up-to-date database (`make db`). Run exactly
+# ONE copy: Telegram lets one process poll a bot (a second gets "Conflict" errors), and every turn
+# bundles with the TELEGRAM_BUNDLER_n keys, whose nonces are counted per process.
 bot:
 	.venv/bin/python3 app/telebot.py
 
@@ -363,10 +382,10 @@ agent:
 	.venv/bin/python3 app/smart_wallet_agent.py
 
 # --workers 1 is not a default worth changing: tx_sender hands out bundler nonces from a cache
-# guarded by a process-wide lock, so a second worker process means a second nonce counter for the
-# same EOA (API_BUNDLER) and transactions that silently replace each other. The Telegram bot is
-# safe beside it only because it bundles with a different key (TELEGRAM_BUNDLER). The CLI agent
-# (`make agent`) and `make agent-smoke` bundle with API_BUNDLER, so don't run them beside the API.
+# guarded by in-process locks, so a second worker process means a second nonce counter for the
+# same EOAs (API_BUNDLER_n) and transactions that silently replace each other. The Telegram bot is
+# safe beside it only because it bundles with different keys (TELEGRAM_BUNDLER_n). The CLI agent
+# (`make agent`) and `make agent-smoke` bundle with the API's keys, so don't run them beside the API.
 # --reload is for development.
 # --app-dir rather than `cd app`: the contract ABIs are read from ./out and the deploy records from
 # ./broadcast, relative to the repo root, so the working directory has to stay here while app/ goes

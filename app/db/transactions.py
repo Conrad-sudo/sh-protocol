@@ -351,6 +351,16 @@ def save_history_sync(chain_id: int, wallet: str, next_block: int | None = None)
     db.commit()
 
 
+def get_transaction(user_id: int, tx_id: int) -> dict | None:
+    """One of the user's transactions by its id, or None when there is no such row of theirs."""
+    row = (
+        get_db()
+        .execute(f"SELECT {_TRANSACTION_COLUMNS} FROM transactions WHERE id = ? AND user_id = ?", (tx_id, user_id))
+        .fetchone()
+    )
+    return dict(row) if row else None
+
+
 def get_pending_transactions(user_id: int, limit: int) -> list[dict]:
     """The user's oldest still-pending transactions, up to `limit`."""
     rows = (

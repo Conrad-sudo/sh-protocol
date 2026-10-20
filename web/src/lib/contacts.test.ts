@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addressProblem, nameProblem, normalizeName } from './contacts'
+import { addressProblem, looksLikeEnsName, nameProblem, normalizeName } from './contacts'
 
 const SAM = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 
@@ -44,7 +44,8 @@ describe('addressProblem', () => {
     ['0x1234', 'An address is 0x and 40 more characters. This one has 4.'],
     [SAM.slice(0, -1), 'An address is 0x and 40 more characters. This one has 39.'],
     [`${SAM}0`, 'An address is 0x and 40 more characters. This one has 41.'],
-    ['sam.eth', "Paste the 0x address. Names such as sam.eth aren't supported."],
+    ['usdc.eth', 'Paste the whole 0x address.'],
+    ['0x7099...79C8', 'Paste the whole 0x address.'],
     ['hello', 'Enter a full address starting with 0x.'],
     [`0x${'g'.repeat(40)}`, 'Enter a full address starting with 0x.'],
     // One letter's case changed: the checksum no longer matches.
@@ -52,5 +53,15 @@ describe('addressProblem', () => {
     [`0x${'0'.repeat(40)}`, 'This is the zero address. Money sent there is lost for good.'],
   ])('refuses %j', (address, problem) => {
     expect(addressProblem(address)).toBe(problem)
+  })
+})
+
+describe('looksLikeEnsName', () => {
+  it.each(['sam.eth', 'Sam.ETH', 'jesse.base.eth', '0xabc.eth', 'zoë.eth'])('takes %j for a name', value => {
+    expect(looksLikeEnsName(value)).toBe(true)
+  })
+
+  it.each(['', 'sam', SAM, '0x1234', '0x7099...79C8', 'sam smith.eth', 'sam..eth'])('not %j', value => {
+    expect(looksLikeEnsName(value)).toBe(false)
   })
 })

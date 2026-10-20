@@ -34,6 +34,7 @@ export const ME = {
   user_id: 7,
   owner_addr: WALLET,
   telegram_linked: false,
+  telegram_bot: null as string | null,
   wallet_chains: [] as number[],
 }
 

@@ -72,8 +72,7 @@ function WalletOverview({ wallet, tx }: { wallet: WalletState; tx: OwnerActionHa
  */
 function LinkTelegramButton() {
   const { data: me } = useMe()
-  const { chains } = useSelectedChain()
-  if (!me || me.telegram_linked || !chains.some(chain => chain.telegram_bot)) return null
+  if (!me || me.telegram_linked || !me.telegram_bot) return null
   return <LinkButton to="/settings#telegram">Link Telegram</LinkButton>
 }
 

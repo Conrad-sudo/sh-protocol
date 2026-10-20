@@ -19,8 +19,12 @@ import contextvars
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 
-_reads = ThreadPoolExecutor(max_workers=16, thread_name_prefix="chain-read")
-_tasks = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chain-task")
+# Shared by every turn in the process, so sized for the turns that can run at once
+# (CHAT_MAX_CONCURRENT, TELEGRAM_MAX_CONCURRENT), not for one turn's handful of reads. Past it, reads
+# queue rather than fail; the RPC provider's own rate limit is the ceiling above this. A thread is
+# started only when there is no idle one to take the work, so a quiet process runs a few.
+_reads = ThreadPoolExecutor(max_workers=256, thread_name_prefix="chain-read")
+_tasks = ThreadPoolExecutor(max_workers=128, thread_name_prefix="chain-task")
 
 
 def start_read(read: Callable[[], Any]) -> Future:

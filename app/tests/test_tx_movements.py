@@ -25,6 +25,8 @@ def _addr(n: int) -> str:
 
 
 WALLET = _addr(0xA11CE)
+OTHER_WALLET = _addr(0xB0B)
+ENTRY_POINT = _addr(0xE7)
 SAM = _addr(0x5A3)
 STRANGER = _addr(0xBAD)
 USDC = _addr(0x05DC)
@@ -54,6 +56,8 @@ POSITION_MANAGER_CONTRACT = Web3().eth.contract(abi=position_manager_abi)
 TRANSFER =Web3.keccak(text="Transfer(address,address,uint256)")
 DEPOSIT = Web3.keccak(text="Deposit(address,uint256)")
 WITHDRAWAL = Web3.keccak(text="Withdrawal(address,uint256)")
+BEFORE_EXECUTION = Web3.keccak(text="BeforeExecution()")
+USER_OPERATION_EVENT = Web3.keccak(text="UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)")
 SINGLE, BATCH = b"\x00" * 32, b"\x01" + b"\x00" * 31
 
 
@@ -76,25 +80,44 @@ def withdrawal(who: str, wad: int, token: str = WETH) -> dict:
     return {"address": token, "topics": [WITHDRAWAL, _topic(who)], "data": wad.to_bytes(32, "big")}
 
 
-def bundle(executions: list[tuple[str, int, bytes]], sender: str = WALLET) -> dict:
-    """The handleOps transaction that runs one op from `sender` carrying `executions`."""
+def _op(executions: list[tuple[str, int, bytes]], sender: str) -> tuple:
+    """A PackedUserOperation from `sender` carrying `executions`."""
     if len(executions) == 1:
         target, value, data = executions[0]
         mode, execution = SINGLE, bytes.fromhex(target[2:]) + value.to_bytes(32, "big") + data
     else:
         mode, execution = BATCH, encode(["(address,uint256,bytes)[]"], [executions])
     call_data = Web3.keccak(text="execute(bytes32,bytes)")[:4] + encode(["bytes32", "bytes"], [mode, execution])
-    op = (sender, 1, b"", call_data, bytes(32), 0, bytes(32), b"", b"")
+    return (sender, 1, b"", call_data, bytes(32), 0, bytes(32), b"", b"")
+
+
+def bundle(executions: list[tuple[str, int, bytes]], sender: str = WALLET, before: tuple = ()) -> dict:
+    """
+    The handleOps transaction that runs one op from `sender` carrying `executions` -- after the ops
+    in `before`, (executions, sender) pairs, when it shares the bundle with other wallets.
+    """
+    ops = [_op(e, s) for e, s in before] + [_op(executions, sender)]
     selector = Web3.keccak(
         text="handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)"
     )[:4]
     return {
-        "to": _addr(0xE7),
+        "to": ENTRY_POINT,
         "value": 0,
         "input": selector + encode(
-            ["(address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[]", "address"], [[op], STRANGER]
+            ["(address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[]", "address"], [ops, STRANGER]
         ),
     }
+
+
+def before_execution(address: str | None = None) -> dict:
+    """The EntryPoint's BeforeExecution: every op has passed validation, and the first is about to run."""
+    return {"address": address or ENTRY_POINT, "topics": [BEFORE_EXECUTION], "data": b""}
+
+
+def op_event(op_hash: bytes, sender: str, address: str | None = None) -> dict:
+    """The EntryPoint's UserOperationEvent closing one op of a bundle."""
+    return {"address": address or ENTRY_POINT, "topics": [USER_OPERATION_EVENT, op_hash, _topic(sender), bytes(32)],
+            "data": b""}
 
 
 def moved(executions, logs, *, native_contract=None, exchanges=(ROUTER, SWAP_ROUTER, POSITION_MANAGER)) -> list[Moved]:
@@ -328,6 +351,57 @@ def test_direction_of():
     check("a setting is none", tx_movements.direction_of([]) == "none")
 
 
+def test_shared_bundle():
+    print("\n[7] a bundle shared with another wallet: each op is read from its own logs only")
+    deadline = 2**32
+
+    def sell_for_eth(wallet: str) -> list:
+        return [
+            (USDC, 0, _erc20("approve", [ROUTER, 100_000_000])),
+            (ROUTER, 0, router_call("swapExactTokensForETH", [100_000_000, 1, [USDC, WETH], wallet, deadline])),
+        ]
+
+    ours, theirs = b"\xaa" * 32, b"\xbb" * 32
+    # Two sales through the same router, one after the other: each unwraps WETH as the router, so
+    # nothing in either Withdrawal says whose ETH it was.
+    logs = [
+        before_execution(),
+        transfer(USDC, OTHER_WALLET, PAIR, 100_000_000),
+        transfer(WETH, PAIR, ROUTER, 2 * 10**16),
+        withdrawal(ROUTER, 2 * 10**16),
+        op_event(theirs, OTHER_WALLET),
+        transfer(USDC, WALLET, PAIR, 100_000_000),
+        transfer(WETH, PAIR, ROUTER, 3 * 10**16),
+        withdrawal(ROUTER, 3 * 10**16),
+        op_event(ours, WALLET),
+    ]
+    tx = bundle(sell_for_eth(WALLET), before=[(sell_for_eth(OTHER_WALLET), OTHER_WALLET)])
+
+    def read(wallet: str, op_hash: bytes | None, receipt_logs: list = logs) -> list[Moved]:
+        return tx_movements.assistant_movements(
+            wallet, tx, {"logs": receipt_logs}, token_info,
+            native="ETH", wrapped=WETH, exchanges=(ROUTER,), user_op_hash=op_hash,
+        )
+
+    whole = [m for m in read(WALLET, None) if m.ticker == "ETH"]
+    check("read whole, the receipt credits the wallet with the other wallet's ETH as well", len(whole) == 2, str(whole))
+    check("read from its own logs, only its own sale",
+          read(WALLET, ours) == [Moved(OUT, USDC, "USDC", 100_000_000, 6, PAIR), Moved(IN, None, "ETH", 3 * 10**16, 18, ROUTER)],
+          str(read(WALLET, ours)))
+    check("...and the first op's, only that one",
+          read(OTHER_WALLET, theirs) == [Moved(OUT, USDC, "USDC", 100_000_000, 6, PAIR),
+                                         Moved(IN, None, "ETH", 2 * 10**16, 18, ROUTER)],
+          str(read(OTHER_WALLET, theirs)))
+
+    # A contract our op calls emits the EntryPoint's event, naming our op, before our sale's logs.
+    forged = logs[:5] + [op_event(ours, WALLET, address=STRANGER)] + logs[5:]
+    check("an EntryPoint event emitted by another contract is no boundary",
+          tx_movements.op_logs(forged, ours, ENTRY_POINT) == forged[5:9],
+          str(len(tx_movements.op_logs(forged, ours, ENTRY_POINT))))
+    check("an op whose event isn't in the receipt reads every log",
+          tx_movements.op_logs(logs, b"\xcc" * 32, ENTRY_POINT) == logs)
+
+
 if __name__ == "__main__":
     test_token_and_native_sends()
     test_swaps()
@@ -336,4 +410,5 @@ if __name__ == "__main__":
     test_celo_and_odd_calldata()
     test_owner_calls()
     test_direction_of()
+    test_shared_bundle()
     finish("All movement checks passed.")

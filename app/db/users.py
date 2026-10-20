@@ -93,12 +93,40 @@ def link_telegram(user_id: int, chat_id: int):
 
 def unlink_telegram(user_id: int):
     """
-    Detaches whatever Telegram chat is bound to an account.
+    Detaches whatever Telegram chat is bound to an account, and forgets the network it chose there.
 
     @param user_id  The application user ID.
     """
     db = get_db()
-    db.execute("UPDATE users SET telegram_chat_id = NULL WHERE id = ?", (user_id,))
+    db.execute(
+        "UPDATE users SET telegram_chat_id = NULL, telegram_chain_id = NULL WHERE id = ?", (user_id,)
+    )
+    db.commit()
+
+
+def get_telegram_chain(user_id: int) -> int | None:
+    """
+    The network the account chose with /chain in the Telegram bot.
+
+    @param user_id  The application user ID.
+    @return         A chain ID, or None if it has not chosen one (or has no such account).
+    """
+    row = get_db().execute("SELECT telegram_chain_id FROM users WHERE id = ?", (user_id,)).fetchone()
+    return row["telegram_chain_id"] if row else None
+
+
+def set_telegram_chain(user_id: int, chain_id: int | None):
+    """
+    Records the network the account chose in the Telegram bot; None forgets it.
+
+    The caller checks the chain is one the account may use (a wallet there, a network the bot
+    serves): this only stores it.
+
+    @param user_id   The application user ID.
+    @param chain_id  The chosen chain ID, or None.
+    """
+    db = get_db()
+    db.execute("UPDATE users SET telegram_chain_id = ? WHERE id = ?", (chain_id, user_id))
     db.commit()
 
 

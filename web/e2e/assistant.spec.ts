@@ -13,6 +13,15 @@ const SAM = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
+  button?: boolean
+}
+
+interface QuoteOffer {
+  quote_id: string
+  chain_id: number
+  action: string
+  fees: string
+  expires_at: number
 }
 
 // A reply with everything that could push a phone sideways.
@@ -38,11 +47,18 @@ interface Options {
   history?: ChatMessage[]
   /** How POST /api/chat answers. */
   reply?: { text: string; delayMs?: number } | 'offline'
+  /** The quote POST /api/chat's turn offers for a tap. */
+  quote?: QuoteOffer
 }
 
-async function mockServer(page: Page, { history = [], reply = { text: 'Done.' } }: Options = {}) {
+async function mockServer(page: Page, { history = [], reply = { text: 'Done.' }, quote }: Options = {}) {
   let thread = [...history]
+  let offered: QuoteOffer | null = null
   const posted: unknown[] = []
+  const tapped: unknown[] = []
+  // What a confirmed send's History row reads: pending twice, then landed.
+  let sending = ''
+  let rowReads = 0
 
   await page.route(isApiUrl, async route => {
     const request = route.request()
@@ -66,13 +82,50 @@ async function mockServer(page: Page, { history = [], reply = { text: 'Done.' } 
         if (reply === 'offline') return route.abort('connectionreset')
         if (reply.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs))
         thread = [...thread, { role: 'user', text: body.message }, { role: 'assistant', text: reply.text }]
+        offered = quote ?? null
         return route.fulfill({ json: { reply: reply.text } })
+      }
+      case '/api/chat/quote':
+        return route.fulfill({ json: { quote: offered } })
+      case '/api/chat/quote/confirm':
+      case '/api/chat/quote/cancel': {
+        tapped.push({ path: url.pathname, body: request.postDataJSON() })
+        const confirm = url.pathname.endsWith('/confirm')
+        // A confirm signs and broadcasts before it answers; the wait for the network comes after.
+        if (confirm) await new Promise(resolve => setTimeout(resolve, 1_500))
+        const outcome = confirm
+          ? `Sending — ${offered?.action}. Waiting for the network to confirm it.`
+          : 'Cancelled. Nothing was sent.'
+        thread = [
+          ...thread,
+          { role: 'user', text: confirm ? '✅ Confirm' : '✖️ Cancel', button: true },
+          { role: 'assistant', text: outcome, button: true },
+        ]
+        sending = offered?.action ?? ''
+        offered = null
+        return route.fulfill({ json: confirm ? { outcome, transaction_id: 77 } : { outcome } })
+      }
+      case '/api/transactions/77': {
+        const landed = rowReads++ >= 2
+        return route.fulfill({
+          json: {
+            id: 77,
+            chain_id: SEPOLIA,
+            source: 'assistant',
+            action: sending,
+            status: landed ? 'confirmed' : 'pending',
+            tx_hash: landed ? `0x${'ab'.repeat(32)}` : null,
+            created_at: Math.floor(Date.now() / 1000),
+            mined_at: landed ? Math.floor(Date.now() / 1000) : null,
+            direction: 'out',
+          },
+        })
       }
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
   })
-  return { posted }
+  return { posted, tapped }
 }
 
 /** The composer is on screen and, on phones, clear of the tab bar. */
@@ -187,4 +240,50 @@ test('only the chat lets the keyboard shrink the page', async ({ page }) => {
   await page.locator('a[href="/contacts"]:visible').first().click()
   await expect(page.getByRole('heading', { name: 'Contacts', level: 1 })).toBeVisible()
   await expect(viewport).not.toHaveAttribute('content', /interactive-widget/)
+})
+
+test('a quoted transaction gets a card, and one tap sends it', async ({ page }, testInfo) => {
+  // An action as long as a real swap's, with a full address, to push a phone sideways if it can.
+  const action = `Swap 0.25 ETH for at least 812.418203 USDC on Uniswap V3, paid to ${SAM}`
+  const { tapped } = await mockServer(page, {
+    history: longHistory(),
+    reply: { text: 'That swap costs **$0.35** in fees. Reply yes to send it.' },
+    quote: { quote_id: 'q-abc_123', chain_id: SEPOLIA, action, fees: '$0.35', expires_at: Math.floor(Date.now() / 1000) + 300 },
+  })
+  await page.goto('/assistant')
+
+  const input = page.getByRole('textbox', { name: 'Message' })
+  await input.fill('swap 0.25 eth for usdc')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const card = page.getByRole('region', { name: 'Transaction waiting for your answer' })
+  await expect(card.getByText(action)).toBeVisible()
+  await expect(card.getByText('Fees: $0.35 · good for 5 minutes')).toBeVisible()
+  await expect(card.getByRole('button', { name: 'Confirm' })).toBeInViewport()
+  await expectTheme(page, testInfo)
+  await expectNoSidewaysScroll(page)
+  await expectComposerInView(page)
+  await page.screenshot({ path: testInfo.outputPath('assistant-quote.png') })
+
+  await card.getByRole('button', { name: 'Confirm' }).click()
+  await expect(card.getByRole('status')).toHaveText('Sending…')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await page.screenshot({ path: testInfo.outputPath('assistant-quote-sending.png') })
+
+  const log = page.getByRole('log', { name: 'Conversation with Mitfah' })
+  await expect(log.getByText('✅ Confirm')).toBeVisible()
+  await expect(log.getByText(`Sending — ${action}.`, { exact: false })).toBeVisible()
+  await expect(card).toHaveCount(0)
+  // Answered once on the wire: the chat is free again while the line below follows the send.
+  await input.fill('thanks')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+  await input.fill('')
+  await expect(page.getByText(`Waiting for the network to confirm “${action}”…`)).toBeInViewport()
+  await expectNoSidewaysScroll(page)
+  const landed = page.locator('.mf-send-status')
+  await expect(landed).toContainText(`Confirmed on Sepolia: ${action}.`, { timeout: 10_000 })
+  await expect(landed.getByRole('link', { name: 'View transaction' })).toBeInViewport()
+  await expectNoSidewaysScroll(page)
+  await expectComposerInView(page)
+  await page.screenshot({ path: testInfo.outputPath('assistant-quote-landed.png') })
+  expect(tapped).toEqual([{ path: '/api/chat/quote/confirm', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
 })

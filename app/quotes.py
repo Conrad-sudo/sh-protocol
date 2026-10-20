@@ -21,6 +21,9 @@ a control: text in a message, a token name, or a tool result could talk the mode
     The user has to send another message for the turn counter to move.
   - Quotes go stale. A quote is single-use and expires, so one cannot be raised quietly and
     redeemed later in the conversation.
+  - Asking again is not agreeing. A typed message that repeats the request a quote was raised
+    by, word for word, cannot confirm it ({repeats}): the user may not have seen that quote at all
+    -- the page failed to show it, or they never read it -- so they are quoted afresh and asked.
 
 What it does NOT do: a user who reads the quote and approves it without looking is still approving
 whatever it says. This makes the agent's claims checkable against code-written text and bounds a
@@ -67,6 +70,11 @@ class PendingTransaction:
     # What it is meant to do, 'in' or 'out', for the History tab's groups while it is pending or if
     # it fails (tx_history.start_assistant_tx). None when the quote can't say.
     direction: str | None = None
+    # Shown on a card with Confirm and Cancel buttons, once the turn that raised it was over (offer).
+    offered: bool = False
+    # The user's message in the turn that raised it (AgentContext.message): the same words again
+    # don't confirm it (repeats). Empty when that turn had none.
+    request: str = ""
 
     @property
     def age(self) -> float:
@@ -95,6 +103,7 @@ def put(
     cost: dict,
     lp_pool: dict | None = None,
     direction: str | None = None,
+    request: str = "",
 ) -> PendingTransaction:
     """
     Parks a quoted transaction and returns it, with the id the user will confirm against.
@@ -117,11 +126,42 @@ def put(
         cost=cost,
         lp_pool=lp_pool,
         direction=direction,
+        request=request,
     )
     with _lock:
         _prune(now)
         _pending[pending.quote_id] = pending
     return pending
+
+
+def _words(message: str) -> list[str]:
+    """A message as repeats compares it: its words, ignoring case, spacing and closing punctuation."""
+    return message.casefold().strip().rstrip(".!?,;:").split()
+
+
+def repeats(user_id: int, quote_id: str, message: str) -> bool:
+    """
+    Whether `message` asks for a quote's transaction again rather than agreeing to it: the same
+    words as the message that raised it. Such a message is a new request -- the user may never have
+    seen the quote it would confirm (2026-10-20: a page that lost a quote, its user asking again, and
+    the model sending the old quote as if they had said yes) -- so the quote is dropped, and
+    confirm_transaction has them quoted afresh and asked.
+
+    A reply of one or two words ("yes", "go ahead") is never a repeat, though it raised the quote:
+    otherwise a quote raised by a "yes" to a question could never be confirmed by a "yes". A reworded
+    request is not caught here; the system prompt covers it.
+
+    @return  True, and the quote dropped, if it is a repeat.
+    """
+    asked = _words(message)
+    if len(asked) <= 2:
+        return False
+    with _lock:
+        pending = _pending.get(quote_id)
+        if pending is None or pending.user_id != user_id or _words(pending.request) != asked:
+            return False
+        del _pending[quote_id]
+    return True
 
 
 def take(user_id: int, chain_id: int, quote_id: str, turn_id: int) -> PendingTransaction:
@@ -161,14 +201,79 @@ def take(user_id: int, chain_id: int, quote_id: str, turn_id: int) -> PendingTra
     return pending
 
 
-def drop(user_id: int, quote_id: str) -> bool:
-    """Discards a quote the user decided against. True if there was one to discard."""
+def drop(user_id: int, quote_id: str, chain_id: int | None = None) -> bool:
+    """
+    Discards a quote the user decided against. True if there was one to discard.
+
+    @param chain_id  When given, only a quote on that chain is discarded: a Cancel button acts on
+                     the network the user is on now, as its Confirm would.
+    """
     with _lock:
         pending = _pending.get(quote_id)
         if pending is None or pending.user_id != user_id:
             return False
+        if chain_id is not None and pending.chain_id != chain_id:
+            return False
         del _pending[quote_id]
         return True
+
+
+def raised_in(user_id: int, chain_id: int, turn_id: int) -> list[PendingTransaction]:
+    """
+    The quotes the user's turn `turn_id` on `chain_id` raised and that are still waiting, oldest
+    first. A turn that raised exactly one gets Confirm and Cancel buttons ({offer}).
+
+    A copy of the store's entries, not a claim on them: taking one still goes through {take}.
+    """
+    with _lock:
+        _prune(time.time())
+        found = [
+            p for p in _pending.values()
+            if p.user_id == user_id and p.chain_id == chain_id and p.turn_id == turn_id
+        ]
+    return sorted(found, key=lambda p: p.created_at)
+
+
+def offer(user_id: int, chain_id: int, turn_id: int | None) -> PendingTransaction | None:
+    """
+    The quote to put Confirm and Cancel buttons under once a turn is over: the one it raised, when
+    it raised exactly one. With several, the user says which in words; with none, or a turn that
+    failed (no id, so it has shown the user no quote), there is nothing to offer. Marks it offered,
+    so the web chat can show its card again after a reload ({offered}).
+
+    The buttons only name the quote. Confirming one still goes through {take}.
+    """
+    if turn_id is None:
+        return None
+    raised = raised_in(user_id, chain_id, turn_id)
+    if len(raised) != 1:
+        return None
+    with _lock:
+        raised[0].offered = True
+    return raised[0]
+
+
+def offered(user_id: int, chain_id: int) -> PendingTransaction | None:
+    """
+    The newest quote on `chain_id` that was offered with buttons ({offer}) and is still waiting:
+    the card the web chat shows. None when there is none.
+    """
+    with _lock:
+        _prune(time.time())
+        found = [p for p in _pending.values() if p.user_id == user_id and p.chain_id == chain_id and p.offered]
+    return max(found, key=lambda p: p.created_at, default=None)
+
+
+def fee_text(cost: dict) -> str:
+    """
+    A quote's fees, network and Mitfah's together, as one figure: "$0.35", or in the native asset
+    when it couldn't be priced. What a Confirm card shows, in Telegram and on the web.
+    """
+    if "total_usd" in cost:
+        usd = cost["total_usd"]
+        return "under $0.01" if usd < 0.01 else f"${usd:,.2f}"
+    native = f"{cost['total_native']:.8f}".rstrip("0").rstrip(".")
+    return f"{native} {cost['native_asset']}"
 
 
 def has_pending(user_id: int, chain_id: int) -> bool:

@@ -8,6 +8,15 @@ export async function fetchContacts() {
 }
 
 /**
+ * The address an ENS name (sam.eth) points to now, with the name as ENS spells it. Only a lookup:
+ * the address is then signed and saved like a typed one, so the contact keeps it even if the name
+ * is pointed elsewhere later. A 404 means the name points nowhere.
+ */
+export function resolveEnsName(name: string, signal?: AbortSignal) {
+  return apiFetch<Contact>(`/api/contacts/resolve?name=${encodeURIComponent(name)}`, { signal })
+}
+
+/**
  * Checks a contact and returns the typed data the owner wallet signs to save it. A name or address
  * the server would refuse fails here, before the wallet is asked anything.
  */

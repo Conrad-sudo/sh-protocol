@@ -110,8 +110,9 @@ _MAX_POSITIONS_SCANNED = 200
 
 # Independent chain reads run together on this pool, so a quote or a position list costs a few
 # round trips to the RPC rather than one per read. Every task is a single leaf eth_call that never
-# waits on anything here, so the pool cannot deadlock however many callers share it.
-_READS = ThreadPoolExecutor(max_workers=16, thread_name_prefix="v3-read")
+# waits on anything here, so the pool cannot deadlock however many callers share it. Every toolkit
+# in the process shares it, so it is sized for many quotes at once (a quote asks each fee tier).
+_READS = ThreadPoolExecutor(max_workers=64, thread_name_prefix="v3-read")
 
 
 def _run(read: Callable[[], object]) -> object:

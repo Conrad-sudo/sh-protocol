@@ -1,36 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../../api/client'
 import { routes } from '../../routes'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN } from '../../test/utils'
 
 const SEPOLIA = 11155111
-const BSC = 56
 const BASE = 8453
 
-/** Three networks, each with a bot of its own, like a server with every MITFAH_<CHAIN>_USERNAME set. */
 const CHAINS = [
-  { chain_id: BSC, name: 'bsc', native_ticker: 'BNB', telegram_bot: 'mitfah_bsc_bot' },
-  { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
-  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
+  { chain_id: BASE, name: 'base', native_ticker: 'ETH' },
+  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH' },
 ].map(chain => ({ ...chain, fork: false, rpc_url: null, default_spenders: [], exchange: null }))
 
 interface ServerOptions {
   linked?: boolean
   /** The networks the account has a wallet on. */
   walletChains?: number[]
-  /** POST answers like a server with no bot usernames set. */
-  notConfigured?: boolean
+  /** The bot's username (MITFAH_USERNAME); null like a server without one, which can't mint a link. */
+  bot?: string | null
   /** DELETE answers 500. */
   unlinkFails?: boolean
 }
 
-/** A signed-in account with the Telegram endpoints, behaving like app/api.py. */
+/** A signed-in account with the Telegram endpoints, behaving like the API. */
 function stubServer({
   linked = false,
   walletChains = [BASE],
-  notConfigured = false,
+  bot = 'mitfah_bot',
   unlinkFails = false,
 }: ServerOptions = {}) {
   const server = { linked, links: 0, unlinks: 0, meCalls: 0, linkUrls: [] as string[] }
@@ -41,19 +38,19 @@ function stubServer({
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') {
         server.meCalls++
-        return Promise.resolve(json(200, { ...ME, telegram_linked: server.linked, wallet_chains: walletChains }))
+        return Promise.resolve(
+          json(200, { ...ME, telegram_linked: server.linked, telegram_bot: bot, wallet_chains: walletChains }),
+        )
       }
       if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
       if (url.startsWith('/api/integrations/telegram/link') && method === 'POST') {
         server.linkUrls.push(url)
-        if (notConfigured) {
-          return Promise.resolve(json(500, { detail: 'Telegram is not configured: no MITFAH_<CHAIN>_USERNAME is set' }))
+        if (!bot) {
+          return Promise.resolve(json(500, { detail: 'Telegram is not configured: MITFAH_USERNAME is not set' }))
         }
         server.links++
         const nonce = `nonce-${server.links}`
-        return Promise.resolve(
-          json(200, { url: `https://t.me/mitfah_base_bot?start=${nonce}`, nonce, expires_in: 600 }),
-        )
+        return Promise.resolve(json(200, { url: `https://t.me/${bot}?start=${nonce}`, nonce, expires_in: 600 }))
       }
       if (url === '/api/integrations/telegram/link' && method === 'DELETE') {
         server.unlinks++
@@ -93,16 +90,16 @@ describe('TelegramCard', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
     const open = await screen.findByRole('link', { name: 'Open Telegram' })
-    // The link opens the bot of the network the app is showing: the account's wallet, on Base.
-    expect(server.linkUrls).toEqual([`/api/integrations/telegram/link?chain_id=${BASE}`])
-    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_base_bot?start=nonce-1')
+    // One bot for every network, so the link names none.
+    expect(server.linkUrls).toEqual(['/api/integrations/telegram/link'])
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_bot?start=nonce-1')
     expect(open).toHaveAttribute('target', '_blank')
     expect(open).toHaveAttribute('rel', 'noopener noreferrer')
     expect(screen.getByTitle('QR code of the Telegram link')).toBeInTheDocument()
     expect(screen.getByText('10:00')).toBeInTheDocument()
     expect(screen.getByText('Waiting for Telegram…')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Link Telegram' })).not.toBeInTheDocument()
-    expect(screen.queryByText(/Each network has its own bot/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '@mitfah_bot' })).not.toBeInTheDocument()
 
     // Nothing happened in Telegram yet: still waiting after a few polls.
     const before = server.meCalls
@@ -116,7 +113,7 @@ describe('TelegramCard', () => {
     expect(await screen.findByText('Linked')).toBeInTheDocument()
     expect(screen.getByText('Telegram linked. You can now chat with your assistant there.')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Open Telegram' })).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
+    expect(screen.getByRole('link', { name: '@mitfah_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_bot')
 
     // And polling stops.
     const after = server.meCalls
@@ -140,55 +137,38 @@ describe('TelegramCard', () => {
 
     await user.click(screen.getByRole('button', { name: 'Get a new link' }))
     const open = await screen.findByRole('link', { name: 'Open Telegram' })
-    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_base_bot?start=nonce-2')
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_bot?start=nonce-2')
     expect(screen.getByText('10:00')).toBeInTheDocument()
   })
 
-  it('lists the bots of the networks the account has a wallet on, once linked', async () => {
+  it('shows the one bot once linked, and how to switch networks in it', async () => {
     stubServer({ linked: true, walletChains: [SEPOLIA, BASE] })
     await setup()
 
-    const base = await screen.findByRole('link', { name: '@mitfah_base_bot' })
-    expect(base).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
-    expect(base).toHaveAttribute('target', '_blank')
-    expect(base).toHaveAttribute('rel', 'noopener noreferrer')
-    expect(screen.getByRole('link', { name: '@mitfah_sepolia_bot' })).toHaveAttribute(
-      'href',
-      'https://t.me/mitfah_sepolia_bot',
+    const bot = await screen.findByRole('link', { name: '@mitfah_bot' })
+    expect(bot).toHaveAttribute('href', 'https://t.me/mitfah_bot')
+    expect(bot).toHaveAttribute('target', '_blank')
+    expect(bot).toHaveAttribute('rel', 'noopener noreferrer')
+    // The same bot for both of the account's networks: the chat switches between them.
+    expect(screen.getAllByRole('link', { name: /^@/ })).toHaveLength(1)
+    expect(screen.getByText(/to switch networks/)).toHaveTextContent(
+      'Open the bot and press Start. Send /chain there to switch networks.',
     )
-    expect(screen.getByText(/Each network has its own bot/)).toBeInTheDocument()
-    // Each also as a code that opens large, to scan with a phone (CSS hides them on touch screens).
-    expect(screen.getByRole('button', { name: "Enlarge the Base bot's QR code" })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: "Enlarge the Sepolia bot's QR code" })).toBeInTheDocument()
-    expect(screen.getByText(/click a code to enlarge it/)).toBeInTheDocument()
-    // No wallet on BNB Smart Chain, so no bot to open there.
-    expect(screen.queryByRole('link', { name: '@mitfah_bsc_bot' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /BNB Smart Chain bot/ })).not.toBeInTheDocument()
+    // Also as a code to scan with a phone (CSS hides it on touch screens).
+    expect(screen.getByTitle('QR code of the Telegram bot')).toBeInTheDocument()
   })
 
-  it("shows one bot's QR code large and on its own, so a phone's camera reads the right one", async () => {
-    stubServer({ linked: true, walletChains: [SEPOLIA, BASE] })
-    const user = await setup()
-    const list = () => document.querySelector('.mf-telegram-bots')
+  it('shows no bot once linked if the server runs none', async () => {
+    stubServer({ linked: true, bot: null })
+    await setup()
 
-    await user.click(await screen.findByRole('button', { name: "Enlarge the Base bot's QR code" }))
-    const dialog = await screen.findByRole('dialog', { name: 'Base bot' })
-    expect(within(dialog).getByTitle('QR code of the Base bot')).toBeInTheDocument()
-    expect(within(dialog).getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute(
-      'href',
-      'https://t.me/mitfah_base_bot',
-    )
-    // Meanwhile the small codes step aside (CSS hides them), so they can't be read instead.
-    expect(list()).toHaveAttribute('data-enlarged')
-
-    // The footer's Close; the header's X is called Close too.
-    await user.click(within(dialog).getAllByRole('button', { name: 'Close' }).at(-1)!)
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    expect(list()).not.toHaveAttribute('data-enlarged')
+    expect(await screen.findByText('Linked')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /^@/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/to switch networks/)).not.toBeInTheDocument()
   })
 
   it('says so when the server has no Telegram bot', async () => {
-    stubServer({ notConfigured: true })
+    stubServer({ bot: null })
     const user = await setup()
 
     await user.click(await screen.findByRole('button', { name: 'Link Telegram' }))
@@ -205,7 +185,7 @@ describe('TelegramCard', () => {
     expect(await screen.findByRole('button', { name: 'Link Telegram' })).toBeInTheDocument()
     expect(server.unlinks).toBe(1)
     expect(screen.queryByText('Linked')).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: '@mitfah_base_bot' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '@mitfah_bot' })).not.toBeInTheDocument()
   })
 
   it('keeps the chat linked and says so when unlinking fails', async () => {

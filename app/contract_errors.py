@@ -134,6 +134,19 @@ def name_revert(text: str) -> str | None:
     return None
 
 
+def failed_op_index(data: bytes) -> int | None:
+    """
+    Which op of a handleOps bundle the EntryPoint rejected, from the index its FailedOp or
+    FailedOpWithRevert carries first; None for any other revert.
+    """
+    if data[:4] not in (_FAILED_OP_SELECTOR, _FAILED_OP_WITH_REVERT_SELECTOR):
+        return None
+    try:
+        return decode(["uint256"], data[4:36])[0]
+    except Exception:  # noqa: BLE001 -- malformed payload: not one op's fault that can be told
+        return None
+
+
 def describe_revert_data(data: bytes) -> str:
     """
     Turns raw revert data into something readable: a known custom error's signature, the message

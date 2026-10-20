@@ -38,6 +38,11 @@ _HANDLE_OPS = Web3.keccak(
 )[:4]
 _EXECUTE = Web3.keccak(text="execute(bytes32,bytes)")[:4]
 _CALLTYPE_SINGLE, _CALLTYPE_BATCH = 0x00, 0x01
+# The EntryPoint's events around each op's execution in a bundle (op_logs).
+_BEFORE_EXECUTION = Web3.keccak(text="BeforeExecution()")
+_USER_OPERATION_EVENT = Web3.keccak(
+    text="UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)"
+)
 
 # Decoding calldata needs no node. SwapRouter02 and the position manager each batch their calls in
 # a multicall -- SwapRouter02's takes a deadline, the position manager's doesn't -- and both have
@@ -108,12 +113,15 @@ def assistant_movements(
     wrapped: str | None,
     exchanges: Collection[str],
     native_contract: str | None = None,
+    user_op_hash: bytes | None = None,
 ) -> list[Moved]:
     """
     What an assistant UserOperation moved, from the transaction that executed it and its receipt.
 
     @param wallet           The user's wallet, checksummed: the op's sender.
     @param tx               The bundle transaction (EntryPoint.handleOps), as the node returns it.
+    @param user_op_hash     The op's hash, to read only its own logs out of a bundle shared with
+                            other wallets (op_logs); None reads every log in the receipt.
     @param token_info       Tokens the user knows; a Transfer of any other token is left out.
     @param wrapped          The chain's wrapped native token (WETH, WBNB), or None.
     @param exchanges        The chain's exchange contracts -- its V2 router, Uniswap V3's router
@@ -126,6 +134,8 @@ def assistant_movements(
     wallet = Web3.to_checksum_address(wallet)
     executions = executions_of(wallet, _bytes(tx.get("input")))
     logs = list(receipt["logs"])
+    if user_op_hash is not None and tx.get("to"):
+        logs = op_logs(logs, user_op_hash, tx["to"])
     moved = _token_movements(wallet, logs, token_info, native, native_contract)
     if native_contract is not None:
         return moved
@@ -214,6 +224,36 @@ def _native_unwrapped(
         elif who in paying:
             moved.append(Moved(IN, None, native, wad, 18, who))
     return moved
+
+
+def op_logs(logs: list, user_op_hash: bytes, entry_point: str) -> list:
+    """
+    The logs one op's execution emitted, out of a bundle's receipt.
+
+    handleOps validates every op, emits BeforeExecution, then runs the ops one after another,
+    closing each with its UserOperationEvent. So an op's logs are the ones after the event that
+    closed the op before it -- after BeforeExecution, for the first -- up to its own. Read whole, a
+    receipt shared with other wallets credits this one with what an exchange paid out to them: a
+    router unwrapping the native coin for two swaps in one bundle emits two Withdrawals, and neither
+    says whose it was. Only the EntryPoint's own events count as boundaries -- any contract an op
+    calls can emit one with the same topics.
+
+    @param entry_point  The EntryPoint that ran the bundle: the bundle transaction's `to`.
+    @return             Those logs; every log in the receipt if the op's event isn't among them.
+    """
+    entry_point = Web3.to_checksum_address(entry_point)
+    start = 0
+    for i, log in enumerate(logs):
+        if Web3.to_checksum_address(log["address"]) != entry_point or not log["topics"]:
+            continue
+        topic = _topic(log, 0)
+        if topic == _BEFORE_EXECUTION:
+            start = i + 1
+        elif topic == _USER_OPERATION_EVENT:
+            if len(log["topics"]) > 1 and _topic(log, 1) == bytes(user_op_hash):
+                return logs[start:i]
+            start = i + 1
+    return logs
 
 
 def executions_of(wallet: str, data: bytes) -> list[tuple[str, int, bytes]]:

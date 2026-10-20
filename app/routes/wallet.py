@@ -14,6 +14,7 @@ from web3.exceptions import ABIFunctionNotFound, ContractLogicError
 
 from auth import get_current_user
 from constants import (
+    SESSION_RENEWAL_WARNING_SECS,
     get_always_counted_ticker,
     get_native_asset_ticker,
     get_router,
@@ -43,10 +44,6 @@ from userop import reconcile_session_key
 
 router = APIRouter()
 
-
-# How long before expiry the wallet read starts flagging a key as needing renewal, so a UI can
-# prompt while there is still time rather than after the assistant has stopped working.
-SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
 
 # SessionHandler.SESSION_GAS_WINDOW: how long the daily fee budget lasts before it refills.
 SESSION_GAS_WINDOW_SECS = 86_400

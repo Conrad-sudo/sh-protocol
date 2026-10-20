@@ -19,12 +19,20 @@ The order of work is part of the security model:
      handleOps, which catches anything that moved in between and sizes the outer transaction. This
      is the first executable op in the flow, so nothing reaches it until the user has agreed: the
      two phases are split precisely so the cost can be shown, and confirmed, in between.
-  3. {broadcast_user_op} sends it. Afterwards the op is looked up by its hash if our transaction
-     reverted or stalled: a UserOp's signature does not cover the beneficiary, so someone else may
-     have landed it first.
+  3. {submit_user_op} puts it in the chain's next bundle -- many users' ops in one handleOps, sent
+     by one {Lane} per chain and key (see "Bundles" below) -- and {await_user_op} waits for it:
+     apart, so a Confirm button can answer once it is on the wire and leave the wait to a
+     background thread (landing.py); {broadcast_user_op} does both in one call. Afterwards the op
+     is looked up by its hash if its bundle reverted or stalled: a UserOp's signature does not
+     cover the beneficiary, so someone else may have landed it first.
 """
 import os
-from dataclasses import dataclass
+import threading
+from collections import Counter, deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from concurrent.futures import Future
+from dataclasses import dataclass, field
 
 import rlp
 from dotenv import load_dotenv
@@ -38,11 +46,11 @@ from web3.contract import Contract
 from web3.exceptions import ContractLogicError
 from web3.logs import DISCARD
 
-from contract_errors import describe_revert_data
+from contract_errors import describe_revert_data, failed_op_index
 from contracts import load_entry_point
 from network_config import load_network_config
 from parallel import read_all
-from tx_sender import send_and_confirm
+from tx_sender import Broadcast, confirm, send
 from userop import (
     create_signed_user_op,
     hash_user_op,
@@ -111,22 +119,38 @@ _L1_FEE_CHAINS = {"base"}
 L1_GAS_BUFFER = 1.2
 
 # Live chains whose public mempool is watched by bots. A UserOp's signature does not cover the
-# beneficiary, so a bot that sees our handleOps can lift the op out, resubmit it naming itself, and
+# beneficiary, so a bot that sees our handleOps can lift an op out, resubmit it naming itself, and
 # collect the gas repayment: the user's action still happens, but our transaction reverts and pays
-# for nothing. Broadcasting privately keeps the transaction out of the public mempool. Only the
-# BROADCAST goes here -- every read and estimate still uses the chain's normal RPC -- and a fork
-# never matches, since its name differs.
+# for nothing -- and in a bundle, it sinks every other op in it too (they go out again, see
+# _receipt_that_ran). Broadcasting privately keeps the transaction out of the public mempool. Only
+# the BROADCAST goes here -- every read and estimate still uses the chain's normal RPC -- and a fork
+# never matches, since its name differs. Arbitrum and Base have no public mempool to watch: their
+# sequencer orders what it is sent.
+#
+# Both endpoints leave out a transaction that would revert rather than mine it, so a bundle that
+# goes wrong between the simulation and the block stalls instead of reverting (tx_sender.confirm's
+# TimeoutError) -- and, until it is dropped, holds up the sends behind it.
 PRIVATE_SEND_RPC_URLS = {
     "mainnet": os.getenv("MAINNET_PRIVATE_RPC_URL") or "https://rpc.flashbots.net/fast",
+    # BlockRazor's full-privacy endpoint: straight to BSC's main block builders, disclosing nothing
+    # to back-runners (and so earning no refunds). Needs no API key (checked 2026-10-20).
+    "bsc": os.getenv("BSC_PRIVATE_RPC_URL") or "https://bsc.blockrazor.xyz/fullprivacy",
 }
 _private_send_w3: dict[str, Web3] = {}
 
-# Which EOA signs handleOps is decided by the PROCESS, not the chain. The API and the Telegram bot
+# Which EOAs sign handleOps is decided by the PROCESS, not the chain. The API and the Telegram bot
 # are separate processes, and tx_sender's nonce counter only coordinates threads within one: two
 # processes signing with ONE key would hand out the same nonce and replace each other's
-# transactions. So each process has its own key. The API's is the default; telebot.py switches at
-# startup. Anything else that runs the agent in a process of its own (the CLI agent, the smoke
-# test) signs with the API's key, and so must not run beside the API.
+# transactions. So each process has keys of its own. The API's are the default; telebot.py switches
+# at startup. Anything else that runs the agent in a process of its own (the CLI agent, the smoke
+# test) signs with the API's keys, and so must not run beside the API.
+#
+# Each process holds a small pool of keys, numbered from 1 in .env (API_BUNDLER_1, API_BUNDLER_2,
+# ...), each with its own nonce counter and its own Lane. The chain mines one key's transactions
+# strictly in nonce order, so with one key a stuck transaction held up every send behind it, for up
+# to ~4 minutes (tx_sender's fee bumps). With a pool, a new op goes to the least busy key
+# (pick_bundler), so a stall holds up only its own lane. The first key is also the deployer and
+# protocol owner on every fork and on live Sepolia (deploy_wallet.LIVE_PRIVATE_KEY_ENV).
 API_BUNDLER_ENV = "API_BUNDLER"
 TELEGRAM_BUNDLER_ENV = "TELEGRAM_BUNDLER"
 _bundler_key_env = API_BUNDLER_ENV
@@ -220,13 +244,24 @@ class PreparedUserOp:
     from_block: int      # the chain head before anything was sent; a lost race is searched from here
 
 
+@dataclass
+class SubmittedUserOp:
+    """A prepared UserOp on the wire inside a bundle: what await_user_op needs to see it land."""
+
+    prepared: PreparedUserOp
+    w3: Web3
+    entry_point: Contract
+    lane: "Lane"         # the sender it went out through, and goes out through again if resent
+    bundle: "Bundle"     # the handleOps carrying it
+
+
 def use_bundler_key(env_name: str) -> None:
     """
-    Selects the env var holding the key this process signs handleOps with.
+    Selects the env vars holding the keys this process signs handleOps with.
 
-    Called once at startup by any process that must not share the API's key (telebot.py).
+    Called once at startup by any process that must not share the API's keys (telebot.py).
 
-    @param env_name  API_BUNDLER_ENV or TELEGRAM_BUNDLER_ENV.
+    @param env_name  API_BUNDLER_ENV or TELEGRAM_BUNDLER_ENV: the keys are <env_name>_1, _2, ...
     """
     global _bundler_key_env
     if env_name not in (API_BUNDLER_ENV, TELEGRAM_BUNDLER_ENV):
@@ -234,23 +269,37 @@ def use_bundler_key(env_name: str) -> None:
     _bundler_key_env = env_name
 
 
-def resolve_bundler(w3: Web3) -> LocalAccount:
-    """
-    Returns this process's bundler account.
+# Env var prefix -> its accounts, derived once.
+_bundler_keys: dict[str, list[LocalAccount]] = {}
 
-    It must be a plain EOA on every chain it bundles for: the EntryPoint pays the beneficiary with a
-    bare ETH send, which reverts AA91 against an address carrying code. That is why the well-known
+
+def bundler_keys() -> list[LocalAccount]:
+    """
+    This process's bundler accounts: <prefix>_1, <prefix>_2, ... up to the first number not set.
+
+    Each must be a plain EOA on every chain it bundles for: the EntryPoint pays the beneficiary with
+    a bare ETH send, which reverts AA91 against an address carrying code. That is why the well-known
     Anvil keys are never used here -- they are EIP-7702-delegated on real mainnet, Sepolia and BSC,
     and a fork inherits that code.
 
-    @param w3  Web3 connection for the target network.
-    @return    A web3.py LocalAccount for the bundler key.
-    @raises RuntimeError if the key is not configured.
+    @raises RuntimeError if not even the first key is set.
     """
-    key = os.getenv(_bundler_key_env)
-    if not key:
-        raise RuntimeError(f"{_bundler_key_env} is not set -- this process has no bundler key.")
-    return w3.eth.account.from_key(key)
+    if _bundler_key_env not in _bundler_keys:
+        accounts = []
+        while key := os.getenv(f"{_bundler_key_env}_{len(accounts) + 1}"):
+            accounts.append(Account.from_key(key))
+        if not accounts:
+            raise RuntimeError(f"{_bundler_key_env}_1 is not set -- this process has no bundler key.")
+        _bundler_keys[_bundler_key_env] = accounts
+    return _bundler_keys[_bundler_key_env]
+
+
+def resolve_bundler() -> LocalAccount:
+    """
+    This process's first bundler account. A quote is simulated from it and checks its balance; a
+    send picks its key with pick_bundler instead, unless it names one itself (the tests).
+    """
+    return bundler_keys()[0]
 
 
 def _priority_fee(w3: Web3) -> int:
@@ -261,14 +310,25 @@ def _priority_fee(w3: Web3) -> int:
         return w3.to_wei(2, "gwei")
 
 
-def _revert_reason(exc: Exception) -> str:
-    """Names the revert inside a web3 exception, falling back to its text."""
+def _revert_data(exc: Exception) -> bytes | None:
+    """The raw revert data inside a web3 exception, or None when it carries none."""
     data = getattr(exc, "data", None)
     if isinstance(data, dict):
         data = data.get("data")
     if isinstance(data, str) and data.startswith("0x") and len(data) > 2:
         try:
-            return describe_revert_data(bytes.fromhex(data[2:]))
+            return bytes.fromhex(data[2:])
+        except ValueError:
+            return None
+    return None
+
+
+def _revert_reason(exc: Exception) -> str:
+    """Names the revert inside a web3 exception, falling back to its text."""
+    data = _revert_data(exc)
+    if data is not None:
+        try:
+            return describe_revert_data(data)
         except ValueError:
             pass
     return str(exc)
@@ -805,63 +865,440 @@ def _replay_revert(w3: Web3, tx: dict, receipt) -> str:
     return "reason not reported"
 
 
-def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAccount):
-    """
-    Sends a prepared UserOp inside handleOps and returns the transaction that executed it.
+# ── Bundles: many users' ops in one handleOps ─────────────────────────────────
+#
+# Every op is prepared on its own -- priced, signed and checked as a bundle of one. Until 2026-10-20
+# each went out in a handleOps of its own too, and since one key's transactions are signed and
+# broadcast one at a time (tx_sender's nonce lock), that held each process to one op per RPC round
+# trip, about ten a second, however fast the chain. Now each op joins a queue, and one sender
+# thread per chain and key (a Lane) sends whatever has piled up while it was busy as ONE handleOps.
+#
+# There is no timer. An op that finds the lane idle goes straight out on its own, exactly as before,
+# so a quiet server is no slower; under load the bundles grow by themselves. What sharing a
+# transaction changes, and how each is handled:
+#
+#   - One bad op reverts the lot. handleOps validates every op before running any, and one that
+#     fails validation reverts the whole transaction with FailedOp(index). So a bundle of several
+#     is simulated first; the op that fails is refused to its own user (NotSent) and dropped, and
+#     the rest are simulated again. A bundle of one skips this: prepare_user_op has just done it.
+#   - One fee for many ops. The EntryPoint repays each op at min(its cap, base fee + its tip), so a
+#     bundle is priced at the lowest cap and the lowest tip among its ops (_bundle_fees). An op
+#     whose cap the base fee has already passed would hold that price down for everyone, so it
+#     goes out on its own.
+#   - One wait. Every op in a bundle shares one tx_sender.confirm, and with it one set of fee bumps;
+#     each op's own wait (await_user_op) reads its result out of the shared receipt.
+#   - One op per wallet. Two ops of one wallet are prepared with the same nonce, so the second
+#     would sink the bundle; it waits for the next one instead.
 
-    Usually that is our own. But a UserOp's signature does not cover the beneficiary, so once the op
-    has been seen -- in the public mempool, or by the RPC during our own estimate -- anyone can land
-    it first, naming themselves. Our transaction then reverts on the used nonce, yet the user's
-    action HAS happened. Reporting that revert as a failure invites the user to retry and pay twice,
-    so a revert or a stall is checked against the chain by the op's hash first.
+# How many ops one handleOps may carry, and how much gas (user's call, 2026-10-20). The gas counted
+# is the sum of each op's outer gas as a bundle of one -- an over-count, since a bundle pays the
+# transaction's base cost once -- and is held under the chain's own per-transaction limit, past
+# which the node refuses the transaction outright.
+BUNDLE_MAX_OPS = 40
+BUNDLE_MAX_GAS = 20_000_000
+# EIP-7825's per-transaction cap, 2^24 gas: enforced on Ethereum (Fusaka), Sepolia, BSC (BEP-652)
+# and Base (Azul). Arbitrum allows 32M (ArbOS Dia). A chain not listed is held to the lower figure.
+TX_GAS_CAP = 2**24
+_TX_GAS_CAP_BY_CHAIN = {"arbitrum": 32_000_000}
+# How many more bundles an op goes out in after one reverted without running it -- a rival landed
+# another op of that bundle first, or something moved between the simulation and the block.
+MAX_RESENDS = 2
+
+
+def bundle_gas_cap(chain_name: str) -> int:
+    """The most gas one bundle may carry on chain_name. A fork is held to its live chain's limit."""
+    return min(BUNDLE_MAX_GAS, _TX_GAS_CAP_BY_CHAIN.get(chain_name.removesuffix("-fork"), TX_GAS_CAP))
+
+
+class NotSent(RuntimeError):
+    """The op was refused before any transaction carried it: nothing went out, and nothing will."""
+
+
+@dataclass
+class Bundle:
+    """One handleOps on the wire, and the one wait for it that every op in it shares."""
+
+    tx: dict             # as built; tx_sender's replacements change only its fees
+    sent: Broadcast
+    landed: Future       # its receipt, or tx_sender.confirm's TimeoutError
+
+
+@dataclass(eq=False)
+class _Queued:
+    """An op waiting for a bundle, and how its sender hears it went out -- or why it can't."""
+
+    prepared: PreparedUserOp
+    on_wire: Future = field(default_factory=Future)  # -> the Bundle carrying it
+    alone: bool = False  # to go out in a bundle of its own (see Lane._check)
+
+
+def _bundle_fees(ops: list[PreparedUserOp]) -> dict:
+    """
+    One fee for a bundle: the lowest cap and the lowest tip among its ops. The EntryPoint repays
+    each op at min(its cap, base fee + its tip), so priced any higher the transaction could cost the
+    bundler more than an op repays. A bundle of one is priced at its op's own fees, as before.
+    """
+    return {
+        "maxFeePerGas": min(p.fees["maxFeePerGas"] for p in ops),
+        "maxPriorityFeePerGas": min(p.fees["maxPriorityFeePerGas"] for p in ops),
+    }
+
+
+class Lane:
+    """
+    The one sender for a chain and a bundler key in this process: a queue of prepared ops, and a
+    thread that sends whatever is waiting as one handleOps each time it is free.
+    """
+
+    def __init__(self, w3: Web3, chain_name: str, chain_id: int, entry_point: Contract, bundler: LocalAccount):
+        self.w3, self.chain_name, self.chain_id = w3, chain_name, chain_id
+        self.entry_point, self.bundler = entry_point, bundler
+        self.send_w3 = _send_w3_for(chain_name)
+        self.gas_cap = bundle_gas_cap(chain_name)
+        self._queue: deque[_Queued] = deque()
+        self._ready = threading.Condition()
+        # What the bundles still in flight could cost the bundler, at their fee caps. A node refuses
+        # a transaction its sender can't pay for on top of the ones it already has pending.
+        self._reserved = 0
+        # The ops held against this lane, by wallet: picked for it and not yet on the wire
+        # (pick_bundler), or in a bundle that has not landed yet. What pick_bundler weighs it by.
+        self._held: Counter[str] = Counter()
+        self._lock = threading.Lock()  # guards _reserved and _held
+        threading.Thread(target=self._run, name=f"lane-{chain_name}", daemon=True).start()
+
+    def load(self) -> int:
+        """How many ops are held against this lane: picked for it, queued, or in a bundle not landed."""
+        with self._lock:
+            return sum(self._held.values())
+
+    def holds(self, wallet: str) -> bool:
+        """Whether one of this wallet's ops is held against this lane."""
+        with self._lock:
+            return wallet in self._held
+
+    def count(self, wallets: list[str], step: int) -> None:
+        """Holds (step 1) or lets go of (step -1) one op of each wallet against this lane."""
+        with self._lock:
+            for wallet in wallets:
+                self._held[wallet] += step
+                if not self._held[wallet]:
+                    del self._held[wallet]
+
+    def submit(self, prepared: PreparedUserOp) -> Bundle:
+        """
+        Queues a prepared op, and returns the bundle carrying it once that is on the wire.
+
+        @raises NotSent  If it was refused before going out: it would fail inside the bundle, or the
+                         bundler can't afford the bundle.
+        @raises          The node's refusal, unchanged, when the bundle could not be broadcast.
+        """
+        queued = _Queued(prepared)
+        with self._ready:
+            self._queue.append(queued)
+            self._ready.notify()
+        return queued.on_wire.result()
+
+    def _run(self) -> None:
+        while True:
+            with self._ready:
+                while not self._queue:
+                    self._ready.wait()
+                batch = self._take()
+            try:
+                self._send(batch)
+            except BaseException as error:  # noqa: BLE001 -- each op's sender hears it; the lane goes on
+                for queued in batch:
+                    if not queued.on_wire.done():
+                        queued.on_wire.set_exception(error)
+
+    def _take(self) -> list[_Queued]:
+        """
+        The next bundle's ops, in the order they came: up to BUNDLE_MAX_OPS and the gas cap, one per
+        wallet. The first op waiting always goes, whatever its size; one marked `alone` goes only
+        first, on its own. Called holding the queue's lock.
+        """
+        head = self._queue.popleft()
+        if head.alone:
+            return [head]
+        batch, gas, wallets, skipped = [head], head.prepared.outer_gas, {head.prepared.op[0]}, []
+        while self._queue and len(batch) < BUNDLE_MAX_OPS:
+            queued = self._queue.popleft()
+            wallet = queued.prepared.op[0]
+            if queued.alone or wallet in wallets or gas + queued.prepared.outer_gas > self.gas_cap:
+                skipped.append(queued)
+                continue
+            batch.append(queued)
+            gas += queued.prepared.outer_gas
+            wallets.add(wallet)
+        self._queue.extendleft(reversed(skipped))
+        return batch
+
+    def _requeue(self, ops: list[_Queued]) -> None:
+        """Puts ops back at the front of the queue, in order, each to go out on its own."""
+        for queued in ops:
+            queued.alone = True
+        with self._ready:
+            self._queue.extendleft(reversed(ops))
+            self._ready.notify()
+
+    def _send(self, batch: list[_Queued]) -> None:
+        """Sends `batch` as one handleOps -- checked first if it holds several -- and starts its wait."""
+        if len(batch) > 1:
+            outer_gas = self._check(batch)
+            if not batch:
+                return
+        else:
+            outer_gas = batch[0].prepared.outer_gas
+        fees = _bundle_fees([queued.prepared for queued in batch])
+
+        tx = self.entry_point.functions.handleOps(
+            [queued.prepared.op for queued in batch], self.bundler.address
+        ).build_transaction(
+            {
+                "from": self.bundler.address,
+                # Placeholder only: send_tx overwrites this with a nonce allocated under its lock.
+                # Supplying one at all just stops build_transaction from making its own (racy)
+                # eth_getTransactionCount call while assembling the dict.
+                "nonce": 0,
+                "chainId": self.chain_id,
+                "gas": outer_gas,
+                **fees,
+            }
+        )
+        sent = send(self.w3, self.chain_name, self.bundler, tx, send_w3=self.send_w3)
+        cost = outer_gas * fees["maxFeePerGas"]
+        wallets = [queued.prepared.op[0] for queued in batch]
+        with self._lock:
+            self._reserved += cost
+        # Held until the bundle lands; counted before any sender hears it is on the wire, so an op
+        # is never left out between pick_bundler letting go of it and this taking it up.
+        self.count(wallets, 1)
+        bundle = Bundle(tx, sent, Future())
+        threading.Thread(
+            target=self._wait, args=(bundle, cost, wallets), name="bundle-wait", daemon=True
+        ).start()
+        for queued in batch:
+            queued.on_wire.set_result(bundle)
+
+    def _check(self, batch: list[_Queued]) -> int:
+        """
+        Simulates a bundle of several, and returns the gas it needs. `batch` is whittled down IN
+        PLACE, so whoever holds it never hears about an op twice.
+
+        An op the EntryPoint rejects is refused to its own user (NotSent) and dropped, and the rest
+        simulated again. One whose fee cap the base fee has already passed goes back to the queue to
+        go out alone, and so does every op of a bundle that reverts without saying which op it was.
+        The bundler's balance is read alongside, and the lot refused if it can't cover this bundle
+        on top of the ones in flight.
+
+        @raises NotSent  For every op left, if the bundle couldn't be simulated or afforded.
+        """
+        while len(batch) > 1:
+            data = self.entry_point.encode_abi(
+                abi_element_identifier="handleOps", args=[[q.prepared.op for q in batch], self.bundler.address]
+            )
+            try:
+                first = read_all({
+                    # First, so that a revert is the error raised.
+                    "gas": lambda: self.w3.eth.estimate_gas(
+                        {"from": self.bundler.address, "to": self.entry_point.address, "data": data},
+                        block_identifier="pending",
+                    ),
+                    "block": lambda: self.w3.eth.get_block("latest"),
+                    "balance": lambda: self.w3.eth.get_balance(self.bundler.address),
+                })
+            except ContractLogicError as exc:
+                revert = _revert_data(exc)
+                index = failed_op_index(revert) if revert is not None else None
+                if index is None or index >= len(batch):
+                    self._requeue(batch[:])
+                    batch.clear()
+                    return 0
+                batch.pop(index).on_wire.set_exception(
+                    NotSent(f"Submitting this transaction would fail: {_revert_reason(exc)}. Nothing was sent.")
+                )
+                continue
+            except Exception as exc:
+                raise NotSent(
+                    f"Couldn't check this transaction before sending it ({type(exc).__name__}). Nothing was sent."
+                ) from exc
+
+            base_fee = first["block"].get("baseFeePerGas", 0)
+            stale = [q for q in batch if q.prepared.fees["maxFeePerGas"] < base_fee]
+            if stale:
+                batch[:] = [q for q in batch if q.prepared.fees["maxFeePerGas"] >= base_fee]
+                self._requeue(stale)
+                continue
+
+            outer_gas = int(first["gas"] * OUTER_GAS_BUFFER)
+            needed = outer_gas * _bundle_fees([q.prepared for q in batch])["maxFeePerGas"]
+            with self._lock:
+                reserved = self._reserved
+            if first["balance"] < reserved + needed:
+                raise NotSent(
+                    f"The service's bundler account {self.bundler.address} on {self.chain_name} holds "
+                    f"{first['balance'] / 1e18:.6f} of the native asset but needs up to "
+                    f"{(reserved + needed) / 1e18:.6f} to submit this transaction alongside the ones "
+                    f"still in flight. Nothing was sent; the operator has to top it up."
+                )
+            return outer_gas
+        # Whittled down to one: prepare_user_op has already simulated it as a bundle of one.
+        return batch[0].prepared.outer_gas if batch else 0
+
+    def _wait(self, bundle: Bundle, cost: int, wallets: list[str]) -> None:
+        """The bundle's one wait, fee bumps and all (tx_sender.confirm), shared by every op in it."""
+        try:
+            bundle.landed.set_result(confirm(bundle.sent))
+        except BaseException as error:  # noqa: BLE001 -- handed to every op's wait
+            bundle.landed.set_exception(error)
+        finally:
+            with self._lock:
+                self._reserved -= cost
+            self.count(wallets, -1)
+
+
+# (chain name, bundler address, EntryPoint address) -> its Lane, made on first use.
+_lanes: dict[tuple[str, str, str], Lane] = {}
+_lanes_lock = threading.Lock()  # guards _lanes, and makes each pick_bundler choice in turn
+
+
+def _lanes_for(user_id: int, accounts: list[LocalAccount]) -> list[Lane]:
+    """The Lanes for the user's acting chain and these bundler keys, in the same order."""
+    w3, chain_id, chain_name = load_network_config(user_id)
+    entry_point = load_entry_point(user_id=user_id)
+    lanes = []
+    with _lanes_lock:
+        for account in accounts:
+            key = (chain_name, account.address, entry_point.address)
+            if key not in _lanes:
+                _lanes[key] = Lane(w3, chain_name, chain_id, entry_point, account)
+            lanes.append(_lanes[key])
+    return lanes
+
+
+def _lane_for(user_id: int, bundler: LocalAccount) -> Lane:
+    """The Lane for the user's acting chain and this bundler key."""
+    return _lanes_for(user_id, [bundler])[0]
+
+
+@contextmanager
+def pick_bundler(user_id: int, wallet: str) -> Iterator[LocalAccount]:
+    """
+    The bundler key to send one of a wallet's ops with, held against that key until it is on the
+    wire. Prepare the op with it, and submit it, inside the `with`.
+
+    A wallet with an op still held against one key goes with that key again: the chain then mines
+    its ops in order, and the lane keeps one op per wallet in each bundle (Lane._take). Any other op
+    goes to the key with the fewest ops held -- picked, queued, or in a bundle not landed yet -- and
+    so away from a key whose transaction is stuck; on a tie, the first key. Held from the moment it
+    is picked, so ops picked at the same moment spread across the keys rather than all going to
+    whichever was idle.
+
+    @param user_id  The application user ID: the lanes are its acting chain's.
+    @param wallet   The op's sender, as its PackedUserOperation names it (op[0]).
+    """
+    lanes = _lanes_for(user_id, bundler_keys())
+    with _lanes_lock:
+        lane = next((lane for lane in lanes if lane.holds(wallet)), None) or min(lanes, key=Lane.load)
+        lane.count([wallet], 1)
+    try:
+        yield lane.bundler
+    finally:
+        lane.count([wallet], -1)
+
+
+def submit_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAccount) -> SubmittedUserOp:
+    """
+    Puts a prepared UserOp in the chain's next bundle, and returns once that is on the wire --
+    at once, as the only op in it, when nothing else is waiting.
 
     @param user_id   The application user ID.
     @param prepared  The op from prepare_user_op.
     @param bundler   The account that prepared it.
-    @return          (tx_hash, receipt) of the transaction that executed the op.
+    @return          What await_user_op waits on. Everything it needs is bound here, so it can wait
+                     on any thread, outside the turn's acting network (db.acting_network).
+    @raises NotSent  If it was refused before going out: it would fail inside the bundle, or the
+                     bundler can't afford the bundle. Nothing was sent.
+    @raises          The node's refusal, unchanged, when the bundle could not be broadcast.
+    """
+    lane = _lane_for(user_id, bundler)
+    return SubmittedUserOp(prepared, lane.w3, lane.entry_point, lane, lane.submit(prepared))
+
+
+def _receipt_that_ran(submitted: SubmittedUserOp):
+    """
+    The receipt of the transaction that executed a submitted op: its bundle's, or a rival's.
+
+    A UserOp's signature does not cover the beneficiary, so once the op has been seen -- in the
+    public mempool, or by the RPC during our own estimate -- anyone can land it first, naming
+    themselves. Our bundle then reverts on the used nonce, yet the user's action HAS happened.
+    Reporting that revert as a failure invites the user to retry and pay twice, so a revert or a
+    stall is checked against the chain by the op's hash first.
+
+    A bundle that reverted without anyone running the op -- a rival landed ANOTHER of its ops, or
+    something moved since the simulation -- is not this op's failure either. The op is simulated
+    once more on its own (if it is the one that sank the bundle, its user hears why, and no more gas
+    is spent on it) and goes out in a later bundle, up to MAX_RESENDS times.
+
+    @raises RuntimeError  if the op was not executed.
+    @raises TimeoutError  if neither our bundle nor anyone else's executed it in time.
+    """
+    prepared, w3, entry_point = submitted.prepared, submitted.w3, submitted.entry_point
+    bundle = submitted.bundle
+    for resend in range(MAX_RESENDS + 1):
+        try:
+            receipt = bundle.landed.result()
+        except TimeoutError:
+            landed = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
+            if landed is None:
+                raise
+            print(f"[bundler] our handleOps stalled, but the op was executed in {landed['transactionHash'].hex()}")
+            return landed
+        if receipt["status"] == 1:
+            return receipt
+
+        landed = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
+        if landed is not None:
+            print(
+                f"[bundler] our handleOps reverted because the op had already been executed, in "
+                f"{landed['transactionHash'].hex()} — reporting that one"
+            )
+            return landed
+        if resend == MAX_RESENDS:
+            break
+        beneficiary = submitted.lane.bundler.address
+        _estimate(
+            w3,
+            {
+                "from": beneficiary,
+                "to": entry_point.address,
+                "data": entry_point.encode_abi(abi_element_identifier="handleOps", args=[[prepared.op], beneficiary]),
+            },
+            "Submitting this transaction",
+        )
+        print("[bundler] its bundle reverted without running the op — sending it again")
+        bundle = submitted.lane.submit(prepared)
+
+    raise RuntimeError(f"handleOps outer transaction reverted: {_replay_revert(w3, bundle.tx, receipt)}")
+
+
+def await_user_op(submitted: SubmittedUserOp):
+    """
+    Waits for a submitted UserOp and returns the transaction that executed it.
+
+    Usually that is its own bundle; see _receipt_that_ran for when it is not, and for a bundle that
+    reverted without running it. The bundle's one wait (Lane._wait, tx_sender.confirm) bounds how
+    long, and replaces the transaction at a higher fee if the base fee outruns it.
+
+    @param submitted  The op from submit_user_op.
+    @return           (tx_hash, receipt) of the transaction that executed the op.
     @raises UserOpReverted  if the op was executed and its call reverted (a RuntimeError, carrying
                             that transaction's hash and receipt).
     @raises RuntimeError    if the op was not executed.
     @raises TimeoutError    if neither our transaction nor anyone else's executed it in time.
     """
-    w3, chain_id, chain_name = load_network_config(user_id)
-    entry_point = load_entry_point(user_id=user_id)
-
-    tx =entry_point.functions.handleOps([prepared.op], bundler.address).build_transaction(
-        {
-            "from": bundler.address,
-            # Placeholder only: send_tx overwrites this with a nonce allocated under its lock.
-            # Supplying one at all just stops build_transaction from making its own (racy)
-            # eth_getTransactionCount call while assembling the dict.
-            "nonce": 0,
-            "chainId": chain_id,
-            "gas": prepared.outer_gas,
-            **prepared.fees,
-        }
-    )
-
-    # One bundler EOA per process signs for every user, so the nonce is allocated under a lock
-    # rather than read here. send_and_confirm also bounds the wait and replaces the transaction at a
-    # higher fee if the base fee outruns it.
-    try:
-        receipt = send_and_confirm(w3, chain_name, bundler, tx, send_w3=_send_w3_for(chain_name))
-    except TimeoutError:
-        receipt = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
-        if receipt is None:
-            raise
-        print(f"[bundler] our handleOps stalled, but the op was executed in {receipt['transactionHash'].hex()}")
-    else:
-        if receipt["status"] == 0:
-            landed = find_user_op_receipt(w3, entry_point, prepared.user_op_hash, prepared.from_block)
-            if landed is None:
-                raise RuntimeError(
-                    f"handleOps outer transaction reverted: {_replay_revert(w3, tx, receipt)}"
-                )
-            print(
-                f"[bundler] our handleOps reverted because the op had already been executed, in "
-                f"{landed['transactionHash'].hex()} — reporting that one"
-            )
-            receipt = landed
+    prepared, entry_point = submitted.prepared, submitted.entry_point
+    receipt = _receipt_that_ran(submitted)
 
     # In ERC-4337 the EntryPoint catches an inner-call revert and still mines the outer transaction
     # (status 1); the op's own result is in UserOperationEvent, found here by the op's hash.
@@ -892,6 +1329,17 @@ def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAcco
         )
 
     return receipt["transactionHash"], receipt
+
+
+def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAccount):
+    """
+    Sends a prepared UserOp and waits for it, on the calling thread: submit_user_op, then
+    await_user_op. For a caller with nothing to answer in between -- the unattended path.
+
+    @return  (tx_hash, receipt) of the transaction that executed the op.
+    @raises  As submit_user_op and await_user_op do.
+    """
+    return await_user_op(submit_user_op(user_id, prepared, bundler))
 
 
 def send_user_op_as_session(user_id: int, key_ciphertext: str, target: str, value: int, data: bytes):
@@ -936,14 +1384,13 @@ def _submit_user_op(user_id: int, key_ciphertext: str, session_handler, entry_po
     The unattended path. Anything the user is asked to approve first goes through quote_user_op
     and prepare_user_op separately, so the cost can be shown between the two (see app/quotes.py).
     """
-    w3, _, _ = load_network_config(user_id)
-    bundler = resolve_bundler(w3)
-
-    print("\n[1/2] Preparing transaction ...")
-    quote = quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler)
-    check_bundler_funds(user_id, quote, bundler)
-    prepared = prepare_user_op(
-        user_id, key_ciphertext, session_handler, entry_point, quote, bundler
-    )
-    print("[2/2] Sending transaction   ...")
-    return broadcast_user_op(user_id, prepared, bundler)
+    with pick_bundler(user_id, session_handler.address) as bundler:
+        print("\n[1/2] Preparing transaction ...")
+        quote = quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler)
+        check_bundler_funds(user_id, quote, bundler)
+        prepared = prepare_user_op(
+            user_id, key_ciphertext, session_handler, entry_point, quote, bundler
+        )
+        print("[2/2] Sending transaction   ...")
+        submitted = submit_user_op(user_id, prepared, bundler)
+    return await_user_op(submitted)

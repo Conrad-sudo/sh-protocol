@@ -35,8 +35,8 @@ interface ServerOptions {
   walletPrompt?: Promise<void>
   /** Answers POST /api/wallet/tx/confirm; by default every transaction has mined. */
   confirm?: () => Response | Promise<Response>
-  /** Whether each network has a Telegram bot; by default none has. */
-  telegramBots?: boolean
+  /** Whether the server runs a Telegram bot; by default it doesn't. */
+  telegramBot?: boolean
   /** Whether the account has linked Telegram. */
   telegramLinked?: boolean
 }
@@ -48,10 +48,9 @@ function stubServer({
   extra = {},
   walletPrompt = Promise.resolve(),
   confirm = () => json(200, { status: 'confirmed', tx_hash: TX_HASH }),
-  telegramBots = false,
+  telegramBot = false,
   telegramLinked = false,
 }: ServerOptions = {}) {
-  const chains = CHAINS.map(chain => ({ ...chain, telegram_bot: telegramBots ? `mitfah_${chain.name}_bot` : null }))
   const walletCalls: number[] = []
   const sent: Record<string, string>[] = []
   const prepared: { path: string; body: unknown }[] = []
@@ -73,10 +72,16 @@ function stubServer({
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') {
         return Promise.resolve(
-          json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains, telegram_linked: telegramLinked }),
+          json(200, {
+            ...ME,
+            owner_addr: WALLET,
+            wallet_chains: walletChains,
+            telegram_linked: telegramLinked,
+            telegram_bot: telegramBot ? 'mitfah_bot' : null,
+          }),
         )
       }
-      if (url === '/api/chains') return Promise.resolve(json(200, { chains }))
+      if (url === '/api/chains') return Promise.resolve(json(200, { chains: CHAINS }))
       const route = `${(init?.method ?? 'GET').toUpperCase()} ${url}`
       if (extra[route]) {
         const body = init?.body ? JSON.parse(String(init.body)) : undefined
@@ -277,7 +282,7 @@ describe('DashboardPage', () => {
   })
 
   it('offers to link Telegram beside "Ask the assistant", opening Settings at its card', async () => {
-    stubServer({ telegramBots: true })
+    stubServer({ telegramBot: true })
     const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView')
     const user = userEvent.setup()
     const router = await renderRoutes(routes, '/dashboard')
@@ -296,17 +301,14 @@ describe('DashboardPage', () => {
   })
 
   it('offers no Telegram button once Telegram is linked, or where the server runs no bot', async () => {
-    for (const options of [{ telegramBots: true, telegramLinked: true }, { telegramBots: false }]) {
+    for (const options of [{ telegramBot: true, telegramLinked: true }, { telegramBot: false }]) {
       cleanup()
       resetClientForTests()
       stubServer(options)
-      const user = userEvent.setup()
       await renderRoutes(routes, '/dashboard')
 
+      // The wallet waits for the account, which says both, so the button would be showing by now.
       await walletHeader()
-      // "Add a network" needs the network list too, so the button would be showing by now.
-      await user.click(screen.getByRole('button', { name: 'Network: Sepolia' }))
-      expect(await screen.findByRole('menuitem', { name: 'Add a network' })).toBeInTheDocument()
       expect(screen.getByRole('link', { name: 'Ask the assistant' })).toBeInTheDocument()
       expect(screen.queryByRole('link', { name: 'Link Telegram' })).not.toBeInTheDocument()
     }

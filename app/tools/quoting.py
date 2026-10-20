@@ -17,6 +17,7 @@ from bundler import (
 )
 from constants import (
     ETH_SENTINEL,
+    SESSION_RENEWAL_WARNING_SECS,
     WEI_PER_ETH,
     get_chain_display_name,
     get_native_asset_ticker,
@@ -57,9 +58,10 @@ def _transaction_cost(chain_id: int, quote, fee_wei: int, native_price) -> dict:
                          asset. getUsdValue is linear in the amount, so this one read prices every
                          figure exactly -- it used to be three reads, one after another, after the
                          quote was done.
-    @return  The figures to show. "usd_unavailable" replaces the USD ones when the native asset
-             cannot be priced -- an unwatched-token transfer is still legal while the ETH feed is
-             stale, so a quote in native units is better than refusing to quote at all.
+    @return  The figures, kept with the quote; _shown_fees picks the one the model sees.
+             "usd_unavailable" replaces the USD ones when the native asset cannot be priced -- an
+             unwatched-token transfer is still legal while the ETH feed is stale, so a quote in
+             native units is better than refusing to quote at all.
     """
     expected_wei = quote.expected_gas_wei + fee_wei
     max_wei = quote.max_gas_wei + fee_wei
@@ -161,7 +163,7 @@ def _quote_executions(
     # now, rather than after the user has agreed.
     session_key, _ = _get_session_keys(user_id)
     w3, chain_id, _ = load_network_config(user_id)
-    bundler = _resolve_bundler(w3)
+    bundler = _resolve_bundler()
     session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
     resolved = _resolve_legs(user_id, legs or [])
     registry = load_registry(user_id)
@@ -207,6 +209,7 @@ def _quote_executions(
         cost=_transaction_cost(chain_id, quote, fee.result(), native_price),
         lp_pool=lp_pool,
         direction=_intended_direction(native_value, legs),
+        request=runtime.context.message,
     )
 
     return {
@@ -217,23 +220,50 @@ def _quote_executions(
         "network": get_chain_display_name(chain_id),
         "action": pending.action,
         "destinations": [c["to"] for c in pending.calls],
-        **figures,
-        **pending.cost,
+        **_shown_figures(figures),
+        **_shown_fees(pending.cost),
         "expires_in_seconds": quotes.QUOTE_TTL_SECONDS,
         "next_step": (
-            "Show the user `action`, its `details` if it has any, the `network` it runs on, what it "
-            "is worth (`usd_value`) and counts toward the spending limit (`charged_usd`) where the "
-            "quote has them, and what it costs in fees (`total_usd`, or the native figures if USD "
-            "is unavailable), and say plainly that nothing has been sent yet. Say each figure in "
-            "plain words, never by its field name; `total_usd` is the fees only, with what is sent "
-            "or spent on top, so never call it the total cost; `remaining_usd` is the limit left "
-            "before this transaction, not after it. Then STOP and wait for their reply. If they "
-            "agree, call "
-            "confirm_transaction with this quote_id in the turn that follows; if they decline or "
-            "change anything, call cancel_transaction and start again. Never confirm in this same "
-            "turn, and never confirm a quote_id the user has not been shown."
+            "Show the user, briefly: `action` (and its `details`, if any), the `network`, what it is "
+            "worth (`usd_value`) and counts toward the spending limit (`charged_usd`) where the "
+            "quote has them, the fees as the one figure given, and that nothing has been sent yet. "
+            "Plain words, never field names. Then STOP and wait for their reply. If they agree, "
+            "call confirm_transaction with this quote_id in the turn that follows; if they decline "
+            "or change anything, call cancel_transaction and start again. Never confirm in this "
+            "same turn, and never confirm a quote_id the user has not been shown."
         ),
     }
+
+
+def _shown_figures(figures: dict) -> dict:
+    """
+    The wallet checks' figures (_enforce_wallet_checks) that a quote shows the model: what the
+    transaction is worth and what it counts toward the limit. What is left of the limit is not
+    among them -- confirm_transaction reports it once the transaction has gone out, and a refusal
+    states it when the transaction doesn't fit -- and the key's time left is there only once it
+    runs out within SESSION_RENEWAL_WARNING_SECS. A model handed a figure reads it out, and every
+    figure read out makes the quote longer to read on a phone.
+    """
+    shown = {k: v for k, v in figures.items() if k not in ("remaining_usd", "session_expires_in_secs")}
+    if figures["session_expires_in_secs"] < SESSION_RENEWAL_WARNING_SECS:
+        shown["session_expires_in_secs"] = figures["session_expires_in_secs"]
+    return shown
+
+
+def _shown_fees(cost: dict) -> dict:
+    """
+    The fees as a quote shows them to the model: one figure, the network fee and Mitfah's together.
+    A model handed the parts reads every one of them out, so the breakdown and the ceiling stay in
+    the stored quote (PendingTransaction.cost) for the code that needs them.
+
+    @param cost  _transaction_cost's figures.
+    @return      {"fees_usd"}, or, when the native asset can't be priced, {"fees"} in the native
+                 asset with "usd_unavailable" saying why.
+    """
+    if "usd_unavailable" in cost:
+        native = f"{cost['total_native']:.8f}".rstrip("0").rstrip(".")
+        return {"fees": f"{native} {cost['native_asset']}", "usd_unavailable": cost["usd_unavailable"]}
+    return {"fees_usd": cost["total_usd"]}
 
 
 def _intended_direction(native_value: int, legs: list | None) -> str | None:

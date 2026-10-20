@@ -398,16 +398,24 @@ def settle_pending(user_id: int, web3_for: Callable[[int], Web3 | None]):
     @param web3_for  A Web3 for a chain this server serves, or None for one it doesn't.
     """
     for row in get_pending_transactions(user_id, SETTLE_BATCH):
-        try:
-            w3 = web3_for(row["chain_id"])
-            if w3 is None:
-                continue
-            if row["source"] == "assistant":
-                _settle_assistant_row(w3, row)
-            else:
-                _settle_owner_row(w3, row)
-        except Exception:  # noqa: BLE001 -- e.g. an RPC that refuses a wide log search; try next read
-            log.exception("Could not settle transaction %s", row["id"])
+        settle_one(row, web3_for)
+
+
+def settle_one(row: dict, web3_for: Callable[[int], Web3 | None]):
+    """
+    Finishes one pending row from the chain, as settle_pending does each of its batch. Best effort:
+    a row it can't settle now stays pending for the next read.
+    """
+    try:
+        w3 = web3_for(row["chain_id"])
+        if w3 is None:
+            return
+        if row["source"] == "assistant":
+            _settle_assistant_row(w3, row)
+        else:
+            _settle_owner_row(w3, row)
+    except Exception:  # noqa: BLE001 -- e.g. an RPC that refuses a wide log search; try next read
+        log.exception("Could not settle transaction %s", row["id"])
 
 
 def _settle_owner_row(w3: Web3, row: dict):
@@ -523,6 +531,8 @@ def _read_row_movements(w3: Web3, row: dict):
         # move may only now be read.
         exchanges=set(_exchange_names(chain_id)),
         native_contract=tokens.address_of(_native(chain_id)) if chain_id == CHAIN_ID_CELO else None,
+        # Its own logs only: the bundle may have run other wallets' ops too.
+        user_op_hash=bytes.fromhex(row["user_op_hash"].removeprefix("0x")) if row["user_op_hash"] else None,
     )
     save_movements(row["id"], moved, tx_movements.direction_of(moved))
 

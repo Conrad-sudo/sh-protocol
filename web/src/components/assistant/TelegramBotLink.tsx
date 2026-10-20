@@ -1,22 +1,20 @@
 import { Button } from 'rsuite'
 import { telegramBotUrl } from '../../api/telegram'
-import { useSelectedChain } from '../../chain/useSelectedChain'
 import { useMe } from '../../hooks/useMe'
 
 /**
- * Opens this network's Telegram bot, where the same conversation carries on. Only for an account
- * that has linked Telegram, and only where the network has a bot; linking itself is in Settings.
+ * Opens the Telegram bot, where the same conversation carries on once /chain there picks this
+ * network. Only for an account that has linked Telegram, on a server that runs a bot; linking itself
+ * is in Settings.
  */
-export function TelegramBotLink({ chainId }: { chainId: number }) {
+export function TelegramBotLink() {
   const { data: me } = useMe()
-  const { chains } = useSelectedChain()
-  const username = chains.find(chain => chain.chain_id === chainId)?.telegram_bot
 
-  if (!me?.telegram_linked || !username) return null
+  if (!me?.telegram_linked || !me.telegram_bot) return null
   return (
     <Button
       as="a"
-      href={telegramBotUrl(username)}
+      href={telegramBotUrl(me.telegram_bot)}
       target="_blank"
       rel="noopener noreferrer"
       appearance="subtle"

@@ -8,14 +8,14 @@ import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, walletS
  * Also the dashboard's way there.
  */
 
-const LINK = 'https://t.me/mitfah_base_bot?start=e2e-nonce'
+const LINK = 'https://t.me/mitfah_bot?start=e2e-nonce'
 const BASE = 8453
 const SEPOLIA = 11155111
 
-/** Networks the account has a wallet on, each with a bot of its own. */
+/** Networks the account has a wallet on. One bot serves them all. */
 const CHAINS = [
-  { chain_id: BASE, name: 'base', native_ticker: 'ETH', telegram_bot: 'mitfah_base_bot' },
-  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', telegram_bot: 'mitfah_sepolia_bot' },
+  { chain_id: BASE, name: 'base', native_ticker: 'ETH' },
+  { chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH' },
 ].map(chain => ({ ...chain, fork: false, rpc_url: null, default_spenders: [], exchange: null }))
 
 async function mockApi(page: Page, { linked = false, notConfigured = false } = {}) {
@@ -30,7 +30,14 @@ async function mockApi(page: Page, { linked = false, notConfigured = false } = {
       case '/api/auth/refresh':
         return route.fulfill({ json: TOKEN })
       case '/api/me':
-        return route.fulfill({ json: { ...ME, telegram_linked: server.linked, wallet_chains: [BASE, SEPOLIA] } })
+        return route.fulfill({
+          json: {
+            ...ME,
+            telegram_linked: server.linked,
+            telegram_bot: notConfigured ? null : 'mitfah_bot',
+            wallet_chains: [BASE, SEPOLIA],
+          },
+        })
       case '/api/chains':
         return route.fulfill({ json: { chains: CHAINS } })
       case '/api/integrations/telegram/link':
@@ -42,7 +49,7 @@ async function mockApi(page: Page, { linked = false, notConfigured = false } = {
         if (notConfigured) {
           return route.fulfill({
             status: 500,
-            json: { detail: 'Telegram is not configured: no MITFAH_<CHAIN>_USERNAME is set' },
+            json: { detail: 'Telegram is not configured: MITFAH_USERNAME is not set' },
           })
         }
         return route.fulfill({ json: { url: LINK, nonce: 'e2e-nonce', expires_in: 600 } })
@@ -90,36 +97,16 @@ test('linking Telegram: link, wait, linked', async ({ page }, testInfo) => {
   await expect(card.getByText('Linked')).toBeVisible({ timeout: 10_000 })
   await expect(page.getByText('Telegram linked. You can now chat with your assistant there.')).toBeVisible()
   await expect(open).toBeHidden()
-  // Once linked, each network's bot is a link away, and on a desktop a QR code away too.
-  await expect(card.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
-  await expect(card.getByRole('link', { name: '@mitfah_sepolia_bot' })).toBeVisible()
-  await expect(card.locator('li .mf-telegram-bot-qr')).toHaveCount(2)
-  for (const code of await card.locator('li .mf-telegram-bot-qr').all()) {
-    await expect(code).toBeVisible({ visible: !touch })
-  }
+  // Once linked, the one bot is a link away, and on a desktop a QR code away too; /chain there
+  // switches networks.
+  const bot = card.locator('.mf-telegram-bot')
+  await expect(bot.getByRole('link', { name: '@mitfah_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_bot')
+  await expect(bot.getByText('Send /chain there to switch networks.')).toBeVisible()
+  await expect(bot.locator('.mf-telegram-qr')).toBeVisible({ visible: !touch })
   await expectNoSidewaysScroll(page)
-  // Of the card only, as above: a full-page capture would show the codes on a touch screen.
-  await card.screenshot({ path: testInfo.outputPath('settings-telegram-bots.png') })
-
-  if (!touch) {
-    // A code opens large and on its own, so a phone's camera reads that one and no other.
-    const enlarge = card.getByRole('button', { name: "Enlarge the Base bot's QR code" })
-    await enlarge.click()
-    const dialog = page.getByRole('dialog', { name: 'Base bot' })
-    await expect(dialog.getByRole('img', { name: 'QR code of the Base bot' })).toBeVisible()
-    await expect(dialog.getByRole('link', { name: '@mitfah_base_bot' })).toHaveAttribute('href', 'https://t.me/mitfah_base_bot')
-    for (const code of await card.locator('li .mf-telegram-bot-qr').all()) {
-      await expect(code).toHaveCSS('opacity', '0')
-    }
-    expect(await seriousProblems(page)).toEqual([])
-    await page.screenshot({ path: testInfo.outputPath('settings-telegram-bot-enlarged.png') })
-
-    await page.keyboard.press('Escape')
-    await expect(dialog).toBeHidden()
-    await expect(enlarge).toHaveCSS('opacity', '1')
-    // Back where the user was: on the code they opened.
-    await expect(enlarge).toBeFocused()
-  }
+  expect(await seriousProblems(page)).toEqual([])
+  // Of the card only, as above: a full-page capture would show the code on a touch screen.
+  await card.screenshot({ path: testInfo.outputPath('settings-telegram-bot.png') })
   await snap(page, testInfo, 'settings-telegram-linked')
 
   await card.getByRole('button', { name: 'Unlink' }).click()

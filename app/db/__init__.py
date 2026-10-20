@@ -14,6 +14,7 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   users         accounts and their linked Telegram chat
   signin        refresh tokens and the single-use sign-in nonces
   transactions  the History tab's records
+  feedback      what users tell the team about the app (the bot's /feedback)
 """
 import json
 import os
@@ -96,6 +97,10 @@ from db.contacts import (  # noqa: E402 -- after get_db, which these modules imp
     get_contact,
     save_contact,
 )
+from db.feedback import (  # noqa: E402 -- after get_db, which these modules import
+    add_feedback,
+    count_feedback_since,
+)
 from db.schema import (  # noqa: E402 -- after get_db, which these modules import
     MIGRATIONS,
     init_db,
@@ -145,6 +150,7 @@ from db.transactions import (  # noqa: E402 -- after get_db, which these modules
     get_movements,
     get_owner_transaction,
     get_pending_transactions,
+    get_transaction,
     get_transactions,
     get_unread_movement_rows,
     get_wallet_tx_hashes,
@@ -155,11 +161,13 @@ from db.transactions import (  # noqa: E402 -- after get_db, which these modules
 )
 from db.users import (  # noqa: E402 -- after get_db, which these modules import
     create_user,
+    get_telegram_chain,
     get_telegram_chats_on_chain,
     get_user_by_id,
     get_user_by_owner_addr,
     get_user_id_by_telegram_chat_id,
     link_telegram,
+    set_telegram_chain,
     unlink_telegram,
 )
 from db.wallets import (  # noqa: E402 -- after get_db, which these modules import

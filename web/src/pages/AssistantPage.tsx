@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Placeholder, Text } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
@@ -7,6 +7,8 @@ import { BudgetPanel, BudgetStrip } from '../components/assistant/BudgetPanel'
 import { ChatLog } from '../components/assistant/ChatLog'
 import { ClearChatButton } from '../components/assistant/ClearChatButton'
 import { Composer } from '../components/assistant/Composer'
+import { QuoteCard } from '../components/assistant/QuoteCard'
+import { SendStatus } from '../components/assistant/SendStatus'
 import { SuggestedPrompts } from '../components/assistant/SuggestedPrompts'
 import { TelegramBotLink } from '../components/assistant/TelegramBotLink'
 import { PageHeader } from '../components/PageHeader'
@@ -40,7 +42,7 @@ export function AssistantPage() {
         actions={
           view.wallet && (
             <>
-              <TelegramBotLink chainId={view.wallet.chain_id} />
+              <TelegramBotLink />
               <ClearChatButton key={view.wallet.chain_id} chainId={view.wallet.chain_id} />
             </>
           )
@@ -55,6 +57,14 @@ export function AssistantPage() {
 function scrollToEnd(smooth: boolean) {
   const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   window.scrollTo({ top: document.documentElement.scrollHeight, behavior: smooth && !reduce ? 'smooth' : 'instant' })
+}
+
+/**
+ * A quote to answer is always brought into view: it follows the user's own message, so they are
+ * waiting for it. Run by the card once it is on the page, since it is read a moment after the reply.
+ */
+function scrollToQuote() {
+  scrollToEnd(true)
 }
 
 function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
@@ -92,6 +102,13 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
     scrolledOnce.current = true
     forceScroll.current = false
   }, [history.isPending, messages.length, latest?.id, latest?.status])
+
+  // Not while a message waits for its reply: that turn may quote something newer.
+  const showQuote = latest?.status !== 'pending'
+  // A send's progress line, below the newest message: followed if the reader is following.
+  const followStatus = useCallback(() => {
+    if (atEnd.current) scrollToEnd(true)
+  }, [])
 
   const send = (text: string) => {
     forceScroll.current = true
@@ -157,6 +174,8 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
             </Button>
           </p>
         )}
+        <SendStatus chainId={chainId} onChange={followStatus} />
+        {showQuote && <QuoteCard chainId={chainId} busy={chat.busy} onShow={scrollToQuote} />}
         <Composer
           value={draft}
           onChange={setDraft}

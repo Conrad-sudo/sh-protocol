@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { ChatMessage, Contact, Exchange, WalletState } from '../api/types'
+import type { ChatMessage, Contact, Exchange, QuoteOffer, Transaction, WalletState } from '../api/types'
 import { routes } from '../routes'
 import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
@@ -14,7 +14,26 @@ const TOKENS = [
 ]
 const SAM: Contact = { name: 'sam', address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
 
-type Answer = { reply: string } | { status: number; detail?: string } | 'offline'
+/** A reply, and the quote its turn offered, if any. */
+type Answer = { reply: string; quote?: QuoteOffer } | { status: number; detail?: string } | 'offline'
+/** What a tap on a quote card's button gets; by default the server's own wording. */
+type TapAnswer = { outcome: string; transaction_id?: number | null } | { status: number; detail?: string } | 'offline'
+
+/** The History row a confirmed send is followed in. */
+const SENT_ROW = 77
+
+const STALE = 'That quote has expired or was already used. Nothing was sent. Ask me again for a fresh one.'
+
+function makeQuote(overrides: Partial<QuoteOffer> = {}): QuoteOffer {
+  return {
+    quote_id: 'q-abc_123',
+    chain_id: SEPOLIA,
+    action: 'Transfer 5 USDC to sam',
+    fees: '$0.35',
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    ...overrides,
+  }
+}
 
 interface ServerOptions {
   history?: ChatMessage[]
@@ -37,8 +56,16 @@ interface ServerOptions {
   exchange?: Exchange
   /** Whether the account has linked Telegram. */
   telegramLinked?: boolean
-  /** The username of the network's Telegram bot; it has none by default. */
+  /** The username of the server's Telegram bot; it runs none by default. */
   telegramBot?: string
+  /** The quote waiting for a tap when the page loads. */
+  quote?: QuoteOffer | null
+  /** What taps on a quote card's buttons get, in order; the last one repeats. */
+  taps?: TapAnswer[]
+  /** A tap waits for this before answering. */
+  tapGate?: Promise<void>
+  /** What reads of a confirmed send's History row find, in order; the last one repeats. */
+  landing?: Transaction['status'][]
 }
 
 /** A signed-in account with a wallet on Sepolia and a chat that behaves like app/api.py. */
@@ -56,11 +83,18 @@ function stubServer({
   exchange,
   telegramLinked = false,
   telegramBot,
+  quote = null,
+  taps = [],
+  tapGate = Promise.resolve(),
+  landing = ['confirmed'],
 }: ServerOptions = {}) {
   let thread = [...history]
+  let offered = quote
+  let sending = ''
   const posted: unknown[] = []
+  const tapped: { url: string; body: unknown }[] = []
   const cleared: string[] = []
-  const calls = { history: 0, wallet: 0 }
+  const calls = { history: 0, wallet: 0, transaction: 0 }
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
@@ -68,14 +102,18 @@ function stubServer({
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') {
         return Promise.resolve(
-          json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains, telegram_linked: telegramLinked }),
+          json(200, {
+            ...ME,
+            owner_addr: WALLET,
+            wallet_chains: walletChains,
+            telegram_linked: telegramLinked,
+            telegram_bot: telegramBot ?? null,
+          }),
         )
       }
       if (url === '/api/chains') {
         return Promise.resolve(
-          json(200, {
-            chains: CHAINS.map(c => ({ ...c, exchange: exchange ?? null, default_spenders: [], telegram_bot: telegramBot ?? null })),
-          }),
+          json(200, { chains: CHAINS.map(c => ({ ...c, exchange: exchange ?? null, default_spenders: [] })) }),
         )
       }
       if (url === `/api/tokens?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { tokens: TOKENS }))
@@ -91,12 +129,60 @@ function stubServer({
           return Promise.resolve(json(clearStatus, { detail: 'The assistant is still answering a message.' }))
         }
         thread = []
+        offered = null
         return Promise.resolve(json(200, { status: 'cleared', chain_ids: [SEPOLIA] }))
       }
       if (url.startsWith('/api/chat/history?')) {
         calls.history++
         if (historyFailures-- > 0) return Promise.resolve(new Response('Internal Server Error', { status: 500 }))
         return Promise.resolve(json(200, { chain_id: SEPOLIA, messages: thread }))
+      }
+      if (url === `/api/chat/quote?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { quote: offered }))
+      if (url.startsWith('/api/chat/quote/') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { chain_id: number; quote_id: string }
+        const confirm = url.endsWith('/confirm')
+        const answer = taps.length ? taps[Math.min(tapped.length, taps.length - 1)] : null
+        tapped.push({ url, body })
+        return tapGate.then(() => {
+          if (answer === 'offline') throw new TypeError('Failed to fetch')
+          if (answer && 'status' in answer) {
+            if (answer.status === 409) offered = null
+            return answer.detail
+              ? json(answer.status, { detail: answer.detail })
+              : new Response('Bad Gateway', { status: answer.status })
+          }
+          const outcome =
+            answer?.outcome ??
+            (confirm ? `Sending — ${offered?.action}. Waiting for the network to confirm it.` : 'Cancelled. Nothing was sent.')
+          thread = [
+            ...thread,
+            { role: 'user', text: confirm ? '✅ Confirm' : '✖️ Cancel', button: true },
+            { role: 'assistant', text: outcome, button: true },
+          ]
+          if (!confirm) {
+            offered = null
+            return json(200, { outcome })
+          }
+          sending = offered?.action ?? ''
+          offered = null
+          const transactionId = answer && 'transaction_id' in answer ? answer.transaction_id : SENT_ROW
+          return json(200, { outcome, transaction_id: transactionId })
+        })
+      }
+      if (url === `/api/transactions/${SENT_ROW}`) {
+        const status = landing[Math.min(calls.transaction++, landing.length - 1)]
+        const row: Transaction = {
+          id: SENT_ROW,
+          chain_id: SEPOLIA,
+          source: 'assistant',
+          action: sending,
+          status,
+          tx_hash: status === 'pending' ? null : `0x${'ab'.repeat(32)}`,
+          created_at: Math.floor(Date.now() / 1000),
+          mined_at: status === 'pending' ? null : Math.floor(Date.now() / 1000),
+          direction: 'out',
+        }
+        return Promise.resolve(json(200, row))
       }
       if (url === '/api/chat' && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as { chain_id: number; message: string }
@@ -115,13 +201,18 @@ function stubServer({
           }
           const reply = answer?.reply ?? `You said: ${body.message}`
           thread = [...thread, { role: 'user', text: body.message }, { role: 'assistant', text: reply }]
+          if (answer && 'quote' in answer && answer.quote) offered = answer.quote
           return json(200, { reply })
         })
       }
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { posted, calls, cleared }
+  return { posted, calls, cleared, tapped }
+}
+
+function quoteCard() {
+  return screen.findByRole('region', { name: 'Transaction waiting for your answer' })
 }
 
 function composer() {
@@ -201,24 +292,24 @@ describe('AssistantPage', () => {
     expect(within(aside).getByRole('link', { name: 'Manage contacts' })).toHaveAttribute('href', '/contacts')
   })
 
-  it('opens the network’s Telegram bot once Telegram is linked', async () => {
-    stubServer({ telegramLinked: true, telegramBot: 'mitfah_sepolia_bot' })
+  it('opens the Telegram bot once Telegram is linked', async () => {
+    stubServer({ telegramLinked: true, telegramBot: 'mitfah_bot' })
     await renderRoutes(routes, '/assistant')
 
     const open = await screen.findByRole('link', { name: 'Open in Telegram' })
-    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_sepolia_bot')
+    expect(open).toHaveAttribute('href', 'https://t.me/mitfah_bot')
     expect(open).toHaveAttribute('target', '_blank')
     expect(open).toHaveAttribute('rel', 'noopener noreferrer')
   })
 
-  it('offers no Telegram link before Telegram is linked, or where the network has no bot', async () => {
-    for (const options of [{ telegramBot: 'mitfah_sepolia_bot' }, { telegramLinked: true }]) {
+  it('offers no Telegram link before Telegram is linked, or where the server runs no bot', async () => {
+    for (const options of [{ telegramBot: 'mitfah_bot' }, { telegramLinked: true }]) {
       cleanup()
       resetClientForTests()
-      stubServer({ ...options, exchange: 'uniswap-v3' })
+      stubServer(options)
       await renderRoutes(routes, '/assistant')
-      // The swap suggestion needs the network list too, so the link would be showing by now.
-      expect(await screen.findByRole('button', { name: 'Swap 1 ETH for USDC…' })).toBeInTheDocument()
+      // The chat waits for the account, which says both, so the link would be showing by now.
+      await composer()
       expect(screen.queryByRole('link', { name: 'Open in Telegram' })).not.toBeInTheDocument()
     }
   })
@@ -629,5 +720,162 @@ describe('AssistantPage', () => {
     expect(await within(log()).findByText(/Earlier messages were cleared/)).toBeInTheDocument()
     expect(within(log()).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
     expect(within(log()).getByText('Sent 5 USDC to sam.')).toBeInTheDocument()
+  })
+
+  it('offers a quoted transaction on a card, as plain text, and sends it with one tap', async () => {
+    const action = 'Transfer 5 [USDC](https://evil.example) to sam'
+    const sent = deferred()
+    const { tapped, calls } = stubServer({
+      answers: [{ reply: 'That costs $0.35 in fees. Reply yes to send it.', quote: makeQuote({ action }) }],
+      tapGate: sent.promise,
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument()
+    await user.type(await composer(), 'send 5 usdc to sam{Enter}')
+    const card = await quoteCard()
+    expect(within(card).getByText('Confirm on Sepolia?')).toBeInTheDocument()
+    // The server's words, as text: a token's symbol can't become a link.
+    expect(within(card).getByText(action)).toBeInTheDocument()
+    expect(within(card).queryByRole('link')).not.toBeInTheDocument()
+    expect(within(card).getByText('Fees: $0.35 · good for 5 minutes')).toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }))
+    expect(tapped).toEqual([{ url: '/api/chat/quote/confirm', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
+    expect(within(card).getByRole('status')).toHaveTextContent('Sending…')
+    expect(within(card).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
+    // One turn at a time: nothing else can be sent meanwhile.
+    await user.type(await composer(), 'and my balance?')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+    const wallets = calls.wallet
+    sent.open()
+    expect(await within(log()).findByText('✅ Confirm')).toBeInTheDocument()
+    const outcome = within(log()).getByText(`Sending — ${action}. Waiting for the network to confirm it.`)
+    expect(outcome.tagName).toBe('P')
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+    // A payment changes the balances and what is left to spend.
+    await waitFor(() => expect(calls.wallet).toBeGreaterThan(wallets))
+    expect(tapped).toHaveLength(1)
+  })
+
+  it('follows a confirmed send until it lands, then reads the wallet again', async () => {
+    const { calls } = stubServer({ quote: makeQuote(), landing: ['pending', 'confirmed'] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText('Waiting for the network to confirm “Transfer 5 USDC to sam”…')).toBeInTheDocument()
+    const wallets = calls.wallet
+    const landed = await screen.findByText(/Confirmed on Sepolia: Transfer 5 USDC to sam\./, {}, { timeout: 5_000 })
+    expect(within(landed).getByRole('link', { name: 'View transaction' })).toHaveAttribute(
+      'href',
+      `https://sepolia.etherscan.io/tx/0x${'ab'.repeat(32)}`,
+    )
+    // What it changed is read again, and the row is read no more.
+    await waitFor(() => expect(calls.wallet).toBeGreaterThan(wallets))
+    const reads = calls.transaction
+    await new Promise(resolve => setTimeout(resolve, 2_500))
+    expect(calls.transaction).toBe(reads)
+
+    // The next message clears a send that has landed.
+    await user.type(await composer(), 'thanks{Enter}')
+    await waitFor(() => expect(screen.queryByText(/Confirmed on Sepolia/)).not.toBeInTheDocument())
+  }, 15_000)
+
+  it('says when a confirmed send failed on chain, and points to History', async () => {
+    stubServer({ quote: makeQuote(), landing: ['failed'] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    const failed = await screen.findByText(/“Transfer 5 USDC to sam” went out but failed on chain/)
+    expect(within(failed).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
+  })
+
+  it('follows nothing when the confirm sent nothing', async () => {
+    const { calls } = stubServer({
+      quote: makeQuote(),
+      taps: [{ outcome: "That didn't go through: not enough USDC", transaction_id: null }],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    expect(await within(log()).findByText("That didn't go through: not enough USDC")).toBeInTheDocument()
+    expect(screen.queryByText(/Waiting for the network/)).not.toBeInTheDocument()
+    expect(calls.transaction).toBe(0)
+  })
+
+  it('shows the waiting quote again after a reload, and cancels it', async () => {
+    const { tapped } = stubServer({
+      history: [
+        { role: 'user', text: 'send 5 usdc to sam' },
+        { role: 'assistant', text: 'Reply yes to send it.' },
+      ],
+      quote: makeQuote(),
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    const card = await quoteCard()
+    await user.click(within(card).getByRole('button', { name: 'Cancel' }))
+    expect(await within(log()).findByText('✖️ Cancel')).toBeInTheDocument()
+    expect(within(log()).getByText('Cancelled. Nothing was sent.')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument()
+    expect(tapped).toEqual([{ url: '/api/chat/quote/cancel', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
+  })
+
+  it('says why when a quote is gone, and nothing was sent', async () => {
+    stubServer({ quote: makeQuote(), taps: [{ status: 409, detail: STALE }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText(STALE)).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument(),
+    )
+    expect(within(log()).queryByText('✅ Confirm')).not.toBeInTheDocument()
+  })
+
+  it('warns to check History when a confirm may have gone out', async () => {
+    const { tapped, calls } = stubServer({ quote: makeQuote(), taps: ['offline'] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText('No answer arrived.')).toBeInTheDocument()
+    const warning = screen.getByText(/may still have been sent/)
+    expect(within(warning).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
+    // The chat is read again, in case the server recorded what happened.
+    await waitFor(() => expect(calls.history).toBe(2))
+    expect(tapped).toHaveLength(1)
+  })
+
+  it('says when a quote has expired, with nothing left to tap', async () => {
+    stubServer({ quote: makeQuote({ expires_at: Math.floor(Date.now() / 1000) - 1 }) })
+    await renderRoutes(routes, '/assistant')
+
+    expect(await screen.findByText(/The quote for “Transfer 5 USDC to sam” has expired/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
+  })
+
+  it('shows a button tap from the history as plain text', async () => {
+    stubServer({
+      history: [
+        { role: 'user', text: '✅ Confirm', button: true },
+        { role: 'assistant', text: 'Sent — Transfer 1 [x](https://evil.example) to sam.', button: true },
+      ],
+    })
+    await renderRoutes(routes, '/assistant')
+
+    await composer()
+    expect(await within(log()).findByText('Sent — Transfer 1 [x](https://evil.example) to sam.')).toBeInTheDocument()
+    expect(within(log()).queryByRole('link')).not.toBeInTheDocument()
   })
 })

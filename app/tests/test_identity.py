@@ -155,16 +155,28 @@ def test_no_tool_writes_the_contact_list():
         check("a raw address is refused as a recipient", False, "it was accepted")
     except ToolException:
         check("a raw address is refused as a recipient", True)
+    # An ENS name is a destination by another spelling: whoever registers one could have it paid if
+    # the agent looked it up. Only the owner's web app resolves names, and only to save a contact.
+    try:
+        tools.common._resolve_contact(1, "vitalik.eth")
+        check("an unsaved ENS name is refused as a recipient", False, "it was accepted")
+    except ToolException as e:
+        check("an unsaved ENS name is refused as a recipient", True)
+        check("the refusal says the web app can add it by that name", "ENS name" in str(e), str(e))
     finally:
         set_everywhere(tools, "_get_contact", original)
+    import ens_names
+    aliases = [f"{m.__name__}.{n}" for m in modules for n, v in vars(m).items()
+               if v is ens_names or v is ens_names.resolve]
+    check("no tools module can resolve an ENS name", not aliases, f"bound as {aliases}")
 
 
 def test_thread_id_is_per_chain():
     """
     Conversation history is keyed per user PER CHAIN.
 
-    A Telegram user id is the same number for every bot, so a user-only key would merge every
-    per-chain bot's conversation into one history.
+    One account talks to the assistant on several chains (the web app's network switch, /chain in
+    the Telegram bot), so a user-only key would merge every chain's conversation into one history.
     """
     print("\n[4] thread ids are scoped per chain")
     from smart_wallet_agent import thread_id

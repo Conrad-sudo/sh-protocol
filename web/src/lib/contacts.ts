@@ -27,6 +27,15 @@ export function nameProblem(name: string): string | null {
   return null
 }
 
+/**
+ * Whether `value` (already trimmed) is an ENS name, such as sam.eth or jesse.base.eth, rather than an
+ * address. Only its shape: the server says whether it is a valid name. A shortened address
+ * (0x12…ab typed with dots) is not one.
+ */
+export function looksLikeEnsName(value: string): boolean {
+  return value.includes('.') && !value.includes('..') && !/\s/.test(value) && !/^0x[0-9a-f]*$/i.test(value)
+}
+
 /** What is wrong with `address` (already trimmed) as a contact's address, or null. */
 export function addressProblem(address: string): string | null {
   if (address === '') return 'Enter an address.'
@@ -34,7 +43,7 @@ export function addressProblem(address: string): string | null {
     if (/^0x[0-9a-f]*$/i.test(address)) {
       return `An address is 0x and 40 more characters. This one has ${address.length - 2}.`
     }
-    if (address.includes('.')) return "Paste the 0x address. Names such as sam.eth aren't supported."
+    if (address.includes('.')) return 'Paste the whole 0x address.'
     return 'Enter a full address starting with 0x.'
   }
   // Mixed case carries a checksum; all one case carries none (EIP-55).

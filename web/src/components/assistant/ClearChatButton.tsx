@@ -5,7 +5,7 @@ import { Button, Message, Text, useToaster } from 'rsuite'
 import { deleteChatHistory } from '../../api/chat'
 import { ApiError } from '../../api/client'
 import type { ChatMessage } from '../../api/types'
-import { chatHistoryKey, useChatHistory, useChatSend } from '../../hooks/useChat'
+import { chatHistoryKey, quoteOfferKey, useChatHistory, useChatSend } from '../../hooks/useChat'
 import { errorText } from '../../lib/tx'
 import { chainName } from '../../wallet/chains'
 import { ConfirmModal } from '../owner/ConfirmModal'
@@ -33,6 +33,8 @@ export function ClearChatButton({ chainId }: { chainId: number }) {
     mutationFn: () => deleteChatHistory(chainId),
     onSuccess: () => {
       queryClient.setQueryData<ChatMessage[]>(chatHistoryKey(chainId), [])
+      // The server discards the chat's quotes with it.
+      queryClient.setQueryData(quoteOfferKey(chainId), null)
       notify('success', 'Chat cleared.')
     },
     onError: error =>
