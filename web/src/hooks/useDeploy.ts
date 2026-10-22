@@ -57,7 +57,9 @@ interface PendingDeploy {
 export interface DeployResult {
   chainId: number
   walletAddress: string
-  /** False if the wallet exists but the assistant's key could not be confirmed on it. */
+  /** The passkey the wallet was created trusting; null for a wallet made without one. */
+  keyId: string | null
+  /** False if the wallet exists but no passkey could be confirmed on it, so the assistant can't send yet. */
   assistantReady: boolean
 }
 
@@ -179,6 +181,7 @@ export function useDeploy(onDeployed: (result: DeployResult) => void) {
             result: {
               chainId: result.chain_id,
               walletAddress: result.wallet_address,
+              keyId: result.key_id ?? null,
               assistantReady: result.session_key_authorized,
             },
           }

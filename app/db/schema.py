@@ -267,6 +267,87 @@ def _migrate_app_feedback(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_passkeys(db: sqlite3.Connection):
+    """
+    Session keys become passkeys (2026-10-20): the app no longer holds any.
+
+    A session key used to be an Ethereum key this server minted, kept encrypted in Vault (its
+    ciphertext in session_keys, or pending_session_keys until the owner's grant mined) and signed
+    with. It is now a passkey on the user's own device, which signs only after Face ID, a
+    fingerprint or a PIN. So both tables are dropped, ciphertexts and all, and the server keeps only
+    what is public:
+
+      - passkeys: one row per device the user made a passkey on. key_id is what the wallet files
+        the key under (keccak256(abi.encode(qx, qy))), credential_id is how the browser names it,
+        public_key the COSE key the approval is verified with, and sign_count the authenticator's
+        counter (0 for synced passkeys, which don't keep one). Which wallet a passkey is approved
+        on, and until when, lives on chain only (SessionHandler.getSessions).
+      - users.webauthn_handle: the account's random 16-byte WebAuthn user handle, made on first use.
+        Random rather than the account id, as WebAuthn asks, so a passkey reveals nothing about
+        who it belongs to.
+      - passkey_challenges: registration challenges, single use and short-lived, kept here rather
+        than in memory so a `--reload` between the options and the response loses nothing.
+      - sign_requests: a quote offered for a passkey's approval, frozen at offer time. The Telegram
+        bot and the API are separate processes: the bot raises the quote, and the API, where the
+        approval page posts, signs and sends it. token_hash is the SHA-256 of the Telegram link's
+        token (NULL for the web chat, which names the quote under its JWT); `op` and `challenge`
+        are the UserOperation built by the latest /api/sign/start and the hash the passkey must
+        sign, and sign_id names that build, so an older one can't be finished. `status` is
+        'open', 'sending' (claimed by a finish), 'sent', 'failed' or 'cancelled'; one past
+        expires_at -- the quote's own expiry -- counts as expired whatever it says.
+    """
+    columns = [row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()]
+    if "webauthn_handle" not in columns:
+        db.execute("ALTER TABLE users ADD COLUMN webauthn_handle BLOB")
+    db.executescript("""
+        DROP TABLE IF EXISTS session_keys;
+        DROP TABLE IF EXISTS pending_session_keys;
+
+        CREATE TABLE IF NOT EXISTS passkeys (
+            key_id        TEXT PRIMARY KEY,
+            user_id       INTEGER NOT NULL,
+            credential_id TEXT NOT NULL UNIQUE,
+            public_key    BLOB NOT NULL,
+            qx            TEXT NOT NULL,
+            qy            TEXT NOT NULL,
+            sign_count    INTEGER NOT NULL DEFAULT 0,
+            device_name   TEXT NOT NULL,
+            created_at    INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS passkeys_by_user ON passkeys (user_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS passkey_challenges (
+            challenge  TEXT PRIMARY KEY,
+            user_id    INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sign_requests (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            quote_id            TEXT NOT NULL,
+            user_id             INTEGER NOT NULL,
+            chain_id            INTEGER NOT NULL,
+            origin              TEXT NOT NULL,
+            token_hash          TEXT UNIQUE,
+            telegram_chat_id    INTEGER,
+            telegram_message_id INTEGER,
+            quote               TEXT NOT NULL,
+            created_at          INTEGER NOT NULL,
+            expires_at          INTEGER NOT NULL,
+            status              TEXT NOT NULL,
+            sign_id             TEXT UNIQUE,
+            op                  TEXT,
+            challenge           TEXT,
+            built_at            INTEGER,
+            transaction_id      INTEGER,
+            outcome             TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS sign_requests_by_quote ON sign_requests (user_id, chain_id, quote_id);
+        CREATE INDEX IF NOT EXISTS sign_requests_by_status ON sign_requests (user_id, chain_id, status);
+    """)
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -568,6 +649,7 @@ MIGRATIONS = (
     _migrate_transaction_direction,  # 5: the History tab's filters
     _migrate_telegram_chain,         # 6: the network chosen in the one Telegram bot
     _migrate_app_feedback,           # 7: the bot's /feedback
+    _migrate_passkeys,               # 8: passkeys instead of server-held session keys
 )
 
 

@@ -58,7 +58,7 @@ jobs:
         run: |
           pip install slither-analyzer==0.11.6
           slither . --ignore-compile --foundry-out-directory slither-out \
-            --filter-paths "lib/|src/mocks/|src/SafeProxy.sol|src/SessionGrantLib.sol" --fail-high
+            --filter-paths "lib/|src/mocks/|src/SafeProxy.sol" --fail-high
 
   fork:
     name: Fork tests (${{ matrix.suite }})

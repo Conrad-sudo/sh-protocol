@@ -8,7 +8,7 @@
 
 **Agentic wallet infrastructure.**
 
-SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them across DeFi — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent works through a session key. And the protocol, not the agent, decides what is allowed to happen.
+SessionHandler Protocol gives every user a programmable smart account and lets an AI agent run it for them across DeFi — swapping, paying, providing liquidity and building on-chain reputation — from plain-language instructions. The user keeps the root key. The agent prepares each transaction, and the user approves it with a passkey on their own device — Face ID, a fingerprint or a PIN. And the protocol, not the agent, decides what is allowed to happen.
 
 It is built from the standards the ecosystem is converging on:
 
@@ -44,7 +44,7 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 │  INTEGRATIONS       ERC-20 · Uniswap V3 / PancakeSwap V2 · ERC-8004         │
 │                     Chainlink pricing · UserOp builder and bundler          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  KEY CUSTODY        HashiCorp Vault Transit — session keys encrypted        │
+│  KEY CUSTODY        passkeys on users' devices — the server holds none      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  CORE (on-chain)    SessionHandler account  +  SpendingLimitModule hook     │
 │                     every agent transaction is checked here                 │
@@ -58,15 +58,15 @@ The protocol is built in layers: a small on-chain core that enforces the rules, 
 
 ### Core — the smart account and its spending-limit hook
 
-**`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or the account's one approved session key. A session key can move value but can never touch the account's own settings, so an agent can't loosen its own rules — and it **expires**, so a key nobody renews stops working on its own rather than living forever.
+**`SessionHandler`** is each user's ERC-7579 smart account, one per user per chain. It checks its own UserOperations and accepts a signature from either the owner or one of up to five approved session keys. A session key is a **passkey**, one per device: the device or the user's password manager keeps it, never the server, and every signature needs Face ID, a fingerprint or the device PIN, checked on-chain through the chain's P-256 precompile. A session key can move value but can never touch the account's own settings, so nothing signed with one can loosen the wallet's rules — and it **expires**, so a key nobody renews stops working on its own rather than living forever.
 
 Every transaction the account executes is wrapped by **`SpendingLimitModule`**, an ERC-7579 hook. It measures how much US-dollar value left the wallet (native coin plus the watched tokens, before vs. after) and refuses anything that would go past the owner's limit for the current window. Because it measures the result rather than reading calldata, it works the same for a transfer, a swap on any venue, or a liquidity move: a fair swap costs almost nothing against the limit, a bad-rate or draining swap costs what was actually lost. It also forbids standing token approvals — an approval must be used up within the same transaction, unless it goes to a spender the owner trusts (like the DEX router).
 
-The account also caps what the session key can spend on **gas**, which the hook cannot see: a ceiling per operation and a budget per day across all of them, both set per chain at deploy and adjustable by the owner.
+The account also caps what session keys can spend on **gas**, which the hook cannot see: a ceiling per operation and a budget per day across all of them, both set per chain at deploy and adjustable by the owner.
 
-This hook is what turns "an AI holds a key to my money" into "an AI can spend at most $X per day from my money". Everything above it in the stack can fail — a confused model, a bad prompt, a compromised server — and the most that can leave the wallet is still bounded here. It is a standalone module, so any ERC-7579 account can install it.
+This hook is what turns "an AI can move my money" into "at most $X per day can leave my wallet, whatever goes wrong". Everything above it in the stack can fail — a confused model, a bad prompt, a compromised server — and the most that can leave the wallet is still bounded here. It is a standalone module, so any ERC-7579 account can install it.
 
-Owners also keep full control of the wallet: pause the wallet, switch the agent off, change the limit and window, choose which tokens count, trust spenders, cap network fees, and withdraw.
+Owners also keep full control of the wallet: pause the wallet, remove any device's key, change the limit and window, choose which tokens count, trust spenders, cap network fees, and withdraw.
 
 ### Shared contracts — one set per chain
 
@@ -75,7 +75,7 @@ Owners also keep full control of the wallet: pause the wallet, switch the agent 
 | **`SHTreasury`** | The admin root. Owns the registry, oracle and factory, and collects protocol fees. |
 | **`SHRegistry`** | Central settings every wallet reads live: EntryPoint, ERC-8004 registries, oracle, fee, treasury, agent id, and the module new wallets install. A change here reaches every wallet with no redeploy. Swapping the oracle takes a **2-day timelock**. |
 | **`SHOracle`** | Turns token amounts into US dollars with Chainlink feeds. Refuses stale prices, and on L2s refuses to price while the sequencer is down. |
-| **`SHFactory`** | Deploys wallets with CREATE2, so the address is known before the transaction. One signature creates the wallet, installs the hook with its limit, authorizes the session key, trusts the chain's exchange contracts and funds it. |
+| **`SHFactory`** | Deploys wallets with CREATE2, so the address is known before the transaction. One signature creates the wallet, installs the hook with its limit, authorizes the first device's passkey, trusts the chain's exchange contracts and funds it. |
 
 ```
 SHTreasury  (operator — admin root, fee sink)
@@ -83,7 +83,7 @@ SHTreasury  (operator — admin root, fee sink)
    │      └── SHOracle ── Chainlink USD prices (2-day timelocked swap)
    └── SHFactory ── deployWallet(...) in one transaction
             └── SessionHandler  (per user, per chain)
-                   ├── validates owner + session-key signatures
+                   ├── validates owner + passkey signatures
                    ├── guards its own admin surface from session keys
                    ├── pays a small flat protocol fee per agent action
                    └── hook ──▶ SpendingLimitModule ──▶ SHOracle
@@ -99,7 +99,8 @@ SHTreasury  (operator — admin root, fee sink)
    ▼  app (web / Telegram / CLI) → API → agent runtime
    │     agent checks remaining budget, gets a quote, runs a preflight
    ▼  integrations build [approve, swap, approve 0] as one batch
-   ▼  Vault decrypts the session key just long enough to sign the UserOp
+   ▼  the user taps Confirm and approves with their passkey (Face ID / fingerprint / PIN),
+   │     which signs that exact UserOp on their own device
    ▼  ERC-4337 EntryPoint → SessionHandler.validateUserOp
    ▼  SpendingLimitModule.preCheck  → snapshot the wallet's USD value
    ▼  the swap runs on Uniswap / PancakeSwap
@@ -120,7 +121,7 @@ The LLM is DeepSeek (`deepseek-flash`) by default; any [LangChain chat model](ht
 
 ### Security model in one paragraph
 
-The owner key never leaves the user's browser wallet — deploying and every owner action are signed there, so the service is non-custodial. Session keys live encrypted in Vault. The agent is handed the user's account by the runtime and cannot pick another. And every agent transaction, no matter which layer produced it, passes through the spending-limit hook on-chain, with its gas capped per operation and per day. API keys are masked in every error, log line and tool result before they leave the server. Full analysis: [THREAT_MODEL.md](THREAT_MODEL.md).
+The owner key never leaves the user's browser wallet — deploying and every owner action are signed there, so the service is non-custodial. Session keys are passkeys on the user's own devices, so the server holds no key that can move funds, and every agent transaction waits for the user's Face ID, fingerprint or PIN on that exact operation. The agent is handed the user's account by the runtime and cannot pick another. And every agent transaction, no matter which layer produced it, passes through the spending-limit hook on-chain, with its gas capped per operation and per day. API keys are masked in every error, log line and tool result before they leave the server. Full analysis: [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ---
 
@@ -142,7 +143,6 @@ Celo has partial scaffolding in the Python layer but no contract deployment path
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — for HashiCorp Vault
 - Python 3.12+
 - Node 22.22+ — only for the web app in `web/`
 - An LLM API key — `DEEPSEEK_API_KEY` by default, or any other LangChain chat model
@@ -171,11 +171,8 @@ cd web && npm install
 
 ```bash
 make sepolia-fork                             # terminal 1: local fork with real Chainlink feeds
-make vault                                    # terminal 2: configure Vault (container must be running first)
-make setup-agent ARGS="sepolia-fork"          # deploy protocol → db → wallet → CLI agent
+make setup-agent ARGS="sepolia-fork"          # terminal 2: deploy protocol → db → wallet → CLI agent
 ```
-
-Starting the Vault container is covered in [docs/vault-security.md](docs/vault-security.md#step-1--start-the-vault-container).
 
 To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run dev`, then open http://localhost:3000. Every network and step is explained in [docs/setup.md](docs/setup.md).
 
@@ -183,7 +180,7 @@ To run the full app instead: `COOKIE_SECURE=0 make api` and `cd web && npm run d
 
 ```bash
 forge test --no-match-path "test/fork/*"   # unit, guard, admin and invariant suites
-make py-test                # the fifteen offline Python suites (no chain, no Vault, no model)
+make py-test                # the seventeen offline Python suites (no chain, no model)
 make e2e-test               # full user journey against a running fork (Sepolia; ARGS=arbitrum-fork, ARGS=base-fork, ...)
 make agent-smoke            # a real agent conversation against the fork
 cd web && npm test && npm run e2e
@@ -193,7 +190,7 @@ CI (`.github/workflows/test.yml`) checks the smart contracts only, on every push
 
 ## Deploying
 
-`deploy/Caddyfile` runs the whole service on one server: HTTPS, security headers (a Content-Security-Policy among them, kept in step with the web app by `web/src/securityHeaders.test.ts`), the built web app, and `/api` passed to the API started with `make api-prod`. Its header comment lists what to set first. Before real money goes in, the protocol's admin key must be separate from the API's (THREAT_MODEL.md §4.4) and Vault must run in production mode ([docs/vault-security.md](docs/vault-security.md)).
+`deploy/Caddyfile` runs the whole service on one server: HTTPS, security headers (a Content-Security-Policy among them, kept in step with the web app by `web/src/securityHeaders.test.ts`), the built web app, and `/api` passed to the API started with `make api-prod`. Its header comment lists what to set first. Before real money goes in, the protocol's admin key must be separate from the API's (THREAT_MODEL.md §4.4), and `WEB_APP_URL` must be the site's public https address, since passkeys are bound to that domain for life ([docs/environment.md](docs/environment.md)).
 
 ---
 
@@ -204,7 +201,7 @@ CI (`.github/workflows/test.yml`) checks the smart contracts only, on every push
 | [docs/contracts.md](docs/contracts.md) | Every contract, the spending-limit design, the fee, the test suite |
 | [docs/app.md](docs/app.md) | Agent runtime, integrations, bundler, API and Telegram bot |
 | [web/README.md](web/README.md) | The web app |
-| [docs/vault-security.md](docs/vault-security.md) | Environment variables, Vault setup, session-key security |
+| [docs/environment.md](docs/environment.md) | Environment variables |
 | [docs/setup.md](docs/setup.md) | Local, fork and live deployments |
 | [docs/langchain-packages-migration.md](docs/langchain-packages-migration.md) | Why ERC-20 / Uniswap calldata comes from external packages |
 | [docs/reference.md](docs/reference.md) | Makefile reference, project structure, dependencies |

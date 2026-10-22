@@ -1,172 +1,62 @@
 """
-Building blocks for the ERC-4337 session-key flow: session-key management, UserOp calldata and
-nonce, and signing.
+Building blocks for the wallet's UserOperations: the execute() calldata, the nonce, the hash a
+passkey signs, and which passkeys the wallet approves.
 
-bundler.py -- the app's own bundler, used on every network -- layers gas estimation and
-submission on top of these. Keeping key management, op construction and signing here means there
-is exactly one place to fix a signing or nonce bug.
+The server holds no session key any more. A session key is a passkey on the user's device, so there
+is nothing here to mint, store, promote or sign with: the wallet itself says which passkeys it
+approves and until when (SessionHandler.getSessions), and the app's own records are only the names
+the user gave them (db.passkeys). bundler.py layers gas estimation and submission on top; signing.py
+turns an approval into the op's signature.
 """
 import secrets
-from dotenv import load_dotenv
+import time
+from dataclasses import dataclass
+
 from eth_abi import encode as abi_encode
-from eth_account import Account
 from eth_utils import keccak
 from web3.contract import Contract
-from network_config import load_network_config
+
+from constants import MAX_SESSION_KEYS, MAX_SESSION_TTL_SECS, SESSION_RENEWAL_WARNING_SECS
 from contracts import (
-    load_session_handler,
-    load_entry_point,
-    load_spending_limit_module,
-    pack_execution_calldata,
-    encode_batch_execution_calldata,
-    session_key_nonce_key,
-    ERC7579_SINGLE_CALL_MODE,
     ERC7579_BATCH_CALL_MODE,
+    ERC7579_SINGLE_CALL_MODE,
+    encode_batch_execution_calldata,
+    load_entry_point,
+    load_session_handler,
+    pack_execution_calldata,
 )
-import db
-from vault_signer import encrypt_key, decrypt_key
-
-load_dotenv()
+from db import get_passkeys
+from tx_sender import ATTEMPT_TIMEOUT_SECS, MAX_FEE_BUMPS
 
 
-def get_session_key_or_none(user_id: int, chain_id: int, target_address: str) -> tuple[str, str] | None:
+# How long past its sign request's expiry a signed op stays valid on chain. The request can be
+# approved up to its last second, and the send that follows may run every fee bump (tx_sender) before
+# it gives up; a minute more covers a clock that differs a little from the chain's. Past it, the
+# wallet refuses the op (AA22) however it reaches the chain.
+OP_DEADLINE_GRACE_SECS = (MAX_FEE_BUMPS + 1) * ATTEMPT_TIMEOUT_SECS + 60
+
+
+def passkey_nonce(op_deadline: int) -> int:
     """
-    Returns the session key address and Vault ciphertext this app holds for a wallet, or None.
+    A fresh nonce for a passkey-signed op: its own deadline, a random lane, sequence 0 (spec 3).
 
-    READ ONLY, deliberately. It used to mint a key when the row was missing, which is fine at deploy
-    time and actively dangerous everywhere else: once a revocation deletes the row, the next agent
-    action would silently create a brand-new key, store it, sign with it, and have every UserOp
-    rejected by a wallet that never authorized it -- while the database looked perfectly healthy.
-    Minting is now an explicit step (see {create_pending_session_key}) that only the grant flows
-    take.
+    An ERC-4337 nonce is (key, sequence), and the EntryPoint keeps a sequence per key. Every
+    passkey-signed op takes a key nobody has used, so ops never queue behind each other: two
+    Confirms at once -- two quotes, or two devices -- can't take the same nonce, and an op that is
+    never sent leaves no gap for the next one to wait on. Nothing may assume a session op's nonce
+    follows the last one's.
 
-    `chain_id` is explicit rather than resolved from `user_id` on purpose. deploy_wallet needs a key
-    for the chain it is deploying TO, which is not necessarily the chain the user is currently
-    pointed at, and resolving it here would silently look up the wrong one. It is also what keeps a
-    user's per-chain wallets on separate keys when they share an address across chains.
+    The key is `op_deadline` (48 bits) followed by 144 random bits. SessionHandler reads the top 48
+    bits as the op's own deadline and refuses a passkey op whose deadline is 0; the op is valid until
+    the earlier of it and the passkey's approval. Without it, nothing would ever use a random lane
+    again, so a signed op that was never sent would stay valid until the passkey's approval ran out
+    -- up to 90 days. The nonce is inside the hash the passkey signs, so nobody can move it.
 
-    @param user_id         The application user ID.
-    @param chain_id        The chain the key is authorized on.
-    @param target_address  The wallet address the session key is held for.
-    @return                A tuple of (session_key_address, vault_ciphertext), or None.
+    @param op_deadline  Unix time after which the wallet refuses the op. Must fit 48 bits, non-zero.
     """
-    return db.get_session_key(user_id, chain_id, target_address)
-
-
-def create_pending_session_key(user_id: int, chain_id: int, target_address: str) -> tuple[str, str]:
-    """
-    Mints a FRESH session key for a grant the owner has not signed yet.
-
-    Always a new key, never the one already held: a key is revoked precisely when it might be
-    compromised, so handing the same address back on the next grant would undo the revocation. The
-    old key is not touched here either -- it stays live until the new grant mines, which is what
-    keeps the assistant working in between and what makes an abandoned, unsigned grant harmless.
-
-    Stored in `pending_session_keys`; {promote_pending_session_key} moves it across once the chain
-    confirms the wallet actually authorized it.
-
-    Nothing here touches the network. Deriving an address from a private key is pure secp256k1
-    arithmetic, so `eth_account` does it without an RPC -- which matters beyond tidiness: this used
-    to call load_network_config(user_id), and that reads the user's SAVED network. A first-time user
-    of POST /api/deploy has no saved network yet (it is only written in /api/deploy/confirm, once
-    the wallet actually exists), so minting their very first session key raised
-    "No network configured for user N". The API could never onboard anybody.
-
-    @param user_id         The application user ID.
-    @param chain_id        The chain the key will be authorized on.
-    @param target_address  The wallet address the key is being minted for.
-    @return                A tuple of (session_key_address, vault_ciphertext).
-    """
-    raw_key = secrets.token_bytes(32)
-    account = Account.from_key(raw_key)
-    ciphertext = encrypt_key(raw_key)
-    raw_key = b"\x00" * 32
-    db.save_pending_session_key(user_id, chain_id, target_address, account.address, ciphertext)
-    return account.address, ciphertext
-
-
-def promote_pending_session_key(user_id: int, chain_id: int, target_address: str) -> tuple[str, str] | None:
-    """
-    Makes the outstanding grant's key the wallet's live key, now that the chain has confirmed it.
-
-    Callers MUST have read `currentSession` off the wallet first and found it equal to the pending
-    address; this function does no chain check of its own.
-
-    @return  The promoted (address, ciphertext), or None if no grant was outstanding.
-    """
-    row = db.get_pending_session_key(user_id, chain_id, target_address)
-    if not row:
-        return None
-    db.save_session_key(user_id, chain_id, target_address, row[0], row[1])
-    db.delete_pending_session_key(user_id, chain_id, target_address)
-    return row
-
-
-def reconcile_session_key(
-    user_id: int, chain_id: int, target_address: str, on_chain_key: str | None
-) -> tuple[str, str] | None:
-    """
-    Makes the app's key records agree with the key the wallet actually authorizes.
-
-    The one place those records change once a grant or revocation has mined. The confirm endpoint
-    calls it straight after the owner's transaction; every wallet read calls it too, as the safety
-    net for a confirm that never came -- a closed tab, a dropped connection. Without that, the
-    assistant would keep signing with a key the wallet had already evicted until the owner happened
-    to toggle it again. Idempotent, so running it from both places is harmless.
-
-      - zero             -> revoked: forget the live key, ciphertext and all
-      - the live key     -> already in step
-      - the pending key  -> the grant landed: promote it
-      - anything else    -> a key this app never minted: touch nothing
-
-    A revocation leaves any PENDING key alone on purpose. A read can land between "Turn on" minting
-    a key and the owner's signature, while the wallet still reads zero; deleting the pending row
-    then would throw away the only copy of a key the owner is about to authorize.
-
-    @param on_chain_key  The wallet's `currentSession`, or None when it is zero.
-    @return              The live (address, ciphertext) afterwards, or None when the app holds none.
-    """
-    live = db.get_session_key(user_id, chain_id, target_address)
-    if on_chain_key is None:
-        if live:
-            db.delete_session_key(user_id, chain_id, target_address)
-        return None
-    if live and live[0].lower() == on_chain_key.lower():
-        return live
-    pending = db.get_pending_session_key(user_id, chain_id, target_address)
-    if pending and pending[0].lower() == on_chain_key.lower():
-        return promote_pending_session_key(user_id, chain_id, target_address)
-    return live
-
-
-def current_session_nonce(user_id: int, session_handler: Contract, entry_point: Contract) -> int:
-    """
-    The wallet's next UserOp nonce on the session-key path.
-
-    An ERC-4337 nonce is (key, sequence), and this account routes validation by the key: the one
-    derived from the installed SpendingLimitModule is what tells it to run the session-key checks
-    rather than the owner's. Read separately from prepare_execute_call because an op is quoted and
-    signed at two different moments, and only the nonce can move in between.
-
-    @param user_id         The application user ID.
-    @param session_handler The user's SessionHandler (the UserOp sender).
-    @param entry_point     Bound EntryPoint contract.
-    @return                The nonce to build the next op with.
-    """
-    return session_nonce_read(user_id, session_handler, entry_point)()
-
-
-def session_nonce_read(user_id: int, session_handler: Contract, entry_point: Contract):
-    """
-    The nonce read of current_session_nonce, ready to run but not yet run: a zero-argument call.
-
-    Split out so a caller can run it alongside other reads (see parallel.py). The module is
-    resolved here, on the caller's thread, because the first resolution reads the database.
-    """
-    module = load_spending_limit_module(user_id=user_id)
-    return entry_point.functions.getNonce(
-        session_handler.address, session_key_nonce_key(module.address)
-    ).call
+    if not 0 < op_deadline < 2**48:
+        raise ValueError(f"op deadline {op_deadline} is not a non-zero uint48")
+    return ((op_deadline << 144) | secrets.randbits(144)) << 64
 
 
 def build_execute_calldata(
@@ -174,7 +64,7 @@ def build_execute_calldata(
 ) -> tuple[Contract, Contract, str]:
     """
     The bound SessionHandler and EntryPoint, and the SessionHandler.execute(mode, executionCalldata)
-    calldata that carries `executions`. Reads no nonce: the quote reads it alongside its other reads.
+    calldata that carries `executions`.
 
     One call goes out as an ERC-7579 single execution. Anything longer is a batch, which is not an
     optimisation -- it is the only way an approval can be granted and consumed without tripping
@@ -193,36 +83,6 @@ def build_execute_calldata(
     return session_handler, load_entry_point(user_id=user_id), calldata
 
 
-def prepare_execute_call(
-    user_id: int, target: str, value: int, data: bytes
-) -> tuple[Contract, Contract, str, int]:
-    """
-    build_execute_calldata for one call, plus the session-key nonce, for the unattended path.
-
-    @param user_id  The application user ID.
-    @param target   The contract address SessionHandler will call.
-    @param value    ETH value in wei to forward with the inner call.
-    @param data     ABI-encoded inner calldata to execute on the target.
-    @return         (session_handler, entry_point, calldata_hex, nonce).
-    """
-    session_handler, entry_point, calldata = build_execute_calldata(user_id, [(target, value, data)])
-    return session_handler, entry_point, calldata, current_session_nonce(user_id, session_handler, entry_point)
-
-
-def prepare_execute_batch_call(
-    user_id: int, executions: list[tuple[str, int, bytes]]
-) -> tuple[Contract, Contract, str, int]:
-    """
-    Batch variant of prepare_execute_call: several sub-calls as ONE atomic execute(batchMode, ...).
-
-    @param user_id     The application user ID.
-    @param executions  List of (target_address, value_wei, calldata_bytes) triples, in order.
-    @return            (session_handler, entry_point, calldata_hex, nonce).
-    """
-    session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
-    return session_handler, entry_point, calldata, current_session_nonce(user_id, session_handler, entry_point)
-
-
 # (chain_id, EntryPoint address) -> whether hash_user_op's own hash has matched the EntryPoint's.
 # Missing until the first op on that chain is checked; False means "ask the EntryPoint every time".
 _local_hash_matches: dict[tuple[int, str], bool] = {}
@@ -230,7 +90,8 @@ _local_hash_matches: dict[tuple[int, str], bool] = {}
 
 def hash_user_op(op: tuple, entry_point: Contract, chain_id: int) -> bytes:
     """
-    The op's userOpHash -- what the session key signs and what its receipt is found by.
+    The op's userOpHash: what the passkey signs (the WebAuthn challenge) and what its receipt is
+    found by.
 
     Computed here rather than asked of the EntryPoint: ERC-4337 v0.7 defines it as
     keccak256(abi.encode(keccak256(UserOperationLib.encode(op)), entryPoint, chainId)), which is pure
@@ -269,38 +130,74 @@ def _v07_user_op_hash(op: tuple, entry_point_address: str, chain_id: int) -> byt
     return keccak(abi_encode(["bytes32", "address", "uint256"], [keccak(packed), entry_point_address, chain_id]))
 
 
-def create_signed_user_op(
-    user_id: int, user_op: tuple, entry_point: Contract, key_ciphertext: str, user_op_hash: bytes | None = None
-) -> tuple:
+# ── Which passkeys the wallet approves ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SessionKey:
+    """One passkey the wallet approves, as getSessions reports it."""
+
+    key_id: str          # 0x hex, lowercase: keccak256(abi.encode(qx, qy))
+    valid_until: int     # Unix seconds; the wallet accepts the key through this second
+
+    def active(self, now: int, margin: int = 0) -> bool:
+        """
+        Whether the wallet accepts the key `margin` seconds from now: isSessionActive's own test
+        (validUntil != 0 and the time at or before it), shifted by the margin a caller needs to
+        get an op signed and mined before it runs out.
+        """
+        return self.valid_until != 0 and now + margin <= self.valid_until
+
+
+def read_sessions(wallet: Contract) -> list[SessionKey]:
     """
-    Signs a PackedUserOperation with a session key using EIP-191 message signing.
+    Every passkey the wallet approves, from SessionHandler.getSessions() -- expired ones included:
+    the wallet keeps a key in its set until it is removed, or until a new one needs the room.
 
-    Takes the userOpHash (hash_user_op), wraps it in the Ethereum signed message envelope via
-    encode_defunct (matching toEthSignedMessageHash in SessionHandler._validateUserOp, the account's
-    own UserOp signature check — the module is not a validator), and returns the op with the
-    signature attached.
-
-    The raw private key is decrypted from Vault transiently and wiped from memory
-    immediately after signing.
-
-    @param user_id        The application user ID.
-    @param user_op        An unsigned PackedUserOperation tuple (empty signature field).
-    @param entry_point    Bound EntryPoint contract.
-    @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
-    @param user_op_hash   The op's hash, when the caller already has it; computed here otherwise.
-    @return               A signed PackedUserOperation tuple ready for submission.
+    @param wallet  A bound SessionHandler.
     """
-    from eth_account.messages import encode_defunct
+    key_ids, valid_untils = wallet.functions.getSessions().call()
+    return [SessionKey("0x" + bytes(key).hex(), int(until)) for key, until in zip(key_ids, valid_untils)]
 
-    w3, chain_id, _ = load_network_config(user_id)
-    if user_op_hash is None:
-        user_op_hash = hash_user_op(user_op, entry_point, chain_id)
-    raw_key = decrypt_key(key_ciphertext)
-    try:
-        signed = w3.eth.account.sign_message(
-            encode_defunct(user_op_hash), private_key=raw_key
-        )
-        return user_op[:-1] + (signed.signature,)
-    finally:
-        raw_key = b"\x00" * len(raw_key)
-        del raw_key
+
+def session_keys(user_id: int, sessions: list[SessionKey], now: int | None = None) -> list[dict]:
+    """
+    The wallet's passkeys for the dashboard, each with the name the user gave it here.
+
+    A key the app doesn't know -- granted on chain directly, or from another account's device --
+    still shows, with no name: the wallet trusts it, so the owner must be able to see it to remove
+    it.
+
+    @return  [{"key_id", "device_name", "credential_id", "valid_until", "expires_in_secs",
+              "active", "needs_renewal"}], in the wallet's order.
+    """
+    now = int(time.time()) if now is None else now
+    known = {row["key_id"]: row for row in get_passkeys(user_id)}
+    keys = []
+    for session in sessions:
+        row = known.get(session.key_id)
+        active = session.active(now)
+        left = max(session.valid_until - now, 0)
+        keys.append({
+            "key_id": session.key_id,
+            "device_name": row["device_name"] if row else None,
+            "credential_id": row["credential_id"] if row else None,
+            "valid_until": session.valid_until,
+            "expires_in_secs": left,
+            "active": active,
+            # True once it is worth prompting the owner to renew, while the key still works.
+            "needs_renewal": active and left < SESSION_RENEWAL_WARNING_SECS,
+        })
+    return keys
+
+
+def session_block(user_id: int, sessions: list[SessionKey], now: int | None = None) -> dict:
+    """
+    The wallet read's `session` block (spec 5): the wallet's limits on keys, and each key.
+    """
+    return {
+        "max_keys": MAX_SESSION_KEYS,
+        "max_ttl_secs": MAX_SESSION_TTL_SECS,
+        "renewal_warning_secs": SESSION_RENEWAL_WARNING_SECS,
+        "keys": session_keys(user_id, sessions, now),
+    }

@@ -14,19 +14,18 @@ from web3.logs import DISCARD
 import tx_history
 from auth import get_current_user
 from constants import (
+    MAX_SESSION_TTL_SECS,
     get_always_counted_ticker,
     get_default_spenders,
 )
 from contracts import invalidate_cache
 from db import (
-    delete_pending_session_key,
     get_factory_address,
     get_json,
-    get_pending_session_key,
+    get_passkey,
     get_token_address,
     get_wallet_address,
     get_wallet_chains,
-    save_session_key,
     save_user_network,
     save_wallet_address,
 )
@@ -41,7 +40,7 @@ from routes.deps import (
     _to_json_tx,
     _tx_seen,
 )
-from userop import create_pending_session_key
+from userop import read_sessions
 
 router = APIRouter()
 
@@ -87,8 +86,13 @@ class DeployRequest(BaseModel):
     # ETH sent as deployWallet's msg.value so the new wallet can pay its own ERC-4337 prefund.
     # Decimal, not float: "0.15" has to convert to wei exactly.
     prefund_eth: Decimal = Field(default=Decimal("0"), ge=0)
-    # How long the seeded session key stays valid, in seconds. Optional so the deploy screen need
-    # not ask; the contract enforces its own MAX_SESSION_TTL ceiling on top of this.
+    # The passkey made in onboarding, by its key id: the wallet approves it from the start, so the
+    # assistant's first quote can be confirmed with no second transaction. Must be one of the
+    # account's own passkeys (db.passkeys), which is where its (qx, qy) come from. None deploys an
+    # owner-only wallet: no device can confirm anything until the owner approves one.
+    key_id: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    # How long that approval lasts, in seconds. Optional so the deploy screen need not ask; checked
+    # against MAX_SESSION_TTL here, which the contract enforces too.
     session_ttl_secs: int = Field(default=DEFAULT_SESSION_TTL_SECS, gt=0)
 
 
@@ -101,8 +105,8 @@ class ConfirmRequest(BaseModel):
     chain_id: int
     deployer: str
     tx_hash: str
-    # The address /api/deploy predicted. Echoed back so the session key minted against it can be
-    # re-pointed if this owner's deployCount moved in between (they deployed twice, two tabs open).
+    # The address /api/deploy predicted. Echoed back so a deploy the user's wallet replaced (sped it
+    # up, say) can still be found there, mined under a hash nobody told the app.
     predicted_address: str
 
 
@@ -178,11 +182,11 @@ def _require_own_deployer(user_id: int, deployer: str):
     Refuses a deploy unless the deploying EOA is the one this account signs in as (via SIWE).
 
     Without this the deployer is just an address in the request body, and two things go wrong.
-    A caller can name somebody else's EOA, which mints a session key for a wallet they will never
-    own; and, given another user's deploy transaction, they can call /api/deploy/confirm for it and
-    register that wallet against their own account. The stolen row cannot SPEND -- the key seeded
-    into the real deploy is the owner's, so the attacker's key is never authorized -- but their
-    agent would happily read the victim's balances through it.
+    A caller can name somebody else's EOA and have this server build transactions for a wallet they
+    will never own; and, given another user's deploy transaction, they can call /api/deploy/confirm
+    for it and register that wallet against their own account. The stolen row could not SPEND --
+    every transaction needs a passkey the real owner approved -- but their agent would happily read
+    the victim's balances through it.
 
     The UI never sends anything else: it deploys from the wallet the user signed in with.
 
@@ -205,16 +209,19 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
     Builds the UNSIGNED SHFactory.deployWallet transaction for the user to sign in their own wallet.
 
     Nothing is broadcast here and no key of the app's signs anything — that is what keeps the wallet
-    non-custodial. The response carries the transaction, the address it will produce and the session
-    key seeded into it. The front end passes the transaction to MetaMask and posts the resulting hash
-    to /api/deploy/confirm, which is where anything durable is written.
+    non-custodial. The response carries the transaction, the address it will produce and the passkey
+    it approves. The front end passes the transaction to MetaMask and posts the resulting hash to
+    /api/deploy/confirm, which is where anything durable is written.
 
-    The session key HAS to be minted before signing: its Vault entry is keyed by wallet address and
-    deployWallet authorizes it inside initialize(), so it must exist while the calldata is built.
-    CREATE2 is what makes that possible — predictWalletAddress answers for this owner's next deploy.
+    The passkey the user made in onboarding (`key_id`) goes into the deploy itself: deployWallet
+    approves its (qx, qy) inside initialize(), until now + session_ttl_secs, so the wallet can take
+    a passkey-confirmed transaction from its first block. Without one the wallet is owner-only.
 
     @param req  Deploy parameters collected by the front end.
-    @return     {"chain_id", "predicted_address", "session_key", "watched_tokens", "tx"}.
+    @return     {"chain_id", "predicted_address", "key_id", "watched_tokens", "tx"}; key_id is null
+                for an owner-only wallet.
+    @raises HTTPException 400 for a key_id that isn't one of the account's passkeys, or an approval
+            longer than MAX_SESSION_TTL.
     """
     # Authorize BEFORE resolving the chain: _resolve_chain dials an RPC, and a caller who may not
     # deploy from this address should not be able to make the server do work or learn which chains
@@ -225,6 +232,17 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Not a valid address: {req.deployer}")
 
     _require_own_deployer(user_id, deployer)
+
+    # The account's own passkey, before any RPC: a request naming another's costs no work.
+    key_id = req.key_id.lower() if req.key_id else None
+    passkey_row = get_passkey(user_id, key_id) if key_id else None
+    if key_id and passkey_row is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That isn't one of your passkeys.")
+    if key_id and req.session_ttl_secs > MAX_SESSION_TTL_SECS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A passkey may be approved for at most {MAX_SESSION_TTL_SECS // 86_400} days.",
+        )
 
     # chain_name is only needed to reach the RPC; nothing in this endpoint writes it, so it is
     # dropped here and re-resolved in confirm, where it is actually persisted.
@@ -281,10 +299,14 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
             print(f"user {user_id} has wallets on chains {others}; adding {chain_id}.")
 
     predicted = factory.functions.predictWalletAddress(deployer).call()
-    # Minted into pending: the user has not signed the deploy yet, and may never. Nothing is
-    # authorized on chain until /api/deploy/confirm sees the wallet, which is what promotes it.
-    session_key, _ = create_pending_session_key(user_id, chain_id, predicted)
-    session_key_valid_until = int(time.time()) + req.session_ttl_secs
+    # Both zero for an owner-only wallet, whose deadline initialize() then ignores.
+    if passkey_row is not None:
+        session_key_x = bytes.fromhex(passkey_row["qx"][2:])
+        session_key_y = bytes.fromhex(passkey_row["qy"][2:])
+        session_key_valid_until = int(time.time()) + req.session_ttl_secs
+    else:
+        session_key_x = session_key_y = b"\x00" * 32
+        session_key_valid_until = 0
 
     # The exchange contracts the assistant approves tokens to: a wallet-level choice, not protocol
     # config. Sourced from constants.get_default_spenders, which reads the same network tables the
@@ -311,7 +333,8 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
             req.daily_limit_usd * USD_DECIMALS,
             req.window_secs,
             watched_tokens,
-            session_key,
+            session_key_x,
+            session_key_y,
             session_key_valid_until,
             trusted_spenders,
         ).build_transaction(
@@ -335,7 +358,7 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
     return {
         "chain_id": chain_id,
         "predicted_address": predicted,
-        "session_key": session_key,
+        "key_id": key_id,
         "watched_tokens": watched_tokens,
         "tx": _to_json_tx(tx),
     }
@@ -346,10 +369,10 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     """
     Records the wallet once the user's signed deployWallet transaction has mined.
 
-    This is the half that writes: the wallet address, the user's network, and — if the address moved
-    — the session key's target. Splitting it from /api/deploy is what stops an abandoned signature
-    prompt from leaving a row for a wallet that does not exist, and what lets the app recover the
-    address from the receipt rather than trusting the prediction.
+    This is the half that writes: the wallet address and the user's network. Splitting it from
+    /api/deploy is what stops an abandoned signature prompt from leaving a row for a wallet that does
+    not exist, and what lets the app recover the address from the receipt rather than trusting the
+    prediction. The passkey the deploy approved is read back off the wallet, not taken on trust.
 
     Answers 202 while the transaction is still pending, with `seen` as in /api/wallet/tx/confirm;
     the front end polls until it gets a 200.
@@ -360,7 +383,8 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     second deploy makes a second wallet.
 
     @param req  The chain, the user's EOA, the transaction hash and the predicted address.
-    @return     {"status", "chain_id", "wallet_address", "session_key", "session_key_authorized"}.
+    @return     {"status", "chain_id", "wallet_address", "key_id", "session_key_authorized",
+                "session_key_expires_at"}.
     """
     # Authorized first, for the same reason as /api/deploy: no RPC work for a caller who may not
     # act on this address. Checked here as well as there because the two calls are independent
@@ -382,8 +406,8 @@ def confirm_deploy(req: ConfirmRequest, response: Response, user_id: int = Depen
     # Answered at once, without the receipt wait: a hash this node has never seen may never arrive.
     if not _tx_seen(w3, req.tx_hash):
         # The predicted address is where this owner's deploy lands, so a wallet of theirs there is
-        # this deploy, mined under another hash. Only theirs: the owner check, and the session key
-        # that only /api/deploy for this account mints, keep anyone else's wallet out.
+        # this deploy, mined under another hash. Only theirs: the owner check keeps anyone else's
+        # wallet out, and the deployer is this account's own SIWE-proved address.
         if not _is_wallet_of(w3, predicted, deployer):
             response.status_code = status.HTTP_202_ACCEPTED
             return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
@@ -434,54 +458,38 @@ def _finish_deploy(
     Files a wallet that is on chain as the user's wallet on `chain_id`: the second half of
     /api/deploy/confirm.
 
-    @param predicted       The address /api/deploy predicted, which the pending session key is under.
-    @param wallet_address  Where the wallet actually is.
+    Nothing about the passkey is filed: the server holds no session key, and the wallet itself is
+    the record of which passkeys it approves. Its one approval from the deploy is read back off the
+    chain and reported.
+
+    @param predicted       The address /api/deploy predicted.
+    @param wallet_address  Where the wallet actually is: the prediction, unless another deploy by
+                           this same owner landed in between (their deployCount moved).
     @return                The confirm's 200 body.
     """
-    # The prediction can go stale: deployCount is per-owner, so a second deploy by this same user
-    # between /api/deploy and their signature moves the address. The key seeded into initialize() is
-    # still the one minted against `predicted`, so MOVE the row rather than minting a new key — a
-    # fresh key would not be authorized on chain and every tool would fail to sign.
-    row = get_pending_session_key(user_id, chain_id, predicted)
-    if row is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"No session key held for predicted address {predicted}; call /api/deploy first.",
-        )
-    session_key, ciphertext = row
     if wallet_address != predicted:
-        print(f"Predicted {predicted} but the deploy landed at {wallet_address}; re-pointing session key.")
+        print(f"Predicted {predicted} but the deploy landed at {wallet_address}.")
 
-    # Verify on chain that the key we hold can actually sign for this wallet, rather than assuming
-    # initialize() seeded what was passed. isSessionActive covers both halves: the wallet's one key
-    # IS this one, and its deadline has not already gone by.
     handler_abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     wallet_contract = w3.eth.contract(address=wallet_address, abi=handler_abi)
-    authorized = wallet_contract.functions.isSessionActive(session_key).call()
+    sessions = read_sessions(wallet_contract)
+    # A deploy approves at most one passkey (InitConfig carries one), so the wallet holds that one
+    # or none. Active is the wallet's own test: approved, and its deadline not yet passed.
+    approved = sessions[0] if sessions else None
+    authorized = approved is not None and approved.active(int(time.time()))
 
-    # Promote out of pending under the address the wallet ACTUALLY got, which is the prediction
-    # except when another deploy by this same user landed in between.
-    save_session_key(user_id, chain_id, wallet_address, session_key, ciphertext)
-    delete_pending_session_key(user_id, chain_id, predicted)
-
-    # Saved even when the key is NOT authorized: the wallet exists and holds the prefund, so losing
-    # the reference is worse than recording one the bot cannot sign for. The owner can still drive it
-    # from their own EOA, and deploy_wallet.add_default_session() re-grants a key.
+    # Saved even when no passkey is approved: the wallet exists and holds the prefund, so losing
+    # the reference is worse than recording an owner-only wallet. The owner approves a device in
+    # Controls → Devices.
     save_user_network(user_id, chain_name)
     save_wallet_address(user_id, chain_id, wallet_address)
     invalidate_cache(user_id)
-
-    if not authorized:
-        print(
-            f"WARNING: {session_key} is NOT authorized on {wallet_address} — "
-            "run deploy_wallet.add_default_session to re-grant it."
-        )
 
     return {
         "status": "deployed",
         "chain_id": chain_id,
         "wallet_address": wallet_address,
-        "session_key": session_key,
+        "key_id": approved.key_id if approved else None,
         "session_key_authorized": authorized,
-        "session_key_expires_at": wallet_contract.functions.currentSessionValidUntil().call(),
+        "session_key_expires_at": approved.valid_until if approved else 0,
     }

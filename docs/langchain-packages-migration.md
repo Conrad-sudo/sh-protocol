@@ -1,8 +1,9 @@
 # Migrating the ERC20 + Uniswap V2 tools onto `langchain-erc20` / `langchain-uniswap-v2`
 
 > **Historical record (2026-08-10).** `_submit_plan` no longer exists: write tools now
-> return a quote through `_quote_plan` and only `confirm_transaction` sends (2026-09-23).
-> See [app.md](app.md) `quotes.py` and THREAT_MODEL §4.2. The plan shapes below are unchanged.
+> return a quote through `_quote_plan` (2026-09-23), and since 2026-10-21 no tool sends: the user
+> approves each quote with a passkey (`signing.py`), and Vault is gone. See [app.md](app.md)
+> `quotes.py` and THREAT_MODEL §4.2. The plan shapes below are unchanged.
 
 
 **Status: IMPLEMENTED (2026-08-10).** All steps in §4 are done. Verified by running the real

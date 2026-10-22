@@ -65,14 +65,18 @@ export interface DeployRequest {
   watched_tokens: Token[]
   /** Native-token amount as a decimal string, e.g. "0.05". */
   prefund_eth: string
-  /** How long the assistant's first key lasts, in seconds. */
+  /**
+   * The passkey made during onboarding, which the new wallet trusts from the start; null for a
+   * wallet only its owner can use until a device is added in Controls.
+   */
+  key_id: string | null
+  /** How long that passkey may approve payments, in seconds. */
   session_ttl_secs: number
 }
 
 export interface DeployPrepared {
   chain_id: number
   predicted_address: string
-  session_key: string
   watched_tokens: string[]
   tx: PreparedTx
 }
@@ -87,10 +91,12 @@ export type DeployConfirmResult =
       status: 'deployed'
       chain_id: number
       wallet_address: string
-      session_key: string
+      /** The passkey the wallet was created trusting, or null for an owner-only wallet. */
+      key_id: string | null
+      /** True once the wallet is seen trusting that passkey. */
       session_key_authorized: boolean
-      /** Unix seconds: when that key stops working. */
-      session_key_expires_at: number
+      /** Unix seconds: when that passkey stops approving payments. */
+      session_key_expires_at: number | null
     }
 
 /** GET /api/chains */
@@ -187,6 +193,137 @@ export interface Position {
   fees: PoolShare[]
 }
 
+/**
+ * One key the wallet trusts, read off the chain (getSessions). Each is a passkey on one of the
+ * user's devices: it approves the assistant's payments until `valid_until`.
+ */
+export interface SessionKey {
+  /** keccak256(qx, qy): how the wallet names the key, 0x-prefixed. */
+  key_id: string
+  /** The device's name from the account's passkeys; null for a key granted outside Mitfah. */
+  device_name: string | null
+  /** The passkey's WebAuthn credential id (base64url); null for a key Mitfah doesn't know. */
+  credential_id: string | null
+  /** Unix seconds: when the wallet stops accepting this key. */
+  valid_until: number
+  expires_in_secs: number
+  /** Still within its deadline. */
+  active: boolean
+  /** Still works, but runs out within `renewal_warning_secs`. */
+  needs_renewal: boolean
+}
+
+/** GET /api/wallet/{chain_id} `session`: the devices that may approve payments from this wallet. */
+export interface SessionBlock {
+  /** The most keys a wallet holds at once (5). Adding one to a full wallet first drops expired keys. */
+  max_keys: number
+  /** The longest a grant may last, in seconds (90 days). */
+  max_ttl_secs: number
+  /** How close to its deadline a key counts as needing renewal, in seconds. */
+  renewal_warning_secs: number
+  keys: SessionKey[]
+}
+
+/** One of the account's passkeys, from GET /api/passkeys. A wallet trusts it only once its owner adds it. */
+export interface Passkey {
+  key_id: string
+  /** Base64url. */
+  credential_id: string
+  device_name: string
+  /** Unix seconds. */
+  created_at: number
+}
+
+/** POST /api/passkeys/register: the passkey just saved, with its public key's coordinates (0x hex). */
+export interface RegisteredPasskey extends Passkey {
+  qx: string
+  qy: string
+}
+
+/**
+ * A new passkey as the browser made it (WebAuthn's RegistrationResponseJSON), binary fields in
+ * base64url. The server checks it and keeps only the public key.
+ */
+export interface PasskeyRegistrationJSON {
+  id: string
+  rawId: string
+  type: 'public-key'
+  authenticatorAttachment?: string
+  clientExtensionResults: Record<string, unknown>
+  response: {
+    clientDataJSON: string
+    attestationObject: string
+    transports?: string[]
+    authenticatorData?: string
+    publicKey?: string
+    publicKeyAlgorithm?: number
+  }
+}
+
+/** A passkey's signature over a challenge (WebAuthn's AuthenticationResponseJSON), binary fields in base64url. */
+export interface PasskeyAssertionJSON {
+  id: string
+  rawId: string
+  type: 'public-key'
+  authenticatorAttachment?: string
+  clientExtensionResults: Record<string, unknown>
+  response: {
+    clientDataJSON: string
+    authenticatorData: string
+    signature: string
+    userHandle?: string
+  }
+}
+
+/**
+ * What a confirmation costs: the fees, network and Mitfah's together. `fees` is the one figure a
+ * quote card shows (as QuoteOffer.fees); the totals are what it is written from.
+ */
+export interface SignCost {
+  fees?: string
+  total_usd?: number
+  total_native?: number
+  native_asset?: string
+}
+
+/**
+ * POST /api/sign/start: the final transaction is built, and its hash is the challenge the passkey
+ * signs. Starting again rebuilds it and the older `sign_id` stops working.
+ */
+export interface SignStart {
+  sign_id: string
+  /** Base64url of the 32 bytes the passkey signs. */
+  challenge: string
+  rp_id: string
+  /** The account's passkeys this wallet trusts now: only these can approve it. */
+  allow_credentials: { type: 'public-key'; id: string; transports?: string[] }[]
+  user_verification: 'required'
+  timeout_ms: number
+  /** Unix seconds: the quote's own deadline. */
+  expires_at: number
+  summary: {
+    /** What it does, in one line, as the quote was written. */
+    action: string
+    /** The network's name, e.g. "Base". */
+    network: string
+    chain_id: number
+    cost: SignCost
+  }
+  /**
+   * The Telegram bot's username (no @), for the confirm page's "Back to Telegram". Optional: when
+   * the server leaves it out, the page says to switch back instead.
+   */
+  telegram_bot?: string | null
+}
+
+/** POST /api/sign/finish: the transaction is on the wire; `transaction_id` is the History row to follow. */
+export interface SignFinish {
+  status: 'sent'
+  /** What happened, as the server worded it for the chat. */
+  outcome: string
+  transaction_id: number | null
+}
+
 /** GET /api/wallet/{chain_id} (get_wallet_state): everything the dashboard shows. */
 export interface WalletState {
   chain_id: number
@@ -210,21 +347,7 @@ export interface WalletState {
     /** ERC-20s that count toward the limit. The native asset always counts and is not listed. */
     watched_tokens: { ticker: string | null; address: string }[]
   }
-  session: {
-    /** The assistant's key, or null when this app holds none for the wallet. */
-    key: string | null
-    /** The one key the wallet trusts, read off the chain, or null when it trusts none. */
-    wallet_key: string | null
-    /** True when the wallet trusts the key this app holds, so the assistant can sign at all. */
-    is_app_key: boolean
-    /** Whether the assistant may act for the wallet: its key is the wallet's, and hasn't run out. */
-    active: boolean
-    /** Unix seconds: when the wallet's key stops working. Null when the wallet trusts no key. */
-    expires_at: number | null
-    expires_in_secs: number
-    /** True while the key still works but runs out soon enough to prompt a renewal. */
-    needs_renewal: boolean
-  }
+  session: SessionBlock
   limits: {
     max_op_gas_cost_wei: string
     /**
@@ -258,11 +381,12 @@ export type OwnerAction =
   | { kind: 'daily-limit'; dailyLimitUsd: number }
   | { kind: 'window'; windowSecs: number }
   /**
-   * The assistant's key. `add` makes the API mint a brand-new key lasting `ttlSecs`, replacing any
-   * key the wallet trusts now — so it both turns the assistant on and renews it.
+   * A device's passkey. `add` lets it approve payments for `ttlSecs`, and renews one the wallet
+   * already trusts; `remove` revokes one; `remove_all` revokes every key at once.
    */
-  | { kind: 'session'; action: 'add'; ttlSecs: number }
-  | { kind: 'session'; action: 'remove' }
+  | { kind: 'session'; action: 'add'; keyId: string; ttlSecs: number }
+  | { kind: 'session'; action: 'remove'; keyId: string }
+  | { kind: 'session'; action: 'remove_all' }
   | { kind: 'trusted-spender'; spender: string; action: 'add' | 'remove' }
   | { kind: 'max-gas'; maxCostEth: string }
   | { kind: 'gas-budget'; budgetEth: string }
@@ -300,12 +424,12 @@ export type OwnerTxConfirmResult =
   | { status: 'confirmed'; tx_hash: string }
 
 /**
- * POST /api/wallet/session/confirm: like /api/wallet/tx/confirm, but once mined it files the new key
- * or forgets the revoked one. `unrecognized_key` means the wallet now trusts a key Mitfah doesn't hold.
+ * POST /api/wallet/session/confirm: like /api/wallet/tx/confirm for a device's passkey, but once
+ * mined it answers with the wallet's keys as they are now.
  */
 export type SessionTxConfirmResult =
   | { status: 'pending'; tx_hash: string; seen?: boolean }
-  | { status: 'granted' | 'revoked' | 'unrecognized_key'; tx_hash: string }
+  | { status: 'confirmed'; tx_hash?: string; session?: SessionBlock }
 
 /** POST /api/transactions/deposit: a deposit from the Fund drawer, answered as OwnerTxConfirmResult. */
 export type DepositConfirmResult =

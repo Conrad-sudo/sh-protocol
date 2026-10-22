@@ -1,6 +1,21 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FAKE_WALLET_NAME, installFakeWallet, type WalletTx } from './fakeWallet.ts'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, USDC, walletState, WETH } from './helpers.ts'
+import {
+  addPasskeyAuthenticator,
+  expectNoSidewaysScroll,
+  expectTheme,
+  isApiUrl,
+  ME,
+  passkey,
+  PASSKEY_ID,
+  sessionBlock,
+  sessionKey,
+  snap,
+  TOKEN,
+  USDC,
+  walletState,
+  WETH,
+} from './helpers.ts'
 
 /*
  * The owner's controls — the Controls page, the dashboard's Withdraw drawer and Pause — at real
@@ -24,6 +39,19 @@ const ALLOWLIST_SUGGESTED = [
 ]
 /** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
 const ALLOWLIST_OFF = { enabled: false, targets: [], suggested: ALLOWLIST_SUGGESTED }
+/** The key id the server gives a passkey made during a test. */
+const NEW_KEY_ID = `0x${'ef'.repeat(32)}`
+/** POST /api/passkeys/register/options: for this site, ES256 only, the user verified. */
+const REGISTRATION_OPTIONS = {
+  rp: { id: 'localhost', name: 'Mitfah' },
+  user: { id: Buffer.from('user-handle-7').toString('base64url'), name: 'mitfah-7', displayName: 'Mitfah' },
+  challenge: Buffer.from('registration challenge 32 bytes!').toString('base64url'),
+  pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+  authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+  attestation: 'none',
+  excludeCredentials: [],
+  timeout: 60_000,
+}
 
 interface Prepared {
   path: string
@@ -52,6 +80,7 @@ async function mockServer(
   const prepared: Prepared[] = []
   const sent: { tx: WalletTx; chainId: number }[] = []
   const sessionConfirms: string[] = []
+  const registered: { credentialId: string; deviceName: string }[] = []
 
   await installFakeWallet(page, {
     address: OWNER,
@@ -81,7 +110,7 @@ async function mockServer(
     if (path === '/api/wallet/session/confirm') {
       sessionConfirms.push(path)
       if (afterConfirm) current = afterConfirm
-      return route.fulfill({ json: { status: 'granted', tx_hash: TX_HASH } })
+      return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH } })
     }
     if (path.startsWith('/api/wallet/')) return route.fulfill({ json: current })
     switch (path) {
@@ -89,6 +118,28 @@ async function mockServer(
         return route.fulfill({ json: TOKEN })
       case '/api/me':
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: [SEPOLIA] } })
+      case '/api/passkeys':
+        return route.fulfill({
+          json: {
+            passkeys: [
+              passkey(),
+              ...registered.map(made => passkey({ key_id: NEW_KEY_ID, credential_id: made.credentialId, device_name: made.deviceName })),
+            ],
+          },
+        })
+      case '/api/passkeys/register/options':
+        return route.fulfill({ json: { options: REGISTRATION_OPTIONS } })
+      case '/api/passkeys/register': {
+        const body = request.postDataJSON() as { credential: { id: string; type: string }; device_name: string }
+        registered.push({ credentialId: body.credential.id, deviceName: body.device_name })
+        return route.fulfill({
+          json: {
+            ...passkey({ key_id: NEW_KEY_ID, credential_id: body.credential.id, device_name: body.device_name }),
+            qx: `0x${'01'.repeat(32)}`,
+            qy: `0x${'02'.repeat(32)}`,
+          },
+        })
+      }
       case '/api/chains':
         return route.fulfill({
           json: {
@@ -118,7 +169,7 @@ async function mockServer(
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
   })
-  return { prepared, sent, sessionConfirms }
+  return { prepared, sent, sessionConfirms, registered }
 }
 
 /** Connects the fake wallet from the owner bar in `scope` (the page, a drawer or a modal). */
@@ -271,40 +322,80 @@ test('pausing from the dashboard', async ({ page }, testInfo) => {
   expect(prepared).toEqual([{ path: '/api/wallet/pause/prepare', body: { chain_id: SEPOLIA } }])
 })
 
-test("renewing the assistant's access before it runs out", async ({ page }, testInfo) => {
-  const key = '0x5555555555555555555555555555555555555555'
-  const inTwoDays = Math.floor(Date.now() / 1000) + 2 * 86_400
-  const expiring = walletState(SEPOLIA, ADDRESS, {
-    session: {
-      key,
-      wallet_key: key,
-      is_app_key: true,
-      active: true,
-      expires_at: inTwoDays,
-      expires_in_secs: 2 * 86_400,
-      needs_renewal: true,
-    },
-  })
+test('renewing a device before it runs out', async ({ page }, testInfo) => {
+  const expiring = walletState(SEPOLIA, ADDRESS, { session: sessionBlock([sessionKey(2)]) })
   const { prepared, sessionConfirms } = await mockServer(page, expiring, walletState(SEPOLIA, ADDRESS))
   await page.goto('/controls')
   await connectOwner(page)
 
-  const row = page.locator('.mf-control-row').filter({ has: page.getByRole('heading', { name: 'Assistant' }) })
+  const row = page.locator('.mf-control-row').filter({ has: page.getByRole('heading', { name: 'iPhone', exact: true }) })
   await expect(row.getByText('Expires soon')).toBeVisible()
-  await expect(row.getByRole('button', { name: 'Renew' })).toBeVisible()
-  await expect(row.getByRole('button', { name: 'Turn off assistant' })).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Renew iPhone' })).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Revoke iPhone' })).toBeVisible()
   await expectNoSidewaysScroll(page)
-  await snap(page, testInfo, 'controls-assistant-expiring')
+  await snap(page, testInfo, 'controls-device-expiring')
 
-  await row.getByRole('button', { name: 'Renew' }).click()
+  await row.getByRole('button', { name: 'Renew iPhone' }).click()
   const confirm = page.getByRole('alertdialog')
-  await expect(confirm).toContainText('It keeps its access for another 30 days')
+  await expect(confirm).toContainText('iPhone keeps approving the assistant\'s payments from this wallet for another 30 days')
   await confirm.getByRole('button', { name: 'Renew' }).click()
-  await expect(page.getByText(/^Assistant renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeVisible()
-  await expect(row.getByText('On', { exact: true })).toBeVisible()
+  await expect(page.getByText(/^iPhone renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeVisible()
+  await expect(row.getByText('Active', { exact: true })).toBeVisible()
 
   expect(prepared).toEqual([
-    { path: '/api/wallet/session/prepare', body: { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 } },
+    {
+      path: '/api/wallet/session/prepare',
+      body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+    },
   ])
   expect(sessionConfirms).toHaveLength(1)
+})
+
+test('adding this device: a real passkey is made, then the owner wallet adds it', async ({ page }, testInfo) => {
+  const authenticator = await addPasskeyAuthenticator(page)
+  const wallet = walletState(SEPOLIA, ADDRESS)
+  // Once added, the wallet trusts the iPhone and the new passkey, whatever the browser named it.
+  let made = ''
+  const server = await mockServer(page, wallet)
+  await page.route(
+    url => url.pathname === `/api/wallet/${SEPOLIA}`,
+    route =>
+      route.fulfill({
+        json: made
+          ? walletState(SEPOLIA, ADDRESS, {
+              session: sessionBlock([
+                sessionKey(),
+                sessionKey(30, { key_id: NEW_KEY_ID, device_name: 'Work laptop', credential_id: made }),
+              ]),
+            })
+          : wallet,
+      }),
+  )
+  await page.goto('/controls')
+  await connectOwner(page)
+
+  const name = page.getByLabel('Name for this device')
+  await name.fill('Work laptop')
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-devices')
+  await page.getByRole('button', { name: 'Add this device', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('Your browser will first ask you to create a passkey.')
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-add-device')
+  await confirm.getByRole('button', { name: 'Create passkey' }).click()
+
+  await expect(page.getByText(/^Work laptop can approve payments on Sepolia until/)).toBeVisible()
+  const held = await authenticator.credentials()
+  expect(held).toHaveLength(1)
+  made = held[0]
+  expect(server.registered).toEqual([{ credentialId: made, deviceName: 'Work laptop' }])
+  expect(server.prepared.map(p => p.body)).toEqual([
+    { chain_id: SEPOLIA, action: 'add', key_id: NEW_KEY_ID, ttl_secs: 30 * 86_400 },
+  ])
+  // Read again once confirmed: the list shows the new device as this one.
+  await page.reload()
+  const laptop = page.locator('.mf-control-row').filter({ has: page.getByRole('heading', { name: 'Work laptop' }) })
+  await expect(laptop.getByText('This device')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Add this device', exact: true })).toHaveCount(0)
 })

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FAKE_WALLET_NAME, installFakeWallet, type WalletTx } from './fakeWallet.ts'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, USDC, walletState } from './helpers.ts'
+import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, sessionBlock, snap, TOKEN, USDC, walletState } from './helpers.ts'
 
 /*
  * The dashboard at real screen sizes, in both themes, against a mocked API and a fake browser
@@ -166,15 +166,7 @@ test('a wallet that needs attention', async ({ page }, testInfo) => {
   const troubled = walletState(SEPOLIA, ADDRESS, {
     paused: true,
     is_owner: false,
-    session: {
-      key: null,
-      wallet_key: null,
-      is_app_key: false,
-      active: false,
-      expires_at: null,
-      expires_in_secs: 0,
-      needs_renewal: false,
-    },
+    session: sessionBlock([]),
     spending: { ...healthy.spending, hook_installed: false },
     balances: [healthy.balances[0], unreadableUsdc],
   })

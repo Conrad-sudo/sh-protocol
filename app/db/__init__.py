@@ -8,7 +8,9 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   schema        the tables and their numbered migrations (init_db)
   seed          reference data from seed_data.py and the deploy broadcasts (`make db`)
   chains        chains, RPCs, factory addresses, and the network each user acts on
-  wallets       each user's wallet per chain, and the session keys the app holds
+  wallets       each user's wallet per chain
+  passkeys      the account's passkeys, its WebAuthn user handle, registration challenges
+  sign_requests quotes offered for a passkey's approval, frozen for whichever process signs them
   tokens        listed, added-by-address, dashboard and LP tokens
   contacts      the contact list, the only destinations the assistant may pay
   users         accounts and their linked Telegram chat
@@ -171,13 +173,34 @@ from db.users import (  # noqa: E402 -- after get_db, which these modules import
     unlink_telegram,
 )
 from db.wallets import (  # noqa: E402 -- after get_db, which these modules import
-    delete_pending_session_key,
-    delete_session_key,
-    get_pending_session_key,
-    get_session_key,
     get_wallet_address,
     get_wallet_chains,
-    save_pending_session_key,
-    save_session_key,
     save_wallet_address,
+)
+from db.passkeys import (  # noqa: E402 -- after get_db, which these modules import
+    consume_passkey_challenge,
+    delete_passkey,
+    get_or_create_webauthn_handle,
+    get_passkey,
+    get_passkey_by_credential,
+    get_passkeys,
+    rename_passkey,
+    save_passkey,
+    save_passkey_challenge,
+    update_passkey_sign_count,
+)
+from db.sign_requests import (  # noqa: E402 -- after get_db, which these modules import
+    cancel_sign_request,
+    claim_sign_request,
+    end_sign_request,
+    get_closed_quote_ids,
+    get_open_sign_requests,
+    get_sign_request,
+    get_sign_request_by_quote,
+    get_sign_request_by_sign_id,
+    get_sign_request_by_token,
+    open_sign_request,
+    save_sign_build,
+    set_sign_request_message,
+    set_sign_request_token,
 )

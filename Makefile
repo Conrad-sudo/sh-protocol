@@ -1,14 +1,10 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent vault fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test py-test e2e-test agent-smoke load-test api api-prod
+.PHONY: all test clean deploy install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test py-test e2e-test agent-smoke load-test api api-prod
 
 
 
 100_ETH:=0x56bc75e2d63100000
-
-vault:
-	@bash setup_vault.sh
-
 
 all: clean install update build
 
@@ -124,13 +120,28 @@ positions-test:
 position-tools-test:
 	.venv/bin/python3 app/tests/test_position_tools.py
 
+# Looking up an ENS name can't reach our own network (CCIP-Read SSRF guards), and Basenames still
+# resolve: a stand-in mainnet and a stand-in HTTPS gateway on 127.0.0.1. Offline.
+ens-test:
+	.venv/bin/python3 app/tests/test_ens_names.py
+
+# Passkeys: an approval packed as the wallet reads it (against the contract's own known-answer
+# vector), the op deadline in a passkey op's nonce, making and managing passkeys, and a Telegram
+# card's link approved by its token. A soft passkey stands in for the phone. Offline.
+passkeys-test:
+	.venv/bin/python3 app/tests/test_passkeys.py
+
+# One read-only lookup of a real Basename through mainnet and its gateway. Not part of py-test.
+ens-live:
+	.venv/bin/python3 app/tests/test_ens_names.py --live
+
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
-# unless ARGS names another fork, e.g. `make e2e-test ARGS=arbitrum-fork`. Needs `make vault`, that
-# fork running and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.
+# unless ARGS names another fork, e.g. `make e2e-test ARGS=arbitrum-fork`. Needs that fork running
+# and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.
 e2e-test:
 	.venv/bin/python3 app/tests/test_e2e_fork.py $(ARGS)
 
@@ -174,8 +185,10 @@ sepolia-test: sepolia-uniswap-test
 # Plain local Anvil — no fork, no real chain state to inherit, so the pre-funded Anvil accounts
 # are safe to use here (they are EIP-7702-delegated to drainers on real chains, which is why the
 # fork targets below must not sign with them — see deploy_wallet.LIVE_PRIVATE_KEY_ENV).
+# --hardfork osaka turns on the P-256 precompile (0x100) that passkey signatures are checked with;
+# without it every passkey op fails validation. The forks below need it for the same reason.
 anvil:
-	anvil
+	anvil --hardfork osaka
 
 
 # ── Forking ────────────────────────────────────────────────────────────────────
@@ -217,7 +230,7 @@ define start_fork
 	echo "Port $(FORK_PORT_$(2)) is already in use. Is $(2) already running?"; \
 	exit 1; \
 fi; \
-anvil --fork-url $(1) --fork-block-number $$(cast block-number --rpc-url $(1)) --port $(FORK_PORT_$(2)) & \
+anvil --fork-url $(1) --fork-block-number $$(cast block-number --rpc-url $(1)) --port $(FORK_PORT_$(2)) --hardfork osaka & \
 pid=$$!; \
 trap 'kill $$pid 2>/dev/null' INT TERM EXIT; \
 until cast chain-id --rpc-url http://127.0.0.1:$(FORK_PORT_$(2)) >/dev/null 2>&1; do \
@@ -407,9 +420,7 @@ api-prod:
 #   setup-agent  ... + agent   interactive CLI agent
 #   setup-bot    ... + bot     the Telegram bot
 #   setup-test   (nothing)     just the deployed stack, for running tests against
-# Assumes Vault is already running and configured (`make vault`) — not part of this
-# chain since, once started, Vault persists across redeploys and doesn't need to be
-# re-run every time. Pass the same ARGS you'd give `deploy`/`deploy-wallet` individually,
+# Pass the same ARGS you'd give `deploy`/`deploy-wallet` individually,
 # e.g. `make setup-agent ARGS="sepolia-fork"` — every step reads the same $(ARGS).
 setup-agent: deploy fund db deploy-wallet agent
 setup-test: deploy fund db deploy-wallet 

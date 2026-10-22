@@ -44,7 +44,8 @@ only when asked for:
 E2E_REAL=1 npx playwright test real --project=desktop-light
 ```
 
-It needs Vault, `make sepolia-fork` and the API with `APP_FORK_MODE=1`. A restarted fork has no
+It needs `make sepolia-fork` (anvil with `--hardfork osaka`, for the passkey precompile) and the
+API with `APP_FORK_MODE=1`. Passkeys come from Chromium's virtual authenticator. A restarted fork has no
 protocol on it — `make deploy ARGS=sepolia-fork && make db` puts it back. `real/journey` walks the
 whole path in one sitting (sign in → create → fund → contact → reload → pause → withdraw →
 unpause); the others each go deep on one part.

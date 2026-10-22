@@ -22,6 +22,7 @@ import "../../script/Constants.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {configuredTokens} from "../utils/ConfiguredTokens.sol";
+import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
 
 /**
  * @title SHForkTestBase
@@ -40,6 +41,8 @@ import {configuredTokens} from "../utils/ConfiguredTokens.sol";
  *      pinned forks without distorting any valuation.
  */
 abstract contract SHForkTestBase is Test {
+    using PasskeyHelper for PasskeyHelper.Passkey;
+
     /// @dev A deadline every {SessionHandler-addSession} call in this file can use: comfortably in
     ///      the future, comfortably inside MAX_SESSION_TTL. Recomputed per call so a test that warps
     ///      time still grants a live key.
@@ -67,8 +70,9 @@ abstract contract SHForkTestBase is Test {
     uint256 constant WINDOW = 1 days;
 
     address owner;
-    address sessionKey;
-    uint256 sessionKeyPk;
+    /// @dev The wallet's session key: a soft passkey, seeded through deployWallet in setUp. The fork
+    ///      suites sign with it the way the app's users do, through the REAL EntryPoint.
+    PasskeyHelper.Passkey sessionKey;
     address sink = makeAddr("sink");
     address bundler = makeAddr("bundler");
 
@@ -108,7 +112,7 @@ abstract contract SHForkTestBase is Test {
     //////////////////////////////////////////////////////////////*/
 
     function setUp() public virtual {
-        (sessionKey, sessionKeyPk) = makeAddrAndKey("sessionKey");
+        sessionKey = PasskeyHelper.create("sessionKey");
 
         DeploySHProtocol deployer = new DeploySHProtocol();
         (factory, treasury, config, oracle) = deployer.run();
@@ -139,8 +143,11 @@ abstract contract SHForkTestBase is Test {
         address[] memory trustedSpenders = _trustedSpenders();
 
         vm.prank(owner);
-        wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, sessionKey, _sessionDeadline(), trustedSpenders)));
+        wallet = SessionHandler(
+            payable(factory.deployWallet(
+                    DAILY_LIMIT, WINDOW, watched, sessionKey.qx, sessionKey.qy, _sessionDeadline(), trustedSpenders
+                ))
+        );
 
         sendPackedUserOp = new SendPackedUserOp();
 
@@ -228,6 +235,32 @@ abstract contract SHForkTestBase is Test {
     /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev The nonce key every passkey op here uses. Its op deadline is later than any key's, so the
+    ///      key's own deadline is the window; PasskeyValidationTest covers the op deadline itself.
+    function _passkeyNonceKey() internal pure returns (uint192) {
+        return PasskeyHelper.nonceKey(PasskeyHelper.LATEST_OP_DEADLINE, 0);
+    }
+
+    /// @dev A single-call UserOp from the wallet, approved by the session passkey.
+    function _sessionOp(address dest, uint256 value, bytes memory data)
+        internal
+        view
+        returns (PackedUserOperation memory userOp)
+    {
+        bytes32 hash;
+        (userOp, hash) =
+            sendPackedUserOp.generateUnsignedUserOp(address(wallet), config, dest, value, data, _passkeyNonceKey());
+        userOp.signature = sessionKey.sign(hash);
+    }
+
+    /// @dev A batch UserOp from the wallet, approved by the session passkey.
+    function _sessionBatchOp(Execution[] memory execs) internal view returns (PackedUserOperation memory userOp) {
+        bytes32 hash;
+        (userOp, hash) =
+            sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        userOp.signature = sessionKey.sign(hash);
+    }
 
     function _handleOps(PackedUserOperation memory userOp) internal {
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
@@ -367,9 +400,7 @@ abstract contract SHForkTestBase is Test {
         uint256 inBefore = _tokenIn().balanceOf(address(wallet));
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedBatchUserOp(
-            address(wallet), config, _swapBatch(amountIn, amountIn), sessionKey, sessionKeyPk
-        );
+        PackedUserOperation memory userOp = _sessionBatchOp(_swapBatch(amountIn, amountIn));
         _handleOps(userOp);
 
         uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
@@ -394,14 +425,10 @@ abstract contract SHForkTestBase is Test {
         uint256 ethIn = _nativeSwapValue();
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
+        PackedUserOperation memory userOp = _sessionOp(
             swapRouter,
             ethIn, // forwarded as msg.value -> spent from the wallet's native balance
-            _nativeInSwapCalldata(ethIn),
-            sessionKey,
-            sessionKeyPk
+            _nativeInSwapCalldata(ethIn)
         );
         _handleOps(userOp);
 
@@ -477,14 +504,8 @@ abstract contract SHForkTestBase is Test {
     /// @notice A session-key UserOp aimed at the module's config reverts at execution on the real
     ///         EntryPoint; the cap survives untouched.
     function test_sessionOp_cannotTouchAdminSurface() public {
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(module),
-            0,
-            abi.encodeCall(SpendingLimitModule.setDailyLimit, (int256(1_000_000_000e18))),
-            sessionKey,
-            sessionKeyPk
+        PackedUserOperation memory userOp = _sessionOp(
+            address(module), 0, abi.encodeCall(SpendingLimitModule.setDailyLimit, (int256(1_000_000_000e18)))
         );
         _handleOps(userOp);
 
@@ -579,17 +600,9 @@ abstract contract SHForkTestBase is Test {
     /// @notice A revoked session key fails validation (AA24) on the real EntryPoint.
     function test_revokedSessionKey_failsValidation() public {
         vm.prank(owner);
-        wallet.removeSession();
+        wallet.removeSession(sessionKey.keyId());
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(_tokenIn()),
-            0,
-            abi.encodeCall(IERC20.transfer, (sink, 1)),
-            sessionKey,
-            sessionKeyPk
-        );
+        PackedUserOperation memory userOp = _sessionOp(address(_tokenIn()), 0, abi.encodeCall(IERC20.transfer, (sink, 1)));
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = userOp;

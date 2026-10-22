@@ -33,26 +33,11 @@ export async function deleteChatHistory(chainId?: number) {
   await apiFetch<{ status: 'cleared'; chain_ids: number[] }>(`/api/chat/history${query}`, { method: 'DELETE' })
 }
 
-/** The quote waiting for a Confirm or Cancel tap on one network, or null. */
+/**
+ * The quote waiting for a Confirm or Cancel tap on one network, or null. Confirm and Cancel go
+ * through POST /api/sign/… (api/sign.ts): a passkey approves every send.
+ */
 export async function fetchQuoteOffer(chainId: number) {
   const { quote } = await apiFetch<{ quote: QuoteOffer | null }>(`/api/chat/quote?chain_id=${chainId}`)
   return quote
-}
-
-/**
- * Taps a quote card's Confirm or Cancel. Confirm answers once the transaction is on the wire, with
- * the History row to follow while it lands (`transaction_id`; null when nothing went out). The
- * server answers 409 when the quote is gone or a message is still being answered.
- *
- * @return  What happened, as the server worded it, and the row to follow.
- */
-export async function answerQuote(chainId: number, quoteId: string, confirm: boolean) {
-  const { outcome, transaction_id = null } = await apiFetch<{ outcome: string; transaction_id?: number | null }>(
-    `/api/chat/quote/${confirm ? 'confirm' : 'cancel'}`,
-    {
-      method: 'POST',
-      body: { chain_id: chainId, quote_id: quoteId },
-    },
-  )
-  return { outcome, transactionId: transaction_id }
 }

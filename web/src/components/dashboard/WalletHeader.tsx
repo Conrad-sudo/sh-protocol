@@ -1,7 +1,7 @@
 import { Message, Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
-import { assistantStatus } from '../../lib/assistant'
+import { assistantDeadline, assistantStatus } from '../../lib/assistant'
 import { formatDate, formatTimeLeft } from '../../lib/format'
 import { chainName, explorerUrl } from '../../wallet/chains'
 import { AddressText } from '../AddressText'
@@ -17,7 +17,7 @@ export function WalletHeader({ wallet }: { wallet: WalletState }) {
   const link = explorerUrl(wallet.chain_id, 'address', wallet.address)
   const now = useNow(60_000)
   const assistant = assistantStatus(wallet.session)
-  const expiresAt = (wallet.session.expires_at ?? 0) * 1_000
+  const expiresAt = assistantDeadline(wallet.session) ?? 0
 
   return (
     <GlassPanel bordered className="mf-wallet-header">
@@ -57,7 +57,7 @@ export function WalletHeader({ wallet }: { wallet: WalletState }) {
       {!wallet.spending.hook_installed && (
         <Message type="error" showIcon className="mf-settings-note">
           The spending limit isn't switched on for this wallet, so nothing caps what the assistant can
-          spend. Pause the wallet or turn the assistant off in Controls until it's fixed.
+          spend. Pause the wallet or revoke its devices in Controls until it's fixed.
         </Message>
       )}
       {assistant === 'expiring' && (

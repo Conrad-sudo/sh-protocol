@@ -2,8 +2,8 @@
 End-to-end checks on the API's authentication, run against a throwaway database.
 
 The property under test is the one the whole identity refactor exists to establish: a request acts
-on the account its TOKEN names, and on no other. Everything here is offline -- no RPC, no chain, no
-Vault -- so it is safe to run anywhere.
+on the account its TOKEN names, and on no other. Everything here is offline -- no RPC and no
+chain -- so it is safe to run anywhere.
 
 Run: make auth-test   (or: python app/tests/test_auth.py)
 """
@@ -1174,26 +1174,6 @@ def test_chat_is_rationed():
         api.limiter.enabled = False
 
 
-def test_vault_failure_is_named():
-    """
-    A Vault error answers 503 naming Vault, not a bare 500 — which the web app can only show as
-    "Something went wrong on our side". The usual cause is the dev container restarting and losing
-    its AppRole, so the login in .env is refused.
-    """
-    print("\n[10c] a Vault failure is named, not a bare 500")
-    import hvac.exceptions
-
-    @api.app.get("/__test/vault-down")
-    def _vault_down():
-        raise hvac.exceptions.Forbidden("permission denied, on post http://127.0.0.1:8200/v1/auth/approle/login")
-
-    r = make_client().get("/__test/vault-down")
-    check("a Vault error -> 503", r.status_code == 503, f"{r.status_code} {r.text[:160]}")
-    detail = r.json().get("detail", "")
-    check("the detail names Vault and the fix", "Vault" in detail and "make vault" in detail, r.text[:200])
-    check("the exception itself stays in the log", "8200" not in detail, r.text[:200])
-
-
 def test_chains_lists_only_deployed_served_chains():
     print("\n[11] /api/chains lists chains that are served AND deployed")
     conn = db.get_db()
@@ -1279,7 +1259,6 @@ if __name__ == "__main__":
         test_chat_turn_returns_text_and_hides_failures()
         test_chat_acts_on_the_pages_network()
         test_chat_is_rationed()
-        test_vault_failure_is_named()
         test_chains_lists_only_deployed_served_chains()
         test_rate_limit()
     finally:

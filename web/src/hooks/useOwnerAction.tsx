@@ -4,7 +4,7 @@ import { Message, useToaster } from 'rsuite'
 import { useConnection, useSendTransaction, useSwitchChain } from 'wagmi'
 import { ApiError } from '../api/client'
 import { confirmOwnerTx, confirmSessionTx, prepareOwnerAction } from '../api/wallet'
-import type { OwnerAction } from '../api/types'
+import type { OwnerAction, SessionBlock, WalletState } from '../api/types'
 import { useAuth } from '../auth/useAuth'
 import {
   errorText,
@@ -57,7 +57,7 @@ interface PendingOwnerTx {
   txHash: string
   key: string
   success: string
-  /** `session` for the assistant's key, which has its own confirm endpoint; absent for the rest. */
+  /** `session` for a device's passkey, which has its own confirm endpoint; absent for the rest. */
   confirmWith?: 'session'
   /** When the wallet handed the hash back (ms). Every wait is measured from it, not from a page visit. */
   sentAt: number
@@ -76,11 +76,11 @@ const HANDOVER_EVENT = 'mitfah-owner-tx-handover'
 /** One stored transaction per account and network, so a stuck one never blocks another network. */
 const pendingKey = (userId: number | null, chainId: number) => `mitfah-pending-owner-tx:${userId ?? 'anon'}:${chainId}`
 
-/** The transaction went through, but the wallet ended up trusting a key Mitfah doesn't hold. */
-class ForeignKeyError extends Error {}
-
-/** Asks the API once whether the transaction has mined, through the endpoint that finishes it. */
-async function confirmOnce(pending: PendingOwnerTx): Promise<{ mined: boolean; seen?: boolean }> {
+/**
+ * Asks the API once whether the transaction has mined, through the endpoint that finishes it. A
+ * device's passkey comes back with the wallet's keys as they are now.
+ */
+async function confirmOnce(pending: PendingOwnerTx): Promise<{ mined: boolean; seen?: boolean; session?: SessionBlock }> {
   const body = { chain_id: pending.chainId, tx_hash: pending.txHash }
   const signal = timeoutSignal(REQUEST_TIMEOUT_MS)
   if (pending.confirmWith !== 'session') {
@@ -88,12 +88,7 @@ async function confirmOnce(pending: PendingOwnerTx): Promise<{ mined: boolean; s
     return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true }
   }
   const answer = await confirmSessionTx(body, signal)
-  if (answer.status === 'unrecognized_key') {
-    throw new ForeignKeyError(
-      "That went through, but your wallet now trusts a key Mitfah doesn't hold, so the assistant still can't act. Turn it on again to replace that key.",
-    )
-  }
-  return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true }
+  return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true, session: answer.session }
 }
 
 function readPending(storageKey: string): PendingOwnerTx | null {
@@ -178,10 +173,14 @@ export function useOwnerAction(chainId: number, owner: string) {
     const stale = () => generation.current !== mine
     try {
       for (;;) {
-        const { mined, seen } = await confirmOnce(pending)
+        const { mined, seen, session } = await confirmOnce(pending)
         if (stale()) return { kind: 'stale' }
         if (mined) {
           writePending(storageKey, null)
+          // The devices show their change at once; the rest of the wallet is read again below.
+          if (session) {
+            queryClient.setQueryData<WalletState | null>(['wallet', pending.chainId], old => old && { ...old, session })
+          }
           await queryClient.invalidateQueries({ queryKey: ['wallet', pending.chainId] })
           return { kind: 'confirmed' }
         }
@@ -204,12 +203,6 @@ export function useOwnerAction(chainId: number, owner: string) {
       if (stale()) return { kind: 'stale' }
       // A 400 is final (it reverted, or wasn't sent to this wallet); anything else may be a blip.
       if (error instanceof ApiError && error.status === 400) writePending(storageKey, null)
-      if (error instanceof ForeignKeyError) {
-        // Final too: it mined. Re-read the wallet so the page shows which key it trusts now.
-        writePending(storageKey, null)
-        await queryClient.invalidateQueries({ queryKey: ['wallet', pending.chainId] })
-        if (stale()) return { kind: 'stale' }
-      }
       return { kind: 'failed', error }
     }
   }

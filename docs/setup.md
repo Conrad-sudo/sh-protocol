@@ -3,7 +3,7 @@
 Before running any setup, make sure you have completed the one-time steps:
 
 1. **Clone and install** — see the root [README](../README.md#clone-and-install).
-2. **Environment variables** — create `.env` as described in [Vault & Security](vault-security.md#environment-variables).
+2. **Environment variables** — create `.env` as described in [Environment variables](environment.md).
 3. **Which account to run as** — identity is an application account (`users.id`), not a Telegram chat id. For the local harnesses (`make deploy-wallet`, `make agent`) set:
 
    ```env
@@ -22,7 +22,7 @@ Before running any setup, make sure you have completed the one-time steps:
 
 ## The Setup Sequence
 
-Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC fork, live BSC) follows the same six steps. The sections below give the exact commands for each network — this is the shape of what's happening and why the order matters:
+Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC fork, live BSC) follows the same five steps. The sections below give the exact commands for each network — this is the shape of what's happening and why the order matters:
 
 1. **Start the network** — `make anvil`, `make mainnet-fork`, `make sepolia-fork`, `make bsc-fork`, `make arb-fork` or `make base-fork`. This must be running before anything else, since every later step talks to it over RPC. (Live deployments skip this — there's no local node to start.)
 
@@ -30,26 +30,27 @@ Every network (Anvil, Ethereum mainnet fork, Sepolia fork, live Sepolia, BSC for
 
    > **Starting a fork also funds the bundlers.** As soon as the fork answers, the target gives every bundler key (`API_BUNDLER_n`, `TELEGRAM_BUNDLER_n`) 100 of the chain's native coin each (the same `anvil_setBalance` as `make fund`). If that port already has a node on it, the target refuses to start instead.
 2. **Deploy the shared protocol** — `make deploy ARGS="<network>"`. Runs `script/DeploySHProtocol.s.sol`, which deploys the infrastructure shared by all users: `EntryPoint`, mocks (on Anvil), `SHOracle`, `SHTreasury`, `SHRegistry`, `SpendingLimitModule`, and `SHFactory` (with the module set via the factory constructor). Only needs to be re-run when this infra doesn't exist yet on the target chain (e.g. after restarting Anvil, which wipes all chain state).
-3. **Start and configure Vault** — start the Vault Docker container, then run `make vault`. Vault holds the Transit key that encrypts/decrypts session keys; it must be ready before any session key is created in step 5.
-4. **Sync the database** — `make db`. Seeds reference data (token addresses, selectors, RPC URLs, Chainlink feed addresses) and, critically, reads the `SHFactory` address out of the Forge broadcast file written in step 2 (`broadcast/DeploySHProtocol.s.sol/<chain_id>/run-latest.json`) into the `factory` table. This step must run *after* step 2 — `deploy_wallet.py` resolves the factory address from the DB, not from the broadcast file directly. Safe to re-run any time; it's idempotent.
+3. **Sync the database** — `make db`. Seeds reference data (token addresses, selectors, RPC URLs, Chainlink feed addresses) and, critically, reads the `SHFactory` address out of the Forge broadcast file written in step 2 (`broadcast/DeploySHProtocol.s.sol/<chain_id>/run-latest.json`) into the `factory` table. This step must run *after* step 2 — `deploy_wallet.py` resolves the factory address from the DB, not from the broadcast file directly. Safe to re-run any time; it's idempotent.
 
    > **Watch for stale addresses.** Every re-run of `forge script script/DeploySHProtocol.s.sol --broadcast` on the same chain overwrites that chain's `run-latest.json` with a fresh set of addresses (new nonces → different addresses for every contract, including `SHFactory`). If you deploy again without re-running `make db`, the DB keeps pointing at the old (now-wrong) addresses — this can fail in a confusing way, since the old address might still have *some* contract's bytecode at it (e.g. a previous deployment's `SpendingLimitModule`), producing an empty-revert rather than an obvious "no code" error.
 
-5. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens, sessionKey, sessionKeyValidUntil, trustedSpenders)` to create a per-user `SessionHandler` in **one transaction**: `SpendingLimitModule` is installed as a spending-cap hook seeded with a $50k/24h cap over the network's default watched tokens, the wallet's single session key is authorized, and the chain's exchange contracts are granted as trusted spenders (`constants.get_default_spenders`: Uniswap V3's SwapRouter02 and position manager on Ethereum, Sepolia, Arbitrum and Base, PancakeSwap's V2 router on BSC, none on bare Anvil). It is funded with ETH by the same call (`deployWallet` is `payable`).
+4. **Deploy your wallet** — `make deploy-wallet ARGS="<network>"`. Calls `SHFactory.deployWallet(dailyLimitUsd, windowDuration, watchedTokens, sessionKeyX, sessionKeyY, sessionKeyValidUntil, trustedSpenders)` to create a per-user `SessionHandler` in **one transaction**: `SpendingLimitModule` is installed as a spending-cap hook seeded with a $50k/24h cap over the network's default watched tokens, the harness's passkey is approved for 30 days, and the chain's exchange contracts are granted as trusted spenders (`constants.get_default_spenders`: Uniswap V3's SwapRouter02 and position manager on Ethereum, Sepolia, Arbitrum and Base, PancakeSwap's V2 router on BSC, none on bare Anvil). It is funded with ETH by the same call (`deployWallet` is `payable`).
 
-   > **One transaction, not three.** `addSession` and `addTrustedSpender` used to be separate owner-signed follow-ups. They are now seeded inside `initialize`, so `deploy_wallet.py`'s `add_default_session()` / `trust_default_spenders()` are recovery helpers only and are no longer called by `__main__`. Because the wallet is deployed with CREATE2, its address is known before the transaction is sent, which is what lets the session key (whose Vault entry is keyed by wallet address) be minted up front and passed in.
+   > **One transaction, not three.** `addSession` and `addTrustedSpender` used to be separate owner-signed follow-ups. They are now seeded inside `initialize`, so `deploy_wallet.py`'s `add_default_session()` / `trust_default_spenders()` are recovery helpers only and are no longer called by `__main__`.
+
+   > **The harness's passkey is a software one.** A real user's passkey is made on their phone or laptop, in the web app. The command line has no browser, so `deploy_wallet.py` approves a P-256 key held in software instead (`harness_passkey`), derived from the deployer's private key, the user and the chain. It adds no power — whoever holds that private key already owns the wallet — and lets `make agent`, `make e2e-test` and `make agent-smoke` approve quotes the way a phone would.
 
    > **Re-running gives you a NEW wallet, not the same one.** The CREATE2 salt is derived from `(deployer, factory.deployCount[deployer])` and the factory consumes that counter on every deploy, so each `make deploy-wallet` lands on a fresh address with no salt bookkeeping on the Python side. It does **not** migrate anything: `session_handlers` is overwritten for that `chat_id`, and the previous wallet keeps its prefund, tokens and LP positions with nothing pointing at it. The script warns when it is about to do this — withdraw first if the old wallet holds anything you want.
 
    > **`ARGS` here must exactly match** the network you started in step 1 and deployed to in step 2 (`"anvil"`, `"mainnet-fork"`, `"sepolia-fork"`, `"sepolia"`, `"bsc-fork"`, or `"bsc"`) — `deploy_wallet.py`'s `deploy()` dispatcher passes it straight through to `network`. If it doesn't match, the script will look up the wrong factory address (or none at all) and fail. Omitting `ARGS` defaults to `"anvil"`, matching `make deploy`'s own no-`ARGS` default.
 
-6. **Start talking to it** — `make bot` (Telegram) or `make agent` (interactive CLI).
+5. **Start talking to it** — `make bot` (Telegram) or `make agent` (interactive CLI). In the CLI, a quote prints as a card; type `yes` to approve it with the harness's passkey. In Telegram, a quote's "Confirm with passkey" opens the web app's approval page, so the bot needs `WEB_APP_URL` and a passkey made in the web app.
 
    > **The Telegram bot follows `APP_FORK_MODE`, like the API.** With `APP_FORK_MODE=1` every network it offers in `/chain` is that network's local fork. A network that isn't running (or answers as another chain) when the bot starts is left out until the next start, with a message saying why — so on forks, start the forks you want first. Plain Anvil is never offered.
 
-> **Shortcut — `make setup-agent ARGS="<network>"`.** Runs steps 2, 4, 5, and 6 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Steps 1 (start the network) and 3 (Vault) are *not* part of this chain — start the network first (skip this for live deployments), and make sure Vault is already running and configured (it persists across redeploys, so you don't need to re-run `make vault` every time). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 5 above.
+> **Shortcut — `make setup-agent ARGS="<network>"`.** Runs steps 2, 3, 4 and 5 (deploy → fund → db → deploy-wallet → agent) in one command, stopping if any step fails, then drops straight into the interactive CLI agent at the end. `fund` here is a balance top-up via `anvil_setBalance` (see the Makefile's "Funding Wallets" section) — it automatically skips itself on live networks (`sepolia`/`bsc`), where there's no local Anvil node to fund, so this chain is safe to use for all six networks without special-casing. Step 1 (start the network) is *not* part of this chain — start the network first (skip this for live deployments). The same `ARGS` value is passed through to `deploy`, `fund`, and `deploy-wallet` internally, so it must be one of the network names listed in step 4 above.
 >
-> **The full local setup in two commands** (once Vault is configured):
+> **The full local setup in two commands:**
 >
 > ```bash
 > make <network>-fork    # or `make anvil` for plain local Anvil — see step 1 above
@@ -80,26 +81,13 @@ make deploy
 
 (No `ARGS` needed — the default `NETWORK_ARGS` in the Makefile already points at `http://127.0.0.1:8545` with the Anvil default account.) This deploys the full mock stack (EntryPoint, ERC20Mocks, MockV3Aggregators, MockIdentityRegistry, MockReputationRegistry, SHOracle, SHTreasury, SHRegistry, SpendingLimitModule, SHFactory).
 
-**Step 3 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 4 — Sync the database:**
+**Step 3 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 5 — Deploy your wallet and register session keys:**
+**Step 4 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet
@@ -107,20 +95,20 @@ make deploy-wallet
 
 (No `ARGS` needed — `deploy_wallet.py` defaults to `"anvil"` when none is given, matching `make deploy`'s own default. Pass `ARGS="anvil"` explicitly if you'd rather not rely on the default.)
 
-Must be re-run (along with steps 1, 2, and 4) whenever Anvil is restarted — chain state, including the deployed protocol, is wiped on restart.
+Must be re-run (along with steps 1, 2 and 3) whenever Anvil is restarted — chain state, including the deployed protocol, is wiped on restart.
 
-> **Shortcut — full setup in two commands** (once Vault, step 3, is configured):
+> **Shortcut — full setup in two commands:**
 >
 > ```bash
 > make anvil
 > make setup-agent
 > ```
 >
-> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below. No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
+> Runs steps 2, 3 and 4 above plus a balance top-up (`fund`), finishing with the interactive CLI agent below. No `ARGS` needed for either command — both default to plain Anvil. See [The Setup Sequence](#the-setup-sequence) above.
 
-**Step 6 — No Telegram here.** The Telegram bot serves Ethereum, Sepolia, BNB Smart Chain, Arbitrum One and Base (live or forked), not plain Anvil, so it has nothing to offer a wallet on Anvil. Talk to the agent through the interactive CLI below instead.
+**Step 5 — No Telegram here.** The Telegram bot serves Ethereum, Sepolia, BNB Smart Chain, Arbitrum One and Base (live or forked), not plain Anvil, so it has nothing to offer a wallet on Anvil. Talk to the agent through the interactive CLI below instead.
 
-**Step 7 — Chat:**
+**Step 6 — Chat:**
 
 ```
 What is my wallet address?
@@ -154,48 +142,35 @@ make deploy ARGS="mainnet-fork"
 
 `ARGS="mainnet-fork"` sends to the mainnet fork's port (8547) and signs with `SEPOLIA_ACCOUNT` / `API_BUNDLER_1`. Without it, `make deploy` targets plain Anvil on 8545 with the Anvil burner key.
 
-**Step 3 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 4 — Sync the database:**
+**Step 3 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 5 — Deploy your wallet:**
+**Step 4 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet ARGS="mainnet-fork"
 ```
 
-**Step 6 — Start:**
+**Step 5 — Start:**
 
 ```bash
 make bot      # Telegram bot
 make agent    # Interactive CLI
 ```
 
-> Re-run steps 1, 2, and 4 after any Anvil restart, and re-run `make vault` after any Vault container restart — fork state is wiped on restart.
+> Re-run steps 1, 2 and 3 after any Anvil restart — fork state is wiped on restart.
 
-> **Shortcut — full setup in two commands** (once Vault, step 3, is configured):
+> **Shortcut — full setup in two commands:**
 >
 > ```bash
 > make mainnet-fork
 > make setup-agent ARGS="mainnet-fork"
 > ```
 >
-> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
+> Runs steps 2, 3 and 4 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 5. See [The Setup Sequence](#the-setup-sequence) above.
 
 ---
 
@@ -217,48 +192,35 @@ make deploy ARGS="sepolia-fork"
 
 `ARGS="sepolia-fork"` tells the Makefile to sign with `SEPOLIA_ACCOUNT` / `API_BUNDLER_1` while still broadcasting to the local fork at `http://127.0.0.1:8545`.
 
-**Step 3 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 4 — Sync the database:**
+**Step 3 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 5 — Deploy your wallet:**
+**Step 4 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet ARGS="sepolia-fork"
 ```
 
-**Step 6 — Start:**
+**Step 5 — Start:**
 
 ```bash
 make bot
 make agent
 ```
 
-> Uniswap V3 is officially deployed on Sepolia, so the swap and liquidity-position tools work here. The wallet is seeded with a $50k/24h USD cap over the default Sepolia watched tokens (WETH, USDC, LINK) and one session key that can drive any of them — see [docs/app.md](app.md#deploy_walletpy).
+> Uniswap V3 is officially deployed on Sepolia, so the swap and liquidity-position tools work here. The wallet is seeded with a $50k/24h USD cap over the default Sepolia watched tokens (WETH, USDC, LINK) and the harness's passkey, which can drive any of them — see [docs/app.md](app.md#deploy_walletpy).
 
-> **Shortcut — full setup in two commands** (once Vault, step 3, is configured):
+> **Shortcut — full setup in two commands:**
 >
 > ```bash
 > make sepolia-fork
 > make setup-agent ARGS="sepolia-fork"
 > ```
 >
-> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
+> Runs steps 2, 3 and 4 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 5. See [The Setup Sequence](#the-setup-sequence) above.
 
 ---
 
@@ -280,48 +242,35 @@ make deploy ARGS="bsc-fork"
 
 `ARGS="bsc-fork"` signs with `MAINNET_DEPLOYER_PK` (the placeholder deployer key baked into `HelperConfig.s.sol`) and broadcasts with `--legacy --skip-simulation` — BSC's fee-history data and this fork's `baseFeePerGas: 0` blocks both confuse Forge's default gas estimation, so the Makefile routes around it (see the comment above the `bsc-fork` branch in `Makefile` for the full explanation). If the deployer needs a balance bump on the fork first, `make fund ARGS="bsc-fork"` sets it directly via `anvil_setBalance`.
 
-**Step 3 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 4 — Sync the database:**
+**Step 3 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 5 — Deploy your wallet:**
+**Step 4 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet ARGS="bsc-fork"
 ```
 
-Seeds the wallet with a $50k/24h USD cap over the default BSC watched tokens (WBNB, USDC, USDT) and one session key — see [docs/app.md](app.md#deploy_walletpy).
+Seeds the wallet with a $50k/24h USD cap over the default BSC watched tokens (WBNB, USDC, USDT) and the harness's passkey — see [docs/app.md](app.md#deploy_walletpy).
 
-**Step 6 — Start:**
+**Step 5 — Start:**
 
 ```bash
 make bot
 make agent
 ```
 
-> **Shortcut — full setup in two commands** (once Vault, step 3, is configured):
+> **Shortcut — full setup in two commands:**
 >
 > ```bash
 > make bsc-fork
 > make setup-agent ARGS="bsc-fork"
 > ```
 >
-> Runs steps 2, 4, and 5 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 6. See [The Setup Sequence](#the-setup-sequence) above.
+> Runs steps 2, 3 and 4 above plus a balance top-up (`fund`), finishing with `make agent` (not `make bot`) from step 5. See [The Setup Sequence](#the-setup-sequence) above.
 
 ---
 
@@ -339,26 +288,13 @@ make deploy ARGS="sepolia"
 
 `ARGS="sepolia"` broadcasts to the real `SEPOLIA_RPC_URL` and (if `ETHERSCAN_API_KEY` is set) verifies contracts on Etherscan.
 
-**Step 2 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 3 — Sync the database:**
+**Step 2 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 4 — Deploy your wallet:**
+**Step 3 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet ARGS="sepolia"
@@ -366,22 +302,22 @@ make deploy-wallet ARGS="sepolia"
 
 On Sepolia, as everywhere, the app is its own bundler: `bundler.py` submits UserOps inside `handleOps` from one of the `API_BUNDLER_n` keys (the API) or the `TELEGRAM_BUNDLER_n` keys (the bot), which the EntryPoint repays out of each wallet's prefund. Nothing tops those keys up on a live chain, so keep them funded. If `ETHERSCAN_API_KEY` is set, both `SHOracle` and `SessionHandler` are automatically verified on Etherscan after deployment.
 
-> Uniswap V3 is officially deployed on Sepolia, so the swap, quote and liquidity-position tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and one session key that can drive any external call within that cap.
+> Uniswap V3 is officially deployed on Sepolia, so the swap, quote and liquidity-position tools are available here too. The wallet is seeded with a $50k/24h USD cap over WETH/USDC/LINK and the harness's passkey, which can drive any external call within that cap.
 
-**Step 5 — Start:**
+**Step 4 — Start:**
 
 ```bash
 make bot
 make agent
 ```
 
-> **Shortcut — full setup in one command** (once Vault, step 2, is configured):
+> **Shortcut — full setup in one command:**
 >
 > ```bash
 > make setup-agent ARGS="sepolia"
 > ```
 >
-> Since there's no local node to start for a live deployment, this alone covers steps 1, 3, and 4 above, finishing with `make agent` (not `make bot`) from step 5. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live Sepolia** — make sure that's what you intend before running it.
+> Since there's no local node to start for a live deployment, this alone covers steps 1, 2 and 3 above, finishing with `make agent` (not `make bot`) from step 4. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live Sepolia** — make sure that's what you intend before running it.
 
 ### Deployed Contracts (Sepolia)
 
@@ -408,26 +344,13 @@ make deploy ARGS="bsc"
 
 > The `Makefile`'s `ARGS` matching for BSC only has an explicit branch for `bsc-fork` (which broadcasts to a local fork with `--legacy --skip-simulation`). A plain `ARGS="bsc"` falls through to the generic `NETWORK_ARGS` default (Anvil's burner key), which is **not** what you want for a real broadcast — replace `NETWORK_ARGS` with a BSC-specific branch (mirroring the `sepolia` branch: `--rpc-url $(BSC_RPC_URL) --private-key <funded-bsc-key> --broadcast`) before deploying live. This is a real gap in the current `Makefile`, not a documentation oversight — double-check the resolved command before broadcasting.
 
-**Step 2 — Start and configure Vault:**
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-
-make vault
-```
-
-**Step 3 — Sync the database:**
+**Step 2 — Sync the database:**
 
 ```bash
 make db
 ```
 
-**Step 4 — Deploy your wallet:**
+**Step 3 — Deploy your wallet:**
 
 ```bash
 make deploy-wallet ARGS="bsc"
@@ -435,20 +358,20 @@ make deploy-wallet ARGS="bsc"
 
 BSC is self-bundled like every other network: `bundler.py` signs `handleOps` with one of the `API_BUNDLER_n` or `TELEGRAM_BUNDLER_n` keys, depending on which process is running (see `bundler.pick_bundler`). On `bsc-fork` `make fund` tops them all up; on live BSC they must hold real BNB. Live BSC has not been exercised yet.
 
-**Step 5 — Start:**
+**Step 4 — Start:**
 
 ```bash
 make bot
 make agent
 ```
 
-> **Shortcut — full setup in one command** (once Vault, step 2, is configured):
+> **Shortcut — full setup in one command:**
 >
 > ```bash
 > make setup-agent ARGS="bsc"
 > ```
 >
-> Since there's no local node to start for a live deployment, this alone covers steps 1, 3, and 4 above, finishing with `make agent` (not `make bot`) from step 5. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live BSC** — make sure that's what you intend before running it. Also note the `make deploy` gap flagged in step 1 above: confirm `NETWORK_ARGS` actually resolves to a funded BSC broadcast before relying on this shortcut for a live BSC deploy.
+> Since there's no local node to start for a live deployment, this alone covers steps 1, 2 and 3 above, finishing with `make agent` (not `make bot`) from step 4. The chain's `fund` step (a local-fork-only balance top-up) automatically no-ops on live networks, so it's safe to include here. **This broadcasts a real transaction to live BSC** — make sure that's what you intend before running it. Also note the `make deploy` gap flagged in step 1 above: confirm `NETWORK_ARGS` actually resolves to a funded BSC broadcast before relying on this shortcut for a live BSC deploy.
 
 ---
 

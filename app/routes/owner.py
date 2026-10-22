@@ -20,8 +20,10 @@ from constants import (
     get_default_spenders,
     get_native_asset_ticker,
 )
+from constants import MAX_SESSION_KEYS
 from contracts import invalidate_cache, read_spending_config
 from db import (
+    get_passkey,
     get_token_address,
     resolve_token,
 )
@@ -37,7 +39,7 @@ from routes.deps import (
     _to_json_tx,
     _tx_seen,
 )
-from userop import create_pending_session_key, reconcile_session_key
+from userop import read_sessions, session_block
 
 router = APIRouter()
 
@@ -163,7 +165,7 @@ def prepare_pause(req: PauseRequest, user_id: int = Depends(get_current_user)):
     Builds the unsigned `pause()` transaction.
 
     Pausing stops validation, so a paused wallet rejects UserOps before they reach the EntryPoint and
-    pays no gas for the refusal. It is the kill switch for a suspected session-key compromise.
+    pays no gas for the refusal. It is the kill switch when something looks wrong with a device.
 
     @return  {"tx": …} for the browser to sign, then POST to /api/wallet/tx/confirm.
     """
@@ -345,17 +347,16 @@ class SessionKeyRequest(BaseModel):
     """Body of POST /api/wallet/session/prepare."""
 
     chain_id: int
-    action: str = Field(pattern="^(add|remove)$")
-    # How long the new key should last, in seconds. Only read for `add`. The contract enforces its
-    # own MAX_SESSION_TTL ceiling on top of this, so an over-long value reverts rather than silently
-    # granting forever.
+    action: str = Field(pattern="^(add|remove|remove_all)$")
+    # The passkey to approve, renew or remove: its key id, 0x and 32 bytes of hex. For `add` it must
+    # be one of the account's own passkeys (db.passkeys), which is where (qx, qy) come from -- never
+    # from the request. Not read for `remove_all`.
+    key_id: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    # How long the approval should last, in seconds. Only read for `add`. Checked against the
+    # wallet's own MAX_SESSION_TTL here, which the contract enforces too.
     ttl_secs: int = Field(default=DEFAULT_SESSION_TTL_SECS, gt=0)
 
 
-    # NOTE: there is deliberately no `session_key` field. The owner cannot nominate an address:
-    # every grant mints a fresh key this app holds, so the wallet and the app can never disagree
-    # about who signs. Nominating an outside address only ever cost the user their assistant --
-    # the owner can already sign UserOps and call execute() directly, so it bought them nothing.
 class TrustedSpenderRequest(BaseModel):
     """Body of POST /api/wallet/trusted-spenders/prepare."""
 
@@ -426,86 +427,102 @@ def prepare_window_duration(req: WindowDurationRequest, user_id: int = Depends(g
 @router.post("/api/wallet/session/prepare")
 def prepare_session_key(req: SessionKeyRequest, user_id: int = Depends(get_current_user)):
     """
-    Builds the unsigned `addSession(key, validUntil)` or `removeSession()` transaction.
+    Builds the unsigned owner transaction that approves one of the account's passkeys on this
+    chain's wallet, renews it, or revokes passkeys: `addSession(qx, qy, validUntil)`,
+    `removeSession(keyId)` or `removeAllSessions()`.
 
-    `remove` is the precise kill switch: it cuts off the agent while leaving the owner's own access
-    untouched, unlike `pause`, which stops validation for everything including the owner's UserOps.
-    Reach for this first if a session key looks compromised.
+    A passkey is a device's: up to MAX_SESSION_KEYS of them can confirm the assistant's
+    transactions on one wallet, each until its own deadline, and each chain's wallet approves them
+    separately. Approving one the wallet already holds is a renewal -- the same key, a new deadline
+    -- so `renews` tells the UI which it will be. The wallet sweeps keys that have run out to make
+    room for a new one, so it is full only while MAX_SESSION_KEYS live, unexpired keys are held.
 
-    `add` mints a BRAND-NEW key and grants it. Never the key already held: a key is revoked exactly
-    when it might be compromised, so handing the same address back would undo the revocation. The
-    new key is kept in `pending_session_keys` and is NOT used for anything until the transaction
-    mines and /api/wallet/session/confirm promotes it — so the assistant keeps working on the old
-    key right up to the moment the wallet switches, and a prepared-but-never-signed grant changes
-    nothing. The wallet authorizes one key at a time, so the grant also evicts whatever it held.
+    `remove` is the precise kill switch for one device: a lost phone stops confirming anything the
+    moment it mines, while the other devices -- and the owner's own access -- carry on. It takes any
+    key the wallet holds, named or not, so the owner can drop one granted outside this app.
+    `remove_all` revokes every one; `pause` stops even the owner's UserOps.
 
-    What a session key IS, unchanged by any of this: a bare signer that can drive any execute() call,
-    bounded by the USD cap, the admin guard, the per-op gas ceiling — and now its own deadline.
+    Nothing about the passkey's private half ever reaches this server: the request names the key by
+    its id, and (qx, qy) come from the account's own registration (db.passkeys).
 
-    @return  {"tx", "session_key", "valid_until", "replaces"} for `add`;
-             {"tx", "revokes"} for `remove`.
+    @return  add: {"tx", "key_id", "valid_until", "renews"}; remove: {"tx", "revokes": key_id};
+             remove_all: {"tx", "revokes": [key_id, ...]}.
+    @raises HTTPException 400 for a key that isn't one of this account's passkeys (add), a ttl past
+            MAX_SESSION_TTL, a full wallet, a key the wallet doesn't hold (remove), a wallet with
+            no keys (remove_all), or a transaction that would fail.
     """
     owner = _require_owner(user_id)
+    key_id = req.key_id.lower() if req.key_id else None
+    # The account's own passkey first: a request naming anybody else's key costs no RPC.
+    if req.action == "add":
+        if key_id is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name the passkey to approve (key_id).")
+        passkey_row = get_passkey(user_id, key_id)
+        if passkey_row is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That isn't one of your passkeys.")
+    elif req.action == "remove" and key_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name the passkey to remove (key_id).")
+
     w3, _ = _resolve_chain(req.chain_id)
     wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
-
-    current = wallet.functions.currentSession().call()
-    current = current if int(current, 16) else None
+    sessions = read_sessions(wallet)
+    held = [s.key_id for s in sessions]
 
     if req.action == "remove":
-        if current is None:
+        if key_id not in held:
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"Your wallet on chain {req.chain_id} has no session key to revoke.",
+                status.HTTP_400_BAD_REQUEST, f"Your wallet on chain {req.chain_id} doesn't approve that passkey."
             )
-        prepared = _prepare_owner_tx(w3, owner, wallet.functions.removeSession(), req.chain_id)
-        return {**prepared, "revokes": current}
+        prepared = _prepare_owner_tx(w3, owner, wallet.functions.removeSession(bytes.fromhex(key_id[2:])), req.chain_id)
+        return {**prepared, "revokes": key_id}
+
+    if req.action == "remove_all":
+        if not held:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Your wallet on chain {req.chain_id} has no passkeys to remove."
+            )
+        prepared = _prepare_owner_tx(w3, owner, wallet.functions.removeAllSessions(), req.chain_id)
+        return {**prepared, "revokes": held}
 
     max_ttl = wallet.functions.MAX_SESSION_TTL().call()
     if req.ttl_secs > max_ttl:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"A session key may last at most {max_ttl} seconds ({max_ttl // 86_400} days); "
+            f"A passkey may be approved for at most {max_ttl} seconds ({max_ttl // 86_400} days); "
             f"{req.ttl_secs} was requested.",
         )
-
-    session_key, _ = create_pending_session_key(user_id, req.chain_id, wallet.address)
-    valid_until = int(time.time()) + req.ttl_secs
-
-    prepared = _prepare_owner_tx(
-        w3, owner, wallet.functions.addSession(session_key, valid_until), req.chain_id
+    now = int(time.time())
+    renews = key_id in held
+    live_others = [s for s in sessions if s.key_id != key_id and s.active(now)]
+    if not renews and len(live_others) >= MAX_SESSION_KEYS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Your wallet on chain {req.chain_id} already approves {MAX_SESSION_KEYS} passkeys. Remove one "
+            "first (Controls → Devices).",
+        )
+    valid_until = now + req.ttl_secs
+    fn = wallet.functions.addSession(
+        bytes.fromhex(passkey_row["qx"][2:]), bytes.fromhex(passkey_row["qy"][2:]), valid_until
     )
-    return {
-        **prepared,
-        "session_key": session_key,
-        "valid_until": valid_until,
-        # What signing this will revoke. Null on a first grant; otherwise the UI should say so,
-        # because one key at a time means granting is also revoking.
-        "replaces": current,
-    }
+    prepared = _prepare_owner_tx(w3, owner, fn, req.chain_id)
+    return {**prepared, "key_id": key_id, "valid_until": valid_until, "renews": renews}
 
 
 @router.post("/api/wallet/session/confirm")
 def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int = Depends(get_current_user)):
     """
-    Waits for a session grant or revocation to mine, then makes wallet.db match the chain.
+    Waits for a passkey approval, renewal or revocation to mine, then reports the wallet's keys.
 
-    Separate from /api/wallet/tx/confirm — which exists for the actions that write NOTHING locally
-    — because this one has rows to move, and moving them before the transaction mines is exactly
-    how the app and the wallet drift apart.
-
-    The chain is the source of truth here, not the request: this reads `currentSession` back and
-    reconciles against it, so a client cannot talk the app into filing a key the wallet never
-    authorized.
-
-      - matches the pending key -> promote it; the assistant now signs with it
-      - zero                    -> the revocation landed; forget the key entirely, ciphertext and all
-      - anything else           -> leave the rows alone and report the drift
+    Separate from /api/wallet/tx/confirm because it answers with the session block the dashboard
+    shows (GET /api/wallet/{chain_id}'s `session`), read back off the chain once it has mined: the
+    chain is the record of which passkeys a wallet approves. Nothing is written locally -- there is
+    no key to file, since the server holds none.
 
     Answers 202 while the transaction is still pending, with `seen` as in /api/wallet/tx/confirm;
     the front end polls until it gets a 200.
 
-    @return  {"status", "tx_hash", "session"} once mined.
+    @return  {"status": "confirmed", "session": {"max_keys", "max_ttl_secs",
+             "renewal_warning_secs", "keys": [...]}} once mined.
     """
     _require_owner(user_id)
     w3, _ = _resolve_chain(req.chain_id)
@@ -523,7 +540,7 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
         return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
 
     # Same guard as /api/wallet/tx/confirm: only a transaction sent TO this user's wallet counts, so
-    # one user cannot report another's hash and drive state through this endpoint.
+    # one user cannot report another's hash and read state back through this endpoint.
     if receipt["to"] is None or w3.to_checksum_address(receipt["to"]) != wallet.address:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -536,35 +553,8 @@ def confirm_session_key(req: TxConfirmRequest, response: Response, user_id: int 
             _failed_tx_detail(w3, req.tx_hash, receipt, "That transaction"),
         )
 
-    on_chain = wallet.functions.currentSession().call()
-    on_chain = on_chain if int(on_chain, 16) else None
-    # Shared with the wallet read, which may have got here first: the outcome is therefore read off
-    # the state left behind, not off which branch ran. A revocation drops the ciphertext as well as
-    # the reference, so a key revoked because it leaked can never be granted again.
-    app_key_row = reconcile_session_key(user_id, req.chain_id, wallet.address, on_chain)
-    app_key = w3.to_checksum_address(app_key_row[0]) if app_key_row else None
-    if on_chain is None:
-        outcome = "revoked"
-    elif app_key == on_chain:
-        outcome = "granted"
-    else:
-        # The wallet authorizes a key this app did not mint -- an owner acting outside the app, or a
-        # grant confirmed against the wrong transaction. Nothing was touched; say so.
-        outcome = "unrecognized_key"
-
     invalidate_cache(user_id)
-    expires_at = wallet.functions.currentSessionValidUntil().call()
-
-    return {
-        "status": outcome,
-        "tx_hash": req.tx_hash,
-        "session": {
-            "key": app_key,
-            "wallet_key": on_chain,
-            "is_app_key": bool(app_key) and app_key == on_chain,
-            "expires_at": expires_at or None,
-        },
-    }
+    return {"status": "confirmed", "session": session_block(user_id, read_sessions(wallet))}
 
 
 @router.post("/api/wallet/trusted-spenders/prepare")

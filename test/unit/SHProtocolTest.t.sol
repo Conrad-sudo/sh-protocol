@@ -17,6 +17,7 @@ import {
     MODULE_TYPE_HOOK
 } from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {ERC7579Utils} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
+import {P256} from "@openzeppelin/contracts/utils/cryptography/P256.sol";
 //Local imports
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
@@ -31,6 +32,7 @@ import {SHRegistry} from "../../src/SHRegistry.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
 import {SHTreasury} from "../../src/SHTreasury.sol";
 import {SpendingLimitModuleHarness} from "./SpendingLimitModuleHarness.sol";
+import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
 
 /**
  * @title SHProtocolTest
@@ -58,6 +60,18 @@ contract SHProtocolTest is Test {
     ///      time still grants a live key.
     function _sessionDeadline() internal view returns (uint48) {
         return uint48(block.timestamp + 30 days);
+    }
+
+    using PasskeyHelper for PasskeyHelper.Passkey;
+
+    /// @dev The owner's n-th device. Named, so the same keys come back on every run.
+    function _device(uint256 n) internal pure returns (PasskeyHelper.Passkey memory) {
+        return PasskeyHelper.create(string.concat("device ", vm.toString(n)));
+    }
+
+    /// @dev "No passkey": what deployWallet reads as an owner-only wallet.
+    function _noKey() internal pure returns (PasskeyHelper.Passkey memory) {
+        return PasskeyHelper.Passkey({privateKey: 0, qx: bytes32(0), qy: bytes32(0)});
     }
 
     ERC20Mock usdc;
@@ -97,7 +111,7 @@ contract SHProtocolTest is Test {
         watched[1] = address(dai);
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0))));
 
         harness = new SpendingLimitModuleHarness(address(feeRegistry));
         spender = new MockSpender();
@@ -173,7 +187,7 @@ contract SHProtocolTest is Test {
 
         address[] memory watched = new address[](0);
         vm.expectRevert(SHFactory.SHFactory_SpendingLimitModuleNotSet.selector);
-        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
+        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     function test_deployWallet_revertsOnUnpricedWatchedToken() public {
@@ -184,7 +198,7 @@ contract SHProtocolTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced))
         );
-        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     /// @dev Every token NetworkConfig names must reach the oracle. DeploySHProtocol lists them by
@@ -203,13 +217,13 @@ contract SHProtocolTest is Test {
 
         // The failure users actually saw: a wallet watching all of them deploys.
         vm.prank(owner);
-        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     function test_deployWallet_revertsOnZeroWindow() public {
         address[] memory watched = new address[](0);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidWindowDuration.selector);
-        factory.deployWallet(DAILY_LIMIT, 0, watched, address(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, 0, watched, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     function test_initialize_cannotRerun() public {
@@ -223,7 +237,8 @@ contract SHProtocolTest is Test {
                 dailyLimitUsd: 1,
                 windowDuration: 1,
                 watchedTokens: watched,
-                sessionKey: address(0),
+                sessionKeyX: bytes32(0),
+                sessionKeyY: bytes32(0),
                 sessionKeyValidUntil: 0,
                 trustedSpenders: new address[](0)
             })
@@ -235,7 +250,7 @@ contract SHProtocolTest is Test {
         vm.deal(kani, 1 ether);
         vm.prank(kani);
         address funded =
-            factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0));
+            factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
         assertEq(funded.balance, 1 ether);
     }
 
@@ -246,43 +261,81 @@ contract SHProtocolTest is Test {
     /// @dev Deploys a wallet as `as_`, seeding whatever the test needs. Empty watched list keeps
     ///      these focused on the seeding, not on metering. The CREATE2 salt comes from the factory's
     ///      per-owner deployCount, so repeated calls with the same `as_` yield distinct wallets.
-    function _deploySeeded(address as_, address sessionKey, address[] memory spenders)
+    function _deploySeeded(address as_, PasskeyHelper.Passkey memory key, address[] memory spenders)
         internal
         returns (SessionHandler)
     {
         vm.prank(as_);
         return SessionHandler(
             payable(
-                factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), sessionKey, _sessionDeadline(), spenders)
+                factory.deployWallet(
+                    DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, _sessionDeadline(), spenders
+                )
             )
         );
     }
 
-    function test_deployWallet_seedsSessionKey() public {
-        address seeded = makeAddr("seededKey");
+    function test_deployWallet_seedsPasskey() public {
+        PasskeyHelper.Passkey memory seeded = _device(0);
         // The address is known before the deploy, so the event can be expected against it.
         address predicted = factory.predictWalletAddress(kani);
 
         uint48 deadline = _sessionDeadline();
 
         vm.expectEmit(true, false, false, true, predicted);
-        emit SessionHandler.SessionAdded(seeded, deadline);
+        emit SessionHandler.SessionAdded(seeded.keyId(), seeded.qx, seeded.qy, deadline);
         SessionHandler w = _deploySeeded(kani, seeded, new address[](0));
 
         assertEq(address(w), predicted, "deployed at a different address than predicted");
-        assertEq(w.currentSession(), seeded, "session key not authorized at deploy");
-        assertEq(w.currentSessionValidUntil(), deadline, "seeded key got the wrong deadline");
-        assertTrue(w.isSessionActive(seeded), "seeded key should be live");
+        assertEq(w.sessionValidUntil(seeded.keyId()), deadline, "seeded key got the wrong deadline");
+        assertTrue(w.isSessionActive(seeded.keyId()), "seeded key should be live");
+        (bytes32[] memory ids, uint48[] memory untils) = w.getSessions();
+        assertEq(ids.length, 1, "exactly the seeded key is listed");
+        assertEq(ids[0], seeded.keyId());
+        assertEq(untils[0], deadline);
         assertEq(w.owner(), kani, "deployer should own the wallet");
     }
 
-    function test_deployWallet_zeroSessionKey_authorizesNone() public {
-        SessionHandler w = _deploySeeded(kani, address(0), new address[](0));
-        // address(0) means "owner-only wallet", NOT an error (unlike addSession). Its deadline is
-        // ignored, so the wallet must come up with no key AND no deadline.
-        assertEq(w.currentSession(), address(0));
-        assertEq(w.currentSessionValidUntil(), 0);
-        assertFalse(w.isSessionActive(address(0)));
+    /// @dev (0, 0) means "owner-only wallet", NOT an error (it would fail the curve check in
+    ///      addSession). The deadline is ignored, so the wallet must come up with no key at all.
+    function test_deployWallet_zeroKey_authorizesNone() public {
+        SessionHandler w = _deploySeeded(kani, _noKey(), new address[](0));
+        (bytes32[] memory ids,) = w.getSessions();
+        assertEq(ids.length, 0, "an owner-only wallet lists no key");
+        assertFalse(w.isSessionActive(w.sessionKeyId(bytes32(0), bytes32(0))));
+        assertEq(w.sessionValidUntil(w.sessionKeyId(bytes32(0), bytes32(0))), 0);
+    }
+
+    /// @dev The seed goes through the same grant as addSession, so a deploy cannot start a wallet on
+    ///      terms the owner could not set afterwards: the whole deploy reverts.
+    function test_deployWallet_seedFollowsTheAddSessionRules() public {
+        PasskeyHelper.Passkey memory key = _device(0);
+
+        // Not a point on the curve.
+        vm.prank(kani);
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, bytes32(uint256(key.qy) ^ 1), _sessionDeadline(), new address[](0));
+
+        // One coordinate zero is NOT the owner-only sentinel: it is judged by the curve and refused.
+        vm.prank(kani);
+        vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), bytes32(0), bytes32(uint256(1)), _sessionDeadline(), new address[](0));
+
+        // A deadline in the past.
+        uint48 past = uint48(block.timestamp);
+        vm.prank(kani);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionExpiryInPast.selector, past));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, past, new address[](0));
+
+        // A deadline beyond the longest life a key may have. (The read is hoisted above the prank: a
+        // call inside expectRevert's arguments would use the prank up.)
+        uint48 maxTtl = wallet.MAX_SESSION_TTL();
+        uint48 tooFar = uint48(block.timestamp) + maxTtl + 1;
+        vm.prank(kani);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionTtlTooLong.selector, tooFar, maxTtl));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, tooFar, new address[](0));
+
+        assertEq(factory.deployCount(kani), 0, "a refused deploy consumed no wallet");
     }
 
     function test_deployWallet_seedsTrustedSpenders() public {
@@ -290,7 +343,7 @@ contract SHProtocolTest is Test {
         spenders[0] = makeAddr("routerA");
         spenders[1] = makeAddr("routerB");
 
-        SessionHandler w = _deploySeeded(kani, address(0), spenders);
+        SessionHandler w = _deploySeeded(kani, _noKey(), spenders);
 
         assertTrue(w.isTrustedSpender(spenders[0]));
         assertTrue(w.isTrustedSpender(spenders[1]));
@@ -302,7 +355,7 @@ contract SHProtocolTest is Test {
         spenders[0] = address(0);
         // The module's own validation propagates out through initialize().
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidTrustedSpender.selector);
-        _deploySeeded(kani, address(0), spenders);
+        _deploySeeded(kani, _noKey(), spenders);
     }
 
     /// @dev The point of seeding a spender: an unpriced token (e.g. an LP token) may be approved to
@@ -313,8 +366,8 @@ contract SHProtocolTest is Test {
 
         address[] memory spenders = new address[](1);
         spenders[0] = venue;
-        SessionHandler trusted = _deploySeeded(kani, address(0), spenders);
-        SessionHandler untrusted = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler trusted = _deploySeeded(kani, _noKey(), spenders);
+        SessionHandler untrusted = _deploySeeded(kani, _noKey(), new address[](0));
 
         // approve then zero in one batch, so the no-standing-approval rule is satisfied either way.
         Execution[] memory execs = new Execution[](2);
@@ -340,7 +393,7 @@ contract SHProtocolTest is Test {
         address predicted = factory.predictWalletAddress(kani);
         assertEq(predicted.code.length, 0, "nothing should exist at the predicted address yet");
 
-        SessionHandler w = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler w = _deploySeeded(kani, _noKey(), new address[](0));
         assertEq(address(w), predicted);
     }
 
@@ -349,13 +402,13 @@ contract SHProtocolTest is Test {
         assertEq(factory.deployCount(kani), 0);
         address first = factory.predictWalletAddress(kani);
 
-        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler a = _deploySeeded(kani, _noKey(), new address[](0));
         assertEq(address(a), first);
         assertEq(factory.deployCount(kani), 1);
 
         address second = factory.predictWalletAddress(kani);
         assertTrue(second != first, "prediction must advance once the counter is consumed");
-        SessionHandler b = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler b = _deploySeeded(kani, _noKey(), new address[](0));
         assertEq(address(b), second);
         assertEq(factory.deployCount(kani), 2);
     }
@@ -364,8 +417,8 @@ contract SHProtocolTest is Test {
     ///      owner may hold several; refusing a second is the CALLER's policy, enforced by reading
     ///      deployCount before asking for a signature, not the factory's.
     function test_deployWallet_secondDeploySameOwner_getsFreshWallet() public {
-        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
-        SessionHandler b = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler a = _deploySeeded(kani, _noKey(), new address[](0));
+        SessionHandler b = _deploySeeded(kani, _noKey(), new address[](0));
         assertTrue(address(a) != address(b));
         assertEq(a.owner(), kani);
         assertEq(b.owner(), kani);
@@ -379,12 +432,12 @@ contract SHProtocolTest is Test {
         assertTrue(predictedKani != predictedRando, "salt must bind the owner");
 
         // rando deploys first — kani's prediction must not move.
-        SessionHandler b = _deploySeeded(rando, address(0), new address[](0));
+        SessionHandler b = _deploySeeded(rando, _noKey(), new address[](0));
         assertEq(address(b), predictedRando);
         assertEq(factory.predictWalletAddress(kani), predictedKani, "another owner's deploy moved kani's address");
         assertEq(factory.deployCount(kani), 0, "another owner's deploy advanced kani's counter");
 
-        SessionHandler a = _deploySeeded(kani, address(0), new address[](0));
+        SessionHandler a = _deploySeeded(kani, _noKey(), new address[](0));
         assertEq(address(a), predictedKani);
     }
 
@@ -595,38 +648,79 @@ contract SHProtocolTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                      SESSION-KEY AUTH (account-level)
+               SESSION KEYS: THE PASSKEY LIST (account-level)
     //////////////////////////////////////////////////////////////*/
 
-    function test_addSession_zeroAddressReverts() public {
-        vm.prank(owner);
-        vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
-        wallet.addSession(address(0), _sessionDeadline());
+    /// @dev Authorizes devices 0..n-1 as the owner, each until the default deadline.
+    function _addDevices(uint256 n) internal {
+        for (uint256 i = 0; i < n; i++) {
+            PasskeyHelper.Passkey memory key = _device(i);
+            vm.prank(owner);
+            wallet.addSession(key.qx, key.qy, _sessionDeadline());
+        }
     }
 
-    /// @dev The owner can already sign UserOps unconditionally, so granting it a session key would
-    ///      authorize nothing new while evicting the key the wallet actually runs on.
-    function test_addSession_ownerAddressReverts() public {
-        vm.prank(owner);
-        vm.expectRevert(SessionHandler.SessionHandler_SessionKeyIsOwner.selector);
-        wallet.addSession(owner, _sessionDeadline());
+    function _listedIds() internal view returns (bytes32[] memory ids) {
+        (ids,) = wallet.getSessions();
+    }
+
+    function _contains(bytes32[] memory ids, bytes32 id) internal pure returns (bool) {
+        for (uint256 i = 0; i < ids.length; i++) {
+            if (ids[i] == id) return true;
+        }
+        return false;
+    }
+
+    /// @dev The key ids named by the recorded logs of one of the wallet's events (topic 1).
+    function _idsLogged(Vm.Log[] memory logs, bytes32 eventSelector) internal view returns (bytes32[] memory out) {
+        uint256 n;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(wallet) && logs[i].topics[0] == eventSelector) n++;
+        }
+        out = new bytes32[](n);
+        n = 0;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(wallet) && logs[i].topics[0] == eventSelector) out[n++] = logs[i].topics[1];
+        }
+    }
+
+    // ---- what addSession refuses ----------------------------------------------------------------
+
+    /// @dev Not a point on the P-256 curve means no private key exists for it: the grant would
+    ///      authorize nobody and use up a slot. (0, 0) is one such pair; it is only deployWallet's way
+    ///      of saying "no key".
+    function test_addSession_offCurveKeyReverts() public {
+        PasskeyHelper.Passkey memory real = _device(0);
+        bytes32[4] memory xs = [bytes32(0), bytes32(uint256(1)), real.qx, bytes32(P256.P)];
+        bytes32[4] memory ys = [bytes32(0), bytes32(uint256(1)), bytes32(uint256(real.qy) ^ 1), real.qy];
+
+        for (uint256 i = 0; i < xs.length; i++) {
+            uint48 deadline = _sessionDeadline();
+            vm.prank(owner);
+            vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
+            wallet.addSession(xs[i], ys[i], deadline);
+        }
+        assertEq(_listedIds().length, 0, "a refused key was listed");
     }
 
     function test_addSession_pastDeadlineReverts() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         uint48 past = uint48(block.timestamp);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionExpiryInPast.selector, past));
-        wallet.addSession(kani, past);
+        wallet.addSession(key.qx, key.qy, past);
     }
 
     /// @dev Zero is the dangerous one: the EntryPoint reads a zero validUntil as "valid forever".
     function test_addSession_zeroDeadlineReverts() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionExpiryInPast.selector, uint48(0)));
-        wallet.addSession(kani, 0);
+        wallet.addSession(key.qx, key.qy, 0);
     }
 
     function test_addSession_beyondMaxTtlReverts() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         // Both reads happen BEFORE the prank: vm.prank applies to the next call only, and a view
         // call in the expectRevert argument would eat it.
         uint48 maxTtl = wallet.MAX_SESSION_TTL();
@@ -635,123 +729,409 @@ contract SHProtocolTest is Test {
             abi.encodeWithSelector(SessionHandler.SessionHandler_SessionTtlTooLong.selector, tooFar, maxTtl)
         );
         vm.prank(owner);
-        wallet.addSession(kani, tooFar);
+        wallet.addSession(key.qx, key.qy, tooFar);
     }
 
     function test_addSession_exactlyMaxTtlAllowed() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         uint48 edge = uint48(block.timestamp) + wallet.MAX_SESSION_TTL();
         vm.prank(owner);
-        wallet.addSession(kani, edge);
-        assertEq(wallet.currentSessionValidUntil(), edge);
+        wallet.addSession(key.qx, key.qy, edge);
+        assertEq(wallet.sessionValidUntil(key.keyId()), edge);
     }
+
+    function test_maxSessionKeys_isFive() public view {
+        assertEq(wallet.MAX_SESSION_KEYS(), 5);
+    }
+
+    // ---- add, list, remove ----------------------------------------------------------------------
 
     function test_addRemoveSession_lifecycleAndEvents() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         uint48 deadline = _sessionDeadline();
 
         vm.expectEmit(true, false, false, true, address(wallet));
-        emit SessionHandler.SessionAdded(kani, deadline);
+        emit SessionHandler.SessionAdded(key.keyId(), key.qx, key.qy, deadline);
         vm.prank(owner);
-        wallet.addSession(kani, deadline);
-        assertEq(wallet.currentSession(), kani);
-        assertEq(wallet.currentSessionValidUntil(), deadline);
-        assertTrue(wallet.isSessionActive(kani));
+        wallet.addSession(key.qx, key.qy, deadline);
+        assertEq(wallet.sessionValidUntil(key.keyId()), deadline);
+        assertTrue(wallet.isSessionActive(key.keyId()));
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        assertEq(ids.length, 1);
+        assertEq(ids[0], key.keyId());
+        assertEq(untils[0], deadline);
 
         vm.expectEmit(true, false, false, false, address(wallet));
-        emit SessionHandler.SessionRemoved(kani);
+        emit SessionHandler.SessionRemoved(key.keyId());
         vm.prank(owner);
-        wallet.removeSession();
-        assertEq(wallet.currentSession(), address(0));
-        assertEq(wallet.currentSessionValidUntil(), 0);
-        assertFalse(wallet.isSessionActive(kani));
+        wallet.removeSession(key.keyId());
+        assertEq(wallet.sessionValidUntil(key.keyId()), 0, "the deadline must go with the key");
+        assertFalse(wallet.isSessionActive(key.keyId()));
+        assertEq(_listedIds().length, 0);
     }
 
-    /// @dev One key at a time: granting another evicts the first in the same transaction.
-    function test_addSession_evictsThePreviousKey() public {
-        uint48 deadline = _sessionDeadline();
-        vm.prank(owner);
-        wallet.addSession(kani, deadline);
-
-        address replacement = makeAddr("replacementKey");
-        vm.expectEmit(true, false, false, false, address(wallet));
-        emit SessionHandler.SessionRemoved(kani);
-        vm.expectEmit(true, false, false, true, address(wallet));
-        emit SessionHandler.SessionAdded(replacement, deadline);
-        vm.prank(owner);
-        wallet.addSession(replacement, deadline);
-
-        assertEq(wallet.currentSession(), replacement);
-        assertFalse(wallet.isSessionActive(kani), "evicted key still active");
-    }
-
-    /// @dev Renewing the SAME key extends it; emitting SessionRemoved here would tell anything
-    ///      watching events that the wallet had lost its key.
-    function test_addSession_renewalDoesNotEmitRemoved() public {
-        vm.prank(owner);
-        wallet.addSession(kani, uint48(block.timestamp + 1 days));
-
-        uint48 extended = uint48(block.timestamp + 10 days);
-        vm.recordLogs();
-        vm.prank(owner);
-        wallet.addSession(kani, extended);
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i = 0; i < logs.length; i++) {
-            assertTrue(
-                logs[i].topics[0] != SessionHandler.SessionRemoved.selector, "renewal emitted SessionRemoved"
-            );
+    /// @dev The user chose up to five keys, one per device. All five are listed, each with its own deadline.
+    function test_sessionKeys_fiveAtOnceEachWithItsOwnDeadline() public {
+        for (uint256 i = 0; i < 5; i++) {
+            PasskeyHelper.Passkey memory key = _device(i);
+            vm.prank(owner);
+            wallet.addSession(key.qx, key.qy, uint48(block.timestamp + (i + 1) * 1 days));
         }
-        assertEq(wallet.currentSessionValidUntil(), extended);
+
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        assertEq(ids.length, 5);
+        for (uint256 i = 0; i < 5; i++) {
+            PasskeyHelper.Passkey memory key = _device(i);
+            assertTrue(_contains(ids, key.keyId()), "a granted key is not listed");
+            assertEq(wallet.sessionValidUntil(key.keyId()), uint48(block.timestamp + (i + 1) * 1 days));
+            assertTrue(wallet.isSessionActive(key.keyId()));
+        }
+        assertEq(untils.length, 5);
     }
 
-    function test_removeSession_noKeyIsANoOp() public {
+    /// @dev THE CAP. A sixth key while five are live is refused, with the cap in the error, and
+    ///      nothing changes.
+    function test_sixthKey_isRefusedWhileFiveAreLive() public {
+        _addDevices(5);
+        bytes32[] memory before_ = _listedIds();
+
+        PasskeyHelper.Passkey memory sixth = _device(5);
+        uint48 deadline = _sessionDeadline();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_TooManySessionKeys.selector, uint256(5)));
+        wallet.addSession(sixth.qx, sixth.qy, deadline);
+
+        bytes32[] memory after_ = _listedIds();
+        assertEq(after_.length, 5);
+        for (uint256 i = 0; i < 5; i++) {
+            assertEq(after_[i], before_[i], "the refused add changed the list");
+        }
+        assertEq(wallet.sessionValidUntil(sixth.keyId()), 0);
+    }
+
+    /// @dev Revoking one device frees its slot for the next one.
+    function test_removingAKey_freesItsSlot() public {
+        _addDevices(5);
+        vm.prank(owner);
+        wallet.removeSession(_device(2).keyId());
+
+        PasskeyHelper.Passkey memory sixth = _device(5);
+        vm.prank(owner);
+        wallet.addSession(sixth.qx, sixth.qy, _sessionDeadline());
+
+        bytes32[] memory ids = _listedIds();
+        assertEq(ids.length, 5);
+        assertTrue(_contains(ids, sixth.keyId()));
+        assertFalse(_contains(ids, _device(2).keyId()));
+    }
+
+    /// @dev Renewing a key the wallet already holds uses NO slot: at the cap, any of the five can
+    ///      still be extended (or shortened), and only {SessionAdded} is emitted.
+    function test_renewal_usesNoSlotAndEmitsOnlyAdded() public {
+        _addDevices(5);
+        PasskeyHelper.Passkey memory key = _device(3);
+        uint48 later = uint48(block.timestamp + 80 days);
+
         vm.recordLogs();
         vm.prank(owner);
-        wallet.removeSession();
+        wallet.addSession(key.qx, key.qy, later);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(_idsLogged(logs, SessionHandler.SessionRemoved.selector).length, 0, "renewal emitted SessionRemoved");
+        bytes32[] memory added = _idsLogged(logs, SessionHandler.SessionAdded.selector);
+        assertEq(added.length, 1);
+        assertEq(added[0], key.keyId());
+        assertEq(wallet.sessionValidUntil(key.keyId()), later);
+        assertEq(_listedIds().length, 5, "renewal changed the number of keys");
+
+        // Shortening is a renewal too.
+        uint48 sooner = uint48(block.timestamp + 1 days);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, sooner);
+        assertEq(wallet.sessionValidUntil(key.keyId()), sooner);
+        assertEq(_listedIds().length, 5);
+    }
+
+    /// @dev A key that ran out but is still listed comes straight back when renewed.
+    function test_renewal_revivesAnExpiredKey() public {
+        PasskeyHelper.Passkey memory key = _device(0);
+        uint48 short_ = uint48(block.timestamp + 1 days);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, short_);
+
+        vm.warp(uint256(short_) + 1);
+        assertFalse(wallet.isSessionActive(key.keyId()));
+        assertEq(_listedIds().length, 1, "an expired key stays listed until its slot is needed");
+
+        uint48 renewed = uint48(block.timestamp + 30 days);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, renewed);
+        assertTrue(wallet.isSessionActive(key.keyId()));
+        assertEq(_listedIds().length, 1);
+    }
+
+    /// @dev THE SWEEP. A sixth key when five are held first removes every EXPIRED key, emitting
+    ///      {SessionRemoved} for each, then takes a freed slot.
+    function test_sixthKey_sweepsExpiredKeys_emittingRemovedForEach() public {
+        uint48 long_ = _sessionDeadline();
+        uint48 shortA = uint48(block.timestamp + 1 days); // device 1
+        uint48 shortB = uint48(block.timestamp + 2 days); // device 3
+        uint48[5] memory deadlines = [long_, shortA, long_, shortB, long_];
+        for (uint256 i = 0; i < 5; i++) {
+            PasskeyHelper.Passkey memory key = _device(i);
+            vm.prank(owner);
+            wallet.addSession(key.qx, key.qy, deadlines[i]);
+        }
+        vm.warp(uint256(shortB) + 1); // devices 1 and 3 are over; 0, 2, 4 are not
+
+        PasskeyHelper.Passkey memory sixth = _device(5);
+        uint48 sixthUntil = uint48(block.timestamp + 10 days);
+        vm.recordLogs();
+        vm.prank(owner);
+        wallet.addSession(sixth.qx, sixth.qy, sixthUntil);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32[] memory removed = _idsLogged(logs, SessionHandler.SessionRemoved.selector);
+        assertEq(removed.length, 2, "one SessionRemoved per expired key");
+        assertTrue(_contains(removed, _device(1).keyId()) && _contains(removed, _device(3).keyId()));
+        bytes32[] memory added = _idsLogged(logs, SessionHandler.SessionAdded.selector);
+        assertEq(added.length, 1);
+        assertEq(added[0], sixth.keyId());
+
+        bytes32[] memory ids = _listedIds();
+        assertEq(ids.length, 4, "three live keys plus the new one");
+        assertTrue(_contains(ids, _device(0).keyId()) && _contains(ids, _device(2).keyId()));
+        assertTrue(_contains(ids, _device(4).keyId()) && _contains(ids, sixth.keyId()));
+        assertEq(wallet.sessionValidUntil(_device(1).keyId()), 0, "a swept key keeps no deadline");
+        assertEq(wallet.sessionValidUntil(_device(3).keyId()), 0);
+        assertEq(wallet.sessionValidUntil(sixth.keyId()), sixthUntil);
+    }
+
+    /// @dev Expired means `block.timestamp > validUntil`, the EntryPoint's own rule: a key in its
+    ///      deadline SECOND still works, so it is not swept and the sixth key is still refused. One
+    ///      second later it is swept.
+    function test_sweep_leavesAKeyInItsDeadlineSecond() public {
+        PasskeyHelper.Passkey memory first = _device(0);
+        uint48 edge = uint48(block.timestamp + 1 days);
+        vm.prank(owner);
+        wallet.addSession(first.qx, first.qy, edge);
+        for (uint256 i = 1; i < 5; i++) {
+            PasskeyHelper.Passkey memory key = _device(i);
+            vm.prank(owner);
+            wallet.addSession(key.qx, key.qy, _sessionDeadline());
+        }
+        PasskeyHelper.Passkey memory sixth = _device(5);
+
+        vm.warp(edge);
+        assertTrue(wallet.isSessionActive(first.keyId()));
+        uint48 deadline = _sessionDeadline();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_TooManySessionKeys.selector, uint256(5)));
+        wallet.addSession(sixth.qx, sixth.qy, deadline);
+
+        vm.warp(uint256(edge) + 1);
+        vm.recordLogs();
+        vm.prank(owner);
+        wallet.addSession(sixth.qx, sixth.qy, uint48(block.timestamp + 5 days));
+        bytes32[] memory removed = _idsLogged(vm.getRecordedLogs(), SessionHandler.SessionRemoved.selector);
+        assertEq(removed.length, 1);
+        assertEq(removed[0], first.keyId());
+    }
+
+    /// @dev With room to spare nothing is swept: an expired key stays until its slot is wanted, and
+    ///      is reported with its past deadline so a UI can show "expired".
+    function test_expiredKey_staysListedWhileThereIsRoom() public {
+        PasskeyHelper.Passkey memory key = _device(0);
+        uint48 short_ = uint48(block.timestamp + 1 days);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, short_);
+        PasskeyHelper.Passkey memory other = _device(1);
+        vm.warp(uint256(short_) + 5);
+
+        vm.recordLogs();
+        vm.prank(owner);
+        wallet.addSession(other.qx, other.qy, uint48(block.timestamp + 5 days));
+        assertEq(_idsLogged(vm.getRecordedLogs(), SessionHandler.SessionRemoved.selector).length, 0);
+
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        assertEq(ids.length, 2);
+        for (uint256 i = 0; i < 2; i++) {
+            if (ids[i] == key.keyId()) assertEq(untils[i], short_, "reported with its past deadline");
+        }
+        assertFalse(wallet.isSessionActive(key.keyId()));
+    }
+
+    // ---- removing -------------------------------------------------------------------------------
+
+    /// @dev A typo or a stale id must not read as a successful revoke.
+    function test_removeSession_unknownKeyReverts() public {
+        _addDevices(2);
+        bytes32 stranger = _device(7).keyId();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_UnknownSessionKey.selector, stranger));
+        wallet.removeSession(stranger);
+
+        // Already removed is unknown too.
+        bytes32 gone = _device(0).keyId();
+        vm.prank(owner);
+        wallet.removeSession(gone);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_UnknownSessionKey.selector, gone));
+        wallet.removeSession(gone);
+
+        // And so is a wallet that never held any key.
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_UnknownSessionKey.selector, bytes32(0)));
+        wallet.removeSession(bytes32(0));
+    }
+
+    /// @dev Removing from the MIDDLE of the list moves the last entry into the gap; the others, the
+    ///      last one included, are untouched.
+    function test_removeSession_fromTheMiddleKeepsTheOthers() public {
+        _addDevices(5);
+        vm.prank(owner);
+        wallet.removeSession(_device(1).keyId());
+
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        assertEq(ids.length, 4);
+        assertFalse(_contains(ids, _device(1).keyId()));
+        for (uint256 i = 0; i < ids.length; i++) {
+            assertEq(untils[i], _sessionDeadline(), "a survivor lost or changed its deadline");
+            assertEq(untils[i], wallet.sessionValidUntil(ids[i]));
+        }
+        for (uint256 n = 0; n < 5; n++) {
+            if (n == 1) continue;
+            assertTrue(_contains(ids, _device(n).keyId()), "a survivor went missing");
+        }
+    }
+
+    /// @dev An expired key is removable like any other; it is the owner's way to tidy the list.
+    function test_removeSession_worksOnAnExpiredKey() public {
+        PasskeyHelper.Passkey memory key = _device(0);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, uint48(block.timestamp + 1 days));
+        vm.warp(block.timestamp + 2 days);
+
+        vm.prank(owner);
+        wallet.removeSession(key.keyId());
+        assertEq(_listedIds().length, 0);
+    }
+
+    function test_removeAllSessions_clearsEveryKeyAndEmitsForEach() public {
+        _addDevices(5);
+
+        vm.recordLogs();
+        vm.prank(owner);
+        wallet.removeAllSessions();
+        bytes32[] memory removed = _idsLogged(vm.getRecordedLogs(), SessionHandler.SessionRemoved.selector);
+
+        assertEq(removed.length, 5);
+        assertEq(_listedIds().length, 0);
+        for (uint256 i = 0; i < 5; i++) {
+            assertTrue(_contains(removed, _device(i).keyId()));
+            assertEq(wallet.sessionValidUntil(_device(i).keyId()), 0);
+            assertFalse(wallet.isSessionActive(_device(i).keyId()));
+        }
+
+        // The wallet is empty again: five new keys fit.
+        _addDevices(5);
+        assertEq(_listedIds().length, 5);
+    }
+
+    function test_removeAllSessions_onAnEmptyListIsANoOp() public {
+        vm.recordLogs();
+        vm.prank(owner);
+        wallet.removeAllSessions();
         assertEq(vm.getRecordedLogs().length, 0, "no-op revoke emitted an event");
-        assertEq(wallet.currentSession(), address(0));
+        assertEq(_listedIds().length, 0);
     }
 
-    /// @dev The key and its deadline are written together, so a live key can never carry a zero
-    ///      deadline -- which the EntryPoint would read as "valid forever".
-    function test_sessionKeyAndDeadlineAreAlwaysSetTogether() public {
-        assertEq(wallet.currentSession() == address(0), wallet.currentSessionValidUntil() == 0);
+    // ---- who may change the list ----------------------------------------------------------------
 
-        vm.prank(owner);
-        wallet.addSession(kani, _sessionDeadline());
-        assertEq(wallet.currentSession() == address(0), wallet.currentSessionValidUntil() == 0);
+    /// @dev Only the owner, by a direct call: not a stranger, not the EntryPoint, not the wallet itself.
+    function test_sessionManagement_nonOwnerReverts() public {
+        _addDevices(1);
+        PasskeyHelper.Passkey memory key = _device(0);
+        PasskeyHelper.Passkey memory other = _device(1);
+        bytes32 keyId = key.keyId();
+        address[3] memory callers = [rando, config.entryPoint, address(wallet)];
 
-        vm.prank(owner);
-        wallet.removeSession();
-        assertEq(wallet.currentSession() == address(0), wallet.currentSessionValidUntil() == 0);
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.startPrank(callers[i]);
+            vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, callers[i]));
+            wallet.addSession(other.qx, other.qy, _sessionDeadline());
+            vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, callers[i]));
+            wallet.removeSession(keyId);
+            vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, callers[i]));
+            wallet.removeAllSessions();
+            vm.stopPrank();
+        }
+        assertEq(_listedIds().length, 1, "a non-owner changed the list");
+        assertTrue(wallet.isSessionActive(keyId));
     }
+
+    // ---- reads ----------------------------------------------------------------------------------
 
     /// @dev isSessionActive mirrors the EntryPoint's comparison: still valid in the second that
     ///      equals the deadline, dead in the next one.
     function test_isSessionActive_boundaryMatchesEntryPoint() public {
+        PasskeyHelper.Passkey memory key = _device(0);
         uint48 deadline = uint48(block.timestamp + 1 days);
         vm.prank(owner);
-        wallet.addSession(kani, deadline);
+        wallet.addSession(key.qx, key.qy, deadline);
 
         vm.warp(deadline);
-        assertTrue(wallet.isSessionActive(kani), "should still be live at the deadline second");
+        assertTrue(wallet.isSessionActive(key.keyId()), "should still be live at the deadline second");
         vm.warp(uint256(deadline) + 1);
-        assertFalse(wallet.isSessionActive(kani), "should be dead one second later");
+        assertFalse(wallet.isSessionActive(key.keyId()), "should be dead one second later");
     }
 
     function test_isSessionActive_falseForAStrangerAndForZero() public {
-        vm.prank(owner);
-        wallet.addSession(kani, _sessionDeadline());
-        assertFalse(wallet.isSessionActive(rando));
-        assertFalse(wallet.isSessionActive(address(0)));
+        _addDevices(1);
+        assertFalse(wallet.isSessionActive(_device(1).keyId()));
+        assertFalse(wallet.isSessionActive(bytes32(0)));
     }
 
-    function test_sessionManagement_nonOwnerReverts() public {
-        vm.startPrank(rando);
-        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, rando));
-        wallet.addSession(kani, _sessionDeadline());
-        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, rando));
-        wallet.removeSession();
-        vm.stopPrank();
+    /// @dev A key is listed iff its deadline is non-zero. A listed key with no deadline would be
+    ///      read by the EntryPoint as "valid forever"; a deadline for an unlisted key would be a
+    ///      grant nobody could revoke by id from the list.
+    function test_listAndDeadlinesAreAlwaysSetTogether() public {
+        _addDevices(3);
+        vm.prank(owner);
+        wallet.removeSession(_device(1).keyId());
+
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        for (uint256 i = 0; i < ids.length; i++) {
+            assertGt(untils[i], 0, "a listed key carries no deadline");
+        }
+        for (uint256 n = 0; n < 3; n++) {
+            bytes32 id = _device(n).keyId();
+            assertEq(_contains(ids, id), wallet.sessionValidUntil(id) != 0, "list and deadline disagree");
+        }
+    }
+
+    /// @dev The id is the hash of the key's coordinates, so the app, the contract and an indexer all
+    ///      compute the same one.
+    function test_sessionKeyId_isTheHashOfThePublicKey() public view {
+        PasskeyHelper.Passkey memory key = _device(0);
+        assertEq(wallet.sessionKeyId(key.qx, key.qy), keccak256(abi.encode(key.qx, key.qy)));
+        assertEq(wallet.sessionKeyId(key.qx, key.qy), key.keyId());
+        assertTrue(wallet.sessionKeyId(key.qx, key.qy) != wallet.sessionKeyId(key.qy, key.qx), "order matters");
+    }
+
+    /// @dev A key removed and granted again is a fresh grant.
+    function test_removedKey_canBeGrantedAgain() public {
+        PasskeyHelper.Passkey memory key = _device(0);
+        _addDevices(1);
+        vm.prank(owner);
+        wallet.removeSession(key.keyId());
+        assertFalse(wallet.isSessionActive(key.keyId()));
+
+        uint48 deadline = uint48(block.timestamp + 3 days);
+        vm.prank(owner);
+        wallet.addSession(key.qx, key.qy, deadline);
+        assertTrue(wallet.isSessionActive(key.keyId()));
+        assertEq(wallet.sessionValidUntil(key.keyId()), deadline);
     }
 
     /*//////////////////////////////////////////////////////////////

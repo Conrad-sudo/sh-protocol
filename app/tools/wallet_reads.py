@@ -34,11 +34,11 @@ from parallel import read_all
 from toolkits import get_erc20_tools
 from tools.common import (
     _addresses_to_tickers,
-    _get_session_keys,
     _resolve_contact,
     _token_address,
     _unlisted_label,
 )
+from userop import read_sessions
 
 """
  /*//////////////////////////////////////////////////////////////
@@ -79,14 +79,15 @@ def get_supported_tokens(runtime: ToolRuntime[AgentContext]) -> dict:
 @tool
 def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
     """
-    Reports the wallet's spending limit, the assistant's session key, and whether the wallet is
-    paused.
+    Reports the wallet's spending limit, the user's passkeys approved on it, and whether the wallet
+    is paused.
 
-    The wallet has ONE session key for every action and ONE USD spending limit per window, shared
-    by every token (there are no per-token limits). The key runs out at a set time -- 30 days after
-    it was granted by default, 90 at most -- and only the owner can renew it, in the web app
-    (Controls → Renew). Use this when the user asks about their limit, what they have spent or
-    have left, their session key, or whether the wallet is paused.
+    The wallet has ONE USD spending limit per window, shared by every token (there are no per-token
+    limits). The user confirms every transaction with a passkey on one of their devices (Face ID,
+    fingerprint or PIN); up to five devices can be approved on a wallet, each until a set time --
+    30 days after it was approved by default, 90 at most -- and only the owner can approve or renew
+    one, in the web app (Controls → Devices). Use this when the user asks about their limit, what
+    they have spent or have left, their devices or passkeys, or whether the wallet is paused.
 
     Args:
 
@@ -94,9 +95,11 @@ def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
         A dict with:
           - paused (bool): whether the owner has paused the wallet. A paused wallet rejects every
             transaction until the owner unpauses it in the web app.
-          - session_active (bool): whether the session key can sign right now. False once it has
-            run out or been revoked.
-          - session_expires_at (int): when the key runs out, in Unix seconds.
+          - session_active (bool): whether at least one of the user's passkeys is approved on the
+            wallet right now, so a transaction can be confirmed. False once every approval has run
+            out or been removed.
+          - passkeys (int): how many passkeys are approved on the wallet right now.
+          - session_expires_at (int): when the last approval runs out, in Unix seconds; 0 if none.
           - session_expires_in_secs (int): how long that is from now; 0 once it has run out.
           - daily_limit_usd (float): the spending limit per window, in USD.
           - spent_usd (float): what has counted toward it in the current window, in USD.
@@ -114,7 +117,7 @@ def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
 
 def _get_wallet_status(user_id: int) -> dict:
     """
-    Returns the wallet's spending-limit, session-key and pause status.
+    Returns the wallet's spending-limit, passkey and pause status.
 
     The plain-function half of get_wallet_status. Also used by telebot's wallet checks, which run
     on a timer with no agent and therefore no ToolRuntime.
@@ -124,24 +127,28 @@ def _get_wallet_status(user_id: int) -> dict:
     """
     print("Running get_wallet_status")
     session_handler = load_session_handler(user_id)
-    session_key, _ = _get_session_keys(user_id)
     wallet = session_handler.functions
     reads = read_all({
         # By field name, never position: see contracts.read_spending_config.
         "config": lambda: read_spending_config(session_handler),
         "remaining": wallet.getRemainingBudget().call,
         "paused": wallet.paused().call,
-        "active": wallet.isSessionActive(session_key).call,
-        "expires_at": wallet.currentSessionValidUntil().call,
+        "sessions": lambda: read_sessions(session_handler),
         "allowlist": wallet.sessionAllowlistEnabled().call,
     })
     cfg = reads["config"]
+    now = int(time.time())
+    # Any approved passkey can confirm a transaction, so the wallet takes one until the last of them
+    # runs out.
+    active = [session for session in reads["sessions"] if session.active(now)]
+    expires_at = max((session.valid_until for session in active), default=0)
 
     return {
         "paused": reads["paused"],
-        "session_active": reads["active"],
-        "session_expires_at": reads["expires_at"],
-        "session_expires_in_secs": max(reads["expires_at"] - int(time.time()), 0),
+        "session_active": bool(active),
+        "passkeys": len(active),
+        "session_expires_at": expires_at,
+        "session_expires_in_secs": max(expires_at - now, 0),
         "daily_limit_usd": cfg["dailyLimitUsd"] / WEI_PER_ETH,
         "spent_usd": cfg["spentInWindow"] / WEI_PER_ETH,
         # Below zero when the owner lowered the limit under what was already spent: nothing is left.

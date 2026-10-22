@@ -402,8 +402,7 @@ abstract contract SHUniswapV3ForkTestBase is SHForkTestBase {
     ///      Here the reason is re-thrown as it came (a custom error or a string), so the test fails
     ///      on what really went wrong.
     function _runSessionBatch(Execution[] memory execs) internal {
-        (PackedUserOperation memory userOp,,) =
-            sendPackedUserOp.generateSignedBatchUserOp(address(wallet), config, execs, sessionKey, sessionKeyPk);
+        PackedUserOperation memory userOp = _sessionBatchOp(execs);
 
         vm.recordLogs();
         _handleOps(userOp);

@@ -20,7 +20,6 @@ _session_handler_cache: dict[tuple[int, int], Contract] = {}
 _entry_point_cache: dict[tuple[int, int], Contract] = {}
 _erc20_cache: dict[tuple[int, int, str], Contract] = {}
 _sh_factory_cache: dict[tuple[int, int], Contract] = {}
-_spending_limit_module_cache: dict[tuple[int, int], Contract] = {}
 _registry_cache: dict[tuple[int, int], Contract] = {}
 
 # ERC-7579 single-call, default-execution-type mode (CALLTYPE_SINGLE = 0x00 in the top byte).
@@ -50,7 +49,6 @@ def invalidate_cache(user_id: int) -> None:
         _session_handler_cache,
         _entry_point_cache,
         _sh_factory_cache,
-        _spending_limit_module_cache,
         _registry_cache,
         _erc20_cache,
     ):
@@ -94,36 +92,13 @@ def read_spending_config(wallet: Contract) -> dict:
     return dict(zip(names, fn().call()))
 
 
-def load_spending_limit_module(user_id: int) -> Contract:
-    """
-    Loads the SpendingLimitModule contract ABI, bound to the address the wallet reports
-    via its public SH_MODULE getter.
-
-    The module is the ERC-7579 HOOK that enforces the wallet's global USD spending cap
-    (net-value metering + no-standing-approvals). It is NOT a validator and holds no session-key
-    state — the session key lives on the SessionHandler account itself
-    (currentSession/addSession), and SessionAdded/SessionRemoved are emitted there. This loader
-    is used mainly to read the module's cap config/events.
-
-    @param user_id  The application user ID.
-    @return         A web3.py Contract instance pointing to the installed SpendingLimitModule.
-    """
-    w3, chain_id, _ = load_network_config(user_id)
-    key = (user_id, chain_id)
-    if key not in _spending_limit_module_cache:
-        abi = get_json("./out/SpendingLimitModule.sol/SpendingLimitModule.json")["abi"]
-        address = load_session_handler(user_id).functions.SH_MODULE().call()
-        _spending_limit_module_cache[key] = w3.eth.contract(address=address, abi=abi)
-    return _spending_limit_module_cache[key]
-
-
 def load_registry(user_id: int) -> Contract:
     """
     Loads SHRegistry, bound to the address the wallet reports via its public REGISTRY getter.
 
     The registry is where the protocol fee and the treasury live. The wallet reads them per call
     rather than storing them, so this is the only way to learn what one execution will cost before
-    running it -- see SessionHandler._extractFee.
+    running it -- see SessionHandler._applyFee.
 
     @param user_id  The application user ID.
     @return         A web3.py Contract instance pointing to the SHRegistry the wallet uses.
@@ -169,24 +144,6 @@ def pack_execution_calldata(target: str, value: int, data: bytes) -> bytes:
     @return        The packed executionCalldata bytes.
     """
     return bytes.fromhex(target[2:]) + value.to_bytes(32, "big") + data
-
-
-def session_key_nonce_key(module_address: str) -> int:
-    """
-    Builds the ERC-4337 nonce key used for session-key UserOps.
-
-    SessionHandler (via OZ's AccountERC7579) reads the top 20 bytes of the nonce's 192-bit key
-    as a validator-module address. SpendingLimitModule is now a HOOK only — it is never
-    installed as a validator — and SessionHandler authenticates ops in its own _validateUserOp
-    without consulting the nonce key at all (owner OR currentSession, the latter carrying the
-    key's deadline as the op's validity window). Keeping the module-derived key preserves nonce
-    continuity for wallets that already submitted ops under it; any key value (including 0)
-    validates identically.
-
-    @param module_address  Checksummed hex address of the installed SpendingLimitModule.
-    @return                The nonce key to pass as EntryPoint.getNonce's second argument.
-    """
-    return int(module_address, 16) << 32
 
 
 def encode_batch_execution_calldata(executions: list[tuple[str, int, bytes]]) -> bytes:

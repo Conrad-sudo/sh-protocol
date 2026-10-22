@@ -16,11 +16,22 @@ CHAIN_ID_ARBITRUM = 42161
 CHAIN_ID_BASE = 8453
 WEI_PER_ETH = 10**18
 
-# How long before the assistant's session key runs out the user starts hearing about it: the
+# How long before a passkey's approval on a wallet runs out the user starts hearing about it: the
 # dashboard flags it for renewal, the Telegram bot warns, a quote mentions it. A fixed lead time
-# rather than a fraction of the key's life: what the user needs is time to sign a renewal in the web
-# app, and that doesn't scale with how long the key was granted for.
+# rather than a fraction of the approval's life: what the user needs is time to sign a renewal in the
+# web app, and that doesn't scale with how long it was granted for.
 SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
+# SessionHandler's MAX_SESSION_KEYS and MAX_SESSION_TTL, mirrored for what the dashboard reports
+# without reading them: both are compile-time constants of the contract. The session prepare route
+# reads MAX_SESSION_TTL off the wallet itself before it checks a grant against it.
+MAX_SESSION_KEYS = 5
+MAX_SESSION_TTL_SECS = 90 * 86_400
+# How much life a passkey's approval on the wallet must have left to count for a transaction: in
+# the wallet checks every quote runs, and in which passkeys an approval page may use. The wallet's
+# own comparison is exact (valid through the deadline second, matching the EntryPoint), so this
+# margin is purely client side: it stops a transaction being quoted and approved only to be refused
+# with AA22 while it was in flight.
+SESSION_EXPIRY_MARGIN_SECS = 60
 # The address(0) sentinel the wallet, SHOracle and both toolkits all use for "native asset".
 # Taken from langchain-erc20 so there is exactly one definition in play: it is what the ERC20
 # toolkit is configured with as native_sentinel, and a mismatch would silently route a native

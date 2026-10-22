@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { ChatMessage, Contact, Exchange, QuoteOffer, Transaction, WalletState } from '../api/types'
+import type { ChatMessage, Contact, Exchange, QuoteOffer, SignStart, Transaction, WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeSession, makeWalletState, SEPOLIA } from '../test/fixtures'
+import { makeSession, makeWalletState, PASSKEY_CREDENTIAL, SEPOLIA } from '../test/fixtures'
 import { json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
+import { b64url, installPasskeys, refused, signedCredential } from '../test/webauthn'
 
 const CHAINS = [{ chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false }]
 const TOKENS = [
@@ -16,13 +17,19 @@ const SAM: Contact = { name: 'sam', address: '0x70997970C51812dc3A010C7d01b50e0d
 
 /** A reply, and the quote its turn offered, if any. */
 type Answer = { reply: string; quote?: QuoteOffer } | { status: number; detail?: string } | 'offline'
-/** What a tap on a quote card's button gets; by default the server's own wording. */
+/**
+ * What a quote card's Confirm (POST /api/sign/finish) or Cancel (POST /api/sign/cancel) gets; by
+ * default the server's own wording.
+ */
 type TapAnswer = { outcome: string; transaction_id?: number | null } | { status: number; detail?: string } | 'offline'
 
 /** The History row a confirmed send is followed in. */
 const SENT_ROW = 77
 
-const STALE = 'That quote has expired or was already used. Nothing was sent. Ask me again for a fresh one.'
+/** app/signing.py's answer for a confirmation that is gone. */
+const EXPIRED = 'This confirmation has expired. Ask again.'
+/** The challenge the passkey signs: the transaction's hash, as /api/sign/start sends it. */
+const CHALLENGE = b64url('the user operation hash, 32 b!!!')
 
 function makeQuote(overrides: Partial<QuoteOffer> = {}): QuoteOffer {
   return {
@@ -62,6 +69,8 @@ interface ServerOptions {
   quote?: QuoteOffer | null
   /** What taps on a quote card's buttons get, in order; the last one repeats. */
   taps?: TapAnswer[]
+  /** What POST /api/sign/start refuses with, instead of the confirmation to sign. */
+  startRefusal?: { status: number; detail: string }
   /** A tap waits for this before answering. */
   tapGate?: Promise<void>
   /** What reads of a confirmed send's History row find, in order; the last one repeats. */
@@ -85,6 +94,7 @@ function stubServer({
   telegramBot,
   quote = null,
   taps = [],
+  startRefusal,
   tapGate = Promise.resolve(),
   landing = ['confirmed'],
 }: ServerOptions = {}) {
@@ -93,6 +103,7 @@ function stubServer({
   let sending = ''
   const posted: unknown[] = []
   const tapped: { url: string; body: unknown }[] = []
+  const started: unknown[] = []
   const cleared: string[] = []
   const calls = { history: 0, wallet: 0, transaction: 0 }
   vi.stubGlobal(
@@ -138,15 +149,40 @@ function stubServer({
         return Promise.resolve(json(200, { chain_id: SEPOLIA, messages: thread }))
       }
       if (url === `/api/chat/quote?chain_id=${SEPOLIA}`) return Promise.resolve(json(200, { quote: offered }))
-      if (url.startsWith('/api/chat/quote/') && method === 'POST') {
-        const body = JSON.parse(String(init?.body)) as { chain_id: number; quote_id: string }
-        const confirm = url.endsWith('/confirm')
+      if (url === '/api/sign/start' && method === 'POST') {
+        started.push(JSON.parse(String(init?.body)))
+        if (startRefusal) return Promise.resolve(json(startRefusal.status, { detail: startRefusal.detail }))
+        if (!offered) return Promise.resolve(json(404, { detail: EXPIRED }))
+        const answer: SignStart = {
+          sign_id: `sign-${started.length}`,
+          challenge: CHALLENGE,
+          rp_id: 'localhost',
+          allow_credentials: [{ type: 'public-key', id: PASSKEY_CREDENTIAL }],
+          user_verification: 'required',
+          timeout_ms: 60_000,
+          expires_at: offered.expires_at,
+          summary: { action: offered.action, network: 'Sepolia', chain_id: SEPOLIA, cost: { fees: offered.fees } },
+        }
+        return Promise.resolve(json(200, answer))
+      }
+      if ((url === '/api/sign/finish' || url === '/api/sign/cancel') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+        const confirm = url.endsWith('/finish')
         const answer = taps.length ? taps[Math.min(tapped.length, taps.length - 1)] : null
         tapped.push({ url, body })
         return tapGate.then(() => {
           if (answer === 'offline') throw new TypeError('Failed to fetch')
+          // As app/routes/sign.py: one that would fail on chain is recorded in the chat and closes the quote.
+          if (answer && 'status' in answer && answer.status === 422) {
+            thread = [
+              ...thread,
+              { role: 'user', text: '✅ Confirm', button: true },
+              { role: 'assistant', text: `That didn't go through: ${answer.detail}`, button: true },
+            ]
+            offered = null
+          }
           if (answer && 'status' in answer) {
-            if (answer.status === 409) offered = null
+            if (answer.status === 409 || answer.status === 404) offered = null
             return answer.detail
               ? json(answer.status, { detail: answer.detail })
               : new Response('Bad Gateway', { status: answer.status })
@@ -166,7 +202,7 @@ function stubServer({
           sending = offered?.action ?? ''
           offered = null
           const transactionId = answer && 'transaction_id' in answer ? answer.transaction_id : SENT_ROW
-          return json(200, { outcome, transaction_id: transactionId })
+          return json(200, { status: 'sent', outcome, transaction_id: transactionId })
         })
       }
       if (url === `/api/transactions/${SENT_ROW}`) {
@@ -208,7 +244,7 @@ function stubServer({
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { posted, calls, cleared, tapped }
+  return { posted, calls, cleared, tapped, started }
 }
 
 function quoteCard() {
@@ -231,9 +267,25 @@ function deferred() {
   return { promise, open }
 }
 
+/** This device, holding the passkey the wallet trusts: its prompt approves at once. */
+function approvingDevice() {
+  const browser = installPasskeys()
+  browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+  return browser
+}
+
+/** Taps Confirm on the quote card once its confirmation is ready to sign. */
+async function confirmCard(user: ReturnType<typeof userEvent.setup>) {
+  const confirm = within(await quoteCard()).getByRole('button', { name: 'Confirm' })
+  await waitFor(() => expect(confirm).toBeEnabled())
+  await user.click(confirm)
+}
+
 describe('AssistantPage', () => {
   beforeEach(() => {
     resetClientForTests()
+    // Which passkeys this browser has used is kept there.
+    localStorage.clear()
     setViewportWidth(1280)
     ;(window as { coarsePointer?: boolean }).coarsePointer = false
   })
@@ -556,7 +608,7 @@ describe('AssistantPage', () => {
     expect(within(log()).getAllByText('first')).toHaveLength(1)
   })
 
-  it('says why the assistant cannot send while the wallet is paused or it is turned off', async () => {
+  it('says why the assistant cannot send while the wallet is paused or no device can approve payments', async () => {
     stubServer({ wallet: makeWalletState({ paused: true }) })
     await renderRoutes(routes, '/assistant')
     expect(
@@ -568,7 +620,9 @@ describe('AssistantPage', () => {
     stubServer({ wallet: makeWalletState({ session: makeSession('off'), is_owner: false }) })
     await renderRoutes(routes, '/assistant')
     expect(
-      await screen.findByText('The assistant is turned off, so it can answer questions but can’t send anything.'),
+      await screen.findByText(
+        'No device can approve payments from this wallet yet, so the assistant can answer questions but can’t send anything. Add this device in Controls.',
+      ),
     ).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Open Controls' })).not.toBeInTheDocument()
   })
@@ -722,11 +776,12 @@ describe('AssistantPage', () => {
     expect(within(log()).getByText('Sent 5 USDC to sam.')).toBeInTheDocument()
   })
 
-  it('offers a quoted transaction on a card, as plain text, and sends it with one tap', async () => {
+  it('offers a quoted transaction on a card, as plain text, and sends it once a passkey approves', async () => {
+    const browser = approvingDevice()
     const action = 'Transfer 5 [USDC](https://evil.example) to sam'
     const sent = deferred()
-    const { tapped, calls } = stubServer({
-      answers: [{ reply: 'That costs $0.35 in fees. Reply yes to send it.', quote: makeQuote({ action }) }],
+    const { tapped, started, calls } = stubServer({
+      answers: [{ reply: 'That costs $0.35 in fees. Tap Confirm to send it.', quote: makeQuote({ action }) }],
       tapGate: sent.promise,
     })
     const user = userEvent.setup()
@@ -741,9 +796,23 @@ describe('AssistantPage', () => {
     expect(within(card).queryByRole('link')).not.toBeInTheDocument()
     expect(within(card).getByText('Fees: $0.35 · good for 5 minutes')).toBeInTheDocument()
 
-    await user.click(within(card).getByRole('button', { name: 'Confirm' }))
-    expect(tapped).toEqual([{ url: '/api/chat/quote/confirm', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
-    expect(within(card).getByRole('status')).toHaveTextContent('Sending…')
+    // Started as the card shows, so the tap can open the passkey prompt at once.
+    const confirm = within(card).getByRole('button', { name: 'Confirm' })
+    await waitFor(() => expect(confirm).toBeEnabled())
+    expect(started).toEqual([{ chain_id: SEPOLIA, quote_id: 'q-abc_123' }])
+    await user.click(confirm)
+    expect(browser.get).toHaveBeenCalledTimes(1)
+    const { publicKey } = browser.get.mock.calls[0][0]!
+    expect(new TextDecoder().decode(publicKey!.challenge as ArrayBuffer)).toBe('the user operation hash, 32 b!!!')
+    expect(publicKey!.userVerification).toBe('required')
+
+    expect(await within(card).findByRole('status')).toHaveTextContent('Sending…')
+    expect(tapped).toEqual([
+      {
+        url: '/api/sign/finish',
+        body: { sign_id: 'sign-1', credential: expect.objectContaining({ id: PASSKEY_CREDENTIAL, type: 'public-key' }) },
+      },
+    ])
     expect(within(card).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
     // One turn at a time: nothing else can be sent meanwhile.
     await user.type(await composer(), 'and my balance?')
@@ -763,12 +832,58 @@ describe('AssistantPage', () => {
     expect(tapped).toHaveLength(1)
   })
 
+  it('waits for the passkey before sending, and keeps the card when its prompt is closed', async () => {
+    const browser = installPasskeys()
+    browser.get.mockRejectedValueOnce(refused())
+    const { tapped } = stubServer({ quote: makeQuote() })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    const card = await quoteCard()
+    const confirm = within(card).getByRole('button', { name: 'Confirm' })
+    await waitFor(() => expect(confirm).toBeEnabled())
+    await user.click(confirm)
+    // This browser has never used one of the account's passkeys, so it may hold none.
+    expect(await screen.findByText(/^Nothing was sent\. If this device has no approved passkey/)).toBeInTheDocument()
+    expect(tapped).toEqual([])
+    expect(within(card).getByRole('button', { name: 'Confirm' })).toBeEnabled()
+
+    // A second tap, with the prompt left open: it says so while it waits.
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }))
+    expect(await within(card).findByRole('status')).toHaveTextContent('Approve with your passkey…')
+    expect(tapped).toEqual([])
+  })
+
+  it('says how to add a device when none can approve payments from this wallet', async () => {
+    stubServer({ quote: makeQuote(), startRefusal: { status: 409, detail: 'No passkey on this device is approved for this wallet.' } })
+    await renderRoutes(routes, '/assistant')
+
+    const card = await quoteCard()
+    expect(await within(card).findByText(/No device you added can approve payments from this wallet yet\./)).toBeInTheDocument()
+    expect(within(card).getByRole('link', { name: 'Add this device' })).toHaveAttribute('href', '/controls')
+    expect(within(card).getByRole('button', { name: 'Confirm' })).toBeDisabled()
+  })
+
+  it("says when the passkey's approval isn't accepted, and nothing was sent", async () => {
+    approvingDevice()
+    stubServer({ quote: makeQuote(), taps: [{ status: 400, detail: 'That passkey is not approved for this wallet.' }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    const card = await quoteCard()
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Confirm' })).toBeEnabled())
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText(/^Your passkey's approval wasn't accepted, so nothing was sent\./)).toBeInTheDocument()
+    expect(screen.queryByText('No answer arrived.')).not.toBeInTheDocument()
+  })
+
   it('follows a confirmed send until it lands, then reads the wallet again', async () => {
+    approvingDevice()
     const { calls } = stubServer({ quote: makeQuote(), landing: ['pending', 'confirmed'] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
-    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    await confirmCard(user)
     expect(await screen.findByText('Waiting for the network to confirm “Transfer 5 USDC to sam”…')).toBeInTheDocument()
     const wallets = calls.wallet
     const landed = await screen.findByText(/Confirmed on Sepolia: Transfer 5 USDC to sam\./, {}, { timeout: 5_000 })
@@ -788,25 +903,42 @@ describe('AssistantPage', () => {
   }, 15_000)
 
   it('says when a confirmed send failed on chain, and points to History', async () => {
+    approvingDevice()
     stubServer({ quote: makeQuote(), landing: ['failed'] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
-    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    await confirmCard(user)
     const failed = await screen.findByText(/“Transfer 5 USDC to sam” went out but failed on chain/)
     expect(within(failed).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
   })
 
-  it('follows nothing when the confirm sent nothing', async () => {
-    const { calls } = stubServer({
-      quote: makeQuote(),
-      taps: [{ outcome: "That didn't go through: not enough USDC", transaction_id: null }],
-    })
+  it('says why a send that would fail was not sent, and shows it in the chat', async () => {
+    approvingDevice()
+    const { calls } = stubServer({ quote: makeQuote(), taps: [{ status: 422, detail: 'not enough USDC' }] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
-    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    await confirmCard(user)
+    expect(await screen.findByText(/^Nothing was sent: it would fail on the network\./)).toBeInTheDocument()
+    // The server recorded the tap and its outcome: the chat is read again to show them.
     expect(await within(log()).findByText("That didn't go through: not enough USDC")).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/Waiting for the network/)).not.toBeInTheDocument()
+    expect(calls.transaction).toBe(0)
+  })
+
+  it('follows nothing when the server cannot tell whether it went out', async () => {
+    approvingDevice()
+    const unknown = "I couldn't tell whether that went through. Check the History tab in the web app before trying again."
+    const { calls } = stubServer({ quote: makeQuote(), taps: [{ outcome: unknown, transaction_id: null }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/assistant')
+
+    await confirmCard(user)
+    expect(await within(log()).findByText(unknown)).toBeInTheDocument()
     expect(screen.queryByText(/Waiting for the network/)).not.toBeInTheDocument()
     expect(calls.transaction).toBe(0)
   })
@@ -815,7 +947,7 @@ describe('AssistantPage', () => {
     const { tapped } = stubServer({
       history: [
         { role: 'user', text: 'send 5 usdc to sam' },
-        { role: 'assistant', text: 'Reply yes to send it.' },
+        { role: 'assistant', text: 'Tap Confirm to send it.' },
       ],
       quote: makeQuote(),
     })
@@ -827,16 +959,17 @@ describe('AssistantPage', () => {
     expect(await within(log()).findByText('✖️ Cancel')).toBeInTheDocument()
     expect(within(log()).getByText('Cancelled. Nothing was sent.')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument()
-    expect(tapped).toEqual([{ url: '/api/chat/quote/cancel', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
+    expect(tapped).toEqual([{ url: '/api/sign/cancel', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
   })
 
-  it('says why when a quote is gone, and nothing was sent', async () => {
-    stubServer({ quote: makeQuote(), taps: [{ status: 409, detail: STALE }] })
+  it('says why when a confirmation is gone, and nothing was sent', async () => {
+    approvingDevice()
+    stubServer({ quote: makeQuote(), taps: [{ status: 409, detail: EXPIRED }] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
-    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
-    expect(await screen.findByText(STALE)).toBeInTheDocument()
+    await confirmCard(user)
+    expect(await screen.findByText(/^That confirmation was replaced or has run out, so nothing was sent\./)).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.queryByRole('region', { name: 'Transaction waiting for your answer' })).not.toBeInTheDocument(),
     )
@@ -844,11 +977,12 @@ describe('AssistantPage', () => {
   })
 
   it('warns to check History when a confirm may have gone out', async () => {
+    approvingDevice()
     const { tapped, calls } = stubServer({ quote: makeQuote(), taps: ['offline'] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/assistant')
 
-    await user.click(within(await quoteCard()).getByRole('button', { name: 'Confirm' }))
+    await confirmCard(user)
     expect(await screen.findByText('No answer arrived.')).toBeInTheDocument()
     const warning = screen.getByText(/may still have been sent/)
     expect(within(warning).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')

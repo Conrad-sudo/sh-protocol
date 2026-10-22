@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { installFakeWallet, type WalletTx } from './fakeWallet.ts'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, walletState } from './helpers.ts'
+import { addPasskeyAuthenticator, expectNoSidewaysScroll, expectTheme, isApiUrl, ME, passkey, snap, TOKEN, walletState } from './helpers.ts'
 import { walkOnboarding } from './onboardingFlow.ts'
 
 /*
@@ -23,6 +23,19 @@ const MAINNET_TOKENS = MAINNET_TICKERS.split(' ').map((ticker, i) => ({
   ticker,
   address: `0x${(i + 1).toString(16).padStart(40, '0')}`,
 }))
+/** The key id the server gives the passkey made during onboarding. */
+const NEW_KEY_ID = `0x${'ef'.repeat(32)}`
+/** POST /api/passkeys/register/options: for this site, ES256 only, the user verified. */
+const REGISTRATION_OPTIONS = {
+  rp: { id: 'localhost', name: 'Mitfah' },
+  user: { id: Buffer.from('user-handle-7').toString('base64url'), name: 'mitfah-7', displayName: 'Mitfah' },
+  challenge: Buffer.from('registration challenge 32 bytes!').toString('base64url'),
+  pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+  authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+  attestation: 'none',
+  excludeCredentials: [],
+  timeout: 60_000,
+}
 const PREPARED_TX = {
   to: '0x6666666666666666666666666666666666666666',
   data: '0xdeadbeef',
@@ -31,7 +44,9 @@ const PREPARED_TX = {
 }
 
 interface Recorded {
-  deploy: unknown[]
+  deploy: Record<string, unknown>[]
+  /** Passkeys saved by POST /api/passkeys/register: credential id and device name. */
+  registered: { credentialId: string; deviceName: string }[]
   confirms: number
   /** Messages the wallet was asked to sign: none, as signing in already proved the wallet. */
   signed: string[]
@@ -40,7 +55,7 @@ interface Recorded {
 
 /** Signed in as WALLET, the fake wallet's address, with no Mitfah wallet yet. */
 async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
-  const recorded: Recorded = { deploy: [], confirms: 0, signed: [], sent: [] }
+  const recorded: Recorded = { deploy: [], registered: [], confirms: 0, signed: [], sent: [] }
   let me = { ...ME, owner_addr: WALLET }
 
   await installFakeWallet(page, {
@@ -83,13 +98,32 @@ async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
         })
       case '/api/tokens':
         return route.fulfill({ json: { tokens } })
+      case '/api/passkeys':
+        return route.fulfill({
+          json: {
+            passkeys: recorded.registered.map(made =>
+              passkey({ key_id: NEW_KEY_ID, credential_id: made.credentialId, device_name: made.deviceName }),
+            ),
+          },
+        })
+      case '/api/passkeys/register/options':
+        return route.fulfill({ json: { options: REGISTRATION_OPTIONS } })
+      case '/api/passkeys/register':
+        recorded.registered.push({ credentialId: body.credential.id, deviceName: body.device_name })
+        return route.fulfill({
+          json: {
+            ...passkey({ key_id: NEW_KEY_ID, credential_id: body.credential.id, device_name: body.device_name }),
+            qx: `0x${'01'.repeat(32)}`,
+            qy: `0x${'02'.repeat(32)}`,
+          },
+        })
       case '/api/deploy':
         recorded.deploy.push(body)
         return route.fulfill({
           json: {
             chain_id: SEPOLIA,
             predicted_address: PREDICTED,
-            session_key: '0x5555555555555555555555555555555555555555',
+            key_id: body.key_id,
             watched_tokens: ['usdc'],
             tx: PREPARED_TX,
           },
@@ -98,15 +132,19 @@ async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
         recorded.confirms += 1
         if (recorded.confirms === 1) return route.fulfill({ status: 202, json: { status: 'pending', tx_hash: TX_HASH } })
         me = { ...me, wallet_chains: [body.chain_id] }
-        return route.fulfill({
-          json: {
-            status: 'deployed',
-            chain_id: body.chain_id,
-            wallet_address: PREDICTED,
-            session_key: '0x5555555555555555555555555555555555555555',
-            session_key_authorized: true,
-          },
-        })
+        {
+          const keyId = (recorded.deploy.at(-1)?.key_id as string | null | undefined) ?? null
+          return route.fulfill({
+            json: {
+              status: 'deployed',
+              chain_id: body.chain_id,
+              wallet_address: PREDICTED,
+              key_id: keyId,
+              session_key_authorized: keyId !== null,
+              session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 30 * 86_400,
+            },
+          })
+        }
       default:
         return route.fulfill({ status: 404, json: { detail: 'Not Found' } })
     }
@@ -115,6 +153,7 @@ async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
 }
 
 test('creating a wallet, step by step', async ({ page }, testInfo) => {
+  const authenticator = await addPasskeyAuthenticator(page)
   const recorded = await mockServer(page)
   await page.goto('/onboarding')
   await expect(page.getByRole('heading', { name: 'Create your wallet' })).toBeVisible()
@@ -132,6 +171,7 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
       await expect(step.getByRole('checkbox', { name: 'WETH' })).toBeDisabled()
       await step.getByText('USDC').click()
     },
+    passkey: { deviceName: 'Work laptop' },
   })
 
   // The API answers "pending" once, so the progress view shows for about two seconds.
@@ -154,9 +194,12 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
       window_secs: 604_800,
       watched_tokens: [TOKENS[1]],
       prefund_eth: '1',
+      key_id: NEW_KEY_ID,
       session_ttl_secs: 30 * 86_400,
     },
   ])
+  // The passkey the browser really made, saved under the name given.
+  expect(recorded.registered).toEqual([{ credentialId: (await authenticator.credentials())[0], deviceName: 'Work laptop' }])
   expect(recorded.sent).toEqual([{ tx: { from: WALLET, ...PREPARED_TX }, chainId: SEPOLIA }])
   expect(recorded.confirms).toBe(2)
 })

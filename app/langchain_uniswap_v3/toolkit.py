@@ -518,6 +518,9 @@ class UniswapV3Toolkit:
         if tx_mode not in ("eoa", "calls"):
             raise ValueError(f"tx_mode must be 'eoa' or 'calls', not {tx_mode!r}")
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        # No CCIP-Read: a token reverting with OffchainLookup would otherwise have web3 fetch any URL
+        # it names, from the server (see network_config._ChainIdOnceProvider).
+        self.w3.provider.global_ccip_read_enabled = False
         if not self.w3.is_connected():
             raise ConnectionError("Could not connect to the RPC endpoint.")
 

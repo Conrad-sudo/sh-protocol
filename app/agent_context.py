@@ -19,13 +19,12 @@ class AgentContext:
 
     user_id: int
     # Which turn of the conversation this is: a counter the caller of chat() bumps once per user
-    # message, never something the model can set or see. It exists so confirm_transaction can tell
-    # "the user replied to the quote" from "the same turn that raised the quote is now confirming
-    # it" -- the turn only advances when a real message arrives, so text the model merely READ
-    # (a tool result, an on-chain string, a registration file) cannot quote and send in one go.
-    # See app/quotes.py.
+    # message, never something the model can set or see. Each quote remembers the turn that raised
+    # it, and the card a turn ends with is the quote that turn raised or asked to show again
+    # (quotes.offer). Nothing a turn does can send: the user's passkey does. See app/quotes.py.
     turn_id: int = 0
     # The user's own message that started this turn, verbatim. A quote remembers the one that asked
-    # for it, and confirm_transaction refuses a message that only asks for it again (quotes.repeats):
-    # the same request twice is a new request, not a yes. Empty when the caller has no message.
+    # for it, and confirm_transaction voids a quote when a message only asks for it again
+    # (quotes.repeats): the same request twice is a new request, not a yes. Empty when the caller
+    # has no message.
     message: str = ""

@@ -22,13 +22,16 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {DECIMALS, ETH_USD_PRICE} from "../../script/Constants.s.sol";
+import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
 
 /**
  * @title SessionGuardTest
  * @notice End-to-end proof of SessionHandler's session-execution guard: a session-key UserOp that
  *         tries to reach the account's own admin surface (uninstall the hook, raise the cap, mint
  *         more session keys) fails at execution, while a legitimate external call sails through the
- *         EntryPoint and is metered by the spending-cap hook.
+ *         EntryPoint and is metered by the spending-cap hook. A session key is a PASSKEY: every
+ *         "session" op below is signed the way a phone signs one (see test/utils/PasskeyHelper.sol),
+ *         and the owner's ops are still plain ECDSA.
  * @dev Two layers of coverage:
  *      - Full ERC-4337 flow (EntryPoint.handleOps): the inner execution revert does NOT bubble out
  *        of handleOps (the EntryPoint absorbs it and emits UserOperationRevertReason), so those
@@ -61,15 +64,19 @@ contract SessionGuardTest is Test {
     /// @dev Anvil's default private key for config.account (the wallet owner on the local chain).
     uint256 constant ANVIL_OWNER_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
+    using PasskeyHelper for PasskeyHelper.Passkey;
+
     address owner;
-    address sessionKey;
-    uint256 sessionKeyPk;
+    /// @dev The wallet's authorized passkey, and a second device the tests add when they need one.
+    PasskeyHelper.Passkey sessionKey;
+    PasskeyHelper.Passkey secondKey;
     address kani = makeAddr("kani");
     address attacker = makeAddr("attacker");
     address bundler = makeAddr("bundler");
 
     function setUp() public {
-        (sessionKey, sessionKeyPk) = makeAddrAndKey("sessionKey");
+        sessionKey = PasskeyHelper.create("sessionKey");
+        secondKey = PasskeyHelper.create("secondKey");
 
         DeploySHProtocol deployer = new DeploySHProtocol();
         (factory, treasury, config, oracle) = deployer.run();
@@ -85,7 +92,11 @@ contract SessionGuardTest is Test {
         watched[1] = address(dai);
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
+            SessionHandler(
+                payable(factory.deployWallet(
+                        DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0)
+                    ))
+            );
 
         sendPackedUserOp = new SendPackedUserOp();
 
@@ -94,7 +105,7 @@ contract SessionGuardTest is Test {
         dai.mint(address(wallet), 10_000e18);
 
         vm.prank(owner);
-        wallet.addSession(sessionKey, _sessionDeadline());
+        wallet.addSession(sessionKey.qx, sessionKey.qy, _sessionDeadline());
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -115,25 +126,20 @@ contract SessionGuardTest is Test {
         SessionHandler w = SessionHandler(
             payable(
                 factory.deployWallet(
-                    DAILY_LIMIT, WINDOW, watched, sessionKey, _sessionDeadline(), new address[](0)
+                    DAILY_LIMIT, WINDOW, watched, sessionKey.qx, sessionKey.qy, _sessionDeadline(), new address[](0)
                 )
             )
         );
 
-        assertTrue(w.isSessionActive(sessionKey), "key should be authorized by deployWallet alone");
+        assertTrue(w.isSessionActive(sessionKey.keyId()), "key should be authorized by deployWallet alone");
 
         vm.deal(address(w), 10 ether);
         usdc.mint(address(w), 1_000e6);
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(w),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (attacker, 100e6)),
-            sessionKey,
-            sessionKeyPk
+        (PackedUserOperation memory userOp, bytes32 hash) = sendPackedUserOp.generateUnsignedUserOp(
+            address(w), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (attacker, 100e6)), _passkeyNonceKey()
         );
+        userOp.signature = sessionKey.sign(hash);
         _handleOps(userOp);
 
         assertEq(usdc.balanceOf(attacker), 100e6, "seeded session key could not spend");
@@ -143,25 +149,56 @@ contract SessionGuardTest is Test {
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Signs a single-call UserOp with the session key and submits it through the EntryPoint.
+    /// @dev The nonce key every passkey op here uses. Its op deadline is later than any key's, so the
+    ///      key's own deadline is the window; PasskeyValidationTest covers the op deadline itself.
+    function _passkeyNonceKey() internal pure returns (uint192) {
+        return PasskeyHelper.nonceKey(PasskeyHelper.LATEST_OP_DEADLINE, 0);
+    }
 
+    /// @dev A single-call UserOp from the wallet, signed by `key` as a passkey.
+    function _passkeyOp(PasskeyHelper.Passkey memory key, address dest, uint256 value, bytes memory data)
+        internal
+        view
+        returns (PackedUserOperation memory userOp, bytes32 hash)
+    {
+        (userOp, hash) =
+            sendPackedUserOp.generateUnsignedUserOp(address(wallet), config, dest, value, data, _passkeyNonceKey());
+        userOp.signature = key.sign(hash);
+    }
+
+    /// @dev The same as a batch.
+    function _passkeyBatchOp(PasskeyHelper.Passkey memory key, Execution[] memory execs)
+        internal
+        view
+        returns (PackedUserOperation memory userOp, bytes32 hash)
+    {
+        (userOp, hash) =
+            sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        userOp.signature = key.sign(hash);
+    }
+
+    /// @dev Signs `userOp` again as `key` after its fields were changed (a passkey signs the op hash,
+    ///      so any change to the op needs a fresh assertion).
+    function _resignPasskey(PackedUserOperation memory userOp, PasskeyHelper.Passkey memory key)
+        internal
+        view
+        returns (PackedUserOperation memory)
+    {
+        userOp.signature = key.sign(IEntryPoint(config.entryPoint).getUserOpHash(userOp));
+        return userOp;
+    }
+
+    /// @dev Signs a single-call UserOp with the session key and submits it through the EntryPoint.
     function _sendSessionOp(address dest, bytes memory data) internal {
-        (PackedUserOperation memory userOp,,) =
-            sendPackedUserOp.generateSignedUserOp(address(wallet), config, dest, 0, data, sessionKey, sessionKeyPk);
+        (PackedUserOperation memory userOp,) = _passkeyOp(sessionKey, dest, 0, data);
         _handleOps(userOp);
     }
 
-    /*
-    function _sendSessionOp(address dest, bytes memory data) internal {
-        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
-        (PackedUserOperation memory userOp,,)= sendPackedUserOp.generateSignedUserOp(address(wallet), config, dest, 0, data, sessionKey, signerKeyPk);
-        ops[0]=userOp;
-
-        vm.prank(bundler,bundler);
-        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
-
+    /// @dev How many passkeys the wallet lists.
+    function _keyCount() internal view returns (uint256) {
+        (bytes32[] memory ids,) = wallet.getSessions();
+        return ids.length;
     }
-    */
 
     function _handleOps(PackedUserOperation memory userOp) internal {
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
@@ -209,6 +246,29 @@ contract SessionGuardTest is Test {
         assertEq(usdc.balanceOf(kani), 500e6, "owner-signed transfer did not execute");
     }
 
+    /// @notice The spending cap belongs to the WALLET: two devices spend from one allowance, so a
+    ///         second key never means more spending.
+    function test_twoKeys_shareOneSpendingCap() public {
+        vm.prank(owner);
+        wallet.addSession(secondKey.qx, secondKey.qy, _sessionDeadline());
+        uint256 amount = 3000e6; // $3000 of the $5000 window, per transfer
+        int256 oneTransferUsd = oracle.getPrice(address(usdc), amount);
+
+        (PackedUserOperation memory first,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+        _handleOps(first);
+        assertEq(usdc.balanceOf(kani), amount, "the first device's transfer fits");
+
+        // The window has $2000 left, whichever device asks. handleOps absorbs the inner revert, so
+        // the state is what proves it (see this file's rule for swallowed failures).
+        (PackedUserOperation memory second,) =
+            _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+        _handleOps(second);
+
+        assertEq(usdc.balanceOf(kani), amount, "the second device spent past the shared cap");
+        assertEq(wallet.getConfig().spentInWindow, oneTransferUsd, "the window counts both devices as one");
+    }
+
     /*//////////////////////////////////////////////////////////////
         ADMIN-SURFACE ESCALATION ATTEMPTS (must fail, state intact)
     //////////////////////////////////////////////////////////////*/
@@ -237,10 +297,26 @@ contract SessionGuardTest is Test {
 
     /// @notice A session key must not be able to authorize more session keys via a self-call.
     function test_sessionOp_cannotMintMoreSessionKeys() public {
-        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())));
+        _sendSessionOp(
+            address(wallet), abi.encodeCall(SessionHandler.addSession, (secondKey.qx, secondKey.qy, _sessionDeadline()))
+        );
 
-        assertEq(wallet.currentSession(), sessionKey, "session key minted another session key");
-        assertFalse(wallet.isSessionActive(attacker), "attacker key became active");
+        assertEq(_keyCount(), 1, "session key minted another session key");
+        assertFalse(wallet.isSessionActive(secondKey.keyId()), "the new key became active");
+        assertTrue(wallet.isSessionActive(sessionKey.keyId()), "the original key was disturbed");
+    }
+
+    /// @notice Nor can a key revoke the owner's OTHER devices, or itself: the whole key list is the
+    ///         owner's. A compromised phone must not be able to lock the user's laptop out.
+    function test_sessionOp_cannotRevokeKeys() public {
+        vm.prank(owner);
+        wallet.addSession(secondKey.qx, secondKey.qy, _sessionDeadline());
+
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.removeSession, (secondKey.keyId())));
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.removeAllSessions, ()));
+
+        assertEq(_keyCount(), 2, "a session key edited the key list");
+        assertTrue(wallet.isSessionActive(sessionKey.keyId()) && wallet.isSessionActive(secondKey.keyId()));
     }
 
     /// @notice A batch hiding one restricted sub-call among legit ones must revert ATOMICALLY:
@@ -255,8 +331,7 @@ contract SessionGuardTest is Test {
             callData: abi.encodeCall(SpendingLimitModule.setDailyLimit, (int256(1_000_000_000e18)))
         });
 
-        (PackedUserOperation memory userOp,,) =
-            sendPackedUserOp.generateSignedBatchUserOp(address(wallet), config, execs, sessionKey, sessionKeyPk);
+        (PackedUserOperation memory userOp,) = _passkeyBatchOp(sessionKey, execs);
         _handleOps(userOp);
 
         assertEq(usdc.balanceOf(kani), 0, "batch partially executed despite restricted target");
@@ -283,8 +358,9 @@ contract SessionGuardTest is Test {
     /// @notice The guard reverts with SessionRestrictedTarget(account) when a non-owner execution
     ///         targets the account itself.
     function test_guard_revertsOnSelfTarget() public {
-        bytes memory executionCalldata =
-            _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())));
+        bytes memory executionCalldata = _encodeSingle(
+            address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (secondKey.qx, secondKey.qy, _sessionDeadline()))
+        );
 
         vm.prank(config.entryPoint);
         vm.expectRevert(
@@ -353,18 +429,20 @@ contract SessionGuardTest is Test {
     function test_ownerPassthroughs_unaffected() public {
         vm.startPrank(owner);
         wallet.setDailyLimit(1234e18);
-        wallet.removeSession();
+        wallet.removeAllSessions();
         vm.stopPrank();
 
         assertEq(wallet.getConfig().dailyLimitUsd, int256(1234e18));
-        assertFalse(wallet.isSessionActive(sessionKey));
+        assertFalse(wallet.isSessionActive(sessionKey.keyId()));
     }
 
     /*//////////////////////////////////////////////////////////////
                          SIGNER AUTHORIZATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice A UserOp signed by a never-authorized key fails validation (AA24) before execution.
+    /// @notice A UserOp signed by a never-authorized signer fails validation (AA24) before execution:
+    ///         a stranger's ECDSA key (a session key is no longer an Ethereum address, so only the
+    ///         owner's counts) and a passkey the wallet has never heard of.
     function test_unknownSigner_failsValidation() public {
         (address rando, uint256 randoPk) = makeAddrAndKey("rando");
         (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
@@ -376,6 +454,13 @@ contract SessionGuardTest is Test {
         vm.prank(bundler, bundler);
         vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA24 signature error"));
         IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+
+        (userOp,) = _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        ops[0] = userOp;
+        vm.prank(bundler, bundler);
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA24 signature error"));
+        IEntryPoint(config.entryPoint).handleOps(ops, payable(bundler));
+        assertEq(usdc.balanceOf(kani), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -405,15 +490,8 @@ contract SessionGuardTest is Test {
 
     /// @dev Builds a transfer op signed by `sessionKey` and expects handleOps to fail with `reason`.
     function _expectSessionOpFailsWith(bytes memory reason) internal {
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (PackedUserOperation memory userOp,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = userOp;
@@ -431,7 +509,7 @@ contract SessionGuardTest is Test {
     function test_expiredSessionKey_failsWithAA22() public {
         _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
-        _warpTo(uint256(wallet.currentSessionValidUntil()) + 1);
+        _warpTo(uint256(wallet.sessionValidUntil(sessionKey.keyId())) + 1);
 
         _expectSessionOpFailsWith(
             abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA22 expired or not due")
@@ -441,8 +519,8 @@ contract SessionGuardTest is Test {
     /// @notice The key is still accepted in the second that equals its deadline, matching the
     ///         EntryPoint's own `block.timestamp > validUntil` comparison and {isSessionActive}.
     function test_sessionKey_validInTheDeadlineSecond() public {
-        _warpTo(uint256(wallet.currentSessionValidUntil()));
-        assertTrue(wallet.isSessionActive(sessionKey), "view disagrees with the chain at the boundary");
+        _warpTo(uint256(wallet.sessionValidUntil(sessionKey.keyId())));
+        assertTrue(wallet.isSessionActive(sessionKey.keyId()), "view disagrees with the chain at the boundary");
 
         uint256 before = usdc.balanceOf(kani);
         _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
@@ -451,26 +529,49 @@ contract SessionGuardTest is Test {
 
     /// @notice Renewing the key after it lapsed brings it straight back -- no new key needed.
     function test_expiredSessionKey_worksAgainAfterRenewal() public {
-        _warpTo(uint256(wallet.currentSessionValidUntil()) + 1);
+        _warpTo(uint256(wallet.sessionValidUntil(sessionKey.keyId())) + 1);
         _expectSessionOpFailsWith(
             abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA22 expired or not due")
         );
 
         vm.prank(owner);
-        wallet.addSession(sessionKey, _sessionDeadline());
+        wallet.addSession(sessionKey.qx, sessionKey.qy, _sessionDeadline());
 
         uint256 before = usdc.balanceOf(kani);
         _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
         assertEq(usdc.balanceOf(kani), before + 1e6, "renewed key still refused");
     }
 
-    /// @notice Granting a DIFFERENT key evicts the live one, and the evicted key fails AA24 (it is
-    ///         no longer this wallet's key at all) rather than AA22.
-    function test_evictedSessionKey_failsWithAA24() public {
+    /// @notice Adding a second device evicts nothing: both keep working, each with its own deadline.
+    ///         (A wallet used to hold one key, and granting another replaced it.)
+    function test_secondKey_doesNotEvictTheFirst() public {
         vm.prank(owner);
-        wallet.addSession(makeAddr("replacementKey"), _sessionDeadline());
+        wallet.addSession(secondKey.qx, secondKey.qy, _sessionDeadline());
+
+        uint256 before = usdc.balanceOf(kani);
+        (PackedUserOperation memory first,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        _handleOps(first);
+        (PackedUserOperation memory second,) =
+            _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 2e6)));
+        _handleOps(second);
+
+        assertEq(usdc.balanceOf(kani), before + 3e6, "one of the two devices could not act");
+    }
+
+    /// @notice One device expiring or being revoked leaves the other working.
+    function test_oneKeyRevoked_theOtherKeepsWorking() public {
+        vm.startPrank(owner);
+        wallet.addSession(secondKey.qx, secondKey.qy, _sessionDeadline());
+        wallet.removeSession(sessionKey.keyId());
+        vm.stopPrank();
 
         _expectSessionOpFailsWith(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, 0, "AA24 signature error"));
+
+        (PackedUserOperation memory second,) =
+            _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        _handleOps(second);
+        assertEq(usdc.balanceOf(kani), 1e6);
     }
 
     /**
@@ -479,7 +580,7 @@ contract SessionGuardTest is Test {
      *         a delegated key ran out.
      */
     function test_ownerOp_unaffectedByExpiry() public {
-        _warpTo(uint256(wallet.currentSessionValidUntil()) + 365 days);
+        _warpTo(uint256(wallet.sessionValidUntil(sessionKey.keyId())) + 365 days);
 
         (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet),
@@ -499,17 +600,10 @@ contract SessionGuardTest is Test {
     /// @notice After removeSession, a previously working session key fails validation (AA24).
     function test_removedSessionKey_failsValidation() public {
         vm.prank(owner);
-        wallet.removeSession();
+        wallet.removeSession(sessionKey.keyId());
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (PackedUserOperation memory userOp,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = userOp;
@@ -522,8 +616,9 @@ contract SessionGuardTest is Test {
           GAS AS AN UNMETERED VALUE PATH (THREAT_MODEL §3.12)
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Re-signs a UserOp after its gas fields have been mutated, so the EntryPoint hash still
-    ///      matches. Mirrors SendPackedUserOp's EIP-191-over-userOpHash scheme.
+    /// @dev Re-signs a UserOp with an ECDSA key (the owner's, or a stranger's) after its fields have
+    ///      been mutated, so the EntryPoint hash still matches. Mirrors SendPackedUserOp's
+    ///      EIP-191-over-userOpHash scheme; a passkey re-signs with {_resignPasskey}.
     function _resign(PackedUserOperation memory userOp, uint256 pk) internal view returns (PackedUserOperation memory) {
         bytes32 digest = MessageHashUtils.toEthSignedMessageHash(IEntryPoint(config.entryPoint).getUserOpHash(userOp));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
@@ -534,17 +629,9 @@ contract SessionGuardTest is Test {
     /// @dev A legitimate session op, with its gas fees rewritten to `feePerGas` on both halves of
     ///      `gasFees` (so the packing order cannot affect the result) and re-signed.
     function _inflatedGasOp(uint128 feePerGas) internal view returns (PackedUserOperation memory userOp) {
-        (userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (userOp,) = _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
         userOp.gasFees = bytes32(uint256(feePerGas) << 128 | uint256(feePerGas));
-        return _resign(userOp, sessionKeyPk);
+        return _resignPasskey(userOp, sessionKey);
     }
 
     /// @dev The account-abstraction and OpenZeppelin PackedUserOperation structs are field-identical
@@ -610,15 +697,8 @@ contract SessionGuardTest is Test {
     ///         the account emptying its balance into its EntryPoint deposit. Note the signature is
     ///         never even checked here: _validateUserOp RETURNS failure rather than reverting.
     function test_payPrefund_rejectsOversizedPrefundRequest() public {
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (PackedUserOperation memory userOp,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         uint256 balanceBefore = address(wallet).balance;
         uint256 ceiling = wallet.maxOpGasCost();
@@ -630,15 +710,8 @@ contract SessionGuardTest is Test {
 
     /// @notice A prefund within the ceiling is still paid, so ordinary bundling is unaffected.
     function test_payPrefund_allowsPrefundWithinCeiling() public {
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (PackedUserOperation memory userOp,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         uint256 balanceBefore = address(wallet).balance;
         vm.prank(config.entryPoint);
@@ -651,15 +724,8 @@ contract SessionGuardTest is Test {
         vm.prank(owner);
         wallet.pause();
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
+        (PackedUserOperation memory userOp,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         uint256 balanceBefore = address(wallet).balance;
         vm.prank(config.entryPoint);
@@ -721,30 +787,31 @@ contract SessionGuardTest is Test {
     ///      signed and ready to go in ONE handleOps -- the bundle a stolen key would build.
     function _pricedSessionOps(uint256 count, uint256 perOp) internal view returns (PackedUserOperation[] memory ops) {
         ops = new PackedUserOperation[](count);
-        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(address(wallet), 0);
         for (uint256 i = 0; i < count; i++) {
-            (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
-                address(wallet),
-                config,
-                address(usdc),
-                0,
-                abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-                sessionKey,
-                sessionKeyPk
-            );
-            op.nonce = nonce + i;
+            (PackedUserOperation memory op,) =
+                _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+            op.nonce += i;
             uint256 fee = perOp / (_expectedCost(op) / uint128(uint256(op.gasFees)));
             op.gasFees = bytes32(fee << 128 | fee);
-            ops[i] = _resign(op, sessionKeyPk);
+            ops[i] = _resignPasskey(op, sessionKey);
         }
     }
 
-    /// @dev Has the EntryPoint validate a signed op directly with `missingAccountFunds` of `amount`,
-    ///      signed by `signer` -- how the per-window charge is driven without running the op.
+    /// @dev Has the EntryPoint validate an ECDSA-signed op directly with `missingAccountFunds` of
+    ///      `amount`, signed by `signer` (the owner) -- how the per-window charge is driven without
+    ///      running the op.
     function _validateDirectly(address signer, uint256 signerKey, uint256 amount) internal {
         (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), signer, signerKey
         );
+        vm.prank(config.entryPoint);
+        wallet.validateUserOp(_toOz(op), hash, amount);
+    }
+
+    /// @dev The same for an op signed by the passkey `key`.
+    function _validatePasskeyDirectly(PasskeyHelper.Passkey memory key, uint256 amount) internal {
+        (PackedUserOperation memory op, bytes32 hash) =
+            _passkeyOp(key, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
         vm.prank(config.entryPoint);
         wallet.validateUserOp(_toOz(op), hash, amount);
     }
@@ -818,13 +885,12 @@ contract SessionGuardTest is Test {
         uint256 budget = wallet.sessionGasBudget();
         uint256 calls = budget / perCall;
         for (uint256 i = 0; i < calls; i++) {
-            _validateDirectly(sessionKey, sessionKeyPk, perCall);
+            _validatePasskeyDirectly(sessionKey, perCall);
         }
         assertEq(wallet.sessionGasRemaining(), budget - calls * perCall);
 
-        (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), sessionKey, sessionKeyPk
-        );
+        (PackedUserOperation memory op, bytes32 hash) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
         vm.prank(config.entryPoint);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -835,7 +901,7 @@ contract SessionGuardTest is Test {
 
         vm.warp(block.timestamp + wallet.SESSION_GAS_WINDOW());
         assertEq(wallet.sessionGasRemaining(), budget, "a new window starts full");
-        _validateDirectly(sessionKey, sessionKeyPk, perCall);
+        _validatePasskeyDirectly(sessionKey, perCall);
         assertEq(wallet.sessionGasSpent(), perCall);
         assertEq(wallet.sessionGasWindowStart(), block.timestamp);
     }
@@ -844,21 +910,51 @@ contract SessionGuardTest is Test {
     ///         sign counts, so a forged op can't move value into the deposit for free.
     function test_sessionGasBudget_chargesEveryOpTheOwnerDidNotSign() public {
         (, uint256 strangerKey) = makeAddrAndKey("stranger");
-        (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            sessionKey,
-            sessionKeyPk
-        );
-        op = _resign(op, strangerKey);
+        (PackedUserOperation memory op,) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        op = _resign(op, strangerKey); // a 65-byte signature by someone who is not the owner
 
         vm.prank(config.entryPoint);
         uint256 validationData = wallet.validateUserOp(_toOz(op), bytes32(0), 0.01 ether);
         assertEq(validationData, 1, "the signature fails");
         assertEq(wallet.sessionGasSpent(), 0.01 ether, "and the top-up is still charged");
+
+        // A passkey the wallet does not hold, and a signature that is not even the right shape:
+        // refused, and charged the same.
+        (PackedUserOperation memory stranger, bytes32 hash) =
+            _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        vm.prank(config.entryPoint);
+        assertEq(wallet.validateUserOp(_toOz(stranger), hash, 0.01 ether), 1);
+        stranger.signature = new bytes(64);
+        vm.prank(config.entryPoint);
+        assertEq(wallet.validateUserOp(_toOz(stranger), hash, 0.01 ether), 1);
+        assertEq(wallet.sessionGasSpent(), 0.03 ether, "every refused op paid its top-up");
+    }
+
+    /// @notice A second key can't double the gas budget: it is the WALLET's, so two devices draw from
+    ///         one allowance. Once the first key has used it up, the second is refused too.
+    function test_sessionGasBudget_isSharedByEveryKey() public {
+        vm.prank(owner);
+        wallet.addSession(secondKey.qx, secondKey.qy, _sessionDeadline());
+
+        uint256 perCall = wallet.maxOpGasCost();
+        uint256 budget = wallet.sessionGasBudget();
+        uint256 calls = budget / perCall;
+        for (uint256 i = 0; i < calls; i++) {
+            // Alternate devices: it makes no difference which one spends.
+            _validatePasskeyDirectly(i % 2 == 0 ? sessionKey : secondKey, perCall);
+        }
+        assertEq(wallet.sessionGasSpent(), calls * perCall, "both keys fed one counter");
+
+        (PackedUserOperation memory op, bytes32 hash) =
+            _passkeyOp(secondKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SessionHandler.SessionHandler_SessionGasBudgetExceeded.selector, (calls + 1) * perCall, budget
+            )
+        );
+        wallet.validateUserOp(_toOz(op), hash, perCall);
     }
 
     function test_sessionGasBudget_neverChargesTheOwner() public {
@@ -872,7 +968,7 @@ contract SessionGuardTest is Test {
 
     /// @notice An op the deposit already covers asks for no top-up, and the charge writes nothing.
     function test_sessionGasBudget_aCoveredOpWritesNothing() public {
-        _validateDirectly(sessionKey, sessionKeyPk, 0);
+        _validatePasskeyDirectly(sessionKey, 0);
         assertEq(wallet.sessionGasSpent(), 0);
         assertEq(wallet.sessionGasWindowStart(), 0, "no window was started");
     }
@@ -885,11 +981,9 @@ contract SessionGuardTest is Test {
         (PackedUserOperation memory ownerOp, bytes32 ownerHash,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), owner, ANVIL_OWNER_KEY
         );
-        (PackedUserOperation memory op,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet), config, address(usdc), 0, "", sessionKey, sessionKeyPk
-        );
+        (PackedUserOperation memory op,) = _passkeyOp(sessionKey, address(usdc), 0, "");
         op.callData = abi.encodeCall(SessionHandler.validateUserOp, (_toOz(ownerOp), ownerHash, 0.05 ether));
-        op = _resign(op, sessionKeyPk);
+        op = _resignPasskey(op, sessionKey);
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = op;
         uint256 balanceBefore = address(wallet).balance;
@@ -935,16 +1029,15 @@ contract SessionGuardTest is Test {
     ///         further ops until the window refills.
     function test_setSessionGasBudget_belowWhatIsSpentStopsFurtherOps() public {
         uint256 perCall = wallet.maxOpGasCost();
-        _validateDirectly(sessionKey, sessionKeyPk, perCall);
-        _validateDirectly(sessionKey, sessionKeyPk, perCall);
+        _validatePasskeyDirectly(sessionKey, perCall);
+        _validatePasskeyDirectly(sessionKey, perCall);
 
         vm.prank(owner);
         wallet.setSessionGasBudget(perCall);
         assertEq(wallet.sessionGasRemaining(), 0);
 
-        (PackedUserOperation memory op, bytes32 hash,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), sessionKey, sessionKeyPk
-        );
+        (PackedUserOperation memory op, bytes32 hash) =
+            _passkeyOp(sessionKey, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
         vm.prank(config.entryPoint);
         vm.expectRevert(
             abi.encodeWithSelector(SessionHandler.SessionHandler_SessionGasBudgetExceeded.selector, 2 * perCall + 1, perCall)
@@ -989,7 +1082,7 @@ contract SessionGuardTest is Test {
         assertEq(_feeChargedByOneSessionExecution(), feeAtBasePrice, "fee re-priced with ETH");
     }
 
-    /// @notice The fee is deliberately OUTSIDE the metered window. `_extractFee` runs before
+    /// @notice The fee is deliberately OUTSIDE the metered window. `_applyFee` runs before
     ///         `_execute`, and the hook's preCheck→postCheck window opens inside `_execute`, so the
     ///         fee transfer is never charged against the account's USD cap: the cap meters what the
     ///         USER spends, and a protocol fee is not the user's spend. See THREAT_MODEL §3.12.
@@ -1023,7 +1116,7 @@ contract SessionGuardTest is Test {
     ///         native value of its own — goes through with the ETH/USD feed stale, and still pays
     ///         the fee.
     /// @dev Only the native feed is left stale: the token feeds are re-stamped after the warp, so
-    ///      the only thing that could have consulted the native feed is `_extractFee`.
+    ///      the only thing that could have consulted the native feed is `_applyFee`.
     function test_sessionExecution_erc20OnlyTransfer_survivesAStaleNativeFeed() public {
         _staleNativeFeedOnly();
         uint256 fee = registry.getFee();
@@ -1313,8 +1406,7 @@ contract SessionGuardTest is Test {
         _enableAllowList(address(usdc));
         uint256 amount = 0.1 ether;
 
-        (PackedUserOperation memory userOp,,) =
-            sendPackedUserOp.generateSignedUserOp(address(wallet), config, kani, amount, "", sessionKey, sessionKeyPk);
+        (PackedUserOperation memory userOp,) = _passkeyOp(sessionKey, kani, amount, "");
         _handleOps(userOp);
 
         assertEq(kani.balance, amount, "the send to a plain address was blocked");
@@ -1435,10 +1527,15 @@ contract SessionGuardTest is Test {
             abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(wallet))
         );
         executor.callExecute(
-            address(wallet), bytes32(0), _encodeSingle(address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (attacker, _sessionDeadline())))
+            address(wallet),
+            bytes32(0),
+            _encodeSingle(
+                address(wallet), 0, abi.encodeCall(SessionHandler.addSession, (secondKey.qx, secondKey.qy, _sessionDeadline()))
+            )
         );
 
-        assertEq(wallet.currentSession(), sessionKey, "attacker gained a session key");
+        assertEq(_keyCount(), 1, "the executor gained a session key");
+        assertFalse(wallet.isSessionActive(secondKey.keyId()));
     }
 
     /// @notice An executor cannot reach the module's cap setters, which key by msg.sender.

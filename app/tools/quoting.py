@@ -32,7 +32,6 @@ from tools.common import (
     _APPROVAL_ROLES,
     RECEIVED,
     SENT,
-    _get_session_keys,
     _native_units,
     _resolve_legs,
 )
@@ -124,23 +123,22 @@ def _quote_executions(
     Checks a set of executions, prices them as one UserOperation, and parks it for the user to approve.
 
     The half of every write that runs BEFORE the user agrees. It builds the calldata the
-    transaction will carry, prices the whole operation against the chain without the session key
-    (bundler.quote_user_op), and stores it under an id. No signature is made and nothing is sent.
+    transaction will carry, prices the whole operation against the chain with no user key
+    (bundler.quote_user_op), and stores it under an id. No signature is made and nothing is sent:
+    once the turn is over the quote goes on a card, and only the user's passkey can approve it.
 
     It also checks the wallet will accept the transaction at all -- the checks preflight_check
-    makes: not paused, the session key live, and, when `legs` says what moves, within the spending
-    limit -- and refuses with the reason if not. Those used to be a separate tool the agent had to
-    call first, a whole model call per transaction; here they run alongside the quote's own reads,
-    so they cost no extra time either.
+    makes: not paused, a passkey approved to confirm it, and, when `legs` says what moves, within
+    the spending limit -- and refuses with the reason if not. Those used to be a separate tool the
+    agent had to call first, a whole model call per transaction; here they run alongside the
+    quote's own reads, so they cost no extra time either.
 
     A single call goes out as an ERC-7579 single execution; anything longer is batched, which is
     not an optimisation -- SpendingLimitModule reverts any transaction that leaves an allowance
     standing, so [approve, spend, (reset)] has to land atomically.
 
-    The session key is not an argument. The wallet has exactly one, so there is nothing for the
-    model to choose, and it used to be handed the key's ciphertext only to copy it back into every
-    write: a model call to fetch it, and tokens of random text to repeat. confirm_transaction reads
-    the key itself when it signs.
+    No key is an argument, nor read: the server holds none. The user approves the quote on their
+    own device, with whichever of their passkeys the wallet approves.
 
     @param runtime         The tool's ToolRuntime: carries the user and the conversation turn.
     @param executions      [(target_address, value_wei, calldata_bytes), ...], in order.
@@ -149,19 +147,17 @@ def _quote_executions(
                            spending limit will count and the USD value to show. None for a write
                            that moves nothing the limit could count (a registry write, removing
                            liquidity), which only needs the pause and the key checked.
-    @param lp_pool         A liquidity deposit's pool (see _lp_pool), for confirm_transaction to put
-                           on the dashboard. None for anything else.
+    @param lp_pool         A liquidity deposit's pool (see _lp_pool), for the send to put on the
+                           dashboard. None for anything else.
     @return                The quote to show the user. NOTHING HAS BEEN SENT.
-    @raises ToolException  If the wallet has no session key to sign with, is paused, its key is no
-                           longer live, it doesn't hold what the transaction sends (or can't pay
-                           the fees on top in the native asset), the transaction would go over the
-                           spending limit or would fail, the gas price exceeds what the wallet
-                           allows, or the service's bundler could not pay to submit it.
+    @raises ToolException  If the wallet is paused, no passkey is approved on it (or every approval
+                           is about to run out), it doesn't hold what the transaction sends (or
+                           can't pay the fees on top in the native asset), the transaction would go
+                           over the spending limit or would fail, the gas price exceeds what the
+                           wallet allows, or the service's bundler could not pay to submit it.
     """
     user_id = runtime.context.user_id
-    # The database first, on this thread (see parallel.py). A wallet with no key is refused here,
-    # now, rather than after the user has agreed.
-    session_key, _ = _get_session_keys(user_id)
+    # The database first, on this thread (see parallel.py).
     w3, chain_id, _ = load_network_config(user_id)
     bundler = _resolve_bundler()
     session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
@@ -172,7 +168,7 @@ def _quote_executions(
 
     # Then the chain, all at once: the wallet checks, the quote's own rounds of reads, and the
     # figures its cost needs.
-    checks = start_task(lambda: _wallet_checks(session_handler, session_key, resolved))
+    checks = start_task(lambda: _wallet_checks(session_handler, resolved))
     fee = start_read(registry.functions.getFee().call)
     native_price = start_read(
         lambda: session_handler.functions.getUsdValue(ETH_SENTINEL, WEI_PER_ETH).call()
@@ -182,7 +178,7 @@ def _quote_executions(
         native_balance = start_read(lambda: w3.eth.get_balance(session_handler.address))
         deposit = start_read(entry_point.functions.balanceOf(session_handler.address).call)
     try:
-        quote, failure = _quote_user_op(user_id, session_handler, entry_point, calldata, None, bundler), None
+        quote, failure = _quote_user_op(user_id, session_handler, entry_point, calldata, bundler), None
     except RuntimeError as e:
         quote, failure = None, e
     # A failed check is the clearer reason, so it wins: a paused wallet fails the simulation too,
@@ -204,7 +200,7 @@ def _quote_executions(
         chain_id=chain_id,
         turn_id=runtime.context.turn_id,
         action=action,
-        calls=[{"to": to, "value": value} for to, value, _ in executions],
+        calls=[{"to": to, "value": value, "data": "0x" + data.hex()} for to, value, data in executions],
         quote=quote,
         cost=_transaction_cost(chain_id, quote, fee.result(), native_price),
         lp_pool=lp_pool,
@@ -227,10 +223,10 @@ def _quote_executions(
             "Show the user, briefly: `action` (and its `details`, if any), the `network`, what it is "
             "worth (`usd_value`) and counts toward the spending limit (`charged_usd`) where the "
             "quote has them, the fees as the one figure given, and that nothing has been sent yet. "
-            "Plain words, never field names. Then STOP and wait for their reply. If they agree, "
-            "call confirm_transaction with this quote_id in the turn that follows; if they decline "
-            "or change anything, call cancel_transaction and start again. Never confirm in this "
-            "same turn, and never confirm a quote_id the user has not been shown."
+            "Plain words, never field names. Then STOP. A Confirm card for this quote appears with "
+            "your reply: the user sends it by tapping Confirm and approving with their passkey "
+            "(Face ID, fingerprint or PIN). You cannot send it. If they decline or change anything, "
+            "call cancel_transaction and start again."
         ),
     }
 
@@ -239,10 +235,10 @@ def _shown_figures(figures: dict) -> dict:
     """
     The wallet checks' figures (_enforce_wallet_checks) that a quote shows the model: what the
     transaction is worth and what it counts toward the limit. What is left of the limit is not
-    among them -- confirm_transaction reports it once the transaction has gone out, and a refusal
-    states it when the transaction doesn't fit -- and the key's time left is there only once it
-    runs out within SESSION_RENEWAL_WARNING_SECS. A model handed a figure reads it out, and every
-    figure read out makes the quote longer to read on a phone.
+    among them -- the sent transaction's outcome reports it, and a refusal states it when the
+    transaction doesn't fit -- and the passkeys' time left is there only once the last approval runs
+    out within SESSION_RENEWAL_WARNING_SECS. A model handed a figure reads it out, and every figure
+    read out makes the quote longer to read on a phone.
     """
     shown = {k: v for k, v in figures.items() if k not in ("remaining_usd", "session_expires_in_secs")}
     if figures["session_expires_in_secs"] < SESSION_RENEWAL_WARNING_SECS:

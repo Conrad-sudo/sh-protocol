@@ -13,7 +13,7 @@ Three processes, so only the API's own work is counted:
   - this one. It sends chats from many accounts at once, at each level in turn, and reads the API's
     CPU time from `ps` before and after each level.
 
-Left out: chain reads (the tool reads the database only) and Vault. A real turn makes a dozen or
+Left out: chain reads (the tool reads the database only). A real turn makes a dozen or
 more RPC reads, so it costs the API more CPU than a turn here: measured on a mainnet fork
 (2026-10-19), 50-200 ms a turn against about 28 ms here.
 

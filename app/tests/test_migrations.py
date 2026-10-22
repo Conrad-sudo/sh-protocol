@@ -45,10 +45,13 @@ def test_new_database():
     check("it reports the latest version", db.schema_version(conn) == len(db.MIGRATIONS),
           f"{db.schema_version(conn)} of {len(db.MIGRATIONS)}")
     check("every table is there",
-          {"users", "transactions", "transaction_movements", "supported_tokens", "session_keys", "lp_tokens", "app_feedback"}
+          {"users", "transactions", "transaction_movements", "supported_tokens", "lp_tokens", "app_feedback",
+           "passkeys", "passkey_challenges", "sign_requests"}
           <= _tables(conn), str(sorted(_tables(conn))))
+    check("and no table of server-held session keys", not {"session_keys", "pending_session_keys"} & _tables(conn),
+          str(sorted(_tables(conn))))
     check("with the newest columns", {"direction", "movements_read"} <= _columns(conn, "transactions")
-          and "telegram_chain_id" in _columns(conn, "users"))
+          and {"telegram_chain_id", "webauthn_handle"} <= _columns(conn, "users"))
 
 
 def test_database_from_before_the_numbering():
@@ -174,6 +177,37 @@ def test_feedback_table():
           db.count_feedback_since(user_id + 1, 0) == 0 and db.count_feedback_since(user_id, 2**40) == 0)
 
 
+def test_passkeys():
+    print("\n[7] migration 8 drops the server-held session keys and adds passkeys")
+    _use_new_file()
+    original = db.schema.MIGRATIONS
+    db.schema.MIGRATIONS = original[:7]
+    try:
+        db.init_db()
+    finally:
+        db.schema.MIGRATIONS = original
+    conn = db.get_db()
+    user_id = db.create_user("0x00000000000000000000000000000000000000C3")
+    conn.execute(
+        "INSERT INTO session_keys (user_id, chain_id, target, key_address, key_ciphertext) VALUES (?, ?, ?, ?, ?)",
+        (user_id, SEPOLIA, "0x" + "11" * 20, "0x" + "22" * 20, "vault:v1:ciphertext"),
+    )
+    conn.commit()
+    check("it starts at version 7 with a Vault ciphertext and no passkey tables",
+          db.schema_version(conn) == 7 and "session_keys" in _tables(conn) and "passkeys" not in _tables(conn))
+
+    db.init_db()
+    check("it ends at the latest version with the passkey tables",
+          db.schema_version(conn) == len(db.MIGRATIONS)
+          and {"passkeys", "passkey_challenges", "sign_requests"} <= _tables(conn)
+          and "webauthn_handle" in _columns(conn, "users"))
+    check("the session-key tables are gone, ciphertexts and all",
+          not {"session_keys", "pending_session_keys"} & _tables(conn))
+    check("the account is kept", (db.get_user_by_id(user_id) or {}).get("owner_addr", "").lower() == "0x00000000000000000000000000000000000000c3")
+    db.schema._migrate_passkeys(conn)
+    check("running it again changes nothing", "passkeys" in _tables(conn) and "webauthn_handle" in _columns(conn, "users"))
+
+
 if __name__ == "__main__":
     try:
         test_new_database()
@@ -182,6 +216,7 @@ if __name__ == "__main__":
         test_newer_database_is_refused()
         test_telegram_chain_column()
         test_feedback_table()
+        test_passkeys()
     finally:
         if hasattr(db._local, "db"):
             db._local.db.close()

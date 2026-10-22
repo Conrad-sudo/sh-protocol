@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, TOKEN, walletState } from './helpers.ts'
+import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, passkey, TOKEN, walletState } from './helpers.ts'
 
 /*
  * Every page at the widths real screens come in, from a small phone to a wide desktop. The other
@@ -58,6 +58,14 @@ async function mockServer(page: Page) {
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: [SEPOLIA] } })
       case '/api/chains':
         return route.fulfill({ json: { chains: CHAINS } })
+      case '/api/passkeys':
+        return route.fulfill({ json: {
+          passkeys: [
+            passkey(),
+            // The longest name a device can have, on a device this wallet doesn't trust yet.
+            passkey({ key_id: `0x${'cd'.repeat(32)}`, credential_id: 'b3RoZXItZGV2aWNl', device_name: "Grandma's iPad in the living room corner" }),
+          ],
+        } })
       case '/api/contacts':
         return route.fulfill({
           json: { contacts: [{ name: 'the-landlord-of-the-flat-on-maple-street-who-is-paid-every-month', address: OWNER }] },

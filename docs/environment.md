@@ -1,10 +1,6 @@
-# Vault & Session Key Security
+# Environment Variables
 
-A session key is a cryptographic private key that authorizes an AI agent to sign ERC-4337 `UserOperation`s. Each wallet has exactly one session key (keyed to the wallet address in the `session_keys` table); it is a bare authorized signer, bounded on-chain by the wallet's USD spending cap and admin-surface guard rather than by any per-key scope. Storing it on disk in plaintext is unacceptable — a single database breach would expose the keys for all users — so this system uses **HashiCorp Vault Transit** (encryption-as-a-service) and raw key material never touches disk. The encryption mechanism below is unchanged from earlier designs; only *what the key is keyed to* changed (one key per wallet, not one per token/target).
-
-## Environment Variables
-
-Create a `.env` file in the project root:
+Everything the contracts, the API, the Telegram bot and the CLI agent read from `.env`. Create it in the project root:
 
 ```env
 # Signing keys
@@ -53,11 +49,10 @@ CHAT_MAX_CONCURRENT=180                         # optional; how many web chat tu
 CONFIRM_MAX_CONCURRENT=64                       # optional; quote-card taps at once (web and bot each), apart from turns
 LANDING_MAX_WAITS=256                           # optional; confirmed sends waited on at once, per process
 
-# HashiCorp Vault — populated automatically by `make vault`
-VAULT_ADDR=http://127.0.0.1:8200
-VAULT_ROLE_ID=
-VAULT_SECRET_ID=
-VAULT_SECRET_ID_ACCESSOR=
+# Passkeys — the session keys, which live on users' devices; the server keeps only their public keys
+WEB_APP_URL=http://localhost:3000               # the web app's address; Telegram's Confirm links (/c/<token>) and /web open it
+WEBAUTHN_RP_ID=                                 # optional; default SIWE_DOMAIN's host: localhost in development, mitfah.com in production
+WEBAUTHN_ORIGINS=                               # optional; comma list of origins an approval may come from; default WEB_APP_URL + CORS_ORIGINS
 
 # Optional — Etherscan contract verification after Sepolia deployment, and the History tab's
 # activity outside Mitfah on Ethereum, Sepolia, Arbitrum and Celo
@@ -68,6 +63,14 @@ NODEREAL_API_KEY=your_nodereal_api_key_here
 ALCHEMY_API_KEY=your_alchemy_key
 ```
 
+> **Session keys are passkeys, and there is no key store to run.** Each device's session key is a passkey (WebAuthn, P-256) made in the user's browser and kept by the device or its password manager. The wallet holds its public key; so does `wallet.db`, to name the device. Nothing the server stores can sign anything, which is why there is no Vault any more (see [THREAT_MODEL.md](../THREAT_MODEL.md) §4.1).
+>
+> **`WEBAUTHN_RP_ID` is the domain every passkey is made for, and a passkey is bound to it for life.** Changing it later strands every passkey made under the old one: each user would have to make a new one and approve it on each wallet again. It must be the domain the web app is served from (`mitfah.com` in production); left unset it is `SIWE_DOMAIN`'s host, which already is. Browsers allow passkeys only over https, with `localhost` the one exception, so development works on `http://localhost:3000` and nothing else plain-http.
+>
+> **`WEB_APP_URL` is where Telegram's Confirm button sends the user** (`/c/<token>`, the page that asks for the passkey), so in production it must be the public https address. Left unset, the bot uses the first of `CORS_ORIGINS`. `WEBAUTHN_ORIGINS` names the pages an approval may come from (scheme, host and port, no path); every approval is checked against it, since the relying-party id alone would admit any page under the domain.
+>
+> **The Vault variables are gone.** `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` and `VAULT_SECRET_ID_ACCESSOR` are not read any more: delete them. The Vault container can be stopped once the API and the bot run this version (their first `make db` drops the tables that held its ciphertexts).
+>
 > `SEPOLIA_ACCOUNT` is the public Ethereum address corresponding to `API_BUNDLER_1` (which was `API_BUNDLER` until 2026-10-20, and `SEPOLIA_PRIVATE_KEY` until 2026-09-22). It is used by `HelperConfig.s.sol` as the deployer account on live Sepolia. Load it via `vm.envAddress("SEPOLIA_ACCOUNT")` — do not hardcode it. Mainnet/BSC use a separate placeholder key (`MAINNET_DEPLOYER_PK`) hardcoded in `HelperConfig.s.sol` — **replace it with a real funded key before broadcasting a live mainnet or BSC deployment.**
 >
 > `ANVIL_PRIVATE_KEY` is Anvil's default account 0 key — public, and safe to use locally only. `ANVIL_BUNDLER` is no longer read: plain Anvil now bundles with the `API_BUNDLER_n` / `TELEGRAM_BUNDLER_n` keys like every other network, and can be removed from `.env`.
@@ -91,116 +94,3 @@ ALCHEMY_API_KEY=your_alchemy_key
 > **The ten per-chain bot variables are gone (2026-10-16).** Until then each network had a bot of its own, set as `MITFAH_<STEM>_API` / `MITFAH_<STEM>_USERNAME` with the stems `ETH`, `SEPOLIA`, `BSC`, `ARB` and `BASE`. Nothing reads them any more: delete them. If `MITFAH_API` is missing and any of them is still set, `make bot` names them. The move itself is in [setup.md](setup.md#moving-from-five-telegram-bots-to-one).
 >
 > **`DEEPSEEK_API_KEY` is only the default.** The agent uses DeepSeek out of the box, but the LLM is not tied to DeepSeek — swap in any [LangChain chat model](https://python.langchain.com/docs/integrations/chat/) with a small edit to `app/smart_wallet_agent.py` (see [docs/app.md](app.md#section-3--langchain-agent)), and this key is no longer needed. Some LLM provider is always required; DeepSeek specifically is not.
-
----
-
-## Threat Model
-
-| Attacker | Obtains | Impact |
-|---|---|---|
-| Breaches the SQLite database | `key_ciphertext` blobs | Zero — ciphertexts require Vault's Transit key to decrypt |
-| Breaches Vault | AES-256 Transit key | Zero — the attacker still needs the specific ciphertexts from the DB |
-| Breaches both simultaneously | Both | Full key compromise — both must be protected |
-
-This is a **2-of-2 security model**: the database holds ciphertexts, Vault holds the decryption key. Neither is sufficient alone.
-
----
-
-## How Docker Runs Vault
-
-Vault is started as a Docker container exposing port 8200. Dev mode is used for local development — all state is in-memory and the root token is `dev-root-token`.
-
-> **`dev-root-token` is intentionally insecure.** Do not use it outside of a local development environment. In production, revoke the root token entirely after initial setup and authenticate exclusively via AppRole or another auth method backed by a persistent storage backend.
-
-A custom AppRole (`wallet-agent`) is provisioned with narrowly scoped policy:
-
-```hcl
-path "transit/encrypt/session-keys" { capabilities = ["update"] }
-path "transit/decrypt/session-keys" { capabilities = ["update"] }
-```
-
-The AppRole issues short-lived tokens (1-hour TTL, 4-hour max). `vault_signer.py` authenticates with `VAULT_ROLE_ID` + `VAULT_SECRET_ID` and creates a fresh authenticated client on every call — no long-lived token is cached in the process.
-
----
-
-## Step 1 — Start the Vault Container
-
-```bash
-docker run -d \
-  -e VAULT_DEV_ROOT_TOKEN_ID=dev-root-token \
-  -e SKIP_SETCAP=true \
-  -p 8200:8200 \
-  --name vault-dev \
-  hashicorp/vault:latest
-```
-
-## Step 2 — Configure Vault (one command)
-
-```bash
-make vault
-```
-
-`setup_vault.sh` runs the full configuration sequence inside the container — enabling the Transit secrets engine, creating the `session-keys` AES-256-GCM96 key, enabling AppRole auth, writing the `wallet-agent` policy, and generating a fresh `role_id` / `secret_id` pair. It then writes all four Vault variables directly into `.env`:
-
-```
-VAULT_ADDR, VAULT_ROLE_ID, VAULT_SECRET_ID, VAULT_SECRET_ID_ACCESSOR
-```
-
-> Save `VAULT_SECRET_ID_ACCESSOR` separately — you need it to revoke or rotate the secret without the secret itself.
->
-> Re-run `make vault` after any Vault container restart — dev mode is entirely in-memory.
-
----
-
-## `vault_signer.py`
-
-The Python interface to Vault. Exposes two functions:
-
-```python
-def encrypt_key(raw_key: bytes) -> str:
-    # Base64-encodes raw_key → Vault Transit encrypt → returns 'vault:v1:...' ciphertext
-
-def decrypt_key(ciphertext: str) -> bytes:
-    # Vault Transit decrypt → returns raw 32-byte key material
-```
-
-The Transit key named `session-keys` lives inside Vault and is never exported or readable — it can only be referenced by the encrypt/decrypt API.
-
----
-
-## Key Lifecycle
-
-```
-generate: secrets.token_bytes(32)
-    │
-    ▼
-derive address: w3.eth.account.from_key(raw_key)
-    │
-    ▼
-encrypt: vault_signer.encrypt_key(raw_key)  →  ciphertext stored in session_keys table
-    │
-    ▼
-wipe: raw_key = b"\x00" * 32
-```
-
-At signing time the raw key is decrypted transiently and wiped immediately after the signature is produced:
-
-```python
-raw_key = decrypt_key(key_ciphertext)
-try:
-    signed = w3.eth.account.sign_message(encode_defunct(user_op_hash), private_key=raw_key)
-    return user_op[:-1] + (signed.signature,)
-finally:
-    raw_key = b"\x00" * len(raw_key)
-    del raw_key
-```
-
-The key exists in process memory only for the milliseconds between `decrypt_key()` and the `finally` wipe. The opaque ciphertext (`vault:v1:...`) travels through the tool chain as a string — the LLM passes it between tool calls but never sees or logs raw key material.
-
----
-
-## Operational Notes
-
-> **Dev mode is ephemeral.** All Vault state (keys, AppRole config, policies) is in-memory. A container restart wipes everything. Sleep/suspend preserves state; a full restart does not.
-
-> **Production readiness:** Before going to production, replace dev mode with a real Vault server backed by a persistent storage backend, enable auto-unseal via a cloud KMS (AWS KMS, GCP Cloud KMS, or Azure Key Vault), revoke the root token, and enforce TLS. See the [Vault production hardening guide](https://developer.hashicorp.com/vault/tutorials/operations/production-hardening).

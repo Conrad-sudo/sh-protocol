@@ -121,11 +121,11 @@ class FakeWallet:
     def paused(self):
         return self._call(self.state["paused"])
 
-    def isSessionActive(self, _key):
-        return self._call(self.state["active"])
-
-    def currentSessionValidUntil(self):
-        return self._call(self.state["valid_until"])
+    def getSessions(self):
+        # One passkey approved until valid_until, or none at all.
+        if not self.state["active"]:
+            return self._call(([], []))
+        return self._call(([b"\x11" * 32], [self.state["valid_until"]]))
 
     def getRemainingBudget(self):
         return self._call(self.state["remaining"])
@@ -159,49 +159,49 @@ def test_wallet_checks():
     usdc = lambda amount, d: leg("usdc", amount, d, USDC, 6)   # noqa: E731
     weth = lambda amount, d: leg("weth", amount, d, WETH, 18)  # noqa: E731
 
-    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(), [leg("eth", 0.01, S)])
     check("a native send counts in full", out["charged_usd"] == 20 and out["usd_value"] == 20, str(out))
     check("...and fits $100", out["within_budget"] and not out["is_paused"] and out["session_active"], str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(watched={USDC, WETH}), "0xkey", [usdc(10, S), weth(0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(watched={USDC, WETH}), [usdc(10, S), weth(0.01, S)])
     check("adding liquidity counts BOTH deposits (the LP token has no price)",
           out["charged_usd"] == 30 and out["usd_value"] == 30, str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(watched={WETH}), "0xkey", [leg("eth", 0.01, S), weth(0.01, R)])
+    out = tools.checks._wallet_checks(FakeWallet(watched={WETH}), [leg("eth", 0.01, S), weth(0.01, R)])
     check("a wrap into watched WETH counts nothing", out["charged_usd"] == 0 and out["usd_value"] == 20, str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(watched=set()), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
+    out = tools.checks._wallet_checks(FakeWallet(watched=set()), [leg("eth", 0.01, S), usdc(19, R)])
     check("a swap into an unwatched token counts the ETH paid", out["charged_usd"] == 20, str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("pepe", 1000, S, PEPE, 18, unlisted=True)])
+    out = tools.checks._wallet_checks(FakeWallet(), [leg("pepe", 1000, S, PEPE, 18, unlisted=True)])
     check("a token the user added: no price, nothing counted", out["usd_value"] is None and out["charged_usd"] == 0,
           str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(broken={USDC}), "0xkey", [usdc(10, S)])
+    out = tools.checks._wallet_checks(FakeWallet(broken={USDC}), [usdc(10, S)])
     check("an unwatched token's price failing doesn't fail the checks (it is only shown)",
           out["usd_value"] is None and out["charged_usd"] == 0 and "usd_value_unavailable" in out, str(out))
     try:
-        tools.checks._wallet_checks(FakeWallet(watched={USDC}, broken={USDC}), "0xkey", [usdc(10, S)])
+        tools.checks._wallet_checks(FakeWallet(watched={USDC}, broken={USDC}), [usdc(10, S)])
         check("a counted token's price failing fails the checks", False, "nothing raised")
     except ValueError as e:
         check("a counted token's price failing fails the checks, by name", "StalePrice" in str(e), str(e))
 
-    out = tools.checks._wallet_checks(FakeWallet(remaining=10), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(remaining=10), [leg("eth", 0.01, S)])
     check("$20 doesn't fit $10", out["within_budget"] is False, str(out))
-    out = tools.checks._wallet_checks(FakeWallet(valid_for=30), "0xkey", [])
+    out = tools.checks._wallet_checks(FakeWallet(valid_for=30), [])
     check("a key with 30s left is reported as about to run out",
           out["expiring_imminently"] and not out["session_active"], str(out))
 
-    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.02, S)])
+    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), [leg("eth", 0.02, S)])
     check("sending more of the native asset than the wallet holds is caught, with both figures",
           out["enough_balance"] is False
           and out["balance_short"] == "Not enough ETH: the wallet holds 0.01, and this needs 0.02.", str(out))
-    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("usdc", 10, S, USDC, 6, balance=5 * 10**6)])
+    out = tools.checks._wallet_checks(FakeWallet(), [leg("usdc", 10, S, USDC, 6, balance=5 * 10**6)])
     check("...and of a token, counted in its own decimals",
           out["enough_balance"] is False and "holds 5, and this needs 10" in out["balance_short"], str(out))
-    out = tools.checks._wallet_checks(FakeWallet(), "0xkey", [leg("eth", 0.01, S), usdc(19, R)])
+    out = tools.checks._wallet_checks(FakeWallet(), [leg("eth", 0.01, S), usdc(19, R)])
     check("what only comes back isn't balance-checked", out["enough_balance"] is True, str(out))
-    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), "0xkey", [leg("eth", 0.01, S)])
+    out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), [leg("eth", 0.01, S)])
     check("exactly the balance is enough (the fees are the quote's to check)", out["enough_balance"] is True,
           str(out))
 
@@ -221,7 +221,8 @@ def test_quote_refusals():
     check("paused: says so, and where to unpause", "paused" in refusal(is_paused=True)
           and "Controls" in refusal(is_paused=True), refusal(is_paused=True))
     message = refusal(session_active=False)
-    check("a dead key: says so, and how to renew", "no longer active" in message and "Renew" in message, message)
+    check("no passkey approved: says so, and where to approve or renew one",
+          "No passkey is approved" in message and "Controls → Devices" in message, message)
     message = refusal(session_active=False, expiring_imminently=True)
     check("a key about to run out: says that instead", "under a minute" in message, message)
     message = refusal(within_budget=False, charged_usd=150.0, remaining_usd=80.0)

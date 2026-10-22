@@ -2,6 +2,7 @@
 Tokens: the ones Mitfah lists, the ones a user adds by address, the dashboard's list and the LP tokens
 of the pools the assistant deposited into.
 """
+import sqlite3
 import time
 
 from web3 import Web3
@@ -134,11 +135,17 @@ def save_custom_token(user_id: int, chain_id: int, address: str, ticker: str, na
     @raises sqlite3.IntegrityError  If this user already has that address or ticker on the chain.
     """
     db = get_db()
-    db.execute(
-        "INSERT INTO custom_tokens (user_id, chain_id, address, ticker, name, decimals, added_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, chain_id, address, ticker.lower(), name, decimals, int(time.time())),
-    )
+    try:
+        db.execute(
+            "INSERT INTO custom_tokens (user_id, chain_id, address, ticker, name, decimals, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, chain_id, address, ticker.lower(), name, decimals, int(time.time())),
+        )
+    except sqlite3.IntegrityError:
+        # The failed INSERT leaves this thread's write transaction open, holding the database's one
+        # write lock: every other thread's write would wait and fail "database is locked".
+        db.rollback()
+        raise
     db.commit()
 
 

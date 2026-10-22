@@ -3,6 +3,7 @@ import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { AdvancedPanel } from '../components/controls/AdvancedPanel'
+import { DevicesPanel } from '../components/controls/DevicesPanel'
 import { EmergencyPanel } from '../components/controls/EmergencyPanel'
 import { SpendingPanel } from '../components/controls/SpendingPanel'
 import { TokensPanel } from '../components/controls/TokensPanel'
@@ -18,7 +19,10 @@ import { useWalletView } from '../hooks/useWalletView'
 const TITLE = 'Controls'
 const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the network confirms them.'
 
-/** Everything the owner can change about the wallet: the brakes, the limit, and what it counts. */
+/**
+ * Everything the owner can change about the wallet: the brake, the devices that approve payments,
+ * the limit, and what it counts.
+ */
 export function ControlsPage() {
   const view = useWalletView()
   // Keyed by network: an owner transaction in flight on one network must not follow you to another.
@@ -65,6 +69,7 @@ function Controls({ wallet }: { wallet: WalletState }) {
       <div className="mf-dashboard">
         <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />
         <EmergencyPanel {...panel} />
+        <DevicesPanel {...panel} />
         <SpendingPanel {...panel} />
         <TokensPanel {...panel} chain={chain} />
         <AdvancedPanel {...panel} chain={chain} />
@@ -75,7 +80,7 @@ function Controls({ wallet }: { wallet: WalletState }) {
           title={confirmation.title}
           confirmLabel={confirmation.confirmLabel}
           tone="warning"
-          onConfirm={() => panel.start(confirmation.request)}
+          onConfirm={() => ('run' in confirmation ? confirmation.run() : panel.start(confirmation.request))}
           onClose={() => setConfirmOpen(false)}
         >
           {confirmation.body}

@@ -8,11 +8,9 @@ import os
 from contextlib import asynccontextmanager
 
 import anyio.to_thread
-import hvac.exceptions
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -24,6 +22,8 @@ import routes.contacts
 import routes.deploy
 import routes.history
 import routes.owner
+import routes.passkeys
+import routes.sign
 import routes.signin
 import routes.telegram_link
 import routes.wallet
@@ -43,9 +43,9 @@ load_dotenv()
 # uvicorn configures its log handlers before it imports this module, so they exist by now.
 install_log_redaction()
 
-# The threads every plain-`def` route runs on. anyio's default is 40; chat turns and quote-card taps
-# hold up to CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT of them, for seconds at a time, so the
-# pool is that plus the default's 40 for everything else -- the dashboard, sign-in, History.
+# The threads every plain-`def` route runs on. anyio's default is 40; chat turns and passkey
+# approvals hold up to CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT of them, for seconds at a time,
+# so the pool is that plus the default's 40 for everything else -- the dashboard, sign-in, History.
 API_THREADS = CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT + 40
 
 
@@ -76,27 +76,6 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-@app.exception_handler(hvac.exceptions.VaultError)
-async def vault_unavailable(request: Request, exc: hvac.exceptions.VaultError):
-    """
-    Names Vault when it refuses a request, instead of a bare 500.
-
-    Every session key is encrypted and decrypted through Vault, so deploys, grants and wallet reads
-    all stop when it does. The everyday cause is the dev container restarting: it keeps everything
-    in memory, so it comes back without the AppRole and the transit key, and the login in .env is
-    refused. A bare 500 reached the web app only as "Something went wrong on our side", with
-    nothing pointing at Vault. The exception itself goes to the log, not the client.
-    """
-    print(f"Vault error on {request.url.path}: {exc!r}")
-    return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={
-            "detail": "Key storage (Vault) refused the request, so no session key could be made or "
-            "read. If the Vault container was restarted, run `make vault`, then restart the API."
-        },
-    )
-
-
 # The refresh token travels as a cookie, so the browser must be allowed to send credentials --
 # which means the allowed origins have to be listed explicitly (a wildcard is rejected by the
 # browser alongside credentials, and would be wrong here anyway).
@@ -125,3 +104,5 @@ app.include_router(routes.deploy.router)
 app.include_router(routes.wallet.router)
 app.include_router(routes.owner.router)
 app.include_router(routes.allowlist.router)
+app.include_router(routes.passkeys.router)
+app.include_router(routes.sign.router)

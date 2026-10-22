@@ -507,7 +507,7 @@ def add_liquidity(
 
 def _lp_pool(user_id: int, address_a: str, address_b: str) -> dict:
     """
-    The pool a deposit goes into, for confirm_transaction to put on the dashboard (db.save_lp_token).
+    The pool a deposit goes into, for the send to put on the dashboard (db.save_lp_token).
 
     Each token is named the way the user knows it, and the wrapped native token as the native asset
     itself (ETH, BNB): that is what goes in and comes back out by default, and a deposit of WETH

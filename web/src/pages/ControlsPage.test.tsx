@@ -2,10 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { Allowlist, AllowlistEntry, WalletState } from '../api/types'
+import type { Allowlist, AllowlistEntry, Passkey, RegisteredPasskey, WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makeSession, makeWalletState, SEPOLIA, USDC, WETH } from '../test/fixtures'
+import { formatDate } from '../lib/format'
+import { chainName } from '../wallet/chains'
+import {
+  makePasskey,
+  makeSession,
+  makeSessionBlock,
+  makeSessionKey,
+  makeWalletState,
+  PASSKEY_CREDENTIAL,
+  PASSKEY_ID,
+  SEPOLIA,
+  USDC,
+  WETH,
+} from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, RpcError, setViewportWidth, TOKEN, WALLET } from '../test/utils'
+import { b64url, installPasskeys, madeCredential, refused, signedCredential } from '../test/webauthn'
 
 // Polling waits 2 s between checks; the tests don't.
 vi.mock('../lib/tx', async importOriginal => ({
@@ -40,6 +54,28 @@ const REGISTRY_ENTRY: AllowlistEntry = { address: REGISTRY, label: 'ERC-8004 rev
 /** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
 const ALLOWLIST_OFF: Allowlist = { enabled: false, targets: [], suggested: [ROUTER_ENTRY, USDC_ENTRY, REGISTRY_ENTRY] }
 
+/** A passkey made on this device during a test, as the server saves it. */
+const NEW_CREDENTIAL = b64url('work-laptop-passkey')
+const NEW_PASSKEY: RegisteredPasskey = {
+  key_id: `0x${'ef'.repeat(32)}`,
+  credential_id: NEW_CREDENTIAL,
+  device_name: 'Work laptop',
+  created_at: 1_790_100_000,
+  qx: `0x${'01'.repeat(32)}`,
+  qy: `0x${'02'.repeat(32)}`,
+}
+/** POST /api/passkeys/register/options. */
+const REGISTRATION_OPTIONS: PublicKeyCredentialCreationOptionsJSON = {
+  rp: { id: 'localhost', name: 'Mitfah' },
+  user: { id: b64url('user-handle-1234'), name: 'sam', displayName: 'sam' },
+  challenge: b64url('registration challenge 32 bytes!'),
+  pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+  authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+  attestation: 'none',
+  excludeCredentials: [{ type: 'public-key', id: PASSKEY_CREDENTIAL }],
+  timeout: 60_000,
+}
+
 /** A wallet whose contract allowlist is on, as GET /api/wallet reports it. */
 function walletWithAllowlistOn() {
   const wallet = makeWalletState()
@@ -58,8 +94,12 @@ interface ServerOptions {
   rejectSend?: boolean
   /** Holds the wallet's answers until this settles, like a wallet prompt left open. */
   walletPrompt?: Promise<void>
-  /** What /api/wallet/session/confirm reports once mined. By default it matches the last prepare. */
-  sessionOutcome?: 'granted' | 'revoked' | 'unrecognized_key'
+  /** GET /api/wallet on another network than the first of `walletChains`, by chain id. */
+  otherWallets?: Record<number, WalletState>
+  /** The account's passkeys (GET /api/passkeys); one registered in the test joins them. */
+  passkeys?: Passkey[]
+  /** DELETE /api/passkeys/{key_id} refuses with this 409 detail. */
+  refuseDelete?: string
 }
 
 interface Prepared {
@@ -78,15 +118,22 @@ function stubServer({
   refuse = {},
   rejectSend = false,
   walletPrompt = Promise.resolve(),
-  sessionOutcome,
+  otherWallets = {},
+  passkeys = [makePasskey()],
+  refuseDelete,
 }: ServerOptions = {}) {
   const prepared: Prepared[] = []
   const confirms: Record<string, unknown>[] = []
   const sessionConfirms: Record<string, unknown>[] = []
   const sent: Record<string, string>[] = []
   const sentTo: string[] = []
+  const registered: Record<string, unknown>[] = []
+  const renamed: { url: string; body: Record<string, unknown> }[] = []
+  const deleted: string[] = []
+  let optionsAsked = 0
   let walletReads = 0
   let allowlistReads = 0
+  const accountPasskeys = [...passkeys]
 
   vi.stubGlobal(
     'fetch',
@@ -132,10 +179,37 @@ function stubServer({
         )
       }
       if (url.startsWith('/api/tokens')) return Promise.resolve(json(200, { tokens: TOKENS }))
-      if (/^\/api\/wallet\/\d+$/.test(url)) {
+      const walletRead = /^\/api\/wallet\/(\d+)$/.exec(url)
+      if (walletRead) {
+        const other = otherWallets[Number(walletRead[1])]
+        if (other) return Promise.resolve(json(200, other))
         const answer = wallets[Math.min(walletReads, wallets.length - 1)]
         walletReads += 1
         return Promise.resolve(json(200, answer))
+      }
+      if (url === '/api/passkeys') return Promise.resolve(json(200, { passkeys: accountPasskeys }))
+      if (url === '/api/passkeys/register/options') {
+        optionsAsked += 1
+        return Promise.resolve(json(200, { options: REGISTRATION_OPTIONS }))
+      }
+      if (url === '/api/passkeys/register') {
+        registered.push(body)
+        accountPasskeys.push(NEW_PASSKEY)
+        return Promise.resolve(json(200, NEW_PASSKEY))
+      }
+      if (url.startsWith('/api/passkeys/') && init?.method === 'PATCH') {
+        renamed.push({ url, body })
+        const keyId = decodeURIComponent(url.slice('/api/passkeys/'.length))
+        const passkey = accountPasskeys.find(p => p.key_id === keyId)!
+        passkey.device_name = String(body.device_name)
+        return Promise.resolve(json(200, passkey))
+      }
+      if (url.startsWith('/api/passkeys/') && init?.method === 'DELETE') {
+        if (refuseDelete) return Promise.resolve(json(409, { detail: refuseDelete }))
+        const keyId = decodeURIComponent(url.slice('/api/passkeys/'.length))
+        deleted.push(keyId)
+        accountPasskeys.splice(accountPasskeys.findIndex(p => p.key_id === keyId), 1)
+        return Promise.resolve(new Response(null, { status: 204 }))
       }
       if (/^\/api\/wallet\/\d+\/allowlist$/.test(url)) {
         const answer = allowlists[Math.min(allowlistReads, allowlists.length - 1)]
@@ -157,18 +231,27 @@ function stubServer({
       }
       if (url === '/api/wallet/session/confirm') {
         sessionConfirms.push(body)
-        const last = prepared.findLast(p => p.path === '/api/wallet/session/prepare')
-        const outcome = sessionOutcome ?? (last?.body.action === 'remove' ? 'revoked' : 'granted')
         return Promise.resolve(
           sessionConfirms.length % 2 === 1
             ? json(202, { status: 'pending', tx_hash: body.tx_hash })
-            : json(200, { status: outcome, tx_hash: body.tx_hash }),
+            : json(200, { status: 'confirmed', tx_hash: body.tx_hash }),
         )
       }
       return Promise.resolve(json(404, { detail: 'Not Found' }))
     }),
   )
-  return { prepared, confirms, sessionConfirms, sent, sentTo, walletReads: () => walletReads }
+  return {
+    prepared,
+    confirms,
+    sessionConfirms,
+    sent,
+    sentTo,
+    registered,
+    renamed,
+    deleted,
+    optionsAsked: () => optionsAsked,
+    walletReads: () => walletReads,
+  }
 }
 
 /** Connects the mock wallet from the page's owner bar (the top bar has its own button too). */
@@ -243,109 +326,300 @@ describe('ControlsPage', () => {
     expect(server.prepared).toEqual([{ path: '/api/wallet/unpause/prepare', body: { chain_id: SEPOLIA } }])
   })
 
-  it('turns the assistant off in one click, and asks before turning it back on with a new key', async () => {
-    const server = stubServer({
-      wallets: [makeWalletState(), makeWalletState({ session: makeSession('off') })],
-    })
-    const user = userEvent.setup()
-    await renderRoutes(routes, '/controls')
-
-    await connect(user)
-    await user.click(screen.getByRole('button', { name: 'Turn off assistant' }))
-    expect(await screen.findByText('Assistant turned off. It can no longer act for this wallet.')).toBeInTheDocument()
-    expect(await within(row('Assistant')).findByText('Off')).toBeInTheDocument()
-
-    // Turning it off makes Mitfah forget the key, and turning it on mints a new one, so the switch
-    // is still offered with no key held.
-    await user.click(screen.getByRole('button', { name: 'Turn on assistant' }))
-    const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(
-      /For 30 days, until \w{3} \d{1,2}, \d{4}, it will be able to move funds from this wallet, up to \$100\.00 every 24 hours\./,
-    )
-    await user.click(within(dialog).getByRole('button', { name: 'Turn on assistant' }))
-    expect(await screen.findByText(/^Assistant turned on until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
-    expect(server.prepared.map(p => p.body)).toEqual([
-      { chain_id: SEPOLIA, action: 'remove' },
-      { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 },
-    ])
-    // Both went through the endpoint that files or forgets the key, never the generic one.
-    expect(server.sessionConfirms).toHaveLength(4)
-    expect(server.confirms).toEqual([])
-  })
-
-  it("shows when the assistant's access ends, and renews it after asking", async () => {
+  it('lists the devices that approve payments, and renews one after asking', async () => {
     const server = stubServer()
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
 
     await connect(user)
-    const assistant = within(row('Assistant'))
-    expect(assistant.getByText('On')).toBeInTheDocument()
-    expect(assistant.getByText(/can spend within your limit until \w{3} \d{1,2}, \d{4}\./)).toBeInTheDocument()
-    await user.click(assistant.getByRole('button', { name: 'Renew' }))
+    expect(screen.getByText(/1 of 5 devices can approve payments\./)).toBeInTheDocument()
+    const iphone = within(row('iPhone'))
+    expect(iphone.getByText('Active')).toBeInTheDocument()
+    expect(iphone.getByText(/^Approves payments until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+    await user.click(iphone.getByRole('button', { name: 'Renew iPhone' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(within(dialog).getByText("Renew the assistant's access?")).toBeInTheDocument()
-    expect(dialog).toHaveTextContent(/It keeps its access for another 30 days, until \w{3} \d{1,2}, \d{4}, and can move funds/)
+    expect(within(dialog).getByText('Renew iPhone?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(
+      /iPhone keeps approving the assistant's payments from this wallet for another 30 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+    )
     await user.click(within(dialog).getByRole('button', { name: 'Renew' }))
 
-    expect(await screen.findByText(/^Assistant renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+    expect(await screen.findByText(/^iPhone renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
     expect(server.prepared).toEqual([
-      { path: '/api/wallet/session/prepare', body: { chain_id: SEPOLIA, action: 'add', ttl_secs: 30 * 86_400 } },
+      {
+        path: '/api/wallet/session/prepare',
+        body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+      },
     ])
+    // Through the endpoint that reads the wallet's keys back, never the generic one.
     expect(server.sessionConfirms).toEqual([
       { chain_id: SEPOLIA, tx_hash: TX_HASH },
       { chain_id: SEPOLIA, tx_hash: TX_HASH },
     ])
+    expect(server.confirms).toEqual([])
   })
 
-  it('warns while the access is about to run out', async () => {
-    stubServer({ wallets: [makeWalletState({ session: makeSession('expiring') })] })
-    await renderRoutes(routes, '/controls')
-
-    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
-    expect(assistant.getByText('Expires soon')).toBeInTheDocument()
-    expect(assistant.getByText(/access runs out in 1 d 23 h|access runs out in 2 d/)).toBeInTheDocument()
-    expect(assistant.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
-    expect(assistant.getByRole('button', { name: 'Turn off assistant' })).toBeInTheDocument()
-  })
-
-  it('offers only a renewal once the access has run out', async () => {
-    stubServer({ wallets: [makeWalletState({ session: makeSession('expired') })] })
-    await renderRoutes(routes, '/controls')
-
-    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
-    expect(assistant.getByText('Expired')).toBeInTheDocument()
-    expect(assistant.getByText(/access ran out on \w{3} \d{1,2}, \d{4}, so it can't act/)).toBeInTheDocument()
-    expect(assistant.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
-    // An expired key can do nothing, and a new grant replaces it anyway.
-    expect(assistant.queryByRole('button', { name: 'Turn off assistant' })).toBeNull()
-  })
-
-  it('offers to replace a key the wallet trusts that Mitfah does not hold', async () => {
-    stubServer({ wallets: [makeWalletState({ session: makeSession('foreign') })] })
-    await renderRoutes(routes, '/controls')
-
-    const assistant = within((await screen.findByRole('heading', { name: 'Assistant', level: 3 })).closest('.mf-control-row') as HTMLElement)
-    expect(assistant.getByText('Off')).toBeInTheDocument()
-    expect(assistant.getByText(/trusts a signing key Mitfah doesn't hold/)).toBeInTheDocument()
-    expect(assistant.getByRole('button', { name: 'Turn on assistant' })).toBeInTheDocument()
-  })
-
-  it('says so when the wallet ends up trusting a key Mitfah does not hold', async () => {
-    const server = stubServer({ sessionOutcome: 'unrecognized_key' })
+  it('revokes a device in one click, and asks before adding it back', async () => {
+    const server = stubServer({ wallets: [makeWalletState(), makeWalletState({ session: makeSession('off') })] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
 
     await connect(user)
-    await user.click(screen.getByRole('button', { name: 'Renew' }))
-    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Renew' }))
+    await user.click(screen.getByRole('button', { name: 'Revoke iPhone' }))
+    expect(await screen.findByText('iPhone can no longer approve payments on Sepolia.')).toBeInTheDocument()
+    expect(await screen.findByText(/No device can approve payments from this wallet yet/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Revoke all' })).toBeNull()
 
-    expect(await within(row('Assistant')).findByText(/now trusts a key Mitfah doesn't hold/)).toBeInTheDocument()
-    expect(screen.queryByText(/^Assistant renewed/)).toBeNull()
-    // It mined, so there's nothing to check again, and the wallet was read afresh.
-    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull()
-    expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
-    expect(server.walletReads()).toBeGreaterThan(1)
+    // The passkey is still the account's, so the wallet offers it back.
+    expect(within(row('iPhone')).getByText('Not on this wallet')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add iPhone' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('Add iPhone?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(
+      /iPhone will be able to approve the assistant's payments from this wallet for 30 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Add device' }))
+    expect(await screen.findByText(/^iPhone can approve payments on Sepolia until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+
+    expect(server.prepared.map(p => p.body)).toEqual([
+      { chain_id: SEPOLIA, action: 'remove', key_id: PASSKEY_ID },
+      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+    ])
+    expect(server.sessionConfirms).toHaveLength(4)
+    expect(server.confirms).toEqual([])
+  })
+
+  it("says when a passkey not on the wallet was registered, asks the user to add it only if it's theirs, and removes one they don't know", async () => {
+    const stranger = makePasskey({ key_id: `0x${'cd'.repeat(32)}`, credential_id: 'c3RyYW5nZXI', device_name: 'iPhone 2' })
+    const server = stubServer({ passkeys: [makePasskey(), stranger] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const registered = formatDate(stranger.created_at * 1_000)
+    const other = await waitFor(() => row('iPhone 2'))
+    expect(within(other).getByText('Not on this wallet')).toBeInTheDocument()
+    expect(other).toHaveTextContent(`A passkey registered to your account on ${registered}.`)
+    expect(other).not.toHaveTextContent('One of your devices')
+
+    await user.click(within(other).getByRole('button', { name: 'Add iPhone 2' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(`Only add it if you registered this passkey yourself, on ${registered}.`)
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(server.prepared).toEqual([])
+
+    await user.click(within(other).getByRole('button', { name: 'Remove iPhone 2' }))
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'iPhone 2', level: 3 })).toBeNull())
+    expect(server.deleted).toEqual([stranger.key_id])
+    // Forgetting it is the account's own list: the owner wallet signs nothing.
+    expect(server.prepared).toEqual([])
+    expect(server.sent).toEqual([])
+  })
+
+  it("says why a passkey couldn't be removed", async () => {
+    const stranger = makePasskey({ key_id: `0x${'cd'.repeat(32)}`, credential_id: 'c3RyYW5nZXI', device_name: 'iPhone 2' })
+    stubServer({ passkeys: [makePasskey(), stranger], refuseDelete: 'This passkey is still approved on your wallet.' })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(await screen.findByRole('button', { name: 'Remove iPhone 2' }))
+    expect(
+      await within(row('iPhone 2')).findByText(/^Couldn't remove it: This passkey is still approved on your wallet\.$/),
+    ).toBeInTheDocument()
+  })
+
+  it('revokes every device at once, in one click', async () => {
+    const server = stubServer({ wallets: [makeWalletState(), makeWalletState({ session: makeSession('off') })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Revoke all' }))
+    expect(
+      await screen.findByText("Every device revoked. The assistant can't send anything on Sepolia until you add one again."),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(server.prepared).toEqual([{ path: '/api/wallet/session/prepare', body: { chain_id: SEPOLIA, action: 'remove_all' } }])
+  })
+
+  it('warns while a device is about to run out', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('expiring') })] })
+    await renderRoutes(routes, '/controls')
+
+    const iphone = within((await screen.findByRole('heading', { name: 'iPhone', level: 3 })).closest('.mf-control-row') as HTMLElement)
+    expect(iphone.getByText('Expires soon')).toBeInTheDocument()
+    expect(iphone.getByText(/Stops approving payments in (1 d 23 h|2 d)\. Renew it to keep it working\./)).toBeInTheDocument()
+    expect(iphone.getByRole('button', { name: 'Renew iPhone' })).toBeInTheDocument()
+    expect(iphone.getByRole('button', { name: 'Revoke iPhone' })).toBeInTheDocument()
+  })
+
+  it('offers a renewal once a device has run out', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('expired') })] })
+    await renderRoutes(routes, '/controls')
+
+    const iphone = within((await screen.findByRole('heading', { name: 'iPhone', level: 3 })).closest('.mf-control-row') as HTMLElement)
+    expect(iphone.getByText('Expired')).toBeInTheDocument()
+    expect(iphone.getByText(/^Stopped approving payments on \w{3} \d{1,2}, \d{4}\. Renew it to use it again\.$/)).toBeInTheDocument()
+    expect(iphone.getByRole('button', { name: 'Renew iPhone' })).toBeInTheDocument()
+    expect(screen.getByText(/0 of 5 devices can approve payments\./)).toBeInTheDocument()
+  })
+
+  it('offers only to revoke a key added outside Mitfah', async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('foreign') })] })
+    await renderRoutes(routes, '/controls')
+
+    const unknown = within(
+      (await screen.findByRole('heading', { name: 'Unknown device', level: 3 })).closest('.mf-control-row') as HTMLElement,
+    )
+    expect(unknown.getByText(/Added to this wallet outside Mitfah/)).toBeInTheDocument()
+    expect(unknown.getByRole('button', { name: 'Revoke Unknown device' })).toBeInTheDocument()
+    expect(unknown.queryByRole('button', { name: /Renew|Rename/ })).toBeNull()
+  })
+
+  it('adds this device: its passkey is made inside the confirming tap, then the owner wallet adds it', async () => {
+    const browser = installPasskeys()
+    browser.create.mockResolvedValue(madeCredential(NEW_CREDENTIAL))
+    const withLaptop = makeSessionBlock([
+      makeSessionKey(),
+      makeSessionKey({ key_id: NEW_PASSKEY.key_id, device_name: 'Work laptop', credential_id: NEW_CREDENTIAL }),
+    ])
+    const server = stubServer({ wallets: [makeWalletState(), makeWalletState({ session: withLaptop })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const name = await screen.findByLabelText('Name for this device')
+    await user.clear(name)
+    await user.type(name, 'Work laptop')
+    await user.click(screen.getByRole('button', { name: 'Add this device' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(
+      /Your browser will first ask you to create a passkey\. This device \(“Work laptop”\) will be able to approve the assistant's payments from this wallet for 30 days/,
+    )
+    // Fetched while the dialog asks, so the confirming tap can open the browser's prompt at once.
+    await waitFor(() => expect(server.optionsAsked()).toBe(1))
+    expect(browser.create).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Create passkey' }))
+    expect(browser.create).toHaveBeenCalledTimes(1)
+
+    expect(await screen.findByText(/^Work laptop can approve payments on Sepolia until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+    expect(server.registered).toEqual([
+      { credential: expect.objectContaining({ id: NEW_CREDENTIAL, type: 'public-key' }), device_name: 'Work laptop' },
+    ])
+    expect(server.prepared.map(p => p.body)).toEqual([
+      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
+    ])
+    // This browser made it, so the list says which device is this one.
+    expect(await within(row('Work laptop')).findByText('This device')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add this device' })).toBeNull()
+  })
+
+  it('offers to add a new device on the other wallets too, one signature each', async () => {
+    const browser = installPasskeys()
+    browser.create.mockResolvedValue(madeCredential(NEW_CREDENTIAL))
+    const server = stubServer({
+      walletChains: [SEPOLIA, BSC],
+      otherWallets: { [BSC]: makeWalletState({ chain_id: BSC, session: makeSession('off') }) },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const name = screen.getByLabelText('Name for this device')
+    await user.clear(name)
+    await user.type(name, 'Work laptop')
+    await user.click(screen.getByRole('button', { name: 'Add this device' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await waitFor(() => expect(server.optionsAsked()).toBe(1))
+    await user.click(within(dialog).getByRole('button', { name: 'Create passkey' }))
+    expect(await screen.findByText(/^Work laptop can approve payments on Sepolia until/)).toBeInTheDocument()
+
+    const others = within(screen.getByRole('region', { name: 'Add on your other wallets' }))
+    expect(others.getByText(/Also let “Work laptop” approve payments from your other wallets\?/)).toBeInTheDocument()
+    await user.click(await others.findByRole('button', { name: `Add on ${chainName(BSC)}` }))
+    expect(
+      await screen.findByText(new RegExp(`^Work laptop can approve payments on ${chainName(BSC)} until`)),
+    ).toBeInTheDocument()
+    expect(server.prepared.map(p => p.body)).toEqual([
+      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
+      { chain_id: BSC, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
+    ])
+    // The second went out on BSC, after the wallet switched there.
+    expect(server.sentTo).toHaveLength(2)
+    expect(server.sentTo[1]).not.toBe(server.sentTo[0])
+  })
+
+  it('uses the passkey this device already has, when the browser won’t make another', async () => {
+    const browser = installPasskeys()
+    browser.create.mockRejectedValue(refused('InvalidStateError'))
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    const server = stubServer({ wallets: [makeWalletState({ session: makeSession('off') })] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(screen.getByRole('button', { name: 'Add this device' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await waitFor(() => expect(server.optionsAsked()).toBe(1))
+    await user.click(within(dialog).getByRole('button', { name: 'Create passkey' }))
+    expect(await screen.findByText(/This device already has one of your Mitfah passkeys/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Use it' }))
+    expect(browser.get).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText(/^iPhone can approve payments on Sepolia until/)).toBeInTheDocument()
+    expect(server.registered).toEqual([])
+    expect(server.prepared.map(p => p.body)).toEqual([
+      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+    ])
+  })
+
+  it('offers no new device once the wallet trusts five', async () => {
+    installPasskeys()
+    const keys = [1, 2, 3, 4, 5].map(n =>
+      makeSessionKey({ key_id: `0x${String(n).repeat(64)}`, device_name: `Phone ${n}`, credential_id: b64url(`phone-${n}`) }),
+    )
+    stubServer({
+      wallets: [makeWalletState({ session: makeSessionBlock(keys) })],
+      passkeys: [
+        ...keys.map(key => makePasskey({ key_id: key.key_id, credential_id: key.credential_id!, device_name: key.device_name! })),
+        makePasskey({ key_id: NEW_PASSKEY.key_id, credential_id: NEW_CREDENTIAL, device_name: 'Work laptop' }),
+      ],
+    })
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText(/5 of 5 devices can approve payments\./)).toBeInTheDocument()
+    const laptop = within(await waitFor(() => row('Work laptop')))
+    expect(laptop.getByText(/already trusts 5 devices, the most it can\. Revoke one to add Work laptop\./)).toBeInTheDocument()
+    expect(laptop.getByRole('button', { name: 'Add Work laptop' })).toBeDisabled()
+    expect(within(row('Add this device')).getByText('Wallet full')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add this device' })).toBeDisabled()
+  })
+
+  it("says so when this browser can't make passkeys", async () => {
+    stubServer({ wallets: [makeWalletState({ session: makeSession('off') })], passkeys: [] })
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText(/This browser can't make passkeys, so it can't approve payments\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add this device' })).toBeDisabled()
+    expect(screen.queryByLabelText('Name for this device')).toBeNull()
+  })
+
+  it('renames a device everywhere its passkey shows, without the owner wallet', async () => {
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    // Names belong to the account, not the chain: no wallet connected.
+    await user.click(await screen.findByRole('button', { name: 'Rename iPhone' }))
+    const input = screen.getByLabelText('New name')
+    await user.clear(input)
+    await user.type(input, "Sam's iPhone")
+    await user.click(within(row('iPhone')).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('heading', { name: "Sam's iPhone", level: 3 })).toBeInTheDocument()
+    expect(server.renamed).toEqual([{ url: `/api/passkeys/${PASSKEY_ID}`, body: { device_name: "Sam's iPhone" } }])
+    expect(server.prepared).toEqual([])
   })
 
   it('asks before raising the limit', async () => {
@@ -908,7 +1182,8 @@ describe('ControlsPage', () => {
     expect(await screen.findByText(/so they're switched off here/)).toBeInTheDocument()
     expect(screen.queryByText(/Connect your owner wallet/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Turn off assistant' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Revoke iPhone' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Revoke all' })).toBeDisabled()
   })
 
   it('switches the wallet to the right network before signing', async () => {
@@ -944,15 +1219,21 @@ describe('ControlsPage', () => {
     expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
   })
 
-  it("finishes the assistant's key through its own endpoint after a reload", async () => {
+  it("finishes a device's change through its own endpoint after a reload", async () => {
     sessionStorage.setItem(
       PENDING_KEY,
-      JSON.stringify({ chainId: SEPOLIA, txHash: TX_HASH, key: 'session-on', success: 'Assistant renewed.', confirmWith: 'session' }),
+      JSON.stringify({
+        chainId: SEPOLIA,
+        txHash: TX_HASH,
+        key: `device-renew:${PASSKEY_ID}`,
+        success: 'iPhone renewed.',
+        confirmWith: 'session',
+      }),
     )
     const server = stubServer()
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText('Assistant renewed.')).toBeInTheDocument()
+    expect(await screen.findByText('iPhone renewed.')).toBeInTheDocument()
     expect(server.sessionConfirms).toHaveLength(2)
     expect(server.confirms).toEqual([])
   })

@@ -2,7 +2,7 @@
 
 The smart contract layer implements the SessionHandler Protocol as an **ERC-7579 modular account system**: shared infrastructure contracts deployed once per chain, and per-user `SessionHandler` smart wallets deployed on demand through `SHFactory`.
 
-The account (`SessionHandler`) validates its own UserOperations and manages a session-key allowlist. The USD spending cap lives in a single installable **hook** (`SpendingLimitModule`) that meters net portfolio value around every execution, so any ERC-7579 account could reuse it.
+The account (`SessionHandler`) validates its own UserOperations and manages its session keys, which are **passkeys** (P-256 keys on the user's own devices, up to five per wallet). The USD spending cap lives in a single installable **hook** (`SpendingLimitModule`) that meters net portfolio value around every execution, so any ERC-7579 account could reuse it.
 
 ## Contract Overview
 
@@ -12,8 +12,10 @@ src/
 ├── SHTreasury.sol             ← Protocol admin root — owns SHRegistry, SHOracle, and SHFactory; fee sink
 ├── SHRegistry.sol             ← Central config store — every address a wallet needs (EntryPoint, both ERC-8004 registries, module, oracle, treasury, fee, agentId)
 ├── SHOracle.sol               ← Chainlink-based USD value converter
-├── SessionHandler.sol         ← ERC-7579 smart account — self-validation, session-key allowlist, cap config, admin guard
+├── SessionHandler.sol         ← ERC-7579 smart account — self-validation, passkey session keys, cap config, admin guard
 ├── SpendingLimitModule.sol   ← ERC-7579 Hook (type 4 only) — global USD spending cap (net-value metering)
+├── utils/
+│   └── WebAuthnNative.sol        ← OpenZeppelin's WebAuthn verifier, calling the P-256 precompile only (no Solidity fallback)
 ├── interfaces/
 │   ├── IWETH.sol                 ← WETH interface (extends IERC20Extended)
 │   ├── IERC20Extended.sol        ← IERC20 + IERC20Metadata, plus legacy increaseAllowance (for selector matching only)
@@ -35,9 +37,14 @@ script/
 
 test/
 ├── unit/
-│   ├── SHProtocolTest.t.sol            ← Core unit suite: deploy, module lifecycle, metering, approvals, trusted spenders (61 tests)
-│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (37 tests)
+│   ├── SHProtocolTest.t.sol            ← Core unit suite: deploy, module lifecycle, metering, approvals, trusted spenders, passkey management (97 tests)
+│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (78 tests)
+│   ├── PasskeyValidationTest.t.sol     ← How a passkey-signed UserOp is validated: what passes, every way it can fail, the op deadline, gas (54 tests)
+│   ├── SHAdminTest.t.sol               ← Admin surface: the SHTreasury ownership graph, the oracle timelock, feed admin (70 tests)
 │   └── SpendingLimitModuleHarness.sol ← Test harness exposing the module's internal calldata/approval helpers
+├── utils/
+│   ├── PasskeyHelper.sol               ← A soft passkey: builds WebAuthn assertions the way a browser + authenticator do
+│   └── ConfiguredTokens.sol            ← Every ERC-20 a NetworkConfig names, to check the deploy script prices them all
 ├── fork/
 │   ├── SHForkTestBase.sol              ← Shared abstract fork suite (14 tests) parameterized per network; V2 venue hooks: swap calldata, _trustedSpenders(), liquidity round-trip
 │   ├── SHUniswapV3ForkTestBase.sol     ← Same suite on Uniswap V3: swaps through SwapRouter02, trusts it and the position manager, and a position round-trip (mint → half out → rest out + burn)
@@ -47,7 +54,7 @@ test/
 │   ├── SHArbitrumUniswapV3Test.t.sol   ← Arbitrum-fork instance (WETH→USDC, V3 0.05%) + L2 sequencer-gate tests
 │   └── SHBaseUniswapV3Test.t.sol       ← Base-fork instance (WETH→USDC, V3 0.05%) + L2 sequencer-gate tests
 └── invariant/
-    ├── InvariantSH.t.sol  ← Stateful invariant tests (8 invariants)
+    ├── InvariantSH.t.sol  ← Stateful invariant tests (11 invariants)
     └── SHHandler.sol      ← Action handler for fuzzing, with a ghost metering model
 ```
 
@@ -95,7 +102,7 @@ address public pendingPriceOracle;
 uint48 public pendingPriceOracleEta;
 ```
 
-> **Storage is packed.** `protocolFee` is a `uint96` sharing a slot with `treasury` (so `_extractFee`'s two registry reads cost one storage read, not two), and `pendingPriceOracleEta` is a `uint48` sharing a slot with `pendingPriceOracle`. Both are wide enough: the constructor refuses a `MAX_PROTOCOL_FEE` past `uint96`, and a `uint48` timestamp lasts millions of years. The setters still take `uint256`. `agentId` stays `uint256` because an external registry mints it.
+> **Storage is packed.** `protocolFee` is a `uint96` sharing a slot with `treasury` (so `_applyFee`'s two registry reads cost one storage read, not two), and `pendingPriceOracleEta` is a `uint48` sharing a slot with `pendingPriceOracle`. Both are wide enough: the constructor refuses a `MAX_PROTOCOL_FEE` past `uint96`, and a `uint48` timestamp lasts millions of years. The setters still take `uint256`. `agentId` stays `uint256` because an external registry mints it.
 
 > **`setPriceOracle` was replaced by a two-phase timelock.** The oracle governs every wallet's spending cap, so repointing it is the single highest-impact action the operator key can take. `proposePriceOracle` records the candidate and starts a 2-day delay; `commitPriceOracle` applies it once the ETA passes; `cancelPriceOracle` withdraws it. `proposePriceOracle` also **rejects an oracle that cannot price native (`address(0)`)**, and **the constructor makes the same check on the initial oracle**. The module meters the native balance delta on every metered transaction, so an oracle without that feed would revert every native-moving execution on every deployed wallet. The check also catches a mistyped or wrong-network address, which has no `isPriced()` to call. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8.
 
@@ -103,10 +110,10 @@ uint48 public pendingPriceOracleEta;
 
 ### Protocol fee
 
-The fee is a **flat amount of native token, in wei**. `SessionHandler._extractFee` reads it off the registry and sends it — the fee path makes no oracle call:
+The fee is a **flat amount of native token, in wei**. `SessionHandler._applyFee` reads it off the registry and sends it — the fee path makes no oracle call:
 
 ```
-SessionHandler._extractFee()
+SessionHandler._applyFee()
   ├─ SHRegistry.treasury()
   └─ SHRegistry.getFee()        // protocolFee, as stored (same storage slot as treasury)
 ```
@@ -124,7 +131,7 @@ What follows from a flat fee:
 Three more properties worth knowing:
 
 - **Only session-key executions pay.** `execute` charges the fee when `msg.sender != owner()`; owner-initiated calls pay nothing. `executeFromExecutor` always charges.
-- **The fee is outside the spending cap.** `_extractFee` runs *before* `_execute`, and the hook's `preCheck`→`postCheck` window opens inside `_execute` — so the fee never counts against the account's USD cap. This is deliberate: the cap meters what the *user* spends, and a protocol fee is not the user's spend. It does mean the fee is native outflow the cap cannot see, bounded per execution by `MAX_PROTOCOL_FEE` rather than by the cap.
+- **The fee is outside the spending cap.** `_applyFee` runs *before* `_execute`, and the hook's `preCheck`→`postCheck` window opens inside `_execute` — so the fee never counts against the account's USD cap. This is deliberate: the cap meters what the *user* spends, and a protocol fee is not the user's spend. It does mean the fee is native outflow the cap cannot see, bounded per execution by `MAX_PROTOCOL_FEE` rather than by the cap.
 - **A stale ETH/USD feed does not block the fee.** An ERC-20-only session execution never touches the native feed. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.7.
 
 `totalFeesCollected` on `SHTreasury` sums **wei** collected across different native prices. It is not a dollar total and cannot be converted into one with a spot price after the fact.
@@ -193,16 +200,14 @@ uint256 public totalFeesCollected;
 
 `SHFactory` is the user-facing entry point for deploying new `SessionHandler` wallets. It deploys a single `SessionHandler` implementation in its constructor, then `deployWallet(...)` creates each user's wallet as an **EIP-1167 minimal-proxy clone** and calls `initialize()` on it — which installs the configured `SpendingLimitModule` as a **hook**, seeds the wallet's spending-cap configuration, and applies the two owner-only grants (session key, trusted spenders) that used to need a follow-up transaction each. ETH sent with the call is forwarded to the new wallet as the initial gas prefund.
 
-**One transaction is enough.** `deployWallet` takes the per-wallet spending-cap config *and* `sessionKey` + `sessionKeyValidUntil` + `trustedSpenders`, so a wallet is fully usable the moment it is deployed. The seeded key goes through the same internal grant as `addSession`, so a deploy cannot seed a key on terms an owner transaction would refuse. Previously onboarding was three owner-signed transactions (`deployWallet`, then `addSession`, then `addTrustedSpender`); those two functions remain for later re-grants but are no longer part of the deploy path. They cannot be batched through `execute` — see the two guards described under `SessionHandler` — which is why seeding them in `initialize` is the only way to get to one signature.
+**One transaction is enough.** `deployWallet` takes the per-wallet spending-cap config *and* the first passkey (`sessionKeyX`, `sessionKeyY`, `sessionKeyValidUntil`) + `trustedSpenders`, so a wallet is fully usable the moment it is deployed. `(0, 0)` as the key means an owner-only wallet. The seeded key goes through the same internal grant as `addSession`, so a deploy cannot seed a key on terms an owner transaction would refuse. Previously onboarding was three owner-signed transactions (`deployWallet`, then `addSession`, then `addTrustedSpender`); those two functions remain for later re-grants but are no longer part of the deploy path. They cannot be batched through `execute` — see the two guards described under `SessionHandler` — which is why seeding them in `initialize` is the only way to get to one signature.
 
 **Wallets are deployed with CREATE2.** The salt is `keccak256(abi.encode(msg.sender, deployCount[msg.sender]))`, so `predictWalletAddress(owner)` returns the address that owner's *next* deploy will produce, before it exists. Binding the owner into the salt is what makes that prediction safe to publish: no other caller can reach the same salt, so a predicted address cannot be squatted.
 
-The nonce is a **per-owner** counter held by the factory, not a caller-supplied value and not a global one. A global counter (`totalWallets`, say) would make a predicted address depend on how many wallets *everyone else* had deployed, so any other user's deploy landing first would move it — which would defeat the point, since the address is what the wallet's session key is derived against. Two consequences worth knowing:
+The nonce is a **per-owner** counter held by the factory, not a caller-supplied value and not a global one. A global counter (`totalWallets`, say) would make a predicted address depend on how many wallets *everyone else* had deployed, so any other user's deploy landing first would move it — which would defeat the point: the app uses the predicted address to find the deploy even when the user's wallet replaced the transaction (sped it up, say) and the original hash never mines. Two consequences worth knowing:
 
 - A prediction is only valid for **one factory instance** — the deployer is baked into a CREATE2 address, so redeploying `SHFactory` invalidates every previously shown address.
 - Calling `deployWallet` again simply consumes the next nonce and yields another wallet — one EOA may own several. A salt can never repeat, so there is no collision case and no "already deployed" error. **Enforcing one-wallet-per-user is the caller's job**: read `deployCount(owner)` and refuse when it is non-zero, which is a free view rather than a reverted transaction the user pays for. That check means "does this USER have a wallet" only when the user is `msg.sender` — i.e. when they sign their own deploy. A caller deploying on users' behalf from one shared EOA (as `app/deploy_wallet.py` does) sees a counter covering all its users and must track per-user ownership itself.
-
-Knowing the address up front is also what lets an off-chain caller derive the wallet's **session key** before deploying it — the key's Vault entry is stored under the wallet address, so without CREATE2 it could not be minted until after the deploy that needs it as an argument.
 
 The factory stores **no** protocol addresses of its own. EntryPoint, both ERC-8004 registries, and the `SpendingLimitModule` are read off the registry at `deployWallet` time, so correcting any of them is a single registry call rather than a factory redeploy. `SHFactory` itself owns only the clone implementation and the wallet index.
 
@@ -215,9 +220,10 @@ constructor(
 /// Deploys a new SessionHandler owned by msg.sender; forwards msg.value as ETH prefund.
 /// dailyLimitUsd (18 decimals, >= 0), windowDuration (seconds, > 0), and watchedTokens (each
 /// must already be priced by the oracle) seed the hook's onInstall config.
-/// sessionKey is authorized on the new wallet (address(0) = owner-only wallet); every entry in
-/// trustedSpenders is granted the unpriced-approval exemption (may be empty). Both are applied
-/// inside initialize(), so no follow-up owner transaction is needed.
+/// The passkey (sessionKeyX, sessionKeyY) is authorized until sessionKeyValidUntil ((0, 0) =
+/// owner-only wallet, deadline ignored); every entry in trustedSpenders is granted the
+/// unpriced-approval exemption (may be empty). Both are applied inside initialize(), so no
+/// follow-up owner transaction is needed.
 /// Salted with (msg.sender, deployCount[msg.sender]), which is consumed here — so calling twice
 /// yields two distinct wallets rather than reverting.
 /// Reverts with SHFactory_SpendingLimitModuleNotSet if the registry has no module set yet.
@@ -225,7 +231,9 @@ function deployWallet(
     int256 dailyLimitUsd,
     uint256 windowDuration,
     address[] calldata watchedTokens,
-    address sessionKey,
+    bytes32 sessionKeyX,
+    bytes32 sessionKeyY,
+    uint48 sessionKeyValidUntil,
     address[] calldata trustedSpenders
 ) external payable whenNotPaused returns (address);
 
@@ -283,11 +291,20 @@ function getPrice(address token, uint256 amount) external view returns (int256);
 
 ## `SessionHandler.sol`
 
-The `SessionHandler` is an **ERC-7579 smart account** (extends OpenZeppelin's `AccountERC7579Hooked`, plus `OwnableUpgradeable` and `Pausable`), deployed behind an EIP-1167 clone by `SHFactory`. It owns three responsibilities the module doesn't: **validating its own UserOps**, **managing the session-key allowlist**, and **guarding session-key executions** away from its own admin surface. `SpendingLimitModule` is installed as a **hook only** (no validator).
+The `SessionHandler` is an **ERC-7579 smart account** (extends OpenZeppelin's `AccountERC7579Hooked`, plus `OwnableUpgradeable` and `Pausable`), deployed behind an EIP-1167 clone by `SHFactory`. It owns three responsibilities the module doesn't: **validating its own UserOps**, **managing its passkey session keys**, and **guarding session-key executions** away from its own admin surface. `SpendingLimitModule` is installed as a **hook only** (no validator).
 
-**Self-validation — no separate validator module.** `SessionHandler._authenticate` (called from `validateUserOp`) authenticates every UserOp itself instead of delegating to `AccountERC7579._validateUserOp`. It recovers the signer once from the EIP-191 envelope of the userOpHash (`toEthSignedMessageHash`, matching the bot and the Foundry helper) and branches: the **owner** validates unconditionally, **`currentSession`** validates with its `validUntil` packed into the returned validation data, and anything else returns `SIG_VALIDATION_FAILED`. Raw-signature validation stays at `AccountERC7579`'s default of `false`, so exactly one function decides who may sign.
+**Self-validation — no separate validator module.** `SessionHandler._authenticate` (called from `validateUserOp`) authenticates every UserOp itself instead of delegating to `AccountERC7579._validateUserOp`. It tells the two kinds of signer apart by the signature's **length**:
 
-Not delegating is deliberate. The base routes to a validator module named by the nonce key and otherwise falls back to `_rawSignatureValidation`; no validator module is ever installed here, so that branch is dead, and taking it would cost a second `ecrecover` just to learn which key signed. Recovering once is what lets an expired key fail as `AA22 expired or not due` instead of `AA24 signature error`. The accepted consequence: a validator module installed by the owner is ignored for UserOp validation (though `isValidSignature` would still consult it).
+- **Exactly 65 bytes — the owner.** Plain ECDSA over the EIP-191 envelope of the userOpHash (`toEthSignedMessageHash`, matching the Foundry helper and the user's browser wallet). Valid unconditionally, with no validity window. A 65-byte signature by anyone else fails: a session key is never an Ethereum address now.
+- **Anything else — a passkey.** `qx ‖ qy ‖ abi.encode(r, s, challengeIndex, typeIndex, authenticatorData, clientDataJSON)`: the passkey's public key, then a WebAuthn assertion as **six values in a row** (not `abi.encode` of the struct value, which adds a leading offset word and is refused). `_authenticatePasskey` hashes the key to its id, reads its deadline (one storage read; 0 = not held → fail), decodes the assertion, bounds-checks both JSON indices, and verifies it with **user verification required** (Face ID, fingerprint or PIN — not a bare touch) and the raw userOpHash as the challenge. The smallest possible passkey signature is 256 bytes, so the two encodings cannot be confused.
+
+Every bad signature — malformed, wrong key, wrong op, truncated, garbage — returns `SIG_VALIDATION_FAILED` and **never reverts**: a revert in validation would fail the whole bundle, not just the op. Origin and rpId inside the assertion are **not** checked on chain (a contract cannot know which site the user meant); the browser enforces them and the server checks them before relaying. What binds a signature to one op on chain is the key, user verification and the challenge — the op hash, which covers the wallet, chain, EntryPoint, nonce and calldata. Raw-signature validation stays at `AccountERC7579`'s default of `false`, so exactly one function decides who may sign.
+
+**A passkey op carries a deadline of its own.** The top 48 bits of its nonce (the top of the EntryPoint nonce *key*) are the op's deadline: `nonce = (opDeadline << 208) | (lane << 64) | sequence`. The validity window returned to the EntryPoint is the **earlier** of the key's deadline and the op's, so an expired one fails `AA22 expired or not due`, not `AA24`. A zero op deadline is refused outright — zero would read as "valid forever". Why: the app sends each passkey op on a fresh random 144-bit lane so confirmations never queue behind each other, but nothing else ever uses that lane, so without its own deadline a signed-but-abandoned op would stay sendable until the key expired (up to 90 days). The nonce is inside the signed hash, so a relayer cannot move the deadline. Owner ops ignore it and use nonce key 0. Because an expired op and an expired key both say `AA22`, the app tells them apart by asking whether the key is still active.
+
+**The P-256 precompile is required.** Signatures are checked with `WebAuthnNative` (OpenZeppelin's WebAuthn with `P256.verifyNative`, no Solidity fallback, ~2 KB smaller), which calls the RIP-7212 / EIP-7951 precompile at `0x100`. It is live on every chain served (Ethereum, Arbitrum, Base, BSC — checked 2026-10-20). Locally that means `evm_version = "osaka"` in foundry.toml and `anvil --hardfork osaka` (the Makefile's `anvil` and fork targets pass it); without it every passkey op fails.
+
+Not delegating is deliberate. The base routes to a validator module named by the nonce key and otherwise falls back to `_rawSignatureValidation`; no validator module is ever installed here, so that branch is dead, and taking it would add a hop just to learn who signed. Deciding here is also what lets an expired key fail as `AA22 expired or not due` instead of `AA24 signature error`. The accepted consequence: a validator module installed by the owner is ignored for UserOp validation (though `isValidSignature` would still consult it).
 
 **Admin-surface guard.** For any non-owner execution (a session-key UserOp through the EntryPoint, or a self-call), `execute` runs `_guardSessionExecution`, which reverts if any single/batch sub-call targets `address(this)` or `address(SH_MODULE)`, and rejects `delegatecall` outright. This is what stops a session key from calling the module's cap setters, self-calling `uninstallModule` to delete the cap, minting more session keys, or delegatecalling arbitrary code. Owner-initiated calls skip the guard.
 
@@ -298,11 +315,13 @@ Not delegating is deliberate. The base routes to a validator module named by the
 
 Session-key management and cap configuration are plain `onlyOwner`. Note that the module also refuses `execute`-routed calls to its own setters for *every* caller, owner included — see `SpendingLimitModule` below.
 
-**One session key at a time, and it expires.** `addSession(key, validUntil)` / `removeSession()`. The wallet holds a single key in `currentSession`, packed with its deadline in `currentSessionValidUntil`; granting a different key **evicts** the previous one in the same transaction, and granting the same key again just extends it (no spurious `SessionRemoved`). `addSession` refuses `address(0)`, the owner's own address (the owner can already sign, so it would authorize nothing while evicting the live key), a deadline that has passed — **including zero, which the EntryPoint would read as "valid forever"** — and anything beyond `MAX_SESSION_TTL` (90 days).
+**Up to five passkeys, one per device, and each expires.** `addSession(qx, qy, validUntil)` authorizes a passkey; a key the wallet already holds is **renewed** instead (its deadline overwritten, `SessionAdded` emitted, no new slot). `removeSession(keyId)` revokes one and reverts `SessionHandler_UnknownSessionKey` for a key the wallet does not hold, so a stale id never reads as a successful revoke; `removeAllSessions()` is the panic button (a no-op when empty). `getSessions()` lists every held key with its deadline — the answer to "which keys does this wallet trust?" — and `isSessionActive(keyId)` compares with `<=` to match the EntryPoint exactly (an op is still valid in the second that equals the deadline). Keys are identified by `sessionKeyId(qx, qy) = keccak256(abi.encode(qx, qy))`, derived rather than assigned, so the app, the contract and an indexer agree without asking each other.
 
-One key rather than an allowlist is what keeps the wallet and whoever holds the key in step: a mapping cannot be enumerated, so nothing on chain could answer "which keys does this wallet trust?". `isSessionActive(key)` answers both halves at once, comparing with `<=` to match the EntryPoint exactly (an op is still valid in the second that equals the deadline).
+`addSession` refuses a pair that is not a point on P-256 (`SessionHandler_InvalidSessionKey` — it would authorize nobody while using a slot), a deadline that has passed — **including zero, which the EntryPoint would read as "valid forever"** — and anything beyond `MAX_SESSION_TTL` (90 days). A **new** key when five are held first sweeps every expired key (emitting `SessionRemoved` for each — they already stopped working); only if all five are still live does it revert `SessionHandler_TooManySessionKeys(5)`. Five keys spend no more than one: the cap, the gas budget and the allowlist all belong to the wallet.
 
-Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of contracts via the target allowlist (off by default; an address with no code always passes). A key (with its deadline) and the chain's exchange contracts as trusted spenders are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` remain for re-granting afterwards.
+The signature carries the public key, so validation makes **one** storage read (the deadline in `sessionValidUntil`) where storing the key would take three. That is also what lets `app/bundler.py` simulate a quote for a user who has not signed yet: it plants a throwaway key's deadline with a single storage override (see the slot note below).
+
+Within its window a key is still a bare signer with no per-key target/selector scope: it can drive any external call, bounded by the spending cap, the guard, and the per-UserOp gas ceiling — optionally narrowed to a set of contracts via the target allowlist (off by default; an address with no code always passes). The first passkey (with its deadline) and the chain's exchange contracts as trusted spenders are normally seeded at deploy time by `SHFactory.deployWallet`; `addSession` / `addTrustedSpender` add more devices and re-grant afterwards.
 
 **Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and every approval of a token the oracle can't price (a BSC LP token for `removeLiquidity`, a token added by address for a swap or a deposit) then fails until the owner grants a spender. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
@@ -319,7 +338,8 @@ constructor(ProtocolAddresses memory protocol);
 
 /// Called once by SHFactory on each freshly cloned wallet, for the per-wallet settings.
 /// Installs the module as a HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens),
-/// authorizes cfg.sessionKey if non-zero, and grants each cfg.trustedSpenders entry.
+/// authorizes the passkey (sessionKeyX, sessionKeyY) unless both are zero, and grants each
+/// cfg.trustedSpenders entry.
 struct InitConfig {
     address owner;
     uint64 walletId;
@@ -327,9 +347,10 @@ struct InitConfig {
     int256 dailyLimitUsd;
     uint256 windowDuration;
     address[] watchedTokens;
-    address sessionKey;        // address(0) = owner-only wallet (not an error, unlike addSession)
-    uint48 sessionKeyValidUntil; // the key's deadline; same rules as addSession (ignored for address(0))
-    address[] trustedSpenders; // may be empty; granted AFTER the hook is installed
+    bytes32 sessionKeyX;         // (0, 0) = owner-only wallet (not an error, unlike addSession)
+    bytes32 sessionKeyY;
+    uint48 sessionKeyValidUntil; // the key's deadline; same rules as addSession (ignored for (0, 0))
+    address[] trustedSpenders;   // may be empty; granted AFTER the hook is installed
 }
 
 function initialize(InitConfig calldata cfg) external;
@@ -339,13 +360,16 @@ function execute(bytes32 mode, bytes calldata executionCalldata) public payable 
 function installModule(uint256 moduleTypeId, address module, bytes calldata initData) public override onlyOwner;
 function uninstallModule(uint256 moduleTypeId, address module, bytes calldata deInitData) public override onlyOwner;
 
-// The wallet's ONE session key, packed into a single slot (owner-only to change)
-address public currentSession;
-uint48  public currentSessionValidUntil;
+// Passkey session keys (owner-only to change). sessionValidUntil MUST stay on storage slot 9.
+uint256 public constant MAX_SESSION_KEYS = 5;
 uint48  public constant MAX_SESSION_TTL = 90 days;
-function addSession(address sessionKey, uint48 validUntil) external onlyOwner;
-function removeSession() external onlyOwner;
-function isSessionActive(address key) public view returns (bool);
+mapping(bytes32 keyId => uint48 validUntil) public sessionValidUntil;   // 0 = not held
+function sessionKeyId(bytes32 qx, bytes32 qy) public pure returns (bytes32);   // keccak256(abi.encode(qx, qy))
+function addSession(bytes32 qx, bytes32 qy, uint48 validUntil) external onlyOwner;   // add OR renew
+function removeSession(bytes32 keyId) external onlyOwner;    // unknown id reverts
+function removeAllSessions() external onlyOwner;             // empty: no-op
+function getSessions() external view returns (bytes32[] memory keyIds, uint48[] memory validUntils);
+function isSessionActive(bytes32 keyId) public view returns (bool);   // held && now <= validUntil
 
 // Spending-cap config passthroughs (owner-only; call the module as this account)
 function setDailyLimit(int256 dailyLimitUsd) external onlyOwner;
@@ -397,8 +421,8 @@ function sessionTargetAllowlist(address target) external view returns (bool);  /
 function allowedTargetCount() external view returns (uint256);
 function getAllowedTargets() external view returns (address[] memory);  // whole list, any order
 
-event SessionAdded(address indexed sessionKey, uint48 validUntil);
-event SessionRemoved(address indexed sessionKey);
+event SessionAdded(bytes32 indexed keyId, bytes32 qx, bytes32 qy, uint48 validUntil);   // also on renewal
+event SessionRemoved(bytes32 indexed keyId);
 event MaxOpGasCostUpdated(uint256 oldMax, uint256 newMax);
 event SessionGasBudgetUpdated(uint256 oldBudget, uint256 newBudget);
 event SessionAllowlistToggled(bool enabled);
@@ -406,11 +430,11 @@ event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
 
-> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts `currentSession` in slot 9 — `app/bundler.py`'s `CURRENT_SESSION_SLOT` must match. The gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 10, after it, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts the `sessionValidUntil` mapping in slot 9 — `app/bundler.py`'s `SESSION_VALID_UNTIL_SLOT` must match, since a key's deadline lives at `keccak256(abi.encode(keyId, uint256(9)))` and the bundler overrides exactly that word (`PasskeyValidationTest.test_slot9_isSessionValidUntil` pins it). The key list (`_sessionKeys`, an `EnumerableSet`) takes slots 10–11, and the gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 12, after them, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
 
 > **Two gas ceilings.** `maxOpGasCost` bounds one UserOp: `_authenticate` prices the op's own gas fields against it, and `validateUserOp` bounds the prefund transfer too. `sessionGasBudget` bounds all of them: every UserOp the owner did not sign is charged its prefund top-up (`missingAccountFunds`) against a budget that refills every `SESSION_GAS_WINDOW` (24 hours), and validation reverts with `SessionHandler_SessionGasBudgetExceeded(spent, budget)` past it. Without it, a stolen key running its own bundler could pack many ops, each just under the per-op ceiling, into one `handleOps` and collect all their gas. The charge is the top-up, not the op's maximum price, so an ordinary op uses up about what it really cost. That is only safe because `_authenticate` refuses any op whose `callData` calls `validateUserOp` itself (`SessionHandler_SelfValidationCall`), the one way a key could otherwise have the account pay a prefund outside validation. The window reads `block.timestamp` during validation, which ERC-7562 bans for public bundlers; the protocol bundles every op itself (`app/bundler.py`), so it holds.
 
-> The account currently has **no validator module**, and `_authenticate` never consults one: the nonce key the app sends is irrelevant to who may sign. Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_authenticate` — this self-validation path is the only way UserOps are authenticated.
+> The account currently has **no validator module**, and `_authenticate` never consults one: the nonce key the app sends never decides who may sign (for a passkey op it carries only the op's deadline). Until a validator (an owner/ECDSA validator or Smart Sessions) is added — which would mean changing `_authenticate` — this self-validation path is the only way UserOps are authenticated.
 
 ---
 
@@ -573,14 +597,13 @@ function run() external returns (SHFactory factory, SHTreasury treasury, HelperC
 
 ## `SendPackedUserOp.s.sol`
 
-A reusable helper for constructing signed `PackedUserOperation`s, used by the test suite. Because the account installs no validator module, UserOp validation always falls through to the account's own `_rawSignatureValidation`, so this helper signs with **whatever key it's given** — the same flow covers owner-signed and session-key-signed ops.
+A reusable helper for constructing `PackedUserOperation`s, used by the test suite. It signs **owner** ops itself (secp256k1, the only key a script can hold); for **passkey** ops it builds the same op unsigned and hands back the hash, which the caller signs as a WebAuthn challenge (`test/utils/PasskeyHelper.sol` plays the phone in tests).
 
-**Signing flow:**
-1. Fetch nonce from `EntryPoint.getNonce(sender, 0)`. (The nonce key's top bytes select a validator module; `address(0)` is never installed, so the account always falls back to self-validation. Any key value behaves identically — key 0 is the canonical choice.)
+**Flow:**
+1. Fetch the nonce from `EntryPoint.getNonce(sender, nonceKey)`. Owner ops use key 0. A passkey op's key must carry a non-zero op deadline in its top 48 bits (`PasskeyHelper.nonceKey(opDeadline, lane)`), or the account refuses it.
 2. Pack the execution into `execute(mode, executionCalldata)` calldata — single-call or batch.
 3. Get `userOpHash` from `EntryPoint.getUserOpHash(userOp)`.
-4. Wrap in the EIP-191 envelope via `toEthSignedMessageHash` (matching `_rawSignatureValidation`).
-5. Sign the digest and attach `(r, s, v)`.
+4. Owner: wrap in the EIP-191 envelope via `toEthSignedMessageHash` (what `_authenticate` re-wraps before recovery), sign, attach `(r, s, v)`. Passkey: stop here; the raw `userOpHash` is the challenge.
 
 ```solidity
 // Single-call
@@ -596,25 +619,41 @@ function generateSignedBatchUserOp(
     Execution[] memory executions,
     address signer, uint256 signerKey
 ) external view returns (PackedUserOperation memory, bytes32 userOpHash, bytes32 digest);
+
+// Unsigned twins, for a passkey to sign the returned hash
+function generateUnsignedUserOp(
+    address sender, HelperConfig.NetworkConfig memory config,
+    address dest, uint256 value, bytes memory data,
+    uint192 nonceKey
+) external view returns (PackedUserOperation memory userOp, bytes32 userOpHash);
+function generateUnsignedBatchUserOp(
+    address sender, HelperConfig.NetworkConfig memory config,
+    Execution[] memory executions,
+    uint192 nonceKey
+) external view returns (PackedUserOperation memory userOp, bytes32 userOpHash);
 ```
 
 ---
 
 ## Test Suite
 
-Totals: **60** unit + **13** guard + **8** invariant (local), and **33** fork (11 × 3 networks). All passing.
+Totals: **299** unit (97 protocol + 78 guard + 54 passkey + 70 admin) + **11** invariants, all local (`forge test --no-match-path "test/fork/*"`), and **14** fork tests per network across 5 networks. All passing.
 
-**`test/unit/SHProtocolTest.t.sol` (61 tests)** — deploy/factory config, module lifecycle (install/uninstall/reinstall, `isModuleType` hook-only), config setters (limit/window/watched-token cap, non-owner reverts), session-key allowlist, **net-value metering** (transfer pricing, inflow-offset within a tx, no-banked-credit across txs, window roll, per-token staleness isolation), **approvals** (unlimited rejected, standing reverts, consumed-in-same-tx passes, partial reverts, approve-then-zero), **trusted spenders** (Option C: unpriced approval allowed when trusted / reverts when untrusted, unlimited still rejected, standing still reverts, remove reinstates the price gate, uninstall clears), plus the harness calldata/approval-classifier tests. Uses a `MockSpender` to consume allowances mid-batch.
+**`test/unit/SHProtocolTest.t.sol` (97 tests)** — deploy/factory config, module lifecycle (install/uninstall/reinstall, `isModuleType` hook-only), config setters (limit/window/watched-token cap, non-owner reverts), passkey management (add/renew, the curve and expiry checks, the cap of five and the sweep of expired keys, remove/remove-all, `getSessions`), **net-value metering** (transfer pricing, inflow-offset within a tx, no-banked-credit across txs, window roll, per-token staleness isolation), **approvals** (unlimited rejected, standing reverts, consumed-in-same-tx passes, partial reverts, approve-then-zero), **trusted spenders** (Option C: unpriced approval allowed when trusted / reverts when untrusted, unlimited still rejected, standing still reverts, remove reinstates the price gate, uninstall clears), plus the harness calldata/approval-classifier tests. Uses a `MockSpender` to consume allowances mid-batch.
 
-**`test/unit/SessionGuardTest.t.sol` (52 tests)** — drives real `EntryPoint.handleOps` end-to-end. A wallet deployed with `deployWallet`'s `sessionKey` argument is driven by that key with no `addSession` call anywhere (`test_deployWallet_seededSessionKeyExecutesImmediately`). Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
+**`test/unit/SessionGuardTest.t.sol` (78 tests)** — drives real `EntryPoint.handleOps` end-to-end, every session-key op signed by a soft passkey. A wallet deployed with `deployWallet`'s passkey arguments is driven by that key with no `addSession` call anywhere (`test_deployWallet_seededSessionKeyExecutesImmediately`). Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
 
-Expiry is proved through the same real `handleOps` path: a key past its deadline fails `AA22 expired or not due` (not `AA24`), is accepted in the second that *equals* the deadline, works again after renewal, and an **evicted** key fails `AA24` because it is no longer the wallet's key at all. An owner-signed op still executes a year after the session key lapsed — the owner carries no validity window.
+Expiry is proved through the same real `handleOps` path: a key past its deadline fails `AA22 expired or not due` (not `AA24`), is accepted in the second that *equals* the deadline, works again after renewal, and a **removed** key fails `AA24` because it is no longer the wallet's key at all. An owner-signed op still executes a year after the session key lapsed — the owner carries no validity window.
+
+**`test/unit/PasskeyValidationTest.t.sol` (54 tests)** — what `_authenticatePasskey` accepts (honest assertions, synced-passkey flags, any signature counter, Chrome's extra clientDataJSON field) and every way a signature must fail **without reverting**: unknown/removed key, tampered JSON or challenge, a signature over another op or nonce, UV or UP off, high `s`, the wrong client-data type, another key under a held key's id, a non-owner ECDSA signature, the struct-value encoding, garbage of every length, and huge JSON indices (with a test showing OpenZeppelin's own verifier panics on one — why the account bounds them first). The **op deadline**: zero refused (`AA24`), the window is the earlier of op and key, it cannot be moved after signing, an expired op fails `AA22` while the key is live, and the owner ignores it. Plus the bundler's one-slot override, a known-answer vector produced outside Foundry (Python), and gas measurements (passkey validation is under 150k gas).
 
 > **Gotcha:** the vendored account-abstraction is EntryPoint **v0.9**, whose `nonReentrant` requires `tx.origin == msg.sender` — tests must submit `handleOps` with a two-arg `vm.prank(bundler, bundler)` (EOA bundler) or it reverts `Reentrancy()`.
 
 **`test/fork/SHForkTestBase.sol` (14 tests, abstract)** + thin per-network instances: **`SHMainnetUniswapV3Test`** (mainnet, WETH→DAI), **`SHSepoliaUniswapV3Test`** (Sepolia, WETH→USDC), **`SHArbitrumUniswapV3Test`** and **`SHBaseUniswapV3Test`** (WETH→USDC, plus the sequencer-gate tests), all swapping through Uniswap V3's SwapRouter02 via **`SHUniswapV3ForkTestBase`**, and **`SHPancakeswapV2Test`** (BSC, USDT→WBNB→LINK multi-hop on PancakeSwap V2). Each suite forks its own chain in `setUp` (`vm.createSelectFork(vm.rpcUrl(...))`, URLs from foundry.toml's `[rpc_endpoints]`). Runs identically against the real router, live Chainlink feeds, and the canonical EntryPoint: wallet deploys with cap config, `deployWallet` seeding the chain's default spenders (`_trustedSpenders()`: SwapRouter02 and the position manager on the V3 networks, PancakeSwap's router on BSC — from Constants.s.sol, as `constants.get_default_spenders` seeds them in the app), each asserted trusted; net-value metering at live prices; budget-exceeded reverts atomically; a real **session-key swap** metered by net portfolio change; standing/unlimited approvals rejected on a real DEX; a session op targeting the module reverts; a revoked key fails validation; and a **liquidity round-trip** (`_liquidityRoundTrip()`, whose body depends on the venue). On BSC it is `addLiquidity → removeLiquidity`, proving the unpriced LP-token approval flows through the trusted router (the router creates the pair where there is no direct pool). On the V3 networks it is a position, every step a session-key UserOp through the real EntryPoint: approve both tokens, `mint`, approve both back to 0; then `decreaseLiquidity` by half and `collect`; then the rest, `collect` and `burn`. It checks the wallet holds the NFT (the position manager mints with a plain `_mint`, so a SessionHandler without `onERC721Received` can), the deposit is metered, no allowance is left, and neither withdrawal is metered — they need no approval, since the wallet owns the position. Metering assertions are computed from actual balance diffs priced through the deployed oracle, so they hold despite testnet pool-ratio divergence.
 
-**`test/invariant/` (8 invariants)** — `SHHandler` fuzzes owner executes (transfers, mint+transfer batches), config changes, non-owner attacks, session-key management, and time warps, maintaining a **ghost model** that independently replicates the module's roll-then-accumulate net metering. `InvariantSH` asserts, among others: `invariant_meteringMatchesGhostModel` (module `spentInWindow` equals the ghost exactly), spend never negative, config only ever changed by the owner, the hook stays installed, the watched list stays bounded/consistent, remaining-budget consistency, and the session allowlist matches ghost bookkeeping.
+**`test/unit/SHAdminTest.t.sol` (70 tests)** — the admin surface: the SHTreasury-rooted ownership graph (direct calls to the registry, oracle or factory revert; everything goes through a treasury passthrough), the two-day oracle timelock, and SHOracle's feed admin.
+
+**`test/invariant/` (11 invariants)** — `SHHandler` fuzzes owner executes (transfers, mint+transfer batches), config changes, non-owner attacks, passkey management (add, renew, remove, remove-all against a ghost list), and time warps, maintaining a **ghost model** that independently replicates the module's roll-then-accumulate net metering. `InvariantSH` asserts, among others: `invariant_meteringMatchesGhostModel` (module `spentInWindow` equals the ghost exactly), spend never negative, config only ever changed by the owner, the hook stays installed, the watched list stays bounded/consistent, remaining-budget consistency, and for passkeys: never more than five, the on-chain list matches the ghost list, a key is listed iff its deadline is set, and every passkey call behaved as modelled.
 
 ---
 

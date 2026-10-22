@@ -1,14 +1,18 @@
 import { useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { ApiError } from '../api/client'
-import { answerQuote, fetchChatHistory, fetchQuoteOffer, sendChat } from '../api/chat'
+import { fetchChatHistory, fetchQuoteOffer, sendChat } from '../api/chat'
+import { cancelSign, finishSign, startSign } from '../api/sign'
 import { fetchTransaction } from '../api/transactions'
-import type { ChatMessage, QuoteOffer } from '../api/types'
+import type { ChatMessage, PasskeyAssertionJSON, QuoteOffer, SignStart } from '../api/types'
+import { isPasskeyError, PasskeyError, signWithPasskey } from '../lib/passkey'
+import { errorText } from '../lib/tx'
 import { TRANSACTIONS_KEY } from './useTransactions'
 
 export const chatHistoryKey = (chainId: number) => ['chat-history', chainId] as const
 export const quoteOfferKey = (chainId: number) => ['chat-quote', chainId] as const
 export const landingKey = (chainId: number) => ['chat-landing', chainId] as const
+const signStartKey = (chainId: number, quoteId: string) => ['sign-start', chainId, quoteId] as const
 const sendKey = (chainId: number) => ['chat', 'send', chainId] as const
 const answerKey = (chainId: number) => ['chat', 'answer', chainId] as const
 
@@ -33,9 +37,10 @@ export interface ChatSend {
 /**
  * True when a failed send may still have reached the assistant: the connection dropped or the
  * server broke after the request left. A 4xx means the server refused it before the assistant ran,
- * so sending it again can't repeat anything.
+ * so sending it again can't repeat anything; nor can a passkey prompt that gave no signature.
  */
 export function mayHaveRun(error: unknown) {
+  if (isPasskeyError(error) || error instanceof NothingSentError) return false
   return !(error instanceof ApiError) || error.status === 0 || error.status >= 500
 }
 
@@ -109,6 +114,9 @@ export function useChatSend(chainId: number) {
   }
 }
 
+/** A Confirm that stopped before anything was signed: its confirmation couldn't be started. */
+class NothingSentError extends Error {}
+
 /** The quote waiting for a Confirm or Cancel tap on `chainId`, or null. */
 export function useQuoteOffer(chainId: number) {
   return useQuery({
@@ -117,21 +125,99 @@ export function useQuoteOffer(chainId: number) {
   })
 }
 
-interface AnswerVariables {
-  quote: QuoteOffer
-  confirm: boolean
-}
+/**
+ * How long a started confirmation is tapped with. Older, its fees may be stale, so the card has it
+ * built again in the background (SIGN_REFRESH_MS) and a tap uses the new one.
+ */
+export const SIGN_FRESH_MS = 60_000
+const SIGN_REFRESH_MS = 50_000
 
 /**
- * A quote card's Confirm and Cancel. Like a send, it lives in the query client, so leaving the
- * page while a confirm waits for the network still blocks a second message, and its outcome is in
- * the chat on return.
+ * The confirmation behind a quote card, started as soon as the card shows (POST /api/sign/start):
+ * the final transaction built, and the challenge its passkey signs. Having it before the tap is what
+ * lets the tap open the passkey prompt at once, which Safari requires. Built again while it waits,
+ * never while a Confirm is under way: starting again stops the older one working.
+ *
+ * @param quote   The quote on the card, or null when there is none to confirm.
+ * @param paused  A Confirm or Cancel is under way.
+ */
+export function useSignStart(quote: QuoteOffer | null, paused: boolean) {
+  return useQuery({
+    queryKey: signStartKey(quote?.chain_id ?? 0, quote?.quote_id ?? ''),
+    queryFn: ({ signal }) => startSign({ chain_id: quote!.chain_id, quote_id: quote!.quote_id }, signal),
+    enabled: quote !== null && !paused,
+    staleTime: SIGN_REFRESH_MS,
+    refetchInterval: paused ? false : SIGN_REFRESH_MS,
+    gcTime: 0,
+    retry: false,
+  })
+}
+
+/** A started confirmation, if it is fresh enough for a tap to sign right now. */
+export function freshSignStart(start: { data?: SignStart; dataUpdatedAt: number; isFetching: boolean }) {
+  return start.data && !start.isFetching && Date.now() - start.dataUpdatedAt < SIGN_FRESH_MS ? start.data : null
+}
+
+type AnswerVariables =
+  | { quote: QuoteOffer; confirm: false }
+  | {
+      quote: QuoteOffer
+      confirm: true
+      /** The confirmation the tap signed, or null when none was fresh: one is then started first. */
+      start: SignStart | null
+      /** The passkey prompt the tap opened (signWithPasskey), or null along with `start`. */
+      assertion: Promise<PasskeyAssertionJSON> | null
+      /** Called once the passkey has signed, while the transaction goes out. */
+      onApproved?: () => void
+    }
+
+/**
+ * A quote card's Confirm and Cancel. Confirm sends the quote once a passkey on this device signs
+ * it: the tap opens the prompt, then POST /api/sign/finish sends it. Like a message, it lives in the
+ * query client, so leaving the page while a confirm waits for the network still blocks a second
+ * message, and its outcome is in the chat on return. It runs whatever the browser thinks of its
+ * connection: the prompt is already open, so its answer must reach the server.
  */
 export function useQuoteAnswer(chainId: number) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationKey: answerKey(chainId),
-    mutationFn: ({ quote, confirm }: AnswerVariables) => answerQuote(quote.chain_id, quote.quote_id, confirm),
+    networkMode: 'always',
+    mutationFn: async (variables: AnswerVariables) => {
+      const { quote } = variables
+      const request = { chain_id: quote.chain_id, quote_id: quote.quote_id }
+      if (!variables.confirm) {
+        const { outcome } = await cancelSign(request)
+        return { outcome, transactionId: null }
+      }
+      let { start, assertion } = variables
+      if (!start || !assertion) {
+        // No fresh confirmation at the tap: one is started now, after which a browser may refuse to
+        // open the prompt outside the tap. The next tap then has a fresh one.
+        start = await queryClient
+          .fetchQuery({ queryKey: signStartKey(quote.chain_id, quote.quote_id), queryFn: () => startSign(request), staleTime: 0 })
+          .catch((error: unknown) => {
+            // An expired quote says so itself; anything else stopped before the passkey was asked.
+            if (error instanceof ApiError && error.status === 404) throw error
+            if (error instanceof ApiError && error.status === 409) {
+              throw new NothingSentError(
+                'No device you added can approve payments from this wallet yet. Add this device in Controls.',
+              )
+            }
+            throw new NothingSentError(`Nothing was sent: ${errorText(error)}`)
+          })
+        assertion = signWithPasskey(start).catch((error: unknown) => {
+          if (isPasskeyError(error, 'cancelled')) {
+            throw new PasskeyError('cancelled', 'Your browser needs one more tap. Tap Confirm again.')
+          }
+          throw error
+        })
+      }
+      const credential = await assertion
+      variables.onApproved?.()
+      const sent = await finishSign({ sign_id: start.sign_id, credential })
+      return { outcome: sent.outcome, transactionId: sent.transaction_id ?? null }
+    },
     onSuccess: async ({ outcome, transactionId }, { quote, confirm }) => {
       const key = chatHistoryKey(quote.chain_id)
       await queryClient.cancelQueries({ queryKey: key })
@@ -153,13 +239,21 @@ export function useQuoteAnswer(chainId: number) {
       }
       refresh(quote.chain_id)
     },
-    // A refused tap (4xx) changed nothing, but its quote may be gone. One that may have run may
-    // have sent, so everything it could have changed is read again.
-    onError: (error, { quote }) => (mayHaveRun(error) ? refresh(quote.chain_id) : invalidateOffer(quote.chain_id)),
+    // A closed passkey prompt changed nothing, and its confirmation is still good for another tap. A
+    // refused tap (4xx) changed nothing either, but its quote may be gone and its confirmation is
+    // spent: both are read again. A send refused because it would fail on chain (422 from
+    // /api/sign/finish) is in the chat by then, and its quote closed. One that may have run may have
+    // sent, so everything it could have changed is read again.
+    onError: (error, { quote }) => {
+      if (isPasskeyError(error)) return
+      if (mayHaveRun(error) || (error instanceof ApiError && error.status === 422)) refresh(quote.chain_id)
+      else invalidateOffer(quote.chain_id)
+    },
   })
 
   function invalidateOffer(chain: number) {
     void queryClient.invalidateQueries({ queryKey: quoteOfferKey(chain) })
+    void queryClient.invalidateQueries({ queryKey: ['sign-start', chain] })
   }
 
   function refresh(chain: number) {

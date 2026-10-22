@@ -8,5 +8,6 @@ Disallow: /controls
 Disallow: /settings
 Disallow: /onboarding
 Disallow: /wallets/
+Disallow: /c/
 
 Sitemap: https://mitfah.com/sitemap.xml

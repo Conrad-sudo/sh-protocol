@@ -1,6 +1,10 @@
 """
-What every tool shares: amounts, token and contact resolution, slippage, the session key, and the
-legs a transaction moves. Nothing here imports another tools module.
+What every tool shares: amounts, token and contact resolution, slippage, and the legs a transaction
+moves. Nothing here imports another tools module.
+
+There is no session key here any more: the server holds none. A transaction is approved by the
+user's passkey on their own device (signing.py), and which passkeys the wallet approves is read off
+the wallet itself where a check needs it (tools.checks).
 """
 from typing import NamedTuple
 
@@ -10,6 +14,7 @@ from web3.contract import Contract
 
 from constants import (
     ETH_SENTINEL,
+    SESSION_EXPIRY_MARGIN_SECS,  # noqa: F401 -- re-exported: tools.checks and the tests read it here
     WEI_PER_ETH,
     get_native_asset_ticker,
     get_native_wrapped_ticker,
@@ -34,7 +39,6 @@ from db import (
     resolve_token as _resolve_token,
 )
 from network_config import load_network_config
-from userop import get_session_key_or_none
 
 
 def _to_base_units(amount: float | str, decimals: int) -> int:
@@ -85,14 +89,6 @@ def _check_slippage(slippage_bps: int) -> int:
             f"for a tolerance within that range."
         )
     return slippage_bps
-
-
-# How much life a session key must have left before the wallet checks (every quote, and
-# preflight_check) pass a new transaction. The wallet's own comparison is exact (valid through the
-# deadline second, matching the EntryPoint), so this margin is purely client side: it stops the
-# agent starting something that would be quoted, confirmed by the user and then refused with AA22
-# while it was in flight.
-SESSION_EXPIRY_MARGIN_SECS = 60
 
 
 def _is_listed(chain_id: int, address: str) -> bool:
@@ -352,42 +348,6 @@ def _addresses_to_tickers(user_id: int, addresses: list) -> list:
         except Exception:
             pass
     return [reverse.get(a.lower(), a) for a in addresses]
-
-
-def _get_session_keys(user_id: int) -> tuple[str, str]:
-    """
-    Returns (session_key_address, ciphertext) for a user's wallet on their current chain.
-
-    Not a tool, on purpose. There used to be a get_session_keys tool that handed the model the
-    ciphertext so it could pass it back into every write. The wallet has one key, so there was never
-    a choice to make: the tools that need it read it here, and the model never sees it.
-
-    @param user_id  The application user ID.
-    @return         (key_address, key_ciphertext).
-    """
-    # The account authorizes ONE bare session key at a time for the whole wallet
-    # (SessionHandler.currentSession) rather than per-target scoped keys — every token/router/
-    # registry operation signs with the same key, bounded by the wallet's global USD spending cap
-    # and by the key's own deadline. That is why this takes no token: the target never selected a
-    # different key.
-    #
-    # One key per wallet PER CHAIN, though: both the wallet lookup and the key lookup are scoped to
-    # the chain the user is currently on, so a user with wallets on several chains gets a distinct
-    # key for each rather than one key spanning all of them.
-    _, chain_id, _ = load_network_config(user_id)
-    wallet_address = load_session_handler(user_id).address
-    row = get_session_key_or_none(user_id, chain_id, wallet_address)
-    if row is None:
-        # Read-only on purpose. Minting one here would hand back a key the WALLET has never
-        # authorized -- every UserOp signed with it fails AA24 while the database looks healthy.
-        # A missing row means the key was revoked (or never granted), and only an owner-signed
-        # addSession can fix that.
-        raise ToolException(
-            "This wallet has no session key for the assistant to sign with, so it cannot send "
-            "transactions. Tell the user to grant one from the web app (Settings -> Session key); "
-            "it takes one transaction signed from their own wallet."
-        )
-    return row
 
 
 # Which way a leg of a transaction moves: out of the wallet, or back into it.

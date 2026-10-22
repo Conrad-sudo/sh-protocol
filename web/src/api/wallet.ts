@@ -84,9 +84,14 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
     case 'window':
       return ['/api/wallet/window-duration/prepare', { chain_id, window_secs: action.windowSecs }]
     case 'session':
-      return action.action === 'add'
-        ? ['/api/wallet/session/prepare', { chain_id, action: 'add', ttl_secs: action.ttlSecs }]
-        : ['/api/wallet/session/prepare', { chain_id, action: 'remove' }]
+      switch (action.action) {
+        case 'add':
+          return ['/api/wallet/session/prepare', { chain_id, action: 'add', key_id: action.keyId, ttl_secs: action.ttlSecs }]
+        case 'remove':
+          return ['/api/wallet/session/prepare', { chain_id, action: 'remove', key_id: action.keyId }]
+        case 'remove_all':
+          return ['/api/wallet/session/prepare', { chain_id, action: 'remove_all' }]
+      }
     case 'trusted-spender':
       return ['/api/wallet/trusted-spenders/prepare', { chain_id, spender: action.spender, action: action.action }]
     case 'max-gas':
@@ -113,9 +118,8 @@ export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }, sign
 }
 
 /**
- * confirmOwnerTx for the assistant's key. Turning the assistant on mints a new key that the app
- * starts using only once this sees the wallet trust it, so a grant confirmed anywhere else would
- * leave the assistant signing with the key the wallet just dropped.
+ * confirmOwnerTx for adding, renewing or revoking a device's passkey. Once mined it answers with the
+ * wallet's keys as they are now, so the Devices card shows the change without another read.
  */
 export function confirmSessionTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
   return apiFetch<SessionTxConfirmResult>('/api/wallet/session/confirm', { method: 'POST', body, signal })

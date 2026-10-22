@@ -5,15 +5,15 @@ This covers the half of the API that no offline test can reach: the transactions
 the eth_call simulations that are the entire reason the prepare endpoints exist. A signed-in user
 is walked through the real journey -- sign up, prove an address with SIWE, deploy a wallet, then
 drive every owner action -- with each on-chain effect asserted afterwards. The agent's side is
-covered too: session-key ERC20 transfers through the self-bundler, with what each one really cost
-written to COST_REPORT_PATH.
+covered too: ERC20 transfers approved with the account's passkey and sent through the self-bundler,
+with what each one really cost written to COST_REPORT_PATH. The passkey is a soft one
+(passkey.SoftPasskey), made through the API as the web app makes one, and approving as a phone does.
 
 A brand-new account is used rather than the harness's user 1, because the deploy endpoints can only
 be covered by a wallet this API actually created.
 
 Requires (see the plan, Phase 7):
-    make vault
-    make sepolia-fork                    (or make arbitrum-fork, ...)
+    make sepolia-fork                    (or make arbitrum-fork, ...; started with --hardfork osaka)
     make setup-test ARGS=sepolia-fork    (the same fork name)
 
 Run: make e2e-test [ARGS=arbitrum-fork]   (or: python app/tests/test_e2e_fork.py [arbitrum-fork])
@@ -63,7 +63,7 @@ from constants import (  # noqa: E402
     get_native_asset_ticker, get_native_wrapped_ticker, get_router, get_v3_network,
 )
 from contracts import load_registry, read_spending_config  # noqa: E402
-from db import get_pending_session_key, get_rpc_url, get_session_key, get_token_address  # noqa: E402
+from db import acting_network, get_rpc_url, get_sign_request, get_token_address  # noqa: E402
 from langchain_core.tools import ToolException        # noqa: E402
 from langchain_erc20 import ERC20_ABI                 # noqa: E402
 from langchain_erc8004.abis import REPUTATION_REGISTRY_ABI  # noqa: E402
@@ -72,7 +72,11 @@ from langchain_uniswap_v3 import v3math               # noqa: E402
 from langchain_uniswap_v3.abis import position_manager_abi  # noqa: E402
 import quotes                                         # noqa: E402
 import tx_movements                                   # noqa: E402
-from userop import prepare_execute_call               # noqa: E402
+from userop import build_execute_calldata             # noqa: E402
+import passkey                                       # noqa: E402
+import signing                                       # noqa: E402
+from passkey import SoftPasskey                      # noqa: E402
+from webauthn.helpers import base64url_to_bytes      # noqa: E402
 from web3.exceptions import ContractLogicError        # noqa: E402
 from web3.logs import DISCARD                         # noqa: E402
 
@@ -174,6 +178,87 @@ def sign_in_as(c: TestClient, acct) -> dict:
     return headers
 
 
+# The passkey each account in this run approves with, by user id: made through the API as the web
+# app makes one (register_passkey), and kept here as a phone keeps it.
+PASSKEYS: dict[int, SoftPasskey] = {}
+
+
+def register_passkey(c: TestClient, headers: dict, name: str = "E2E phone", primary: bool = True) -> SoftPasskey:
+    """
+    Makes a passkey for the signed-in account the way the web app does: the API's options, a
+    passkey's answer to them, and POST /api/passkeys/register, which py_webauthn checks for real.
+
+    @param primary  Whether it is the one the account approves its quotes with (PASSKEYS).
+    """
+    key = SoftPasskey(rp_id=passkey.rp_id(), origin=passkey.allowed_origins()[0])
+    r = c.post("/api/passkeys/register/options", headers=headers)
+    assert r.status_code == 200, f"passkey options: {r.status_code} {r.text[:200]}"
+    challenge = base64url_to_bytes(r.json()["options"]["challenge"])
+    r = c.post("/api/passkeys/register", headers=headers,
+               json={"credential": key.registration_response(challenge), "device_name": name})
+    assert r.status_code == 200, f"passkey register: {r.status_code} {r.text[:200]}"
+    if primary:
+        PASSKEYS[c.get("/api/me", headers=headers).json()["user_id"]] = key
+    return key
+
+
+def approve_quote(user_id: int, quote_id: str):
+    """
+    What a quote's card and the user's phone do before the send: open its sign request, build the
+    op (signing.start: fresh fees, a nonce carrying the op's deadline), approve the op's hash with
+    the account's passkey, and check the approval as the API does (signing.approve: py_webauthn,
+    then the wallet's own checks), which claims the request.
+
+    @return  signing.Approved, for tools.sending.submit_signed.
+    @raises ToolException  If there is no such quote waiting, or the approval is refused.
+    """
+    pending = quotes._pending.get(quote_id)
+    offered = signing.open_request(pending, signing.WEB) if pending is not None else None
+    if offered is None:
+        raise ToolException(f"There is no pending transaction {quote_id} to approve.")
+    try:
+        started = signing.start(get_sign_request(offered.request["id"]))
+        credential = PASSKEYS[user_id].assertion(started.challenge)
+        approved = signing.approve(signing.find_by_sign_id(started.sign_id), credential)
+    except (signing.Expired, signing.NoPasskey, signing.Rejected, signing.WouldFail) as e:
+        raise ToolException(f"{type(e).__name__}: {e}")
+    quotes.drop(user_id, quote_id)
+    return approved
+
+
+def send_approved(approved):
+    """The send half: on the wire through the bundler's lanes (tools.sending.submit_signed)."""
+    request = approved.request
+    with acting_network(request["user_id"], NETWORK, CHAIN_ID):
+        return tools.sending.submit_signed(approved)
+
+
+def approve_and_send(user_id: int, quote_id: str) -> str:
+    """
+    A quote approved with the account's passkey (approve_quote), sent, and waited for.
+
+    @return  What the user is told once it lands: "Sent — <action>. Tx hash: `0x…`", and what is
+             left of the limit.
+    @raises ToolException  If there is no such quote waiting, or it would fail, or it failed.
+    """
+    return tools.sending.settle_quoted(send_approved(approve_quote(user_id, quote_id)))
+
+
+def passkey_op(user_id: int, executions: list[tuple[str, int, bytes]], account) -> tuple:
+    """
+    One op from the user's wallet, priced, built and approved by the account's passkey, but not
+    sent: the bundler's own steps, for a test that drives the bundle itself.
+
+    @return  (the prepared op, the EntryPoint) -- bundler.PreparedUserOp, ready for a lane.
+    """
+    with acting_network(user_id, NETWORK, CHAIN_ID):
+        session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
+        quote = bundler.quote_user_op(user_id, session_handler, entry_point, calldata, account)
+        final = bundler.finalize_user_op(user_id, session_handler, entry_point, quote, account, int(time.time()) + 600)
+        signature = PASSKEYS[user_id].contract_signature(final.user_op_hash)
+        return bundler.check_signed_user_op(user_id, entry_point, quote, final, signature, account), entry_point
+
+
 def owner_action(c: TestClient, headers: dict, acct, path: str, body: dict) -> dict:
     """prepare -> sign -> broadcast -> confirm, asserting each hop. Returns the confirm payload."""
     r = c.post(path, headers=headers, json={"chain_id": CHAIN_ID, **body})
@@ -189,8 +274,12 @@ def owner_action(c: TestClient, headers: dict, acct, path: str, body: dict) -> d
 
 
 def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
-    """The real onboarding path: prepare the deploy, sign it, confirm it, verify it on chain."""
-    print("\n[1] deploy: prepare -> sign -> confirm")
+    """
+    The real onboarding path: make a passkey, prepare the deploy approving it, sign it, confirm it,
+    verify it on chain.
+    """
+    print("\n[1] deploy: passkey -> prepare -> sign -> confirm")
+    phone = register_passkey(c, headers)
     body = {
         "chain_id": CHAIN_ID,
         "deployer": acct.address,
@@ -198,6 +287,7 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
         # Nothing picked on purpose: the API adds WETH regardless, since it always counts like ETH.
         "watched_tokens": [],
         "prefund_eth": "1",
+        "key_id": phone.key_id,
     }
 
     # A browser wallet may replace the API's gas estimate with a lower limit of its own. The deploy
@@ -222,7 +312,8 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
     if r.status_code != 200:
         raise SystemExit("cannot continue without a wallet")
     prepared = r.json()
-    predicted, session_key = prepared["predicted_address"], prepared["session_key"]
+    predicted = prepared["predicted_address"]
+    check("the deploy approves the passkey it was asked to", prepared["key_id"] == phone.key_id, str(prepared.get("key_id")))
     weth = Web3.to_checksum_address(get_token_address(CHAIN_ID, WRAPPED))
     check("WETH is watched though the request picked nothing", prepared["watched_tokens"] == [weth],
           str(prepared["watched_tokens"]))
@@ -246,17 +337,20 @@ def test_deploy_round_trip(c: TestClient, acct, headers: dict) -> str:
     wallet = confirmed["wallet_address"]
 
     check("the wallet landed at the predicted address", wallet == predicted, f"{wallet} vs {predicted}")
-    check("the session key is authorized ON CHAIN", confirmed["session_key_authorized"] is True)
+    check("the passkey is approved ON CHAIN", confirmed["key_id"] == phone.key_id
+          and confirmed["session_key_authorized"] is True and confirmed["session_key_expires_at"] > time.time(),
+          str(confirmed))
     check("the wallet holds the prefund", w3.eth.get_balance(wallet) == 10**18,
           str(w3.eth.get_balance(wallet)))
 
     abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     on_chain = w3.eth.contract(address=wallet, abi=abi)
     check("the owner is the signer", on_chain.functions.owner().call() == acct.address)
-    check("currentSession agrees on chain",
-          on_chain.functions.currentSession().call() == session_key)
+    key_ids, _ = on_chain.functions.getSessions().call()
+    check("getSessions lists exactly that passkey", ["0x" + bytes(k).hex() for k in key_ids] == [phone.key_id],
+          str(key_ids))
     check("the seeded key carries a live deadline",
-          on_chain.functions.isSessionActive(session_key).call() is True)
+          on_chain.functions.isSessionActive(bytes.fromhex(phone.key_id[2:])).call() is True)
     return wallet
 
 
@@ -292,8 +386,10 @@ def test_wallet_state_read(c: TestClient, headers: dict, acct, wallet: str):
     check("weth is watched and named, not a bare address",
           [t["ticker"] for t in state["spending"]["watched_tokens"]] == [WRAPPED],
           str(state["spending"]["watched_tokens"]))
-    check("the app holds the session key and it is active on chain",
-          state["session"]["key"] is not None and state["session"]["active"] is True,
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    check("the wallet's one passkey is listed, active, under its device's name",
+          [(k["key_id"], k["device_name"], k["active"]) for k in state["session"]["keys"]]
+          == [(PASSKEYS[user_id].key_id, "E2E phone", True)] and state["session"]["max_keys"] == 5,
           str(state["session"]))
     check("the gas ceiling is a string, not a float64-mangled int",
           isinstance(state["limits"]["max_op_gas_cost_wei"], str))
@@ -403,73 +499,69 @@ def test_owner_actions(c: TestClient, acct, headers: dict, wallet: str):
     check("the trusted spender was added",
           spender in [Web3.to_checksum_address(a) for a in read_spending_config(sh)["trustedSpenders"]])
 
-    # The session key: revoke, then grant again. A grant mints a FRESH key, so the address after
-    # the round trip must differ from the one before it -- that is the revocation being real.
-    old_key = sh.functions.currentSession().call()
-    r = c.post("/api/wallet/session/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "action": "remove"})
-    check("session/prepare names the key it will revoke", r.json().get("revokes") == old_key, r.text[:150])
-    tx_hash = sign_and_send(acct, r.json()["tx"])
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    r = c.post("/api/wallet/session/confirm", headers=headers,
-               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
-    check("the revocation is confirmed", r.json().get("status") == "revoked", r.text[:200])
-    check("the agent's key is revoked on chain", int(sh.functions.currentSession().call(), 16) == 0)
+    # The passkeys: a second device added, the first renewed, one revoked, then every one, then the
+    # phone approved again -- each read back from the wallet, which is the only record of them.
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
-    check("the app forgot the revoked key", get_session_key(user_id, CHAIN_ID, wallet) is None)
+    phone = PASSKEYS[user_id]
+    laptop = register_passkey(c, headers, "E2E laptop", primary=False)
 
-    r = c.post("/api/wallet/session/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "action": "add"})
-    new_key = r.json()["session_key"]
-    check("a grant mints a fresh key", new_key != old_key, f"{new_key} == {old_key}")
-    tx_hash = sign_and_send(acct, r.json()["tx"])
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    r = c.post("/api/wallet/session/confirm", headers=headers,
-               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
-    check("the grant is confirmed", r.json().get("status") == "granted", r.text[:200])
-    check("the agent can sign again", sh.functions.isSessionActive(new_key).call() is True)
+    def session_action(body: dict) -> tuple[dict, dict]:
+        r = c.post("/api/wallet/session/prepare", headers=headers, json={"chain_id": CHAIN_ID, **body})
+        assert r.status_code == 200, f"session/prepare {body}: {r.status_code} {r.text[:250]}"
+        prepared = r.json()
+        tx_hash = sign_and_send(acct, prepared["tx"])
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        r = c.post("/api/wallet/session/confirm", headers=headers, json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+        assert r.status_code == 200, f"session/confirm {body}: {r.status_code} {r.text[:250]}"
+        return prepared, r.json()
 
-    # A confirm that never arrives -- the owner closed the tab while the grant mined. The next
-    # wallet read has to pick the new key up, or the assistant keeps signing with the evicted one.
+    def on_wallet() -> dict[str, int]:
+        ids, untils = sh.functions.getSessions().call()
+        return {"0x" + bytes(k).hex(): int(u) for k, u in zip(ids, untils)}
+
+    def refused(body: dict) -> int:
+        return c.post("/api/wallet/session/prepare", headers=headers, json={"chain_id": CHAIN_ID, **body}).status_code
+
+    prepared, confirmed = session_action({"action": "add", "key_id": laptop.key_id, "ttl_secs": 7 * 86_400})
+    check("adding a second device names it, as new", prepared["key_id"] == laptop.key_id and prepared["renews"] is False,
+          str({k: prepared.get(k) for k in ("key_id", "renews")}))
+    check("both devices are approved on chain", set(on_wallet()) == {phone.key_id, laptop.key_id}, str(on_wallet()))
+    check("the confirm reads the wallet's own list back, with the devices' names",
+          confirmed["status"] == "confirmed"
+          and {(k["key_id"], k["device_name"], k["active"]) for k in confirmed["session"]["keys"]}
+          == {(phone.key_id, "E2E phone", True), (laptop.key_id, "E2E laptop", True)}, str(confirmed))
+    before = on_wallet()[phone.key_id]
+    prepared, _ = session_action({"action": "add", "key_id": phone.key_id, "ttl_secs": 60 * 86_400})
+    check("adding a device the wallet already approves renews it, in place",
+          prepared["renews"] is True and on_wallet()[phone.key_id] > before and len(on_wallet()) == 2, str(on_wallet()))
+    prepared, _ = session_action({"action": "remove", "key_id": laptop.key_id})
+    check("revoking one device names it, and only it goes",
+          prepared["revokes"] == laptop.key_id and set(on_wallet()) == {phone.key_id}, str(on_wallet()))
+    check("revoking a device the wallet doesn't approve is refused before anything is signed",
+          refused({"action": "remove", "key_id": laptop.key_id}) == 400)
+    stranger = SoftPasskey()
+    check("approving a passkey that isn't the account's is refused",
+          refused({"action": "add", "key_id": stranger.key_id}) == 400)
+    check("approving for longer than the wallet allows is refused",
+          refused({"action": "add", "key_id": phone.key_id, "ttl_secs": 91 * 86_400}) == 400)
+    prepared, _ = session_action({"action": "remove_all"})
+    check("revoking every device names each, and none is left on chain",
+          prepared["revokes"] == [phone.key_id] and on_wallet() == {}, f"{prepared.get('revokes')} {on_wallet()}")
+    check("revoking every device of a wallet with none is refused", refused({"action": "remove_all"}) == 400)
+
+    # A confirm that never arrives -- the owner closed the tab while the approval mined. The next
+    # wallet read shows it anyway: it reads the wallet, not anything the app wrote down.
     r = c.post("/api/wallet/session/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "action": "add"})
-    unconfirmed_key = r.json()["session_key"]
+               json={"chain_id": CHAIN_ID, "action": "add", "key_id": phone.key_id})
     tx_hash = sign_and_send(acct, r.json()["tx"])
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
     session = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["session"]
-    check("a grant nobody confirmed is picked up by the next wallet read",
-          session["key"] == unconfirmed_key and session["is_app_key"] and session["active"], str(session))
-    check("nothing is left pending once it is picked up",
-          get_pending_session_key(user_id, CHAIN_ID, wallet) is None)
-    r = c.post("/api/wallet/session/confirm", headers=headers,
-               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
-    check("a confirm arriving after the read still reports the grant",
-          r.json().get("status") == "granted", r.text[:200])
-
-    # The same for a revocation.
-    r = c.post("/api/wallet/session/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "action": "remove"})
-    tx_hash = sign_and_send(acct, r.json()["tx"])
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    session = c.get(f"/api/wallet/{CHAIN_ID}", headers=headers).json()["session"]
-    check("a revocation nobody confirmed is picked up by the next wallet read",
-          session["key"] is None and session["wallet_key"] is None, str(session))
-    check("the app forgot that revoked key too", get_session_key(user_id, CHAIN_ID, wallet) is None)
-
-    # A read landing between "Turn on" and the owner's signature sees a wallet with no key. It must
-    # not throw away the key the owner is about to authorize.
-    r = c.post("/api/wallet/session/prepare", headers=headers,
-               json={"chain_id": CHAIN_ID, "action": "add"})
-    new_key = r.json()["session_key"]
-    c.get(f"/api/wallet/{CHAIN_ID}", headers=headers)
-    check("a wallet read keeps the key of a grant still waiting for its signature",
-          get_pending_session_key(user_id, CHAIN_ID, wallet) is not None)
-    tx_hash = sign_and_send(acct, r.json()["tx"])
-    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    r = c.post("/api/wallet/session/confirm", headers=headers,
-               json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
-    check("so that grant still lands", r.json().get("status") == "granted", r.text[:200])
-    check("and the agent can sign with it", sh.functions.isSessionActive(new_key).call() is True)
+    check("an approval nobody confirmed shows on the next wallet read",
+          [(k["key_id"], k["active"]) for k in session["keys"]] == [(phone.key_id, True)] and session["max_keys"] == 5,
+          str(session))
+    r = c.post("/api/wallet/session/confirm", headers=headers, json={"chain_id": CHAIN_ID, "tx_hash": tx_hash})
+    check("a confirm arriving after the read still reports it", r.json().get("status") == "confirmed", r.text[:200])
+    check("and the phone can approve again", sh.functions.isSessionActive(bytes.fromhex(phone.key_id[2:])).call() is True)
 
     # Withdraw actually moves value.
     sink = Account.create().address
@@ -750,20 +842,17 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
 
     The transfers go through tools.transfer_erc20 -- the exact function the agent calls, minus the
     model -- so the path is the production one: langchain-erc20's plan, the signature-free gas
-    estimate, the session-key signature, handleOps from the API's bundler key. One transfer moves a
-    token the cap does not watch (no price read), one a token it does (one), so the cost of the
-    oracle shows up in the numbers.
+    estimate, the passkey's approval (approve_and_send: the sign flow the card and phone drive),
+    handleOps from the API's bundler key. One transfer moves a token the cap does not watch (no
+    price read), one a token it does (one), so the cost of the oracle shows up in the numbers.
     """
     print("\n[7] self-bundling: ERC20 transfers, their real cost, and the live-chain failure modes")
     abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     sh = w3.eth.contract(address=wallet, abi=abi)
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
-    _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
 
-    # A tool runtime for the NEXT conversation turn. Every quote and every confirm gets its own,
-    # because confirm_transaction refuses a quote raised in the turn that is confirming it -- the
-    # guarantee that the user actually saw the cost and replied. The agent supplies these ids in
-    # production (smart_wallet_agent._next_turn_id); here the test plays the part of the user.
+    # A tool runtime for the NEXT conversation turn. Every quote gets its own, as each message does
+    # in production (smart_wallet_agent._next_turn_id); here the test plays the part of the user.
     turn = itertools.count(1)
 
     def next_turn() -> SimpleNamespace:
@@ -803,8 +892,8 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
         )
 
     def confirm(quoted: dict):
-        """The send half, a turn later -- as it would be after the user replied."""
-        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        """The send half: the user approves the card with their passkey."""
+        result = approve_and_send(user_id, quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
     def transfer(amount: float) -> tuple[dict, int]:
@@ -832,8 +921,8 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     check("the price read shows up in the gas", cost_watched["op_gas_used"] > cost["op_gas_used"],
           f'{cost_watched["op_gas_used"]} vs {cost["op_gas_used"]}')
 
-    # The quote/confirm split itself. A quote prices a transaction that is still unsigned and
-    # unsent; it cannot be confirmed in the turn that raised it, it belongs to one user, it works
+    # The quote/approval split itself. A quote prices a transaction that is still unsigned and
+    # unsent; no tool can send it -- only the user's passkey -- it belongs to one user, it works
     # once, and what it quoted has to match what the chain then charges.
     sent_before = sent_by_bundlers()
     held_before = token.functions.balanceOf(payee).call()
@@ -868,17 +957,18 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
           "remaining_usd" not in quoted and "session_expires_in_secs" not in quoted, str(sorted(quoted)))
 
     try:
-        tools.sending.confirm_transaction.func(same_turn, quote_id=quoted["quote_id"])
-        check("confirming in the quoting turn is refused", False, "it was sent")
+        shown = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
     except ToolException as e:
-        check("confirming in the quoting turn is refused", "has not seen the cost" in str(e), str(e)[:160])
+        shown = str(e)
+    check("the agent's confirm_transaction only shows the card again", shown == tools.sending.CARD_SHOWN, shown[:160])
     check("...and still nothing was broadcast", sent_by_bundlers() == sent_before)
 
+    signing.open_request(quotes._pending[quoted["quote_id"]], signing.WEB)
     try:
-        quotes.take(user_id + 9_999, CHAIN_ID, quoted["quote_id"], next(turn))
-        check("another user cannot claim someone else's quote", False, "it was handed over")
-    except quotes.QuoteError:
-        check("another user cannot claim someone else's quote", True)
+        signing.find_by_quote(user_id + 9_999, CHAIN_ID, quoted["quote_id"])
+        check("another user cannot approve someone else's quote", False, "it was found")
+    except signing.Expired:
+        check("another user cannot approve someone else's quote", True)
 
     receipt = confirm(quoted)
     actual = user_op_cost(sh, receipt)
@@ -900,10 +990,10 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     }
 
     try:
-        tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
-        check("a quote cannot be confirmed twice", False, "it was sent again")
+        approve_and_send(user_id, quoted["quote_id"])
+        check("a quote cannot be approved twice", False, "it was sent again")
     except ToolException as e:
-        check("a quote cannot be confirmed twice", "no pending transaction" in str(e), str(e)[:160])
+        check("a quote cannot be approved twice", "no pending transaction" in str(e), str(e)[:160])
 
     # Over the spending cap: the quote's own wallet checks refuse it, saying how much is left --
     # before anything is signed, sent or paid for. (The bundler's execution estimate would refuse
@@ -946,15 +1036,9 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
     # still happened, once -- and the app must say so, not report a failure the user might retry.
     before = token.functions.balanceOf(payee).call()
     amount = 5 * unit
-    session_handler, entry_point, calldata, nonce = prepare_execute_call(
-        user_id, usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:])
-    )
     bundler_account = bundler.resolve_bundler()
-    op_quote = bundler.quote_user_op(
-        user_id, session_handler, entry_point, calldata, nonce, bundler_account
-    )
-    prepared = bundler.prepare_user_op(
-        user_id, key_ciphertext, session_handler, entry_point, op_quote, bundler_account
+    prepared, entry_point = passkey_op(
+        user_id, [(usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:]))], bundler_account
     )
     check("the op's hash, worked out locally, is the EntryPoint's own",
           prepared.user_op_hash == bytes(entry_point.functions.getUserOpHash(prepared.op).call()))
@@ -997,9 +1081,13 @@ def test_self_bundling(c: TestClient, acct, headers: dict, wallet: str):
 
 
 def deploy_another_wallet(c: TestClient, acct, headers: dict) -> str:
-    """A second account's wallet, deployed the way test_deploy_round_trip does it, minus the checks."""
+    """
+    A second account's wallet, deployed the way test_deploy_round_trip does it, minus the checks:
+    with a passkey of its own, made through the API, which the deploy approves.
+    """
+    key = register_passkey(c, headers)
     body = {"chain_id": CHAIN_ID, "deployer": acct.address, "daily_limit_usd": 50_000,
-            "watched_tokens": [], "prefund_eth": "1"}
+            "watched_tokens": [], "prefund_eth": "1", "key_id": key.key_id}
     prepared = c.post("/api/deploy", headers=headers, json=body).json()
     tx_hash = sign_and_send(acct, prepared["tx"])
     w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
@@ -1043,12 +1131,9 @@ def test_bundling(c: TestClient, acct, headers: dict, wallet: str):
         user_id = c.get("/api/me", headers=account_headers).json()["user_id"]
         deal_erc20(usdc, sender, 100 * unit)
         payee, amount = Account.create().address, i * unit
-        session_handler, entry_point, calldata, nonce = prepare_execute_call(
-            user_id, usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:])
+        prepared, _ = passkey_op(
+            user_id, [(usdc, 0, bytes.fromhex(token.encode_abi("transfer", args=[payee, amount])[2:]))], account
         )
-        _, key_ciphertext = get_session_key(user_id, CHAIN_ID, sender)
-        quote = bundler.quote_user_op(user_id, session_handler, entry_point, calldata, nonce, account)
-        prepared = bundler.prepare_user_op(user_id, key_ciphertext, session_handler, entry_point, quote, account)
         ops.append((user_id, sender, payee, amount, prepared))
 
     lane = bundler._lane_for(ops[0][0], account)
@@ -1138,8 +1223,9 @@ def test_bundler_pool(c: TestClient):
     """
     The API's pool of bundler keys under load: many wallets' Confirms at once, each a different kind
     of transaction -- transfers, native sends, wraps, swaps both ways, a swap sent on to a contact,
-    ERC-8004 ratings -- through the production path (tools.sending.submit_quoted, then
-    settle_quoted). They spread over the keys (bundler.pick_bundler), each key bundles its own share
+    ERC-8004 ratings -- through the production path: each card approved with its account's passkey
+    (approve_quote, as each approval page does), then every one sent at once
+    (tools.sending.submit_signed, then settle_quoted). They spread over the keys (bundler.pick_bundler), each key bundles its own share
     (bundler.Lane), every op runs and does what it was quoted to do, History lists each under the
     hash that ran it, and every key is repaid.
     """
@@ -1218,6 +1304,22 @@ def test_bundler_pool(c: TestClient):
     for item, q in zip(wallets, quoted):
         item["quote"], item["before"] = q, effect(item)
 
+    def approve(item: dict):
+        try:
+            return approve_quote(item["user_id"], item["quote"]["quote_id"])
+        except ToolException as e:
+            return e
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        approvals = list(pool.map(approve, wallets))
+    print(f"  INFO  {n} approvals in {time.monotonic() - started:.1f} s (8 at a time)")
+    check(f"every card is approved by its account's passkey ({n}/{n})",
+          not [a for a in approvals if isinstance(a, Exception)],
+          str([str(a)[:120] for a in approvals if isinstance(a, Exception)][:3]))
+    for item, approved in zip(wallets, approvals):
+        item["approved"] = approved
+
     nonces = {k: w3.eth.get_transaction_count(k) for k in keys}
     balances = {k: w3.eth.get_balance(k) for k in keys}
     barrier = threading.Barrier(n)
@@ -1227,7 +1329,9 @@ def test_bundler_pool(c: TestClient):
         barrier.wait(timeout=120)
         t0 = time.monotonic()
         try:
-            sending = tools.sending.submit_quoted(item["user_id"], CHAIN_ID, item["quote"]["quote_id"], next(turn))
+            if isinstance(item["approved"], Exception):
+                raise item["approved"]
+            sending = send_approved(item["approved"])
             on_wire = time.monotonic() - t0
             return sending, tools.sending.settle_quoted(sending), on_wire, time.monotonic() - t0
         except Exception as e:  # noqa: BLE001 -- counted and shown below
@@ -1406,7 +1510,8 @@ def test_custom_tokens(c: TestClient, acct, headers: dict, wallet: str):
         return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
 
     def confirm(quoted: dict):
-        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        """The user approves the card with their passkey; it is sent and lands."""
+        result = approve_and_send(user_id, quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
     # A fresh token nobody prices, and a fake one calling itself USDC.
@@ -1564,7 +1669,8 @@ def test_swaps_and_liquidity(c: TestClient, acct, headers: dict, wallet: str):
         return SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=next(turn)))
 
     def confirm(quoted: dict):
-        result = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+        """The user approves the card with their passkey; it is sent and lands."""
+        result = approve_and_send(user_id, quoted["quote_id"])
         return w3.eth.get_transaction_receipt("0x" + result.split("`")[1].removeprefix("0x"))
 
     if get_exchange(CHAIN_ID) == "uniswap-v3":
@@ -2099,13 +2205,12 @@ def test_price_pause_is_named(c: TestClient, acct, headers: dict, wallet: str):
         message = agent_read_message()
         check("the agent is told the error by name on a read", "PriceOracle_SequencerDown" in message, message[:200])
 
-        # The agent, on a transaction: a real session-key UserOp through the self-bundling path.
-        # Its inner call fails in the hook's valuation, which the bundler's execution estimate hits
-        # first -- so the op is refused by name before it is signed, and nothing is mined or paid.
+        # The agent, on a transaction: a real passkey op through the self-bundling path. Its inner
+        # call fails in the hook's valuation, which the bundler's execution estimate hits first --
+        # so the op is refused by name before the passkey is even asked, and nothing is mined or paid.
         user_id = c.get("/api/me", headers=headers).json()["user_id"]
-        _, key_ciphertext = get_session_key(user_id, CHAIN_ID, wallet)
         try:
-            bundler.send_user_op_as_session(user_id, key_ciphertext, sink, 10**15, b"")
+            passkey_op(user_id, [(sink, 10**15, b"")], bundler.resolve_bundler())
             check("a UserOp fails during an outage", False, "it succeeded")
         except RuntimeError as e:
             check("the agent is told the error by name on a transaction",
@@ -2142,7 +2247,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
     usdc = Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc"))
     deal_erc20(usdc, wallet, 10 * 10 ** w3.eth.contract(address=usdc, abi=ERC20_ABI).functions.decimals().call())
     quoted = tools.transfers.transfer_erc20.func(next_turn(), token="usdc", recipient="payee", amount=1)
-    reply = tools.sending.confirm_transaction.func(next_turn(), quote_id=quoted["quote_id"])
+    reply = approve_and_send(user_id, quoted["quote_id"])
     sent_hash = reply.split("`")[1]
     check("the reply reports a 0x-prefixed hash", sent_hash.startswith("0x") and len(sent_hash) == 66, sent_hash)
     sent_receipt = w3.eth.get_transaction_receipt(sent_hash)
@@ -2176,7 +2281,7 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
           and added["source"] == "owner", str(added))
 
     for expected in ("Set the spending limit to $1,234", "Set the spending period to 1 hour", "Pause the wallet",
-                     "Unpause the wallet", "Turn the assistant off", "Count USDC toward the limit",
+                     "Unpause the wallet", "Revoke “E2E laptop”", "Revoke every device", "Count USDC toward the limit",
                      "Stop counting USDC toward the limit"):
         check(f"the owner action “{expected}” is listed", expected in actions, str(actions))
     check("the withdrawal is listed with its amount",
@@ -2199,40 +2304,45 @@ def test_transaction_history(c: TestClient, acct, headers: dict, wallet: str):
 
 def test_web_confirm_button(c: TestClient, headers: dict, wallet: str):
     """
-    The web chat's Confirm button against the real chain: a quote a turn offered shows on
-    GET /api/chat/quote, and POST /api/chat/quote/confirm sends exactly it, with no model, under a
-    turn of its own. It answers once the transaction is on the wire; the History row it names,
-    followed on GET /api/transactions/{id}, lands as a successful transaction.
+    The web chat's card against the real chain: a quote a turn offered shows on GET /api/chat/quote,
+    and the passkey's approval -- POST /api/sign/start, then /finish -- sends exactly it, with no
+    model, under a turn of its own. It answers once the transaction is on the wire; the History row
+    it names, followed on GET /api/transactions/{id}, lands as a successful transaction.
     """
-    print("\n[10] the web chat's Confirm button: offered, tapped, sent on chain")
-    import quotes
-
+    print("\n[10] the web chat's card: offered, approved with a passkey, sent on chain")
     user_id = c.get("/api/me", headers=headers).json()["user_id"]
-    # The real turn counter, as a chat turn takes it: a tap needs a later turn than the quote's.
     turn_id = smart_wallet_agent._next_turn_id()
     runtime = SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=turn_id))
     quoted = tools.transfers.transfer_erc20.func(runtime, token="usdc", recipient="payee", amount=1)
-    offered = quotes.offer(user_id, CHAIN_ID, turn_id)
-    check("the turn's one quote is offered", offered is not None and offered.quote_id == quoted["quote_id"])
+    offered = signing.offer(user_id, CHAIN_ID, turn_id, signing.WEB)
+    check("the turn's one quote is offered on a card, with a sign request",
+          offered is not None and offered.pending.quote_id == quoted["quote_id"] and offered.token is None)
 
     card = c.get(f"/api/chat/quote?chain_id={CHAIN_ID}", headers=headers).json()["quote"]
     check("the card is the stored quote", card is not None and card["quote_id"] == quoted["quote_id"]
           and card["action"] == quoted["action"], str(card))
 
+    ref = {"chain_id": CHAIN_ID, "quote_id": quoted["quote_id"]}
+    r = c.post("/api/sign/start", headers=headers, json=ref)
+    started = r.json() if r.status_code == 200 else {}
+    check("opening the approval builds the op and names the passkey that may approve it",
+          r.status_code == 200 and started["allow_credentials"] == [
+              {"type": "public-key", "id": PASSKEYS[user_id].credential_id_b64}], f"{r.status_code} {r.text[:200]}")
+
     recorded = []
     saved_record = smart_wallet_agent._record_button
     # The agent isn't running here; note what would go into the conversation instead.
-    smart_wallet_agent._record_button = lambda *args: recorded.append(args)
+    smart_wallet_agent._record_button = lambda *args, **kwargs: recorded.append((args, kwargs))
     try:
-        r = c.post("/api/chat/quote/confirm", headers=headers,
-                   json={"chain_id": CHAIN_ID, "quote_id": quoted["quote_id"]})
+        credential = PASSKEYS[user_id].assertion(base64url_to_bytes(started["challenge"]))
+        r = c.post("/api/sign/finish", headers=headers, json={"sign_id": started["sign_id"], "credential": credential})
     finally:
         smart_wallet_agent._record_button = saved_record
     outcome = r.json().get("outcome", "") if r.status_code == 200 else ""
     row_id = r.json().get("transaction_id") if r.status_code == 200 else None
-    check("the tap sends it, and answers once it's on the wire",
-          r.status_code == 200 and outcome.startswith(f"Sending — {quoted['action']}") and isinstance(row_id, int),
-          f"{r.status_code} {r.text[:200]}")
+    check("the approval sends it, and answers once it's on the wire",
+          r.status_code == 200 and r.json()["status"] == "sent" and outcome.startswith(f"Sending — {quoted['action']}")
+          and isinstance(row_id, int), f"{r.status_code} {r.text[:200]}")
     row = {}
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -2244,13 +2354,14 @@ def test_web_confirm_button(c: TestClient, headers: dict, wallet: str):
     receipt = w3.eth.get_transaction_receipt(sent_hash) if sent_hash else None
     check("...and the History row it names lands, confirmed, as a transaction that succeeded on chain",
           row.get("status") == "confirmed" and receipt is not None and receipt["status"] == 1, str(row))
-    check("...recorded as a sent button tap",
-          len(recorded) == 1 and recorded[0][2] == smart_wallet_agent.CONFIRM_BUTTON and recorded[0][4] is True,
-          str(recorded))
-    check("the card is gone, and a second tap sends nothing",
+    check("...recorded as a sent approval",
+          len(recorded) == 1 and recorded[0][0][2] == smart_wallet_agent.CONFIRM_BUTTON
+          and recorded[0][1].get("sent") is True, str(recorded))
+    check("the card is gone, and a second approval sends nothing",
           c.get(f"/api/chat/quote?chain_id={CHAIN_ID}", headers=headers).json()["quote"] is None
-          and c.post("/api/chat/quote/confirm", headers=headers,
-                     json={"chain_id": CHAIN_ID, "quote_id": quoted["quote_id"]}).status_code == 409)
+          and c.post("/api/sign/finish", headers=headers,
+                     json={"sign_id": started["sign_id"], "credential": credential}).status_code == 409
+          and c.post("/api/sign/start", headers=headers, json=ref).status_code == 404)
 
     listed = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=100", headers=headers).json()["transactions"]
     row = next((t for t in listed if t["tx_hash"] == sent_hash.lower()), None)

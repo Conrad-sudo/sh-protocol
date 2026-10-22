@@ -39,8 +39,8 @@ contract SHFactory is Ownable, Pausable {
     /// @dev Per-OWNER rather than global on purpose. A global counter (e.g. {totalWallets}) would
     ///      make a predicted address depend on how many wallets everyone else had deployed, so any
     ///      other user's deploy landing first would move it — and {predictWalletAddress} exists
-    ///      precisely so the address can be shown, and the wallet's session key derived from it,
-    ///      before the deploy is signed. Keyed by owner, only that owner's own deploys move it.
+    ///      precisely so the address can be shown, and the user's funding sent to it, before the
+    ///      deploy is signed. Keyed by owner, only that owner's own deploys move it.
     mapping(address owner => uint256) public deployCount;
 
     event WalletDeployed(address indexed walletAddress, address indexed owner, uint256 indexed walletId);
@@ -100,8 +100,8 @@ contract SHFactory is Ownable, Pausable {
     /**
      * @notice Returns the address `owner`'s NEXT {deployWallet} call will produce, before it is
      *         deployed. Lets a front end show the user their wallet address in the same screen that
-     *         asks them to sign, and lets a backend derive the wallet's session key up front (the
-     *         key's off-chain record is stored under the wallet address, so it must be known first).
+     *         asks them to sign. (It no longer feeds a session key: a passkey is made on the user's
+     *         device before the deploy and does not depend on the wallet's address.)
      * @dev Two things move this value, and nothing else can: `owner` deploying again (their
      *      {deployCount} advances), and SHFactory being redeployed (the deployer is baked into a
      *      CREATE2 address, so a new factory invalidates every previously shown address).
@@ -111,15 +111,20 @@ contract SHFactory is Ownable, Pausable {
     }
 
     /// @notice Deploys a SessionHandler (ERC-7579 account) with spendingLimitModule installed as a
-    ///         hook, seeded with the caller's spending-cap config. Reverts if the module isn't set.
+    ///         hook, seeded with the caller's spending-cap config and first passkey. Reverts if the
+    ///         module isn't set.
     /// @dev Deployed with CREATE2 at a salt derived from (msg.sender, that owner's {deployCount}),
     ///      so the address is known before the transaction is signed -- see {predictWalletAddress}.
     ///      The counter is consumed here, so calling this twice yields two distinct wallets and a
     ///      salt can never repeat; there is no collision case to guard against, and no external
     ///      party can occupy the address first because a CREATE2 address is bound to its deployer.
-    /// @dev `sessionKey` and `trustedSpenders` are applied inside {SessionHandler-initialize}, so a
-    ///      wallet is usable after this ONE transaction. Previously they were two follow-up
-    ///      owner-signed calls to addSession/addTrustedSpender.
+    /// @dev The passkey and `trustedSpenders` are applied inside {SessionHandler-initialize}, so a
+    ///      wallet is usable after this ONE transaction. Otherwise they would be two follow-up
+    ///      owner-signed calls to addSession/addTrustedSpender. The key goes through the same grant as
+    ///      {SessionHandler-addSession}: it must be a point on the P-256 curve and its deadline must
+    ///      be in the future and within {SessionHandler-MAX_SESSION_TTL}, or the whole deploy reverts.
+    ///      A user can hold up to {SessionHandler-MAX_SESSION_KEYS} passkeys, one per device; this
+    ///      seeds the first and the owner adds the rest with {SessionHandler-addSession}.
     /// @dev Deliberately does NOT refuse an owner who already has a wallet -- one address may own
     ///      several. A caller wanting one-wallet-per-user enforces it by reading {deployCount}
     ///      before asking the user to sign, rather than by spending gas on a revert.
@@ -130,15 +135,18 @@ contract SHFactory is Ownable, Pausable {
     /// @param dailyLimitUsd   Max USD (18 decimals) the wallet may spend per window. Must be >= 0.
     /// @param windowDuration  Spending-window length in seconds. Must be > 0.
     /// @param watchedTokens   Tokens to meter; each must already be priced by the oracle.
-    /// @param sessionKey      Session key to authorize, or address(0) for an owner-only wallet.
-    /// @param sessionKeyValidUntil Unix timestamp the session key expires at. Must be in the future
-    ///        and within {SessionHandler-MAX_SESSION_TTL}; ignored when `sessionKey` is address(0).
+    /// @param sessionKeyX     X coordinate of the first passkey's P-256 public key. With
+    ///        `sessionKeyY`, both zero, the wallet is owner-only and no passkey is authorized.
+    /// @param sessionKeyY     Y coordinate of that public key.
+    /// @param sessionKeyValidUntil Unix timestamp the passkey expires at. Must be in the future and
+    ///        within {SessionHandler-MAX_SESSION_TTL}; ignored when the key is (0, 0).
     /// @param trustedSpenders Spenders trusted for unpriced-token approvals. May be empty.
     function deployWallet(
         int256 dailyLimitUsd,
         uint256 windowDuration,
         address[] calldata watchedTokens,
-        address sessionKey,
+        bytes32 sessionKeyX,
+        bytes32 sessionKeyY,
         uint48 sessionKeyValidUntil,
         address[] calldata trustedSpenders
     ) external payable whenNotPaused returns (address) {
@@ -168,7 +176,8 @@ contract SHFactory is Ownable, Pausable {
                     dailyLimitUsd: dailyLimitUsd,
                     windowDuration: windowDuration,
                     watchedTokens: watchedTokens,
-                    sessionKey: sessionKey,
+                    sessionKeyX: sessionKeyX,
+                    sessionKeyY: sessionKeyY,
                     sessionKeyValidUntil: sessionKeyValidUntil,
                     trustedSpenders: trustedSpenders
                 })

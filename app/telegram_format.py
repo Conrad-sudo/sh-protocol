@@ -57,6 +57,25 @@ def plain_text(fragment: str) -> str:
     return html.unescape(_TAG.sub("", fragment))
 
 
+def code_escaped(text: str) -> str:
+    """
+    Text the bot passes on as it is -- a send's outcome, which repeats the quote's action -- as
+    Telegram HTML: escaped, so a token's symbol in it can't become a link, with `code` kept as code.
+    """
+    return re.sub(r"`([^`\n]+)`", r"<code>\1</code>", html.escape(text, quote=False))
+
+
+def headed(chain_name: str, lines: list[str], limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """
+    A reply the bot writes itself, as Telegram messages: its network's name in bold, then `lines`,
+    split between lines when long. The bot and the API (telegram_notify) both write them this way.
+
+    @param lines  Lines of Telegram HTML, each complete in itself, so a split between two of them
+                  never cuts a tag in half.
+    """
+    return split_message(f"<b>{html.escape(chain_name)}</b>\n\n" + "\n".join(lines), limit)
+
+
 def to_telegram_html(markdown: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     """
     A reply as Telegram messages, in the HTML Telegram accepts (send with parse_mode HTML).

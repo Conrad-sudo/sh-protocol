@@ -29,7 +29,10 @@
 | `make uniswap-v3-test` | The in-repo Uniswap V3 toolkit (`app/langchain_uniswap_v3/`): its tick and liquidity math against Solidity's own values, its addresses against `script/Constants.s.sol`, and every plan it builds (call order, approvals, the deadline multicall, burn at 100%) against a stand-in chain (`app/tests/test_uniswap_v3.py`, offline) |
 | `make positions-test` | The Uniswap V3 positions reader the dashboard, the assistant and Telegram share (`app/positions.py`): spam and empty positions hidden, the native coin named as such, base token first, nothing raised when the chain read fails (`app/tests/test_positions.py`, offline) |
 | `make position-tools-test` | The assistant's six Uniswap V3 liquidity tools: a range picked by name lands on the ticks that were shown, deposits count against the limit, every refusal holds (unknown token, someone else's position, the wrong network), and each network shows the model only its own liquidity tools (`app/tests/test_position_tools.py`, offline) |
-| `make py-test` | All fifteen offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` + `chat-limits-test` + `redact-test` + `migrations-test` + `uniswap-v3-test` + `positions-test` + `position-tools-test` |
+| `make ens-test` | Adding a contact by ENS name: a lookup can't be steered at our own network (the CCIP-Read SSRF guards) and Basenames still resolve, against a stand-in mainnet and gateway on 127.0.0.1 (`app/tests/test_ens_names.py`, offline) |
+| `make ens-live` | One read-only lookup of a real Basename through mainnet and its gateway (not part of `py-test`) |
+| `make passkeys-test` | Passkeys: an approval packed as the wallet reads it (checked against the contract's own known-answer vector), the op deadline in the nonce, making and managing passkeys, and a Telegram confirm link (`app/tests/test_passkeys.py`, offline) |
+| `make py-test` | All seventeen offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` + `chat-limits-test` + `redact-test` + `migrations-test` + `uniswap-v3-test` + `positions-test` + `position-tools-test` + `ens-test` + `passkeys-test` |
 | `make load-test` | How many chat turns one API process carries at once: the real API on a scratch database, a stand-in for DeepSeek answering each call in 1.5 s, and chats from many accounts at 8, 32, 64 and 128 at once (`ARGS="16 256"` for others; it raises the API's `CHAT_MAX_CONCURRENT` to the highest). Prints turns a second, turn times and the API's CPU per turn. Leaves out chain reads, which cost far more (50–200 ms a turn, measured on a mainnet fork) (`app/tests/load_test.py`; about 4 minutes, no credits, not part of `py-test`) |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc. On the Uniswap V3 forks (Ethereum, Sepolia, Arbitrum, Base) it swaps by every route against ETH/USDC and takes a liquidity position from its range options to its burn; on `bsc-fork`, PancakeSwap V2's swaps and LP tokens. On Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`) — on a Uniswap V3 fork that includes adding liquidity: range options first, the user's pick, then one quote; costs DeepSeek credits |
@@ -46,14 +49,13 @@
 | `make base-fork` | Start a Base fork at the latest block, on port 8549, and fund both bundlers |
 | `make fund ARGS=<network>` | Set a 100 ETH balance on every bundler key's address — `API_BUNDLER_1` (= `SEPOLIA_ACCOUNT`), `API_BUNDLER_2`, … and `TELEGRAM_BUNDLER_1`, … — via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. Every fork target runs it as soon as the fork starts, and it is a prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
-| `make vault` | Configure Vault and refresh `.env` credentials |
 | `make db` | Bring the SQLite database up to date (numbered migrations, `db/schema.py`) and seed reference data |
-| `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) and register its single session key |
+| `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) for the CLI harness, approving the harness's soft passkey (a real user's passkey is made on their device, in the web app) |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
 | `make api` | Start the FastAPI server on port 8000 — what the web app in `web/` talks to |
 | `make api-prod` | The API for production, behind Caddy (`deploy/Caddyfile`): no reload, localhost only, trusting the proxy's `X-Forwarded-For` |
-| `make bot` | Start the Telegram bot: one bot for every network (`MITFAH_API`), each user picking the network with `/chain`, with read commands (`/balance`, `/limit`, `/history`, `/positions`, `/contacts`, `/web`), `/send`, `/swap`, `/cancel`, `/feedback`, and Confirm/Cancel buttons under a quote — **optional**; the only target that needs that token and `python-telegram-bot`. Needs an up-to-date database (`make db`). Run exactly one copy |
-| `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Assumes Vault is already running and configured (`make vault`) — not part of this chain since it persists across redeploys. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
+| `make bot` | Start the Telegram bot: one bot for every network (`MITFAH_API`), each user picking the network with `/chain`, with read commands (`/balance`, `/limit`, `/history`, `/positions`, `/contacts`, `/web`), `/send`, `/swap`, `/cancel`, `/feedback`, and under a quote a "Confirm with passkey" link (to the web app's `/c/<token>` page) and a Cancel button — **optional**; the only target that needs that token and `python-telegram-bot`. Needs an up-to-date database (`make db`). Run exactly one copy |
+| `make setup-agent ARGS=<network>` | Runs `deploy` → `fund` → `db` → `deploy-wallet` → `agent` in sequence for `<network>`, stopping on first failure. Safe for all six networks (live `sepolia`/`bsc` included — `fund` no-ops on those). See `docs/setup.md`'s "Shortcut" callouts |
 | `make setup-bot ARGS=<network>` | Same chain, ending in `bot` instead of `agent` — leaves you in the Telegram bot |
 | `make setup-test ARGS=<network>` | Same chain with no front end: `deploy` → `fund` → `db` → `deploy-wallet`, for running tests against a freshly deployed stack |
 
@@ -72,6 +74,8 @@ sh-protocol/
 │   ├── SHOracle.sol
 │   ├── SessionHandler.sol
 │   ├── SpendingLimitModule.sol
+│   ├── utils/
+│   │   └── WebAuthnNative.sol       ← a passkey's signature checked on the P-256 precompile only (RIP-7212)
 │   ├── interfaces/
 │   │   ├── IWETH.sol
 │   │   ├── IERC20Extended.sol
@@ -93,7 +97,11 @@ sh-protocol/
 │   ├── unit/
 │   │   ├── SHProtocolTest.t.sol
 │   │   ├── SessionGuardTest.t.sol
+│   │   ├── PasskeyValidationTest.t.sol
 │   │   └── SpendingLimitModuleHarness.sol
+│   ├── utils/
+│   │   ├── PasskeyHelper.sol        ← signs ops as a passkey would, for the tests
+│   │   └── ConfiguredTokens.sol
 │   ├── fork/
 │   │   ├── SHForkTestBase.sol
 │   │   ├── SHUniswapV3ForkTestBase.sol
@@ -114,10 +122,12 @@ sh-protocol/
 │   ├── toolkits.py                  ← per-user_id toolkits: langchain-erc20, the chain's exchange (V3 or V2), langchain-erc8004
 │   ├── langchain_uniswap_v3/        ← in-repo Uniswap V3 toolkit: swaps through SwapRouter02, positions through the position manager
 │   ├── positions.py                 ← the wallet's Uniswap V3 positions, read one way for the dashboard, the agent and Telegram
-│   ├── userop.py                    ← UserOp calldata, nonce and session-key signing
+│   ├── userop.py                    ← UserOp calldata, the passkey op's nonce (with its own deadline), the wallet's passkeys read back
+│   ├── passkey.py                   ← passkeys: rp id and origins, COSE keys, an approval packed as the wallet reads it
+│   ├── signing.py                   ← a quote's sign request: its op built, the passkey's approval checked, claimed once
+│   ├── telegram_notify.py           ← tells a Telegram chat how its passkey-approved quote went
 │   ├── bundler.py                   ← the app's own ERC-4337 bundler, on every network
 │   ├── tx_sender.py                 ← nonce-safe EOA broadcast
-│   ├── vault_signer.py
 │   ├── deploy_wallet.py
 │   ├── tools/                       ← the agent's tools, one module per area
 │   ├── tx_history.py                ← the History tab's record: every transaction on the wallet, Mitfah's and outside it
@@ -141,7 +151,7 @@ sh-protocol/
 │   ├── contracts.md
 │   ├── app.md
 │   ├── langchain-packages-migration.md
-│   ├── vault-security.md
+│   ├── environment.md               ← every .env variable
 │   ├── setup.md
 │   └── reference.md
 ├── lib/
@@ -154,7 +164,6 @@ sh-protocol/
 │   ├── v3-core/                      ← `0.8` branch
 │   ├── v3-periphery/                 ← `0.8` branch
 │   └── swap-router-contracts/        ← IV3SwapRouter (SwapRouter02)
-├── setup_vault.sh
 ├── Makefile
 ├── foundry.toml
 └── .env                             ← not committed
@@ -186,7 +195,7 @@ sh-protocol/
 | `eth-account` | Key management and EIP-191 message signing |
 | `langchain-erc20` | ERC20 balances, allowances, transfers and native wrap/unwrap, as execution plans. Pinned exactly — pre-1.0 |
 | `langchain-uniswap-v2` | V2 quotes, liquidity previews and swap/liquidity execution plans, including approval sequencing — pointed at PancakeSwap's router on BSC, the one chain still on V2. The app also reads its V2 ABIs for the dashboard's old V2 LP tokens and the History tab. Pinned exactly — pre-1.0. (Uniswap V3 on the other chains is the in-repo `app/langchain_uniswap_v3/`, not a dependency) |
-| `hvac` | HashiCorp Vault Python client (Transit encrypt/decrypt) |
+| `webauthn` (py_webauthn) | Checks every passkey registration and approval: rp id, origin, user verification, the signature. Pinned exactly — what it accepts is a security boundary. `cbor2` and `cryptography` come with it, pinned too |
 | `requests` | HTTP client for bundler JSON-RPC calls |
 | `langchain` | Tool definitions and agent framework |
 | `langchain-deepseek` | Default DeepSeek LLM integration — swappable for any [LangChain-supported provider](https://python.langchain.com/docs/integrations/chat/) |
@@ -199,8 +208,6 @@ sh-protocol/
 
 | Tool | Purpose |
 |---|---|
-| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Runs the HashiCorp Vault container locally |
-| [HashiCorp Vault](https://developer.hashicorp.com/vault) | Transit encryption-as-a-service for session key custody |
 | [Alchemy](https://www.alchemy.com/) | RPC endpoint for live Sepolia/mainnet reads and fork RPC access (the app bundles its own UserOps — no bundler service) |
 | [Flashbots Protect](https://docs.flashbots.net/flashbots-protect/overview) | Private broadcast of the bundler's live-mainnet transactions, keeping them out of the public mempool |
 | [BlockRazor](https://docs.blockrazor.io/transaction-submission/rpc/bsc/bsc-rpc-endpoint) | Private broadcast of the bundler's live-BSC transactions (full-privacy endpoint, no API key) |

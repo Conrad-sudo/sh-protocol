@@ -6,6 +6,8 @@ import {
   Checkbox,
   CheckboxGroup,
   Form,
+  Input,
+  Loader,
   Message,
   NumberInput,
   Placeholder,
@@ -17,12 +19,13 @@ import {
   Text,
   useToaster,
 } from 'rsuite'
-import type { Chain, Token } from '../../api/types'
+import type { Chain, Passkey, Token } from '../../api/types'
 import { useSelectedChain } from '../../chain/useSelectedChain'
 import { AddressText } from '../../components/AddressText'
 import { AmountInput } from '../../components/AmountInput'
 import { GlassPanel } from '../../components/Glass'
 import { PageHeader } from '../../components/PageHeader'
+import { PasskeyProblem } from '../../components/PasskeyProblem'
 import { QueryError } from '../../components/QueryError'
 import { StatusTag } from '../../components/StatusTag'
 import { AccountMismatchBanner } from '../../components/wallet/AccountMismatchBanner'
@@ -30,18 +33,26 @@ import { ConnectDialog } from '../../components/wallet/ConnectDialog'
 import { NetworkBanner } from '../../components/wallet/NetworkBanner'
 import { useDeploy, type DeployPhase } from '../../hooks/useDeploy'
 import { useMe } from '../../hooks/useMe'
+import { useDevicePasskey, useDevicePasskeyMaker, usePasskeys, useRegistrationOptions } from '../../hooks/usePasskeys'
 import { useTokens } from '../../hooks/useTokens'
 import { useLayoutMode } from '../../layouts/useLayoutMode'
 import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS } from '../../lib/assistant'
 import { formatUsd, formatWindow, isValidAmount } from '../../lib/format'
+import { DEVICE_NAME_MAX, defaultDeviceName, deviceNameProblem, passkeysSupported } from '../../lib/passkey'
 import { WINDOW_CHOICES } from '../../lib/spending'
 import { chainName, isSupportedChainId } from '../../wallet/chains'
 import { DeployProgress } from './DeployProgress'
 
-const STEP_TITLES = ['Choose network', 'Set your limit', 'Prefund your wallet', 'Review and create'] as const
+const STEP_TITLES = [
+  'Choose network',
+  'Set your limit',
+  'Prefund your wallet',
+  'Create your passkey',
+  'Review and create',
+] as const
 
-type WizardStep = 'network' | 'limits' | 'fund' | 'review'
-const WIZARD_INDEX: Record<WizardStep, number> = { network: 0, limits: 1, fund: 2, review: 3 }
+type WizardStep = 'network' | 'limits' | 'fund' | 'passkey' | 'review'
+const WIZARD_INDEX: Record<WizardStep, number> = { network: 0, limits: 1, fund: 2, passkey: 3, review: 4 }
 
 interface Draft {
   chainId: number | null
@@ -50,6 +61,12 @@ interface Draft {
   /** null until the user changes it: then every listed token is watched. */
   tickers: string[] | null
   prefund: string | null
+  /**
+   * The passkey the new wallet trusts from the start, so this device can approve the assistant's
+   * payments at once; null when the user skipped it (the wallet is then theirs alone until a device
+   * is added in Controls).
+   */
+  passkey: Passkey | null
 }
 
 const BUSY: DeployPhase[] = ['preparing', 'signing', 'confirming']
@@ -76,15 +93,21 @@ export function OnboardingPage() {
     windowSecs: 86_400,
     tickers: null,
     prefund: null,
+    passkey: null,
   })
 
   const { state: deployState, deploy, resume, abandon, startOver } = useDeploy(result => {
     setChainId(result.chainId)
+    const network = chainName(result.chainId)
+    let text = `Your wallet is ready on ${network}. You can now disconnect your browser wallet: your passkey approves the assistant's payments. Reconnect it when you want to change your limits or withdraw.`
+    if (result.keyId === null) {
+      text = `Your wallet is ready on ${network}. Add a device in Controls so the assistant can send payments.`
+    } else if (!result.assistantReady) {
+      text = "Your wallet was created, but it doesn't trust your passkey yet. Add this device in Controls."
+    }
     toaster.push(
-      <Message type={result.assistantReady ? 'success' : 'warning'} showIcon closable>
-        {result.assistantReady
-          ? `Your wallet is ready on ${chainName(result.chainId)}. You can now disconnect your browser wallet: the assistant works without it. Reconnect it when you want to change your limits or withdraw.`
-          : 'Your wallet was created, but the assistant is not switched on yet. You can turn it on in Controls.'}
+      <Message type={result.keyId !== null && result.assistantReady ? 'success' : 'warning'} showIcon closable>
+        {text}
       </Message>,
       { placement: 'topCenter', duration: 15_000 },
     )
@@ -127,6 +150,7 @@ export function OnboardingPage() {
       // The wrapped native token always counts; the API adds it anyway, but the request says so too.
       watched_tokens: tickers === null ? tokens : tokens.filter(t => t.always_counted || tickers.includes(t.ticker)),
       prefund_eth: prefund,
+      key_id: draft.passkey?.key_id ?? null,
       session_ttl_secs: ASSISTANT_KEY_TTL_SECS,
     })
   }
@@ -152,7 +176,7 @@ export function OnboardingPage() {
         chain={chain}
         owner={address}
         busy={deploying}
-        onBack={() => setStep('fund')}
+        onBack={() => setStep('passkey')}
         onCreate={tokens => void createWallet(tokens)}
         progress={progress}
       />
@@ -261,8 +285,19 @@ export function OnboardingPage() {
             {!valid && <Form.Text className="mf-error-text">Enter an amount like 0.05.</Form.Text>}
           </Form.Group>
         </Form>
-        <StepNav onBack={() => setStep('limits')} onNext={() => setStep('review')} nextDisabled={!valid} />
+        <StepNav onBack={() => setStep('limits')} onNext={() => setStep('passkey')} nextDisabled={!valid} />
       </StepBody>
+    )
+  } else if (step === 'passkey' && chainId !== null) {
+    body = (
+      <PasskeyStep
+        chainId={chainId}
+        onBack={() => setStep('fund')}
+        onDone={passkey => {
+          setDraft(d => ({ ...d, passkey }))
+          setStep('review')
+        }}
+      />
     )
   } else {
     body = (
@@ -271,7 +306,7 @@ export function OnboardingPage() {
         chain={chain}
         owner={address}
         busy={false}
-        onBack={() => setStep('fund')}
+        onBack={() => setStep('passkey')}
         onCreate={tokens => void createWallet(tokens)}
         progress={null}
       />
@@ -457,7 +492,11 @@ function ReviewStep({
           {draft.prefund} {chain?.native_ticker}
         </dd>
         <dt>Assistant's access</dt>
-        <dd>{ASSISTANT_KEY_DAYS} days, renewable any time in Controls</dd>
+        <dd>
+          {draft.passkey
+            ? `${ASSISTANT_KEY_DAYS} days, approved with the passkey on “${draft.passkey.device_name}”; renewable any time in Controls`
+            : "None yet: the assistant can't send anything until you add a device in Controls"}
+        </dd>
       </dl>
       {draft.chainId !== null && <NetworkBanner chainId={draft.chainId} fork={chain?.fork} />}
       {progress}
@@ -475,6 +514,127 @@ function ReviewStep({
           </Button>
         </div>
       )}
+    </StepBody>
+  )
+}
+
+/**
+ * The passkey that approves the assistant's payments from the new wallet: this device's, made here
+ * (the tap opens the browser's prompt), or the one it already has. It can be skipped: the wallet is
+ * then the owner's alone until a device is added in Controls, which is also the way on for a
+ * browser that can't make passkeys.
+ */
+function PasskeyStep({
+  chainId,
+  onBack,
+  onDone,
+}: {
+  chainId: number
+  onBack: () => void
+  /** The passkey the wallet should trust, or null to create it without one. */
+  onDone: (passkey: Passkey | null) => void
+}) {
+  const passkeys = usePasskeys()
+  const devicePasskey = useDevicePasskey()
+  const [name, setName] = useState(defaultDeviceName)
+  const supported = passkeysSupported()
+  const needsPasskey = devicePasskey === null
+  // Fetched before the tap, so the tap itself can open the prompt.
+  useRegistrationOptions(passkeys.isSuccess && needsPasskey && supported)
+  const maker = useDevicePasskeyMaker(onDone)
+  const problem = deviceNameProblem(name)
+  const busy = maker.making || maker.finding
+
+  const create = () => {
+    if (problem || busy) return
+    maker.make(name)
+  }
+
+  if (passkeys.isPending) {
+    return (
+      <StepBody title="Create your passkey">
+        <Placeholder.Paragraph rows={3} active />
+      </StepBody>
+    )
+  }
+  if (devicePasskey) {
+    return (
+      <StepBody title="Your passkey">
+        <Text muted>
+          This device already has a passkey, “{devicePasskey.device_name}”. It will approve each payment the assistant
+          prepares on {chainName(chainId)}.
+        </Text>
+        <StepNav onBack={onBack} onNext={() => onDone(devicePasskey)} />
+      </StepBody>
+    )
+  }
+  return (
+    <StepBody title="Create your passkey">
+      <Text muted>
+        Your passkey approves each payment the assistant prepares, with Face ID, a fingerprint or this device's PIN.
+      </Text>
+      {passkeys.isError && (
+        <QueryError
+          what="your passkeys"
+          error={passkeys.error}
+          onRetry={() => void passkeys.refetch()}
+          className="mf-settings-note"
+        />
+      )}
+      {supported ? (
+        <Form fluid className="mf-auth-form" onSubmit={create}>
+          <Form.Group controlId="device-name">
+            <Form.Label>Name for this device</Form.Label>
+            <Input
+              id="device-name"
+              value={name}
+              maxLength={DEVICE_NAME_MAX}
+              autoComplete="off"
+              disabled={busy}
+              onChange={setName}
+              aria-describedby="device-name-help-text"
+              aria-invalid={!!problem}
+            />
+            {problem ? (
+              <Form.Text className="mf-error-text">{problem}</Form.Text>
+            ) : (
+              <Form.Text>So you can tell your devices apart. You can rename it later.</Form.Text>
+            )}
+          </Form.Group>
+        </Form>
+      ) : (
+        <Message type="warning" showIcon className="mf-settings-note">
+          This browser can't make passkeys. Create the wallet without one, then add a phone or computer that can in
+          Controls.
+        </Message>
+      )}
+      {maker.making && <Loader className="mf-tx-status" content="Follow your browser to create the passkey…" />}
+      {maker.finding && <Loader className="mf-tx-status" content="Choose this device's passkey…" />}
+      {maker.error && (
+        <PasskeyProblem
+          error={maker.error}
+          onUseExisting={() => maker.findExisting(passkeys.data ?? [])}
+          className="mf-settings-note"
+        />
+      )}
+      <div className="mf-step-nav">
+        <Button appearance="subtle" disabled={busy} onClick={onBack}>
+          Back
+        </Button>
+        <div className="mf-step-nav-end">
+          <Button appearance="link" disabled={busy} onClick={() => onDone(null)}>
+            Skip for now
+          </Button>
+          {supported && (
+            <Button appearance="primary" loading={busy} disabled={!!problem || passkeys.isError} onClick={create}>
+              Create passkey
+            </Button>
+          )}
+        </div>
+      </div>
+      <Text size="sm" muted className="mf-settings-note">
+        Skipped, the wallet is yours alone: the assistant can't send anything until you add a device in Controls.
+      </Text>
     </StepBody>
   )
 }

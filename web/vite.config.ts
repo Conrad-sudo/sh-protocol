@@ -1,7 +1,13 @@
+import { fileURLToPath } from 'node:url'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
-import { searchForWorkspaceRoot, type Plugin } from 'vite'
+import { searchForWorkspaceRoot, type Connect, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
+
+/** The Telegram links' confirm page, an entry of its own (confirm.html, src/confirm/). */
+const CONFIRM_PAGE = '/confirm.html'
+/** A confirm link: /c/<token>. */
+const CONFIRM_LINK = /^\/c\/[^/]+\/?$/
 
 /**
  * Preloads the Latin cuts of the two faces on the first screen, Bodoni Moda (the headline) and
@@ -17,6 +23,8 @@ function preloadHeadlineFont(): Plugin {
     transformIndexHtml: {
       order: 'post',
       handler(_html, ctx) {
+        // The confirm page draws in the system's faces; preloading these would only slow it down.
+        if (ctx.filename.endsWith(CONFIRM_PAGE)) return []
         const files = Object.keys(ctx.bundle ?? {})
         return FIRST_PAINT_FONTS.flatMap(pattern => {
           const font = files.find(file => pattern.test(file))
@@ -37,13 +45,39 @@ function preloadHeadlineFont(): Plugin {
   }
 }
 
+/**
+ * Serves /c/<token> from confirm.html in the dev server and `vite preview`, as deploy/Caddyfile does
+ * on the live site. Without it both would answer with index.html, the app's own shell.
+ */
+function confirmPage(): Plugin {
+  const rewrite: Connect.NextHandleFunction = (req, _res, next) => {
+    const path = req.url?.split('?')[0] ?? ''
+    if (CONFIRM_LINK.test(path)) req.url = CONFIRM_PAGE
+    next()
+  }
+  return {
+    name: 'mitfah:confirm-page',
+    configureServer: server => void server.middlewares.use(rewrite),
+    configurePreviewServer: server => void server.middlewares.use(rewrite),
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
     react(),
     babel({ presets: [reactCompilerPreset()] }),
     preloadHeadlineFont(),
+    confirmPage(),
   ],
+  build: {
+    rolldownOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        confirm: fileURLToPath(new URL('./confirm.html', import.meta.url)),
+      },
+    },
+  },
   server: {
     // 3000 is what the API allows by default (CORS_ORIGINS) and what SIWE_DOMAIN defaults to.
     // strictPort: silently moving to 3001 would make every sign-in message name the wrong site

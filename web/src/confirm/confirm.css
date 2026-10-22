@@ -1,0 +1,239 @@
+/*
+ * The confirm page (/c/<token>): the site's look, written small. No web fonts, no RSuite, no glass,
+ * so it opens fast in Telegram's in-app browser. The colours are tokens.css's: aluminium page, plate,
+ * navy (light) or brushed steel (dark) for the one action, green only for a payment that went out.
+ * Titles use Bodoni where the system has it (every iPhone and Mac), as the site's do.
+ */
+
+:root {
+  color-scheme: light;
+  --mfc-page: #edf0f4;
+  --mfc-plate: #fafbfc;
+  --mfc-text: #0b1a2c;
+  --mfc-heading: #062a4e;
+  --mfc-muted: #45546a;
+  --mfc-rule: #d5dce5;
+  --mfc-primary: #0b335d;
+  --mfc-primary-hover: #062a4e;
+  --mfc-primary-text: #ffffff;
+  --mfc-link: #1f4f80;
+  --mfc-focus: #1f4f80;
+  --mfc-info-bg: #e8eef5;
+  --mfc-error-bg: #f8e6e4;
+  --mfc-error-text: #9c2a25;
+  --mfc-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 1px 0 rgb(6 42 78 / 6%), 0 18px 36px -24px rgb(6 42 78 / 35%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --mfc-page: #07111f;
+    --mfc-plate: #0d1a2b;
+    --mfc-text: #e6edf5;
+    --mfc-heading: #f2f6fb;
+    --mfc-muted: #93a3b8;
+    --mfc-rule: #1d2d43;
+    --mfc-primary: #d3dfec;
+    --mfc-primary-hover: #e6edf6;
+    --mfc-primary-text: #062a4e;
+    --mfc-link: #8cb3e0;
+    --mfc-focus: #8cb3e0;
+    --mfc-info-bg: rgb(140 179 224 / 12%);
+    --mfc-error-bg: rgb(239 107 100 / 12%);
+    --mfc-error-text: #f5a19c;
+    --mfc-shadow: inset 0 1px 0 rgb(255 255 255 / 6%), 0 24px 48px -24px rgb(0 0 0 / 75%);
+  }
+}
+
+/* The theme picked in the app wins over the system's (main.tsx sets data-theme). */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --mfc-page: #07111f;
+  --mfc-plate: #0d1a2b;
+  --mfc-text: #e6edf5;
+  --mfc-heading: #f2f6fb;
+  --mfc-muted: #93a3b8;
+  --mfc-rule: #1d2d43;
+  --mfc-primary: #d3dfec;
+  --mfc-primary-hover: #e6edf6;
+  --mfc-primary-text: #062a4e;
+  --mfc-link: #8cb3e0;
+  --mfc-focus: #8cb3e0;
+  --mfc-info-bg: rgb(140 179 224 / 12%);
+  --mfc-error-bg: rgb(239 107 100 / 12%);
+  --mfc-error-text: #f5a19c;
+  --mfc-shadow: inset 0 1px 0 rgb(255 255 255 / 6%), 0 24px 48px -24px rgb(0 0 0 / 75%);
+}
+
+html,
+body {
+  background: var(--mfc-page);
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  color: var(--mfc-text);
+  font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mfc-page {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: max(20px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+}
+
+.mfc-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: var(--mfc-heading);
+  font-family: 'Bodoni 72', 'Bodoni Moda', Didot, Georgia, serif;
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.mfc-card {
+  box-sizing: border-box;
+  padding: 24px 20px;
+  border: 1px solid var(--mfc-rule);
+  border-radius: 28px;
+  background: var(--mfc-plate);
+  box-shadow: var(--mfc-shadow);
+}
+
+.mfc-card h1 {
+  margin: 0 0 12px;
+  color: var(--mfc-heading);
+  font-family: 'Bodoni 72', 'Bodoni Moda', Didot, Georgia, serif;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.mfc-card p {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+/* The quote's own words: a whole address can be in them, so they wrap anywhere. */
+.mfc-action {
+  font-size: 18px;
+}
+
+.mfc-meta,
+.mfc-status {
+  color: var(--mfc-muted);
+  font-size: 14px;
+}
+
+.mfc-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.mfc-status::before {
+  content: '';
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--mfc-rule);
+  border-top-color: var(--mfc-link);
+  border-radius: 50%;
+  animation: mfc-spin 0.8s linear infinite;
+}
+
+@keyframes mfc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mfc-status::before {
+    animation: none;
+  }
+}
+
+.mfc-outcome {
+  font-size: 17px;
+}
+
+/* One big target for the thumb: the tap that opens the passkey prompt. */
+.mfc-button {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  margin-top: 20px;
+  padding: 12px 20px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--mfc-primary);
+  color: var(--mfc-primary-text);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mfc-button:hover {
+  background: var(--mfc-primary-hover);
+}
+
+.mfc-secondary {
+  border-color: var(--mfc-rule);
+  background: transparent;
+  color: var(--mfc-link);
+}
+
+.mfc-secondary:hover {
+  background: var(--mfc-info-bg);
+}
+
+.mfc-link {
+  display: block;
+  margin: 12px auto 0;
+  padding: 10px 12px;
+  border: 0;
+  background: none;
+  color: var(--mfc-link);
+  font: inherit;
+  font-size: 15px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.mfc-button:focus-visible,
+.mfc-link:focus-visible {
+  outline: 3px solid var(--mfc-focus);
+  outline-offset: 2px;
+}
+
+.mfc-note {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--mfc-info-bg);
+  font-size: 15px;
+}
+
+.mfc-note[data-tone='error'] {
+  background: var(--mfc-error-bg);
+  color: var(--mfc-error-text);
+}
+
+.mfc-card p.mfc-note {
+  margin: 16px 0 0;
+}

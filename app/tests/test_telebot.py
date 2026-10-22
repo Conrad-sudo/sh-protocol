@@ -20,7 +20,6 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import Future
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -40,10 +39,10 @@ from telegram.error import BadRequest, Forbidden, TimedOut  # noqa: E402
 from telegram.ext import CallbackQueryHandler     # noqa: E402
 
 import quotes                                     # noqa: E402
+import signing                                    # noqa: E402
 import telebot                                    # noqa: E402
-from quotes import QuoteError                     # noqa: E402
-from smart_wallet_agent import Confirmed           # noqa: E402
 import telegram_format                            # noqa: E402
+from bundler import UserOpQuote                   # noqa: E402
 from chat_limits import TurnGate                  # noqa: E402
 from web3 import Web3                             # noqa: E402
 
@@ -52,6 +51,22 @@ MAINNET, SEPOLIA, BSC, ARBITRUM, BASE, CELO = 1, 11155111, 56, 42161, 8453, 4222
 BOT_DATA = {"networks": {SEPOLIA: "sepolia", BSC: "bsc", ARBITRUM: "arbitrum", BASE: "base"}}
 WALLET = "0x000000000000000000000000000000000000dEaD"
 SAM = Web3.to_checksum_address("0x" + "5a" * 20)
+# Where a card's Confirm leads: the approval page under this address.
+WEB_APP = "https://app.mitfah.example"
+os.environ["WEB_APP_URL"] = WEB_APP
+# A priced op for the quotes the fake turns raise: a card freezes it into its sign request.
+PRICED = UserOpQuote(
+    calldata="0x1234", call_gas=100_000, call_gas_used=80_000, verification_gas=200_000,
+    verification_gas_used=150_000, pre_verification_gas=60_000, max_fee=2 * 10**9, tip=10**9,
+    base_fee=10**9, outer_gas=500_000, simulated_gas=None, chain_name="base",
+)
+# Message ids for what the fake Telegram sends, so a card's can be recorded and looked for.
+_message_ids = itertools.count(700)
+
+
+def _message(chat_id: int) -> SimpleNamespace:
+    """What Telegram answers a send with: the message, with its chat and a new id."""
+    return SimpleNamespace(chat_id=chat_id, message_id=next(_message_ids))
 
 
 def _token(n: int) -> str:
@@ -84,7 +99,7 @@ def fake_chat(user_id, chain_id, text, network):
     turns.append((user_id, chain_id, text, network))
     turn_id = next(_turn_ids)
     for q in quotes_for_turns:
-        quotes.put(user_id, chain_id, turn_id, q["action"], [], None, q["cost"])
+        quotes.put(user_id, chain_id, turn_id, q["action"], [], PRICED, q["cost"])
     return reply_for_turns["text"], turn_id
 
 
@@ -109,36 +124,51 @@ def make_user(chat_id: int | None, wallet_chains=(SEPOLIA,), saved: str = "sepol
 class FakeBot:
     """
     The bot as handlers and jobs see it. `errors` maps a chat to what sending to it raises. What it
-    sends lands in `sent` as (chat, text), and the options it was sent with in `options`.
+    sends lands in `sent` as (chat, text), and the options it was sent with in `options`. The cards
+    it took the buttons off land in `unbuttoned` as (chat, message id).
     """
 
     def __init__(self, errors: dict | None = None):
         self.errors = errors or {}
         self.sent: list[tuple[int, str]] = []
         self.options: list[dict] = []
+        self.unbuttoned: list[tuple[int, int]] = []
 
     async def send_message(self, chat_id, text, **options):
         if chat_id in self.errors:
             raise self.errors[chat_id]
         self.sent.append((chat_id, text))
         self.options.append(options)
+        return _message(chat_id)
+
+    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None, **_):
+        self.unbuttoned.append((chat_id, message_id))
 
     async def send_chat_action(self, chat_id, action):
         pass
 
 
-# How each reply of the last run() was sent: the options handed to reply_text, in order.
+# How each reply of the last run() was sent: the options handed to reply_text, in order. And the
+# bot the last run() used, for what it did besides replying.
 reply_options: list[dict] = []
+last_bot: dict = {}
+
+
+def _has_link_button(options: dict) -> bool:
+    markup = options.get("reply_markup")
+    return bool(markup) and any(b.url for row in markup.inline_keyboard for b in row)
 
 
 def run(handler, chat_id: int, text: str = "", args: list | None = None, bot_data: dict | None = None,
-        refuse_formatting: bool = False):
+        refuse_formatting: bool = False, refuse_links: bool = False):
     """
     Runs one handler for a message from `chat_id` to the bot, serving BOT_DATA's networks unless
     `bot_data` says otherwise.
 
     @param refuse_formatting  Telegram answers every formatted message with BadRequest, as it does
                               markup it can't parse.
+    @param refuse_links       Telegram answers a message with a link button with BadRequest, as it
+                              does a link a phone can't open (a web app on localhost).
     @return  (the replies, the one-off jobs it scheduled). Their options land in reply_options.
     """
     replies, jobs = [], []
@@ -147,14 +177,18 @@ def run(handler, chat_id: int, text: str = "", args: list | None = None, bot_dat
     async def reply_text(reply, **options):
         if refuse_formatting and "parse_mode" in options:
             raise BadRequest("Can't parse entities: unsupported start tag")
+        if refuse_links and _has_link_button(options):
+            raise BadRequest("Wrong HTTP URL")
         replies.append(reply)
         reply_options.append(options)
+        return _message(chat_id)
 
     update = SimpleNamespace(message=SimpleNamespace(chat_id=chat_id, text=text, reply_text=reply_text))
+    last_bot["bot"] = FakeBot()
     context = SimpleNamespace(
         args=args or [],
         bot_data=bot_data or BOT_DATA,
-        bot=FakeBot(),
+        bot=last_bot["bot"],
         job_queue=SimpleNamespace(run_once=lambda callback, **kwargs: jobs.append((callback, kwargs))),
     )
     asyncio.run(handler(update, context))
@@ -189,9 +223,9 @@ def tap(chat_id: int, data: str, chat_type: str = Chat.PRIVATE, from_id: int | N
 
 
 def buttons(options: dict) -> list[tuple[str, str]]:
-    """A reply's buttons, as (label, data), or [] when it has none."""
+    """A reply's buttons, as (label, data) -- (label, url) for a link -- or [] when it has none."""
     markup = options.get("reply_markup")
-    return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row] if markup else []
+    return [(b.text, b.callback_data or b.url) for row in markup.inline_keyboard for b in row] if markup else []
 
 
 def test_each_account_acts_on_its_network():
@@ -568,8 +602,9 @@ def test_wallet_warnings():
     check("all is well: nothing to say", telebot.wallet_warnings(healthy, "Base", now) == [])
 
     warnings = telebot.wallet_warnings({**healthy, "session_active": False}, "Base", now)
-    check("an inactive key: one warning, naming the chain and where to fix it",
-          len(warnings) == 1 and "your Base wallet is off" in warnings[0] and "Controls → Assistant" in warnings[0],
+    check("no device approved: one warning, naming the chain and where to fix it",
+          len(warnings) == 1 and "None of your devices is approved on your Base wallet" in warnings[0]
+          and "Controls → Devices" in warnings[0],
           str(warnings))
 
     for left, when in ((2 * 86_400 + 3_600, "in 2 days"), (86_400 + 60, "in 1 day"), (3_600, "in under a day")):
@@ -955,17 +990,19 @@ def test_quotes_stay_on_their_network():
           turns == [(user, BASE, "send 1 ETH to Sam", "base"), (user, SEPOLIA, "yes", "sepolia")], str(turns))
     check("and its reply says Sepolia", replies == ["<b>Sepolia</b>\n\nDone."], str(replies))
 
-    # What that Sepolia turn could do with Base's quote: nothing. quotes.take checks the chain.
-    pending = quotes.put(user, BASE, turn_id=1, action="Send 1 ETH to Sam", calls=[], quote=None, cost={})
+    # What Sepolia could do with Base's card: nothing. Its sign request is filed under Base.
+    pending = quotes.put(user, BASE, turn_id=1, action="Send 1 ETH to Sam", calls=[], quote=PRICED, cost={})
+    offered = signing.open_request(pending, signing.TELEGRAM, telegram_chat_id=5001)
     try:
-        quotes.take(user, SEPOLIA, pending.quote_id, turn_id=2)
-        refused = None
-    except quotes.QuoteError as e:
-        refused = str(e)
-    check("taking Base's quote on Sepolia is refused, as an unknown quote",
-          refused is not None and "no pending transaction" in refused, str(refused))
-    taken = quotes.take(user, BASE, pending.quote_id, turn_id=2)
-    check("while on Base it is still there to take", taken.quote_id == pending.quote_id and taken.chain_id == BASE)
+        signing.find_by_quote(user, SEPOLIA, pending.quote_id)
+        refused = False
+    except signing.Expired:
+        refused = True
+    check("Base's card can't be approved as a Sepolia one", refused)
+    found = signing.find_by_quote(user, BASE, pending.quote_id)
+    check("while on Base it is still there to approve", found["id"] == offered.request["id"] and found["chain_id"] == BASE)
+    check("and its link names that one request", signing.find_by_token(offered.token)["id"] == offered.request["id"])
+    signing.cancel(found)
 
 
 def test_unlinking_forgets_the_network():
@@ -1113,17 +1150,17 @@ def test_read_commands():
         telebot._get_wallet_status = lambda user_id: status
         until = datetime.fromtimestamp(expires, tz=timezone.utc)
         replies, _ = run(telebot.limit_cmd, 8001)
-        check("/limit: what's left, per what, and when my access runs out",
+        check("/limit: what's left, per what, and when the devices' approval runs out",
               replies == [f"<b>Base</b>\n\nSpending limit: $80.00 left of $100.00 per day.\n"
-                          f"My access runs out on {until.day} {until:%b %Y}."], str(replies))
+                          f"Your devices' approval runs out on {until.day} {until:%b %Y}."], str(replies))
         status.update(paused=True, session_expires_at=int(time.time()) + 86_400 + 600)
         replies, _ = run(telebot.limit_cmd, 8001)
         check("a pause, and a key running out soon, get their warnings instead",
               "⏸ The owner has paused this wallet" in replies[0] and "runs out in 1 day" in replies[0]
-              and "My access runs out on" not in replies[0], str(replies))
+              and "approval runs out on" not in replies[0], str(replies))
         status.update(session_active=False)
         replies, _ = run(telebot.limit_cmd, 8001)
-        check("a key that's off says so", "your Base wallet is off" in replies[0], str(replies))
+        check("no device approved says so", "None of your devices is approved" in replies[0], str(replies))
         check("windows read naturally", [telebot._window(h) for h in (24, 168, 1, 12, 36)]
               == ["per day", "per 7 days", "per hour", "per 12 hours", "per 36 hours"])
 
@@ -1287,8 +1324,20 @@ def _card_options(i: int) -> list[tuple[str, str]]:
     return buttons(reply_options[i]) if i < len(reply_options) else []
 
 
+CARD_TAIL = "Tap “Confirm with passkey”, then approve with Face ID, your fingerprint or your PIN."
+
+
+def _card_text(action: str, fees: str, minutes: int = 5) -> str:
+    return f"<b>Confirm on Base?</b>\n{action}\nFees: {fees} · good for {minutes} minutes\n{CARD_TAIL}"
+
+
+def _request_for(link: str) -> dict:
+    """The sign request a card's link names, found as the approval page finds it."""
+    return signing.find_by_token(link.rsplit("/c/", 1)[1])
+
+
 def test_quote_card():
-    print("\n[14] a turn that raised one quote is followed by a card the code writes, with Confirm and Cancel")
+    print("\n[14] a turn that raised one quote is followed by a card the code writes: a passkey link and Cancel")
     user = make_user(8201, wallet_chains=(BASE,))
     db.save_contact(user, "Sam", SAM)
     action = f"Transfer 10 USDC to {SAM}"
@@ -1296,15 +1345,25 @@ def test_quote_card():
         quotes_for_turns[:] = [{"action": action, "cost": {"total_usd": 0.3512, "max_total_usd": 0.5}}]
         replies, _ = run(telebot.start_chat, 8201, "send 10 usdc to sam")
         check("the reply, then the card", len(replies) == 2 and replies[0] == "<b>Base</b>\n\nDone.", str(replies))
-        check("the card says what Confirm sends, where, for what, and for how long",
-              replies[1] == f"<b>Confirm on Base?</b>\n{action}\nFees: $0.35 · good for 5 minutes", replies[1])
+        check("the card says what the passkey approves, where, for what, for how long, and how",
+              replies[1] == _card_text(action, "$0.35"), replies[1])
         card = _card_options(1)
-        quote_id = card[0][1].rsplit(":", 1)[1] if card else ""
-        check("with a Confirm and a Cancel button naming the network and the quote",
-              card == [("✅ Confirm", f"q:ok:{BASE}:{quote_id}"), ("✖️ Cancel", f"q:no:{BASE}:{quote_id}")]
-              and quotes._pending[quote_id].action == action, str(card))
-        check("each within Telegram's 64 bytes", all(len(data.encode()) <= 64 for _, data in card))
+        quote_id = card[1][1].rsplit(":", 1)[1] if len(card) == 2 else ""
+        link = card[0][1] if card else ""
+        check("with a link to the approval page and a Cancel naming the network and the quote",
+              len(card) == 2 and card[0][0] == "Confirm with passkey" and link.startswith(f"{WEB_APP}/c/")
+              and card[1] == ("✖️ Cancel", f"q:no:{BASE}:{quote_id}") and quotes._pending[quote_id].action == action,
+              str(card))
+        check("Cancel within Telegram's 64 bytes", len(card[1][1].encode()) <= 64 if card else False)
         check("sent as HTML", reply_options[1].get("parse_mode") == ParseMode.HTML, str(reply_options[1]))
+        request = _request_for(link)
+        check("the link names this quote's sign request, on Base, offered in Telegram, frozen as quoted",
+              request["quote_id"] == quote_id and request["chain_id"] == BASE and request["origin"] == "telegram"
+              and signing.thaw(request)["action"] == action and signing.thaw(request)["quote"] == PRICED)
+        check("the token is kept only as its hash", link.rsplit("/c/", 1)[1] not in str(request)
+              and request["token_hash"] == signing.token_hash(link.rsplit("/c/", 1)[1]))
+        check("and the card's message is recorded, for the API to take its buttons off",
+              request["telegram_chat_id"] == 8201 and request["telegram_message_id"] is not None)
 
         turns.clear()
         replies, _ = run(telebot.send_cmd, 8201, args=["10", "USDC", "to", "Sam"])
@@ -1313,15 +1372,21 @@ def test_quote_card():
 
         quotes_for_turns[:] = [{"action": "Transfer 1 <b>[x](https://evil.example)</b> to 0xabc",
                                 "cost": {"total_usd": 0.004}}]
-        replies, _ = run(telebot.start_chat, 8201, "send it")
+        replies, _ = run(telebot.start_chat, 8201, "send 1 x to 0xabc")
         check("the action is escaped, and a fee under a cent says so",
-              replies[1] == "<b>Confirm on Base?</b>\nTransfer 1 &lt;b&gt;[x](https://evil.example)&lt;/b&gt; to 0xabc\n"
-                            "Fees: under $0.01 · good for 5 minutes", replies[1])
+              replies[1] == _card_text("Transfer 1 &lt;b&gt;[x](https://evil.example)&lt;/b&gt; to 0xabc", "under $0.01"),
+              replies[1])
         quotes_for_turns[:] = [{"action": "Wrap 1 ETH", "cost": {"usd_unavailable": "no price", "total_native": 0.00021,
                                                                  "native_asset": "ETH"}}]
         replies, _ = run(telebot.start_chat, 8201, "wrap 1 eth")
-        check("fees the quote couldn't price in USD are in the coin", replies[1].endswith("Fees: 0.00021 ETH · good for 5 minutes"),
-              replies[1])
+        check("fees the quote couldn't price in USD are in the coin",
+              "\nFees: 0.00021 ETH · good for 5 minutes\n" in replies[1], replies[1])
+
+        replies, _ = run(telebot.start_chat, 8201, "wrap 1 eth", refuse_links=True)
+        card = _card_options(1)
+        check("a link Telegram refuses on a button (a localhost web app) goes in the text; Cancel stays",
+              len(replies) == 2 and f"\n\nApprove it here: {WEB_APP}/c/" in replies[1]
+              and [label for label, _ in card] == ["✖️ Cancel"], f"{replies} {card}")
 
         quotes_for_turns[:] = [{"action": "one", "cost": {"total_usd": 1}}, {"action": "two", "cost": {"total_usd": 1}}]
         replies, _ = run(telebot.start_chat, 8201, "two things")
@@ -1332,21 +1397,74 @@ def test_quote_card():
         check("no quote: no card", replies == ["<b>Base</b>\n\nDone."], str(replies))
 
         def failed_turn(user_id, chain_id, text, network):
-            quotes.put(user_id, chain_id, 99_999, "half-quoted", [], None, {"total_usd": 1})
+            quotes.put(user_id, chain_id, 99_999, "half-quoted", [], PRICED, {"total_usd": 1})
             return "Sorry, something went wrong while handling that. Please try again.", None
 
         telebot.chat_turn = failed_turn
-        replies, _ = run(telebot.start_chat, 8201, "send it")
+        replies, _ = run(telebot.start_chat, 8201, "send 2 usdc to sam")
         check("a turn that failed shows no card, whatever it raised", len(replies) == 1, str(replies))
 
-        pending = quotes.put(user, BASE, 1, action, [], None, {"total_usd": 0.35})
-        pending.created_at -= 250
-        text, _ = telebot.quote_card(pending, time.time())
-        check("a card for a quote near its end says so", text.endswith("good for 1 minute"), text)
+        pending = quotes.put(user, BASE, 1, action, [], PRICED, {"total_usd": 0.35})
+        request = signing.open_request(pending, signing.TELEGRAM, telegram_chat_id=8201).request
+        text, _ = telebot.quote_card(request, "t0ken", request["expires_at"] - 50)
+        check("a card for a quote near its end says so", "good for 1 minute\n" in text, text)
     finally:
         telebot.chat_turn = fake_chat
         quotes_for_turns.clear()
         quotes.drop_all(user, BASE)
+        for request in db.get_open_sign_requests(user, BASE):
+            db.cancel_sign_request(request["id"])
+
+
+def test_typed_yes():
+    print("\n[14b] a typed “yes” while a card waits gets the card again, with a new link, and no turn")
+    user = make_user(8251, wallet_chains=(BASE,))
+    saved = telebot.answer_yes
+    answered = []
+    telebot.answer_yes = lambda user_id, chain_id, typed: answered.append((user_id, chain_id, typed)) or signing.YES_REPLY
+    try:
+        turns.clear()
+        replies, _ = run(telebot.start_chat, 8251, "yes")
+        check("with no card waiting, a yes is an ordinary turn",
+              turns == [(user, BASE, "yes", "base")] and answered == [], f"{turns} {answered}")
+
+        quotes_for_turns[:] = [{"action": "Wrap 1 ETH", "cost": {"total_usd": 0.2}}]
+        run(telebot.start_chat, 8251, "wrap 1 eth")
+        quotes_for_turns.clear()
+        first_link = _card_options(1)[0][1]
+        first = _request_for(first_link)
+
+        turns.clear()
+        replies, _ = run(telebot.start_chat, 8251, "Send it!")
+        check("“Send it!” while it waits: no turn, answered in fixed words",
+              turns == [] and answered == [(user, BASE, "Send it!")]
+              and replies[0] == f"<b>Base</b>\n\n{signing.YES_REPLY}", f"{turns} {replies}")
+        new_link = _card_options(1)[0][1] if len(replies) == 2 else ""
+        check("then the same card again", len(replies) == 2 and replies[1].startswith("<b>Confirm on Base?</b>\nWrap 1 ETH"),
+              str(replies))
+        check("with a new link to the same request", new_link != first_link and _request_for(new_link)["id"] == first["id"])
+        try:
+            _request_for(first_link)
+            old_dead = False
+        except signing.Expired:
+            old_dead = True
+        check("the old link is dead", old_dead)
+        check("and the old card's buttons come off",
+              last_bot["bot"].unbuttoned == [(8251, first["telegram_message_id"])], str(last_bot["bot"].unbuttoned))
+        check("the request now points at the new card",
+              db.get_sign_request(first["id"])["telegram_message_id"] != first["telegram_message_id"])
+
+        for text in ("yes please send 1 eth", "no", "y?"):
+            turns.clear()
+            run(telebot.start_chat, 8251, text)
+            check(f"“{text}” is not a bare yes: a turn", turns == [(user, BASE, text, "base")], str(turns))
+    finally:
+        telebot.answer_yes = saved
+        quotes_for_turns.clear()
+        quotes.drop_all(user, BASE)
+        for request in db.get_open_sign_requests(user, BASE):
+            db.cancel_sign_request(request["id"])
+        telebot._turn_locks.clear()
 
 
 # Everything a quote tap did, in order: how it was answered, the buttons coming off, the actions it ran.
@@ -1379,108 +1497,86 @@ def quote_tap(chat_id: int, data: str, chat_type: str = Chat.PRIVATE, from_id: i
 
 
 def test_quote_buttons():
-    print("\n[15] a quote's buttons act only for its account, on its network, once")
+    print("\n[15] a card's Cancel acts only for its account, on its network, once")
     user = make_user(8301, wallet_chains=(SEPOLIA, BASE))
     tap(8301, f"chain:{BASE}")
-    saved = telebot.confirm_quote, telebot.cancel_quote
-    sending = "Sending — Transfer 10 USDC to 0xabc. Waiting for the network to confirm it."
-    outcome = {"confirm": sending, "landed": "Sent — Transfer 10 USDC to 0xabc. Tx hash: `0x12`", "cancel": True}
+    saved = telebot.cancel_quote
+    outcome = {"cancel": {"id": 1}}
     threads = []
-
-    def fake_confirm(user_id, chain_id, quote_id, network):
-        tap_events.append(("confirm", user_id, chain_id, quote_id, network))
-        threads.append(threading.current_thread().name)
-        if isinstance(outcome["confirm"], Exception):
-            raise outcome["confirm"]
-        if outcome["landed"] is None:
-            return Confirmed(outcome["confirm"])
-        landed = Future()
-        landed.set_result(outcome["landed"])
-        return Confirmed(outcome["confirm"], 41, landed)
 
     def fake_cancel(user_id, chain_id, quote_id):
         tap_events.append(("cancel", user_id, chain_id, quote_id))
+        threads.append(threading.current_thread().name)
         return outcome["cancel"]
 
-    telebot.confirm_quote, telebot.cancel_quote = fake_confirm, fake_cancel
+    telebot.cancel_quote = fake_cancel
     telebot._turn_locks.clear()
     try:
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc_12-x")
-        check("Confirm: answered, the buttons off first, then the quote sent for this account on this network",
-              tap_events == [("answer", None, None), ("buttons off", None),
-                             ("confirm", user, BASE, "Abc_12-x", "base")], str(tap_events))
-        check("told it's on its way, then, once it lands, how it went, both under the network's name",
-              sent == [(8301, f"<b>Base</b>\n\n{sending}"),
-                       (8301, "<b>Base</b>\n\nSent — Transfer 10 USDC to 0xabc. Tx hash: <code>0x12</code>")], str(sent))
+        sent = quote_tap(8301, f"q:no:{BASE}:Abc_12-x")
+        check("Cancel: answered, the buttons off first, then the quote discarded for this account on this network",
+              tap_events == [("answer", None, None), ("buttons off", None), ("cancel", user, BASE, "Abc_12-x")],
+              str(tap_events))
+        check("and the user told, under the network's name", sent == [(8301, "<b>Base</b>\n\nCancelled. Nothing was sent.")],
+              str(sent))
         check("in the conversation's own turn", set(telebot._turn_locks) == {(BASE, 8301)}, str(set(telebot._turn_locks)))
-        check("on a tap thread, not behind other people's turns",
-              threads[-1].startswith("telegram-tap"), str(threads))
-
-        outcome["landed"] = "Sent — Transfer 1 [Claim](https://evil.example) <b>x</b> to 0xabc. Tx hash: `0x12`"
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc_12-x")
-        check("what it says once it lands repeats the action escaped: a token's symbol shaped like a link stays text",
-              sent[-1] == (8301, "<b>Base</b>\n\nSent — Transfer 1 [Claim](https://evil.example) &lt;b&gt;x&lt;/b&gt; "
-                                 "to 0xabc. Tx hash: <code>0x12</code>"), str(sent))
-
-        outcome["confirm"], outcome["landed"] = "That didn't go through: not enough USDC", None
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc_12-x")
-        check("one that never went out: told why, with nothing to follow",
-              sent == [(8301, "<b>Base</b>\n\nThat didn't go through: not enough USDC")], str(sent))
-
-        outcome["confirm"] = QuoteError("gone")
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc_12-x")
-        check("a quote already used or expired: nothing sent, and the user told",
+        check("on a tap thread, not behind other people's turns", threads[-1].startswith("telegram-tap"), str(threads))
+        outcome["cancel"] = {}
+        sent = quote_tap(8301, f"q:no:{BASE}:Abc_12-x")
+        check("a quote with no sign request is cancelled all the same",
+              sent == [(8301, "<b>Base</b>\n\nCancelled. Nothing was sent.")], str(sent))
+        outcome["cancel"] = None
+        sent = quote_tap(8301, f"q:no:{BASE}:Abc_12-x")
+        check("one already gone -- sent, cancelled, expired -- says so",
               sent == [(8301, f"<b>Base</b>\n\n{telebot.STALE_QUOTE}")], str(sent))
 
-        sent = quote_tap(8301, f"q:no:{BASE}:Abc_12-x")
-        check("Cancel discards it, on this network", tap_events[-1] == ("cancel", user, BASE, "Abc_12-x")
-              and sent == [(8301, "<b>Base</b>\n\nCancelled. Nothing was sent.")], f"{tap_events} {sent}")
-        outcome["cancel"] = False
-        sent = quote_tap(8301, f"q:no:{BASE}:Abc_12-x")
-        check("one already gone says so", sent == [(8301, f"<b>Base</b>\n\n{telebot.STALE_QUOTE}")], str(sent))
+        sent = quote_tap(8301, f"q:ok:{BASE}:Abc_12-x")
+        check("a Confirm button from before passkeys: told how it works now, nothing run",
+              tap_events == [("answer", telebot.OLD_CONFIRM, True)] and sent == [], f"{tap_events} {sent}")
 
         refused = [("answer", telebot.OTHER_NETWORK_QUOTE, True)]
-        for data, why in ((f"q:ok:{SEPOLIA}:Abc", "a quote from the network the user switched away from"),
-                          (f"q:ok:{BASE}x:Abc", "a network that isn't a number"),
-                          ("q:ok::Abc", "no network"), (f"q:ok:{BASE}:", "no quote"),
-                          (f"q:ok:{BASE}:Abc!", "a quote id that isn't one"), (f"q:yes:{BASE}:Abc", "no such button"),
-                          (f"q:ok:{BASE}:Abc:more", "more than a button carries")):
+        for data, why in ((f"q:no:{SEPOLIA}:Abc", "a quote from the network the user switched away from"),
+                          (f"q:no:{BASE}x:Abc", "a network that isn't a number"),
+                          ("q:no::Abc", "no network"), (f"q:no:{BASE}:", "no quote"),
+                          (f"q:no:{BASE}:Abc!", "a quote id that isn't one"), (f"q:yes:{BASE}:Abc", "no such button"),
+                          (f"q:no:{BASE}:Abc:more", "more than a button carries")):
             sent = quote_tap(8301, data)
             check(f"{why}: refused, nothing run", tap_events == refused and sent == [], f"{tap_events} {sent}")
 
         nothing = [("answer", None, None)]
         for chat_type in (Chat.GROUP, Chat.SUPERGROUP, Chat.CHANNEL):
-            sent = quote_tap(8301, f"q:ok:{BASE}:Abc", chat_type=chat_type)
+            sent = quote_tap(8301, f"q:no:{BASE}:Abc", chat_type=chat_type)
             check(f"a tap in a {chat_type}: nothing run, nothing said", tap_events == nothing and sent == [],
                   f"{tap_events} {sent}")
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc", from_id=8302)
+        sent = quote_tap(8301, f"q:no:{BASE}:Abc", from_id=8302)
         check("a tap by someone else: the same", tap_events == nothing and sent == [], f"{tap_events} {sent}")
-        sent = quote_tap(8301, f"q:ok:{BASE}:Abc", no_chat=True)
+        sent = quote_tap(8301, f"q:no:{BASE}:Abc", no_chat=True)
         check("a tap with no chat: the same", tap_events == nothing and sent == [], f"{tap_events} {sent}")
-        sent = quote_tap(8309, f"q:ok:{BASE}:Abc")
+        sent = quote_tap(8309, f"q:no:{BASE}:Abc")
         check("an unlinked chat's tap: told how to link, nothing run",
               tap_events == nothing and sent == [(8309, telebot.UNLINKED_MESSAGE)], f"{tap_events} {sent}")
 
         make_user(8303, wallet_chains=(SEPOLIA, BASE))
-        sent = quote_tap(8303, f"q:ok:{BASE}:Abc")
+        sent = quote_tap(8303, f"q:no:{BASE}:Abc")
         check("with no network picked: refused", tap_events == refused and sent == [], f"{tap_events} {sent}")
     finally:
-        telebot.confirm_quote, telebot.cancel_quote = saved
+        telebot.cancel_quote = saved
         telebot._turn_locks.clear()
 
 
 def test_cancel_command():
-    print("\n[16] /cancel drops the quotes waiting on the network in use")
+    print("\n[16] /cancel drops the quotes waiting on the network in use, and their cards' buttons")
     user = make_user(8401, wallet_chains=(BASE,))
     saved = telebot.cancel_quotes
     asked = []
-    dropped = {"n": 2}
-    telebot.cancel_quotes = lambda user_id, chain_id: asked.append((user_id, chain_id)) or dropped["n"]
+    dropped = {"requests": [{"id": 1, "telegram_chat_id": 8401, "telegram_message_id": 77}, {}]}
+    telebot.cancel_quotes = lambda user_id, chain_id: asked.append((user_id, chain_id)) or dropped["requests"]
     try:
         replies, _ = run(telebot.cancel_cmd, 8401)
         check("it drops them on this network, and says so",
               asked == [(user, BASE)] and replies == ["Cancelled. Nothing was sent."], f"{asked} {replies}")
-        dropped["n"] = 0
+        check("and takes the buttons off each card it had", last_bot["bot"].unbuttoned == [(8401, 77)],
+              str(last_bot["bot"].unbuttoned))
+        dropped["requests"] = []
         replies, _ = run(telebot.cancel_cmd, 8401)
         check("with none waiting, it says that", replies == ["There was nothing to cancel."], str(replies))
         replies, _ = run(telebot.cancel_cmd, 8409)
@@ -1561,6 +1657,7 @@ if __name__ == "__main__":
         test_read_commands()
         test_send_and_swap()
         test_quote_card()
+        test_typed_yes()
         test_quote_buttons()
         test_cancel_command()
         test_feedback()

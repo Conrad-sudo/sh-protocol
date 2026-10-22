@@ -1,5 +1,5 @@
 """
-Payments to saved contacts, and wrapping the native asset. Each quotes; confirm_transaction sends.
+Payments to saved contacts, and wrapping the native asset. Each quotes; the user's passkey sends.
 """
 from langchain.tools import ToolRuntime, tool
 

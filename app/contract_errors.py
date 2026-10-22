@@ -87,22 +87,27 @@ ERROR_SELECTORS = _error_selectors()
 
 # The EntryPoint reports these as plain strings inside FailedOp, not as custom-error selectors, so
 # they never appear in ERROR_SELECTORS and would otherwise reach the user verbatim. AA22 is the one
-# that matters day to day: it is what an EXPIRED session key looks like from outside, and "expired
-# or not due" on its own tells nobody which of their two keys ran out or what to do about it.
-# SessionHandler returns the key's deadline as the op's validity window precisely so this case is
-# distinguishable from a bad signature (AA24) instead of being lumped in with it.
+# that matters day to day. SessionHandler returns the EARLIER of two deadlines as a passkey op's
+# validity window -- the passkey's approval on the wallet, and the op's own (in its nonce key) -- so
+# AA22 means one of the two ran out, and is never confused with a bad signature (AA24). Which one
+# can only be told by asking the wallet whether the passkey is still active, which the send path
+# does (tools.sending.submit_signed); this text covers both for anywhere that can't ask.
 _ENTRY_POINT_REASONS = {
     "AA22 expired or not due": (
-        "The assistant's session key has expired, so the wallet will not accept transactions "
-        "signed with it. Grant a new one from the web app (Settings -> Session key); it takes one "
-        "transaction signed from your own wallet."
+        "This approval ran out before it reached the chain: either the confirmation expired, or "
+        "this device's approval on the wallet did. Ask again; if the device's approval ran out, "
+        "renew it under Controls -> Devices in the web app."
     ),
     "AA24 signature error": (
-        "The wallet does not recognise the key that signed this transaction. The assistant's key "
-        "was most likely revoked or replaced -- grant it a new one from the web app "
-        "(Settings -> Session key)."
+        "The wallet does not recognise the passkey that approved this. It was most likely removed "
+        "from the wallet -- check Controls -> Devices in the web app."
     ),
 }
+
+
+def is_expired_failure(text: str) -> bool:
+    """Whether `text` reports an AA22 rejection, raw or as explained above."""
+    return "AA22 expired or not due" in text or _ENTRY_POINT_REASONS["AA22 expired or not due"] in text
 
 
 def explain_entry_point_failure(text: str) -> str | None:

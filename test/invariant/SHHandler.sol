@@ -9,6 +9,8 @@ import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
 import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
 import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
+import {P256} from "@openzeppelin/contracts/utils/cryptography/P256.sol";
+import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
 
 /**
  * @title SHHandler
@@ -25,8 +27,15 @@ import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
  *        change them, the config-consistency invariant catches the divergence.
  *      USDC stays permanently watched (the handler never removes it) so ghost metering of USDC
  *      flows is always live; DAI's watch status is toggled to fuzz list add/remove.
+ *      - The PASSKEY LIST has a ghost model of its own (see {addPasskey}): it replays the wallet's
+ *        rules (renewal in place, a free slot or a sweep of expired keys for a new key, the cap of
+ *        five) and, before every call, works out whether the call should succeed. A mismatch either
+ *        way sets {violated}, which an invariant checks -- handler reverts are swallowed
+ *        (fail_on_revert = false), so a plain assert here would never be seen.
  */
 contract SHHandler is Test {
+    using PasskeyHelper for PasskeyHelper.Passkey;
+
     SessionHandler public wallet;
     SpendingLimitModule public module;
     SHOracle public oracle;
@@ -41,12 +50,21 @@ contract SHHandler is Test {
     uint48 public ghostWindowStart;
     int256 public ghostLimit;
     uint256 public ghostWindowDuration;
-    /// @dev Session keys ever touched, with their expected allowlist state.
-    /// @dev Ghost mirror of the wallet's ONE session key and its deadline. A list is no longer the
-    ///      right shape: the wallet holds a single key, and granting another evicts it.
-    address public expectedSession;
-    uint48 public expectedSessionValidUntil;
-    mapping(address => bool) private _tracked;
+
+    /// @dev The passkeys the handler draws from. More than the cap of five, so the cap can be hit.
+    uint256 public constant POOL_SIZE = 8;
+    PasskeyHelper.Passkey[] internal _pool;
+
+    /// @dev Ghost mirror of the wallet's passkey list: which keys it should hold and until when.
+    struct GhostKey {
+        bytes32 id;
+        uint48 validUntil;
+    }
+
+    GhostKey[] internal _ghost;
+    /// @dev Set when the wallet answered a call differently from the model (and why).
+    bool public violated;
+    string public violation;
 
     constructor(
         SessionHandler _wallet,
@@ -70,6 +88,10 @@ contract SHHandler is Test {
         ghostWindowStart = cfg.windowStart;
         ghostLimit = cfg.dailyLimitUsd;
         ghostWindowDuration = cfg.windowDuration;
+
+        for (uint256 i = 0; i < POOL_SIZE; i++) {
+            _pool.push(PasskeyHelper.create(string.concat("handler passkey ", vm.toString(i))));
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -166,23 +188,85 @@ contract SHHandler is Test {
         try module.setDailyLimit(newLimit) {} catch {}
     }
 
-    /// @dev Owner grants or revokes THE session key; ghosts mirror the key and its deadline. An
-    ///      add always evicts whatever was authorized, which is the behaviour under test.
-    function manageSession(address key, bool add, uint48 ttl) public {
-        key = address(uint160(bound(uint256(uint160(key)), 1, type(uint160).max)));
-        uint48 validUntil = uint48(block.timestamp) + uint48(bound(ttl, 1, wallet.MAX_SESSION_TTL()));
+    /// @dev Owner grants (or renews) one of the pool's passkeys. The model decides first whether that
+    ///      should work: a key already held is renewed in place; a NEW key needs a free slot, and when
+    ///      five are held the wallet sweeps the expired ones before it refuses. Half the deadlines are
+    ///      short (up to 3 days) so the clock in {warpTime} really does expire keys.
+    function addPasskey(uint256 which, uint256 ttl) public {
+        PasskeyHelper.Passkey memory key = _pool[which % POOL_SIZE];
+        uint256 span = ttl % 2 == 0 ? 3 days : uint256(wallet.MAX_SESSION_TTL());
+        uint48 validUntil = uint48(block.timestamp + bound(ttl, 1, span));
+        bytes32 id = key.keyId();
+        (uint256 index, bool found) = _ghostIndex(id);
+        bool expectOk = found || _ghost.length < wallet.MAX_SESSION_KEYS() || _ghostExpiredCount() > 0;
+
         vm.prank(owner);
-        if (add) {
-            try wallet.addSession(key, validUntil) {
-                expectedSession = key;
-                expectedSessionValidUntil = validUntil;
-            } catch {}
-        } else {
-            try wallet.removeSession() {
-                expectedSession = address(0);
-                expectedSessionValidUntil = 0;
-            } catch {}
+        try wallet.addSession(key.qx, key.qy, validUntil) {
+            if (!expectOk) {
+                _flag("addSession succeeded with a full list of live keys");
+            } else if (found) {
+                _ghost[index].validUntil = validUntil;
+            } else {
+                if (_ghost.length >= wallet.MAX_SESSION_KEYS()) _ghostSweep();
+                _ghost.push(GhostKey({id: id, validUntil: validUntil}));
+            }
+        } catch {
+            if (expectOk) _flag("addSession reverted when the model said it should work");
         }
+    }
+
+    /// @dev Owner revokes one pool key. Revoking a key the wallet does not hold must revert.
+    function removePasskey(uint256 which) public {
+        bytes32 id = _pool[which % POOL_SIZE].keyId();
+        (uint256 index, bool found) = _ghostIndex(id);
+
+        vm.prank(owner);
+        try wallet.removeSession(id) {
+            if (!found) _flag("removeSession succeeded for a key that is not held");
+            else _ghostRemoveAt(index);
+        } catch {
+            if (found) _flag("removeSession reverted for a held key");
+        }
+    }
+
+    /// @dev Owner revokes everything.
+    function removeAllPasskeys() public {
+        vm.prank(owner);
+        try wallet.removeAllSessions() {
+            delete _ghost;
+        } catch {
+            _flag("removeAllSessions reverted");
+        }
+    }
+
+    /// @dev A non-owner tries every way of changing the list; none may work. (The model is NOT
+    ///      updated, so a success also shows up as a divergence.)
+    function nonOwnerManagesPasskeys(address caller, uint256 which) public {
+        if (caller == owner) return;
+        PasskeyHelper.Passkey memory key = _pool[which % POOL_SIZE];
+        uint48 validUntil = uint48(block.timestamp + 1 days);
+
+        vm.prank(caller);
+        try wallet.addSession(key.qx, key.qy, validUntil) {
+            _flag("a non-owner added a passkey");
+        } catch {}
+        vm.prank(caller);
+        try wallet.removeSession(key.keyId()) {
+            _flag("a non-owner removed a passkey");
+        } catch {}
+        vm.prank(caller);
+        try wallet.removeAllSessions() {
+            _flag("a non-owner removed every passkey");
+        } catch {}
+    }
+
+    /// @dev The owner offers a public key that is not on the curve; the wallet must refuse it.
+    function addOffCurveKey(bytes32 qx, bytes32 qy) public {
+        if (P256.isValidPublicKey(qx, qy)) return;
+        vm.prank(owner);
+        try wallet.addSession(qx, qy, uint48(block.timestamp + 1 days)) {
+            _flag("an off-curve key was accepted");
+        } catch {}
     }
 
     /// @dev Advances time (possibly past the window) and refreshes the USDC feed so metering keeps
@@ -194,10 +278,57 @@ contract SHHandler is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                     THE PASSKEY GHOST MODEL
+    //////////////////////////////////////////////////////////////*/
+
+    function _flag(string memory why) internal {
+        if (!violated) {
+            violated = true;
+            violation = why;
+        }
+    }
+
+    function _ghostIndex(bytes32 id) internal view returns (uint256 index, bool found) {
+        for (uint256 i = 0; i < _ghost.length; i++) {
+            if (_ghost[i].id == id) return (i, true);
+        }
+    }
+
+    /// @dev Keys past their deadline (`block.timestamp > validUntil`, the EntryPoint's rule).
+    function _ghostExpiredCount() internal view returns (uint256 n) {
+        for (uint256 i = 0; i < _ghost.length; i++) {
+            if (block.timestamp > _ghost[i].validUntil) n++;
+        }
+    }
+
+    function _ghostRemoveAt(uint256 index) internal {
+        _ghost[index] = _ghost[_ghost.length - 1];
+        _ghost.pop();
+    }
+
+    /// @dev What the wallet does to a full list before it takes a new key: drop every expired key.
+    function _ghostSweep() internal {
+        for (uint256 i = _ghost.length; i > 0; i--) {
+            if (block.timestamp > _ghost[i - 1].validUntil) _ghostRemoveAt(i - 1);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
                      HELPERS FOR INVARIANT ITERATION
     //////////////////////////////////////////////////////////////*/
 
-    function sessionKeyCount() external view returns (uint256) {
-        return expectedSession == address(0) ? 0 : 1;
+    function ghostLength() external view returns (uint256) {
+        return _ghost.length;
+    }
+
+    /// @dev Whether the model holds `id`, and until when.
+    function ghostFind(bytes32 id) external view returns (bool found, uint48 validUntil) {
+        (uint256 index, bool isThere) = _ghostIndex(id);
+        if (!isThere) return (false, 0);
+        return (true, _ghost[index].validUntil);
+    }
+
+    function poolKeyId(uint256 i) external view returns (bytes32) {
+        return _pool[i].keyId();
     }
 }

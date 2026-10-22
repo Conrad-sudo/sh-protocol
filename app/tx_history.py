@@ -55,6 +55,7 @@ from db import (
     get_json,
     get_lp_tokens,
     get_owner_transaction,
+    get_passkey,
     get_pending_transactions,
     get_supported_token_by_address,
     get_supported_tokens_by_chain_id,
@@ -65,6 +66,7 @@ from db import (
     save_movements,
     settle_transaction,
 )
+from passkey import key_id
 from tx_movements import Moved
 
 log = logging.getLogger(__name__)
@@ -279,9 +281,11 @@ def describe_wallet_tx(w3: Web3, user_id: int, chain_id: int, wallet, tx) -> str
     if name == "addSession":
         days = round((args["validUntil"] - time.time()) / 86_400)
         lasting = _plural(days, "day") if days >= 1 else "less than a day"
-        return f"Turn the assistant on for {lasting}"
+        return f"Let {_device(user_id, key_id(args['qx'], args['qy']))} approve payments for {lasting}"
     if name == "removeSession":
-        return "Turn the assistant off"
+        return f"Revoke {_device(user_id, '0x' + bytes(args['keyId']).hex())}"
+    if name == "removeAllSessions":
+        return "Revoke every device"
     if name == "addTrustedSpender":
         return f"Trust {_spender(chain_id, args['spender'])} to spend from the wallet"
     if name == "removeTrustedSpender":
@@ -291,6 +295,16 @@ def describe_wallet_tx(w3: Web3, user_id: int, chain_id: int, wallet, tx) -> str
     if name == "setSessionGasBudget":
         return f"Set the daily network fee budget to {_amount(args['newBudget'], 18)} {native}"
     return f"Call {name} on your wallet"
+
+
+def _device(user_id: int, passkey_id: str) -> str:
+    """
+    A passkey as the History tab names it: the name the user gave its device, in quotes, or "a
+    device" for a key this account never registered (one added on chain directly, say). Worded as
+    the Devices card is (Add device, Renew, Revoke).
+    """
+    row = get_passkey(user_id, passkey_id)
+    return f"“{row['device_name']}”" if row else "a device"
 
 
 def _native(chain_id: int) -> str:

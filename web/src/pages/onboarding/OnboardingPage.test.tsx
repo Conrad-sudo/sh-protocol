@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen, within } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../../api/client'
 import { routes } from '../../routes'
-import { makeWalletState } from '../../test/fixtures'
+import type { Passkey, RegisteredPasskey } from '../../api/types'
+import { makePasskey, makeWalletState, PASSKEY_CREDENTIAL } from '../../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../../test/utils'
+import { b64url, installPasskeys, madeCredential } from '../../test/webauthn'
+import { rememberPasskey } from '../../lib/passkey'
 
 // Polling waits 2 s between checks; the tests don't.
 vi.mock('../../lib/tx', async importOriginal => ({
@@ -22,10 +25,29 @@ const TOKENS = [
   // The API flags the wrapped native token: it always counts, like ETH.
   { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', always_counted: true },
 ]
+/** The passkey made during onboarding, as POST /api/passkeys/register saves it. */
+const NEW_CREDENTIAL = b64url('work-laptop-passkey')
+const NEW_PASSKEY: RegisteredPasskey = {
+  key_id: `0x${'ef'.repeat(32)}`,
+  credential_id: NEW_CREDENTIAL,
+  device_name: 'Work laptop',
+  created_at: 1_790_100_000,
+  qx: `0x${'01'.repeat(32)}`,
+  qy: `0x${'02'.repeat(32)}`,
+}
+const REGISTRATION_OPTIONS: PublicKeyCredentialCreationOptionsJSON = {
+  rp: { id: 'localhost', name: 'Mitfah' },
+  user: { id: b64url('user-handle-1234'), name: 'sam', displayName: 'sam' },
+  challenge: b64url('registration challenge 32 bytes!'),
+  pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+  authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+  attestation: 'none',
+  timeout: 60_000,
+}
 const PREPARED = {
   chain_id: SEPOLIA,
   predicted_address: PREDICTED,
-  session_key: '0x5555555555555555555555555555555555555555',
+  key_id: NEW_PASSKEY.key_id,
   watched_tokens: ['usdc'],
   tx: { to: '0x6666666666666666666666666666666666666666', data: '0xdeadbeef', value: '0xde0b6b3a7640000', gas: '0x7a120' },
 }
@@ -34,9 +56,11 @@ const PREPARED = {
 const OTHER = '0x9999999999999999999999999999999999999999'
 
 interface Calls {
-  deploy: unknown[]
+  deploy: Record<string, unknown>[]
   confirm: unknown[]
   sent: Record<string, string>[]
+  registered: unknown[]
+  optionsAsked: number
 }
 
 interface ServerOptions {
@@ -47,6 +71,8 @@ interface ServerOptions {
   walletPrompt?: Promise<void>
   /** Answers every confirm instead of "pending" once, then "deployed". */
   confirm?: () => Response
+  /** The account's passkeys (GET /api/passkeys); one made during the test joins them. */
+  passkeys?: Passkey[]
 }
 
 /**
@@ -61,9 +87,11 @@ function stubServer({
   wrongDeployer = false,
   walletPrompt = Promise.resolve(),
   confirm,
+  passkeys = [],
 }: ServerOptions = {}) {
   let me = { ...ME, owner_addr: ownerAddr, wallet_chains: [] as number[] }
-  const calls: Calls = { deploy: [], confirm: [], sent: [] }
+  const calls: Calls = { deploy: [], confirm: [], sent: [], registered: [], optionsAsked: 0 }
+  const accountPasskeys = [...passkeys]
 
   vi.stubGlobal(
     'fetch',
@@ -96,9 +124,18 @@ function stubServer({
           )
         case `/api/tokens?chain_id=${SEPOLIA}`:
           return Promise.resolve(json(200, { tokens: TOKENS }))
+        case '/api/passkeys':
+          return Promise.resolve(json(200, { passkeys: accountPasskeys }))
+        case '/api/passkeys/register/options':
+          calls.optionsAsked += 1
+          return Promise.resolve(json(200, { options: REGISTRATION_OPTIONS }))
+        case '/api/passkeys/register':
+          calls.registered.push(body)
+          accountPasskeys.push(NEW_PASSKEY)
+          return Promise.resolve(json(200, NEW_PASSKEY))
         case '/api/deploy':
           calls.deploy.push(body)
-          return Promise.resolve(json(200, PREPARED))
+          return Promise.resolve(json(200, { ...PREPARED, key_id: body.key_id }))
         case '/api/deploy/confirm':
           calls.confirm.push(body)
           if (confirm) return Promise.resolve(confirm())
@@ -112,15 +149,19 @@ function stubServer({
           if (calls.confirm.length === 1) return Promise.resolve(json(202, { status: 'pending', tx_hash: TX_HASH }))
           if (reverted) return Promise.resolve(json(400, { detail: `deployWallet reverted (tx: ${TX_HASH})` }))
           me = { ...me, wallet_chains: [SEPOLIA] }
-          return Promise.resolve(
-            json(200, {
-              status: 'deployed',
-              chain_id: SEPOLIA,
-              wallet_address: PREDICTED,
-              session_key: PREPARED.session_key,
-              session_key_authorized: true,
-            }),
-          )
+          {
+            const keyId = (calls.deploy.at(-1)?.key_id as string | null | undefined) ?? null
+            return Promise.resolve(
+              json(200, {
+                status: 'deployed',
+                chain_id: SEPOLIA,
+                wallet_address: PREDICTED,
+                key_id: keyId,
+                session_key_authorized: keyId !== null,
+                session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 30 * 86_400,
+              }),
+            )
+          }
         case `/api/wallet/${SEPOLIA}`:
           return Promise.resolve(
             me.wallet_chains.includes(SEPOLIA)
@@ -157,6 +198,8 @@ describe('OnboardingPage', () => {
   })
 
   it('creates the wallet with the chosen settings, once the signed-in wallet is connected', async () => {
+    const browser = installPasskeys()
+    browser.create.mockResolvedValue(madeCredential(NEW_CREDENTIAL))
     const calls = stubServer()
     const user = userEvent.setup()
     const router = await renderRoutes(routes, '/onboarding')
@@ -189,16 +232,32 @@ describe('OnboardingPage', () => {
     expect(within(fund).getByLabelText('Amount to send now')).toHaveValue('1')
     await user.click(within(fund).getByRole('button', { name: 'Continue' }))
 
+    // This device's passkey, made with the tap: the new wallet trusts it from the start.
+    const passkey = await step('Create your passkey')
+    const name = within(passkey).getByLabelText('Name for this device')
+    await user.clear(name)
+    await user.type(name, 'Work laptop')
+    // Fetched before the tap, so the tap can open the browser's prompt at once.
+    await waitFor(() => expect(calls.optionsAsked).toBe(1))
+    await user.click(within(passkey).getByRole('button', { name: 'Create passkey' }))
+    expect(browser.create).toHaveBeenCalledTimes(1)
+
     const review = await step('Check the details')
     const summary = (term: string) => within(review).getByText(term).nextElementSibling
     expect(summary('Spending limit')).toHaveTextContent('$250.00 every 7 days')
     expect(summary('Counts toward the limit')).toHaveTextContent('ETH, WETH')
     expect(summary('Wallet prefund')).toHaveTextContent('1 ETH')
-    expect(summary("Assistant's access")).toHaveTextContent('30 days, renewable any time in Controls')
+    expect(summary("Assistant's access")).toHaveTextContent(
+      '30 days, approved with the passkey on “Work laptop”; renewable any time in Controls',
+    )
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
 
     expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/dashboard')
+    expect(screen.getByText(/^Your wallet is ready on Sepolia\. You can now disconnect your browser wallet/)).toBeInTheDocument()
+    expect(calls.registered).toEqual([
+      { credential: expect.objectContaining({ id: NEW_CREDENTIAL, type: 'public-key' }), device_name: 'Work laptop' },
+    ])
 
     expect(calls.deploy).toEqual([
       {
@@ -208,6 +267,7 @@ describe('OnboardingPage', () => {
         window_secs: 604_800,
         watched_tokens: [TOKENS[1]],
         prefund_eth: '1',
+        key_id: NEW_PASSKEY.key_id,
         session_ttl_secs: 30 * 86_400,
       },
     ])
@@ -355,6 +415,7 @@ describe('OnboardingPage', () => {
     await within(limits).findByRole('checkbox', { name: 'WETH' })
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
     await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await step('Create your passkey')).getByRole('button', { name: 'Skip for now' }))
     const review = await step('Check the details')
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
     expect(await within(review).findByText('Confirm the transaction in your wallet.')).toBeInTheDocument()
@@ -374,5 +435,68 @@ describe('OnboardingPage', () => {
     expect(router.state.location.pathname).toBe('/dashboard')
     expect(calls.sent).toHaveLength(1)
     expect(sessionStorage.getItem(PENDING_KEY)).toBeNull()
+  })
+  /** Connects and accepts the defaults up to the passkey step. */
+  async function toPasskeyStep(user: ReturnType<typeof userEvent.setup>) {
+    await connect(user)
+    await user.click(within(await step('Where should your wallet live?')).getByRole('button', { name: 'Continue' }))
+    const limits = await step('How much may the assistant spend?')
+    await within(limits).findByRole('checkbox', { name: 'WETH' })
+    await user.click(within(limits).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
+  }
+
+  it('creates the wallet without a passkey when skipped, and says how to add a device', async () => {
+    installPasskeys()
+    const calls = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    await toPasskeyStep(user)
+    const passkey = await step('Create your passkey')
+    expect(within(passkey).getByText(/the assistant can't send anything until you add a device in Controls/)).toBeInTheDocument()
+    await user.click(within(passkey).getByRole('button', { name: 'Skip for now' }))
+
+    const review = await step('Check the details')
+    expect(within(review).getByText("Assistant's access").nextElementSibling).toHaveTextContent(
+      "None yet: the assistant can't send anything until you add a device in Controls",
+    )
+    await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
+    expect(
+      await screen.findByText('Your wallet is ready on Sepolia. Add a device in Controls so the assistant can send payments.'),
+    ).toBeInTheDocument()
+    expect(calls.deploy[0]).toMatchObject({ key_id: null })
+    expect(calls.registered).toEqual([])
+  })
+
+  it('uses the passkey this device already has', async () => {
+    installPasskeys()
+    rememberPasskey(PASSKEY_CREDENTIAL)
+    const calls = stubServer({ passkeys: [makePasskey()] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    await toPasskeyStep(user)
+    const passkey = await step('Your passkey')
+    expect(within(passkey).getByText(/This device already has a passkey, “iPhone”\./)).toBeInTheDocument()
+    await user.click(within(passkey).getByRole('button', { name: 'Continue' }))
+    const review = await step('Check the details')
+    expect(within(review).getByText("Assistant's access").nextElementSibling).toHaveTextContent(/approved with the passkey on “iPhone”/)
+    await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
+    expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
+    expect(calls.deploy[0]).toMatchObject({ key_id: makePasskey().key_id })
+    expect(calls.optionsAsked).toBe(0)
+  })
+
+  it("offers only to skip on a browser that can't make passkeys", async () => {
+    stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    await toPasskeyStep(user)
+    const passkey = await step('Create your passkey')
+    expect(within(passkey).getByText(/This browser can't make passkeys\./)).toBeInTheDocument()
+    expect(within(passkey).queryByRole('button', { name: 'Create passkey' })).toBeNull()
+    expect(within(passkey).getByRole('button', { name: 'Skip for now' })).toBeEnabled()
   })
 })

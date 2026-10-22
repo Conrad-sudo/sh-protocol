@@ -1925,6 +1925,15 @@ main p a {
   margin-top: 24px;
 }
 
+/* The passkey step's way on: skip it, or make the passkey. They wrap together on a phone. */
+.mf-step-nav-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .mf-tiles {
   margin-top: 16px;
 }
@@ -2333,6 +2342,46 @@ main p a {
 
 .mf-control-body:empty {
   display: none;
+}
+
+/* ── Devices (the passkeys that approve payments) ───────────────────────── */
+
+.mf-devices-intro {
+  margin: 0 0 4px;
+}
+
+/* Each device is a control row; the list only rules them apart, like rows in a card. */
+.mf-device-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mf-device-list > li + li,
+.mf-device-list + .mf-control-row,
+.mf-devices-intro + .mf-control-row {
+  border-top: 1px solid var(--rs-border-primary);
+}
+
+/* A device's name is the user's own words, up to 40 characters: it wraps rather than widening a phone. */
+.mf-device-list .mf-control-title h3 {
+  overflow-wrap: anywhere;
+}
+
+.mf-device-name {
+  max-width: 360px;
+}
+
+/* Once a device is added here: the other networks' wallets, each with its own Add. */
+.mf-also-add {
+  margin: 4px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--rs-border-primary);
+  border-radius: 16px;
+}
+
+.mf-also-add > p {
+  margin: 0 0 4px;
 }
 
 /* A section that opens and closes: the whole heading is the button. */
@@ -3028,6 +3077,12 @@ main p a {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+}
+
+/* Why the card can't be confirmed yet (no device approved, or it couldn't be got ready). */
+.mf-quote .mf-quote-problem {
+  margin-top: 8px;
+  font-size: 13px;
 }
 
 .mf-quote-expired {

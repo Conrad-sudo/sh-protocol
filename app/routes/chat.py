@@ -11,6 +11,7 @@ from slowapi.util import get_remote_address
 
 import auth
 import quotes
+import signing
 from auth import get_current_user
 from chat_limits import CHAT_RATE_LIMIT, CONFIRM_MAX_CONCURRENT
 from network_config import (
@@ -21,10 +22,10 @@ from smart_wallet_agent import (
     CANCELLED_REPLY,
     STALE_QUOTE,
     ConversationBusy,
+    answer_yes,
     cancel_quote,
     chat_turn,
     clear_history,
-    confirm_quote,
     get_history,
 )
 
@@ -39,10 +40,10 @@ class ChatRequest(BaseModel):
 
 
 class QuoteAnswer(BaseModel):
-    """Body of POST /api/chat/quote/confirm and /cancel: a tap on a quote card's button."""
+    """Body of POST /api/chat/quote/cancel: a tap on a quote card's Cancel."""
 
     chain_id: int
-    # quotes.put's ids are token_urlsafe(9). Only looked up: quotes.take decides whose it is.
+    # quotes.put's ids are token_urlsafe(9). Only looked up: the quote must be this account's.
     quote_id: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
 
 
@@ -93,7 +94,7 @@ def _chat_rate_key(request: Request) -> str:
 def _chat_turn(user_id: int, tap: bool = False):
     """
     Holds this account's one running turn and one slot -- a message's (CHAT_MAX_CONCURRENT), or a
-    quote-card tap's (CONFIRM_MAX_CONCURRENT) when `tap` -- or refuses.
+    card's approval or cancel's (CONFIRM_MAX_CONCURRENT) when `tap` -- or refuses.
 
     One turn per account, across chains and tabs: a second message sent before the first is
     answered is refused, not queued, since queueing would hold a thread to do nothing. Both
@@ -140,8 +141,13 @@ def post_chat(request: Request, req: ChatRequest, user_id: int = Depends(get_cur
     whole turn acts on it -- not on the user's saved network, which is just the chain they last
     deployed on (see db.acting_network).
 
-    A turn that raised exactly one quote offers it with Confirm and Cancel buttons (quotes.offer),
-    which the web app reads from GET /api/chat/quote.
+    A turn that raised exactly one quote -- or asked to show one again -- offers it on a card
+    (signing.offer), which the web app reads from GET /api/chat/quote and approves with a passkey
+    through /api/sign/start and /finish.
+
+    A typed "yes" while a card is waiting (signing.is_yes) gets no model call at all: it is told to
+    tap Confirm and approve with a passkey, and the card stays. A model could do nothing more -- no
+    tool sends.
 
     @param req  The chain and the user's message.
     @return     {"reply": str}
@@ -150,16 +156,18 @@ def post_chat(request: Request, req: ChatRequest, user_id: int = Depends(get_cur
     """
     network = _network_name(req.chain_id)
     with _chat_turn(user_id):
+        if signing.is_yes(req.message) and quotes.offered(user_id, req.chain_id) is not None:
+            return {"reply": answer_yes(user_id, req.chain_id, req.message)}
         reply, turn_id = chat_turn(user_id, req.chain_id, req.message, network)
-        quotes.offer(user_id, req.chain_id, turn_id)
+        signing.offer(user_id, req.chain_id, turn_id, signing.WEB)
         return {"reply": reply}
 
 
 def _quote_card(pending: quotes.PendingTransaction) -> dict:
     """
     What the web chat's quote card shows, written from the stored quote, never by the model: what
-    Confirm sends (the action, written by the package that built the calldata), where, the fees as
-    one figure, and until when.
+    approving it sends (the action, written by the package that built the calldata), where, the
+    fees as one figure, and until when.
     """
     return {
         "quote_id": pending.quote_id,
@@ -173,9 +181,10 @@ def _quote_card(pending: quotes.PendingTransaction) -> dict:
 @router.get("/api/chat/quote")
 def chat_quote(chain_id: int, user_id: int = Depends(get_current_user)):
     """
-    The quote waiting for a Confirm or Cancel tap on one chain: the newest one a turn offered
-    (quotes.offered), so the card is back after a reload. Only quotes raised by this process -- a
-    quote from the Telegram bot lives in the bot's memory, not here.
+    The quote waiting on a card on one chain: the newest one a turn offered (quotes.offered), so
+    the card is back after a reload. Its Confirm approves it with a passkey (POST /api/sign/start,
+    then /finish, naming {chain_id, quote_id}). Only quotes raised by this process -- a quote from
+    the Telegram bot is approved from its own link.
 
     @param chain_id  The chain the page is on.
     @return          {"quote": {"quote_id", "chain_id", "action", "fees", "expires_at"} | None}.
@@ -188,40 +197,12 @@ def chat_quote(chain_id: int, user_id: int = Depends(get_current_user)):
     return {"quote": None if pending is None else _quote_card(pending)}
 
 
-@router.post("/api/chat/quote/confirm")
-@limiter.limit(CHAT_RATE_LIMIT, key_func=_chat_rate_key)
-def confirm_chat_quote(request: Request, req: QuoteAnswer, user_id: int = Depends(get_current_user)):
-    """
-    Sends a quote the user confirmed with the card's button: no model call, exactly what the quote
-    holds (smart_wallet_agent.confirm_quote), and the tap and its outcome go into the conversation.
-
-    The account comes from the token and the network from the chain named, as for a message; the
-    quote id is only looked up, and quotes.take refuses it unless it is this account's, on this
-    chain, unexpired and unused -- so a forged or replayed tap sends nothing. It runs as a turn
-    (_chat_turn), never beside a message being answered, on a tap's slot. It answers once the
-    transaction is on the wire: the wait for it to land runs in the background (landing.py), and
-    the web app follows it on GET /api/transactions/{transaction_id}. A plain `def` for the same
-    reason as post_chat.
-
-    @return  {"outcome": str, "transaction_id": int | None}: "Sending — …", or why it didn't go
-             out, for the user as it is; and the History row to follow, when it went out.
-    @raises HTTPException 400 for a chain this server does not serve; 409 (STALE_QUOTE) for a quote
-            that is gone, or while a turn runs; 429 as for post_chat.
-    """
-    network = _network_name(req.chain_id)
-    with _chat_turn(user_id, tap=True):
-        try:
-            confirmed = confirm_quote(user_id, req.chain_id, req.quote_id, network)
-        except quotes.QuoteError:
-            raise HTTPException(status.HTTP_409_CONFLICT, STALE_QUOTE)
-    return {"outcome": confirmed.text, "transaction_id": confirmed.transaction_id}
-
-
 @router.post("/api/chat/quote/cancel")
 def cancel_chat_quote(req: QuoteAnswer, user_id: int = Depends(get_current_user)):
     """
-    Discards a quote the user turned down with the card's button, and records it in the
-    conversation. A turn too (_chat_turn), so the record can't land in the middle of one.
+    Discards a quote the user turned down with the card's button, with its sign request, and
+    records it in the conversation. A turn too (_chat_turn), so the record can't land in the middle
+    of one. The same as POST /api/sign/cancel naming {chain_id, quote_id}, kept for the card.
 
     @return  {"outcome": CANCELLED_REPLY}.
     @raises HTTPException 400 for a chain this server does not serve; 409 (STALE_QUOTE) when there
@@ -229,7 +210,7 @@ def cancel_chat_quote(req: QuoteAnswer, user_id: int = Depends(get_current_user)
     """
     _network_name(req.chain_id)
     with _chat_turn(user_id, tap=True):
-        if not cancel_quote(user_id, req.chain_id, req.quote_id):
+        if cancel_quote(user_id, req.chain_id, req.quote_id) is None:
             raise HTTPException(status.HTTP_409_CONFLICT, STALE_QUOTE)
     return {"outcome": CANCELLED_REPLY}
 
@@ -244,7 +225,8 @@ def chat_history(
     Returns the recent conversation for one chain, so the web chat is not blank after a reload.
 
     Only what was said is returned -- the user's messages and the assistant's text. Tool traffic
-    stays inside: those messages carry the session-key ciphertext. See smart_wallet_agent.get_history.
+    stays inside: those messages carry raw calldata (and, in conversations from before 2026-10-02,
+    an old session key's ciphertext). See smart_wallet_agent.get_history.
     The thread is shared with Telegram, so messages sent there appear too.
 
     A plain `def` for the same reason as post_chat: the checkpointer's sync read must not run on the

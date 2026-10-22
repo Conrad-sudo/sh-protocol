@@ -59,6 +59,20 @@ www.{$MITFAH_DOMAIN} {
 		reverse_proxy 127.0.0.1:8000
 	}
 
+	# A Telegram Confirm link, /c/<token>: its own small page (confirm.html), which approves the payment
+	# with a passkey. The token in the address is a single-use credential, so it goes in no Referer
+	# header (not even to this site, whose logs would keep it) and no search index.
+	handle /c/* {
+		root * {$MITFAH_WEB_ROOT:/srv/mitfah}
+		rewrite * /confirm.html
+		header {
+			Cache-Control "no-cache"
+			Referrer-Policy "no-referrer"
+			X-Robots-Tag "noindex, nofollow"
+		}
+		file_server
+	}
+
 	# The web app. /terms and /privacy are prerendered pages of their own (terms.html, privacy.html);
 	# every other address gets index.html, and the app routes it in the browser.
 	handle {

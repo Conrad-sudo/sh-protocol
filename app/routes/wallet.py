@@ -1,7 +1,6 @@
 """
-The dashboard's wallet read: its settings, the session key, and every balance it shows.
+The dashboard's wallet read: its settings, the passkeys it approves, and every balance it shows.
 """
-import time
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -14,18 +13,16 @@ from web3.exceptions import ABIFunctionNotFound, ContractLogicError
 
 from auth import get_current_user
 from constants import (
-    SESSION_RENEWAL_WARNING_SECS,
     get_always_counted_ticker,
     get_native_asset_ticker,
     get_router,
 )
-from contracts import invalidate_cache, read_spending_config
+from contracts import read_spending_config
 from db import (
     add_dashboard_tokens,
     get_custom_tokens,
     get_dashboard_tokens,
     get_lp_tokens,
-    get_session_key,
     get_supported_tokens_by_chain_id,
     get_user_by_id,
     get_wallet_address,
@@ -40,7 +37,7 @@ from routes.deps import (
     _resolve_chain,
     _revert_reason,
 )
-from userop import reconcile_session_key
+from userop import read_sessions, session_block
 
 router = APIRouter()
 
@@ -345,18 +342,19 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     whether the address the account signs in as owns the wallet, so a UI can decide whether to offer
     the owner controls.
 
-    **Reading the session block.** The wallet authorizes ONE session key at a time, held in
-    `currentSession`, so `session.wallet_key` is the whole truth about what the wallet trusts -- no
-    enumeration problem and no caveat. `session.key` is the key THIS APP holds; `is_app_key` says
-    whether they are the same, which is what decides if the assistant can act. `active` additionally
-    accounts for expiry, and `needs_renewal` turns true while the key still works, so a UI can prompt
-    the owner before the assistant stops rather than after.
+    **Reading the session block.** The wallet approves up to `max_keys` passkeys -- one per device --
+    each until its own deadline, and lists them all (getSessions), so `session.keys` is the whole
+    truth about which devices can confirm the assistant's transactions. Each key carries the name
+    the user gave its device here, or null for a key this account never registered (granted on
+    chain directly), which the owner may still want to remove. `active` says whether the wallet
+    accepts it now, and `needs_renewal` turns true while it still works, so a UI can prompt the
+    owner before that device stops working rather than after.
 
     **Reading the chain.** In two rounds of reads that go out together (parallel.py), rather than
-    one call after another: first everything the wallet says about itself; then, once the database
-    has caught up with that, the session check and every balance at once. Two round trips after the
-    chain and wallet checks (one more the first time a new pool is shown), where there used to be
-    about ten plus two per token. On a Uniswap V3 chain the positions take about four rounds of
+    one call after another: first everything the wallet says about itself, its passkeys included;
+    then, once the database has caught up with that, every balance at once. Two round trips after
+    the chain and wallet checks (one more the first time a new pool is shown), where there used to
+    be about ten plus two per token. On a Uniswap V3 chain the positions take about four rounds of
     their own (positions.read_positions); they need nothing else here, so they start before the
     first round and run beside both.
 
@@ -386,10 +384,8 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
         # By field name, never position: see contracts.read_spending_config.
         "cfg": lambda: read_spending_config(wallet),
         "remaining": reads.getRemainingBudget().call,
-        # The wallet authorizes ONE key, so it can be read outright -- the old mapping getter could
-        # only answer "is THIS key allowed", which is why this endpoint used to caveat its answer.
-        "wallet_key": reads.currentSession().call,
-        "expires_at": reads.currentSessionValidUntil().call,
+        # Every passkey the wallet approves, with its deadline: the list is the whole truth.
+        "sessions": lambda: read_sessions(wallet),
         "owner": reads.owner().call,
         "paused": reads.paused().call,
         "max_op_gas_cost": reads.maxOpGasCost().call,
@@ -402,21 +398,10 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     tickers = _ticker_map(chain_id)
     _show_counted_tokens(user_id, chain_id, cfg["watchedTokens"])
 
-    wallet_key = state["wallet_key"] if int(state["wallet_key"], 16) else None
-    session_expires_at = state["expires_at"]
-    # Reconciled BEFORE reporting: a grant or revocation whose confirm never arrived (the owner
-    # closed the tab while it mined) is picked up here, the next time anyone looks at the wallet.
-    before = get_session_key(user_id, chain_id, wallet.address)
-    app_key_row = reconcile_session_key(user_id, chain_id, wallet.address, wallet_key)
-    if app_key_row != before:
-        invalidate_cache(user_id)
-    app_key = w3.to_checksum_address(app_key_row[0]) if app_key_row else None
-
     on_chain_owner = state["owner"]
     bound_owner = get_user_by_id(user_id)["owner_addr"]
 
-    # The second round: the session check goes out first, and is answered while the balances are.
-    active = start_read(reads.isSessionActive(app_key).call) if app_key else None
+    # The second round: every balance at once.
     balances = _token_balances(w3, user_id, chain_id, wallet.address)
 
     return {
@@ -442,20 +427,9 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
                 {"ticker": tickers.get(a.lower()), "address": w3.to_checksum_address(a)} for a in cfg["watchedTokens"]
             ],
         },
-        # `wallet_key` is whatever key the WALLET authorizes, read straight off currentSession --
-        # the wallet holds one at a time, so this is the whole truth, not a guess. `key` is the one
-        # this app holds; when they differ the assistant cannot sign and `is_app_key` says so.
-        "session": {
-            "key": app_key,
-            "wallet_key": wallet_key,
-            "is_app_key": bool(app_key) and wallet_key == app_key,
-            "active": active.result() if active else False,
-            "expires_at": session_expires_at or None,
-            "expires_in_secs": max(session_expires_at - int(time.time()), 0) if session_expires_at else 0,
-            # True once it is worth prompting the owner to renew, while the key still works.
-            "needs_renewal": bool(session_expires_at)
-            and session_expires_at - int(time.time()) < SESSION_RENEWAL_WARNING_SECS,
-        },
+        # The passkeys the wallet approves, read off the chain, named from the account's own
+        # registrations (userop.session_block).
+        "session": session_block(user_id, state["sessions"]),
         # The loosening knobs, grouped so a UI can present them as such.
         "limits": {
             "max_op_gas_cost_wei": str(state["max_op_gas_cost"]),

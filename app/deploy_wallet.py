@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from eth_utils import keccak
 from web3.logs import DISCARD
 from constants import get_default_spenders
 from network_config import load_network_config_by_name, load_network_config
@@ -8,13 +9,13 @@ from db import (
     save_wallet_address,
     save_user_network,
     save_contact,
-    save_session_key,
-    delete_pending_session_key,
+    get_passkey,
+    save_passkey,
     get_wallet_address,
     get_wallet_chains,
     get_user_id_by_telegram_chat_id,
 )
-from userop import create_pending_session_key, promote_pending_session_key
+from passkey import SoftPasskey, allowed_origins, rp_id
 from tx_sender import send_and_confirm
 from contracts import (
     invalidate_cache,
@@ -105,6 +106,34 @@ def _private_key_env(chain_name: str) -> str:
     return LIVE_PRIVATE_KEY_ENV.get(chain_name, "ANVIL_PRIVATE_KEY")
 
 
+def harness_passkey(user_id: int, chain_name: str) -> SoftPasskey:
+    """
+    The passkey this harness approves on user_id's wallet on chain_name: a P-256 key held in
+    software (passkey.SoftPasskey), standing in for the phone a real user approves with.
+
+    Derived from the deployer's own private key, the user and the chain, so any later process --
+    the e2e test, the agent smoke test -- can sign as it again without a key stored anywhere. It
+    adds no power: whoever holds that private key already OWNS the wallet. A real user's passkey
+    is made on their device in the web app, and this server never holds one.
+
+    It answers for this server's rp id and its first allowed origin, so py_webauthn accepts its
+    approvals as it would a phone's.
+    """
+    private_key = os.getenv(_private_key_env(chain_name)) or ""
+    _, chain_id = load_network_config_by_name(chain_name)
+    secret = keccak(f"mitfah-harness-passkey:{user_id}:{chain_id}:".encode() + private_key.encode())
+    return SoftPasskey.from_secret(secret, rp_id=rp_id(), origin=allowed_origins()[0])
+
+
+def _register_harness_passkey(user_id: int, key: SoftPasskey):
+    """Files the harness passkey under the account, as POST /api/passkeys/register would, once."""
+    if get_passkey(user_id, key.key_id) is None:
+        save_passkey(
+            user_id, key.key_id, key.credential_id_b64, key.cose_public_key(),
+            "0x" + key.qx.hex(), "0x" + key.qy.hex(), "CLI harness (soft passkey)",
+        )
+
+
 def _default_watched_tokens(user_id: int, chain_name: str) -> list[str]:
     """
     Resolves the default watched-token ticker list for chain_name into checksummed addresses.
@@ -121,18 +150,18 @@ def _default_watched_tokens(user_id: int, chain_name: str) -> list[str]:
 def deploy_wallet(user_id: int, chain_name: str):
     """
     Deploys a new SessionHandler wallet for user_id by calling SHFactory.deployWallet(
-    dailyLimitUsd, windowDuration, watchedTokens, sessionKey, sessionKeyValidUntil,
+    dailyLimitUsd, windowDuration, watchedTokens, sessionKeyX, sessionKeyY, sessionKeyValidUntil,
     trustedSpenders) on the given chain, then persists the resulting address to wallet.db. The
     first three arguments seed the wallet's spending-cap config: SpendingLimitModule is installed
     as a hook with a DEFAULT_DAILY_LIMIT_USD cap per DEFAULT_WINDOW_SECS window, metering the
     DEFAULT_WATCHED_TICKERS for this network.
 
-    The rest make the wallet usable after this ONE transaction. The session key and the trusted
-    spenders used to require a follow-up owner-signed call each (add_default_session and
-    trust_default_spenders below); they are now applied inside initialize(). The wallet is deployed with
-    CREATE2 at a salt the FACTORY derives from (deployer, its per-owner deployCount), so its
-    address is known BEFORE the transaction is sent -- which is what lets the session key, whose
-    Vault entry is keyed by wallet address, be minted up front.
+    The rest make the wallet usable after this ONE transaction. The session key -- the harness's
+    soft passkey (harness_passkey), filed under the account as a real one would be -- and the
+    trusted spenders used to require a follow-up owner-signed call each (add_default_session and
+    trust_default_spenders below); they are now applied inside initialize(). The wallet is deployed
+    with CREATE2 at a salt the FACTORY derives from (deployer, its per-owner deployCount), so its
+    address is known BEFORE the transaction is sent.
 
     This assumes the shared protocol infrastructure (EntryPoint, SHOracle,
     SHTreasury/SHRegistry, SHFactory, SpendingLimitModule) has already been deployed on
@@ -163,10 +192,6 @@ def deploy_wallet(user_id: int, chain_name: str):
     factory = load_factory(user_id)
     watched_tokens = _default_watched_tokens(user_id, chain_name)
 
-    # CREATE2 means the address exists as a prediction before the tx is sent, so the session key --
-    # whose Vault ciphertext is stored under (user_id, wallet_address), the same key tools.py's
-    # _get_session_keys resolves -- can be minted now and passed into the deploy itself.
-    #
     # predictWalletAddress answers for the deployer's NEXT deploy: the factory salts with its own
     # per-owner deployCount, so this advances after each of OUR deploys and is untouched by anyone
     # else's. That is what keeps `make deploy-wallet` re-runnable (each run gets a fresh wallet) with
@@ -190,9 +215,10 @@ def deploy_wallet(user_id: int, chain_name: str):
             print(f"user {user_id} has wallets on chains {others}; adding {chain_name} ({chain_id}).")
 
     predicted = factory.functions.predictWalletAddress(deployer.address).call()
-    # A brand-new key, held aside until the deploy mines. Nothing is authorized yet, so there is no
-    # live key to overwrite and an abandoned deploy leaves only an unused row behind.
-    session_key, session_key_ct = create_pending_session_key(user_id, chain_id, predicted)
+    # The passkey the wallet approves from its first block. Filed under the account before the
+    # deploy: it is public, and a deploy that fails leaves a passkey that no wallet approves yet.
+    session_key = harness_passkey(user_id, chain_name)
+    _register_harness_passkey(user_id, session_key)
     session_key_valid_until = int(time.time()) + DEFAULT_SESSION_TTL_SECS
 
     # The exchange contracts the assistant approves tokens to are a wallet-level choice, not
@@ -208,7 +234,8 @@ def deploy_wallet(user_id: int, chain_name: str):
         DEFAULT_DAILY_LIMIT_USD,
         DEFAULT_WINDOW_SECS,
         watched_tokens,
-        session_key,
+        session_key.qx,
+        session_key.qy,
         session_key_valid_until,
         trusted_spenders,
     ).build_transaction(
@@ -237,27 +264,22 @@ def deploy_wallet(user_id: int, chain_name: str):
     # predicts an address the first one has taken.
     #
     # Recover rather than raise. By this point the wallet EXISTS on chain, holds the whole prefund,
-    # and already has `session_key` authorized — that key was an ARGUMENT to deployWallet, so it is
-    # correct for whatever address deployed. Only the DB row is filed under the wrong address, so
-    # re-file it. Raising here instead would strand a funded wallet with no session_handlers row,
+    # and already approves the passkey -- it was an ARGUMENT to deployWallet, so the grant is
+    # correct for whatever address deployed. Only the address is filed below: the one the event
+    # reports. Raising here instead would strand a funded wallet with no session_handlers row,
     # reachable only by hand from the deployer key.
     if wallet_address.lower() != predicted.lower():
         print(
             f"WARNING: CREATE2 prediction was stale (predicted {predicted}, deployed "
-            f"{wallet_address}) — another deploy from this key landed first. Re-filing the session "
-            f"key under the deployed address; the on-chain grant is already correct."
+            f"{wallet_address}) — another deploy from this key landed first. Filing the deployed "
+            f"address; the on-chain grant is already correct."
         )
-
-    # The deploy mined and initialize() authorized this key, so the grant it was minted for is real:
-    # promote it out of pending_session_keys and file it under the address the wallet actually got.
-    save_session_key(user_id, chain_id, wallet_address, session_key, session_key_ct)
-    delete_pending_session_key(user_id, chain_id, predicted)
 
     save_wallet_address(user_id, chain_id, wallet_address)
     invalidate_cache(user_id)
 
     print(f"SessionHandler wallet deployed: {wallet_address}")
-    print(f"  session key authorized at deploy: {session_key}")
+    print(f"  passkey approved at deploy: {session_key.key_id} (the harness's soft passkey)")
     print(f"  trusted spenders seeded: {trusted_spenders or '(none)'}")
     print("Deployment complete — Database updated.")
 
@@ -270,27 +292,18 @@ def deploy_wallet(user_id: int, chain_name: str):
 
 def add_default_session(user_id: int):
     """
-    Registers the user's single session key on the SessionHandler wallet.
+    Approves -- or renews -- the harness's passkey (harness_passkey) on the user's wallet, as the
+    owner, for DEFAULT_SESSION_TTL_SECS.
 
-    NOT part of the deploy path any more: deploy_wallet() passes the key into
-    SHFactory.deployWallet, which authorizes it inside initialize(). Kept as a recovery helper
-    for re-granting a key on a wallet deployed without one (sessionKey == address(0)) or after
-    removeSession. Costs one owner-signed transaction; deploying seeds the key for free.
+    NOT part of the deploy path any more: deploy_wallet() passes the passkey into
+    SHFactory.deployWallet, which approves it inside initialize(). Kept as a recovery helper: for a
+    wallet deployed without one, after removeSession, or once its approval has run out. Costs one
+    owner-signed transaction; deploying seeds the key for free. The same key every time, so this
+    renews rather than adds -- the wallet holds up to five, and a renewal takes no new place.
 
-    The wallet authorizes ONE bare session key at a time (SessionHandler.currentSession) rather
-    than per-target scoped keys: the key may sign UserOps for any external call, bounded on-chain
-    by three guardrails that replace the old per-target scoping entirely:
-      1. the wallet-wide USD spending cap (net-value metering per window) configured at
-         deployWallet time, and
-      2. the account's execution guard, which blocks session-key calls to the wallet itself
-         or its SpendingLimitModule (so a key can never raise its own cap), and its
-         no-standing-approval rule (approvals must be consumed in the same transaction), and
-      3. the key's own deadline — addSession takes a validUntil, and the EntryPoint refuses the
-         op with AA22 once it passes.
-
-    A FRESH key every time, never the one already held: a key is revoked exactly when it might be
-    compromised, so re-granting the same address would undo the revocation. Granting also evicts
-    whatever key the wallet held, so calling this while the assistant is working replaces its key.
+    A passkey is still a bare signer within its approval, bounded on chain by the wallet's own
+    limits: the USD spending cap, the execution guard that keeps keys off the wallet's own admin
+    surface, the gas ceilings, and its deadline (AA22 once it passes).
 
     @param user_id  The application user ID.
     """
@@ -298,15 +311,11 @@ def add_default_session(user_id: int):
     private_key_env = _private_key_env(chain_name)
     owner = w3.eth.account.from_key(os.getenv(private_key_env))
     session_handler = load_session_handler(user_id=user_id)
-
-    # One key per wallet per chain: keyed to (user_id, chain_id, wallet address), which is exactly
-    # how tools._get_session_keys resolves it, so every tool signs with this key on this chain.
-    # Held in pending until the grant mines below, so a failed transaction cannot strand the app
-    # holding a key the wallet never authorized.
-    session_key, session_key_ct = create_pending_session_key(user_id, chain_id, session_handler.address)
+    key = harness_passkey(user_id, chain_name)
+    _register_harness_passkey(user_id, key)
     valid_until = int(time.time()) + DEFAULT_SESSION_TTL_SECS
 
-    tx = session_handler.functions.addSession(session_key, valid_until).build_transaction(
+    tx = session_handler.functions.addSession(key.qx, key.qy, valid_until).build_transaction(
         {
             "from": owner.address,
             "nonce": w3.eth.get_transaction_count(owner.address),
@@ -319,15 +328,10 @@ def add_default_session(user_id: int):
     if receipt["status"] != 1:
         raise RuntimeError(f"addSession reverted (tx: {tx_hash.hex()})")
 
-    # Only now is the key real: the wallet authorized it, so it becomes the key this app signs with
-    # and the pending row goes away.
-    save_session_key(user_id, chain_id, session_handler.address, session_key, session_key_ct)
-    delete_pending_session_key(user_id, chain_id, session_handler.address)
-
     logs = session_handler.events.SessionAdded().process_receipt(receipt, errors=DISCARD)
     print(f"Session added! tx: {tx_hash.hex()}, status: {receipt['status']}")
     if logs:
-        print("Session Key:", logs[0]["args"]["sessionKey"], "valid until:", logs[0]["args"]["validUntil"])
+        print("Passkey:", "0x" + logs[0]["args"]["keyId"].hex(), "valid until:", logs[0]["args"]["validUntil"])
     else:
         print("Warning: SessionAdded event could not be decoded (stale ABI — run forge build)")
 

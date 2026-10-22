@@ -1,5 +1,15 @@
 import { expect, test, type Page } from '@playwright/test'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, snap, TOKEN, walletState } from './helpers.ts'
+import {
+  addPasskeyAuthenticator,
+  expectNoSidewaysScroll,
+  expectTheme,
+  isApiUrl,
+  ME,
+  PASSKEY_CREDENTIAL,
+  snap,
+  TOKEN,
+  walletState,
+} from './helpers.ts'
 
 /*
  * The Assistant page at real screen sizes, in both themes, against a mocked API. No model is
@@ -56,6 +66,7 @@ async function mockServer(page: Page, { history = [], reply = { text: 'Done.' },
   let offered: QuoteOffer | null = null
   const posted: unknown[] = []
   const tapped: unknown[] = []
+  let starts = 0
   // What a confirmed send's History row reads: pending twice, then landed.
   let sending = ''
   let rowReads = 0
@@ -87,10 +98,26 @@ async function mockServer(page: Page, { history = [], reply = { text: 'Done.' },
       }
       case '/api/chat/quote':
         return route.fulfill({ json: { quote: offered } })
-      case '/api/chat/quote/confirm':
-      case '/api/chat/quote/cancel': {
+      case '/api/sign/start': {
+        if (!offered) return route.fulfill({ status: 404, json: { detail: 'This confirmation has expired. Ask again.' } })
+        starts += 1
+        return route.fulfill({
+          json: {
+            sign_id: `sign-${starts}`,
+            challenge: Buffer.from('the user operation hash, 32 b!!!').toString('base64url'),
+            rp_id: 'localhost',
+            allow_credentials: [{ type: 'public-key', id: PASSKEY_CREDENTIAL }],
+            user_verification: 'required',
+            timeout_ms: 60_000,
+            expires_at: offered.expires_at,
+            summary: { action: offered.action, network: 'Sepolia', chain_id: SEPOLIA, cost: { fees: offered.fees } },
+          },
+        })
+      }
+      case '/api/sign/finish':
+      case '/api/sign/cancel': {
         tapped.push({ path: url.pathname, body: request.postDataJSON() })
-        const confirm = url.pathname.endsWith('/confirm')
+        const confirm = url.pathname.endsWith('/finish')
         // A confirm signs and broadcasts before it answers; the wait for the network comes after.
         if (confirm) await new Promise(resolve => setTimeout(resolve, 1_500))
         const outcome = confirm
@@ -103,7 +130,7 @@ async function mockServer(page: Page, { history = [], reply = { text: 'Done.' },
         ]
         sending = offered?.action ?? ''
         offered = null
-        return route.fulfill({ json: confirm ? { outcome, transaction_id: 77 } : { outcome } })
+        return route.fulfill({ json: confirm ? { status: 'sent', outcome, transaction_id: 77 } : { outcome } })
       }
       case '/api/transactions/77': {
         const landed = rowReads++ >= 2
@@ -242,12 +269,14 @@ test('only the chat lets the keyboard shrink the page', async ({ page }) => {
   await expect(viewport).not.toHaveAttribute('content', /interactive-widget/)
 })
 
-test('a quoted transaction gets a card, and one tap sends it', async ({ page }, testInfo) => {
+test('a quoted transaction gets a card, and one tap sends it once a passkey approves', async ({ page }, testInfo) => {
+  // This device holds the passkey the wallet trusts; it approves without a touch.
   // An action as long as a real swap's, with a full address, to push a phone sideways if it can.
   const action = `Swap 0.25 ETH for at least 812.418203 USDC on Uniswap V3, paid to ${SAM}`
+  await addPasskeyAuthenticator(page, { credentialId: PASSKEY_CREDENTIAL })
   const { tapped } = await mockServer(page, {
     history: longHistory(),
-    reply: { text: 'That swap costs **$0.35** in fees. Reply yes to send it.' },
+    reply: { text: 'That swap costs **$0.35** in fees. Tap Confirm to send it.' },
     quote: { quote_id: 'q-abc_123', chain_id: SEPOLIA, action, fees: '$0.35', expires_at: Math.floor(Date.now() / 1000) + 300 },
   })
   await page.goto('/assistant')
@@ -264,6 +293,7 @@ test('a quoted transaction gets a card, and one tap sends it', async ({ page }, 
   await expectComposerInView(page)
   await page.screenshot({ path: testInfo.outputPath('assistant-quote.png') })
 
+  await expect(card.getByRole('button', { name: 'Confirm' })).toBeEnabled()
   await card.getByRole('button', { name: 'Confirm' }).click()
   await expect(card.getByRole('status')).toHaveText('Sending…')
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
@@ -285,5 +315,24 @@ test('a quoted transaction gets a card, and one tap sends it', async ({ page }, 
   await expectNoSidewaysScroll(page)
   await expectComposerInView(page)
   await page.screenshot({ path: testInfo.outputPath('assistant-quote-landed.png') })
-  expect(tapped).toEqual([{ path: '/api/chat/quote/confirm', body: { chain_id: SEPOLIA, quote_id: 'q-abc_123' } }])
+  // The passkey's own answer, as the browser gave it: the server checks it against the challenge.
+  expect(tapped).toEqual([
+    {
+      path: '/api/sign/finish',
+      body: {
+        sign_id: 'sign-1',
+        credential: expect.objectContaining({
+          id: PASSKEY_CREDENTIAL,
+          type: 'public-key',
+          response: expect.objectContaining({ signature: expect.any(String), authenticatorData: expect.any(String) }),
+        }),
+      },
+    },
+  ])
+  const signed = (tapped[0] as { body: { credential: { response: { clientDataJSON: string } } } }).body.credential
+  const clientData = JSON.parse(Buffer.from(signed.response.clientDataJSON, 'base64url').toString()) as Record<string, string>
+  expect(clientData).toMatchObject({
+    type: 'webauthn.get',
+    challenge: Buffer.from('the user operation hash, 32 b!!!').toString('base64url'),
+  })
 })

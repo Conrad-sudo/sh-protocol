@@ -1,7 +1,7 @@
 import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import { installFakeWallet } from './fakeWallet.ts'
-import { isApiUrl, ME, TOKEN, walletState } from './helpers.ts'
+import { isApiUrl, ME, passkey, TOKEN, walletState } from './helpers.ts'
 
 /*
  * An axe scan of every page a person actually uses, at each screen size and in both themes
@@ -69,6 +69,8 @@ async function mockServer(page: Page) {
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: [SEPOLIA] } })
       case '/api/chains':
         return route.fulfill({ json: { chains: CHAINS } })
+      case '/api/passkeys':
+        return route.fulfill({ json: { passkeys: [passkey()] } })
       case '/api/contacts':
         return route.fulfill({ json: { contacts: CONTACTS } })
       case '/api/chat/history':

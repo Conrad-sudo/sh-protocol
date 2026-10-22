@@ -336,11 +336,8 @@ class FakeFunctions:
     def paused(self):
         return self._call(False)
 
-    def isSessionActive(self, _key):
-        return self._call(True)
-
-    def currentSessionValidUntil(self):
-        return self._call(2**40)
+    def getSessions(self):
+        return self._call(([b"\x11" * 32], [2**40]))   # one passkey, approved for ages
 
     def getRemainingBudget(self):
         return self._call(100 * 10**18)   # $100 left
@@ -367,7 +364,6 @@ def _with_tool_fakes(uid: int, watched: set[str], chain: int = CHAIN, network: s
     decimals = {USDC: 6, USDT: 6, WETH: 18}
     set_everywhere(tools, "load_network_config", lambda _uid: (None, chain, network))
     set_everywhere(tools, "load_session_handler", lambda _uid: handler)
-    set_everywhere(tools, "_get_session_keys", lambda _uid: ("0xkey", "ciphertext"))
     set_everywhere(tools, "load_ierc20", lambda user_id, token: FakeToken(
         a := db.resolve_token(user_id, chain, token), decimals.get(a, 18)
     ))
@@ -817,8 +813,8 @@ def test_wallet_read():
 
     wallet = SimpleNamespace(address=WALLET, functions=SimpleNamespace(
         getRemainingBudget=lambda: slow(40 * 10**18),
-        currentSession=lambda: slow("0x" + "0" * 40),
-        currentSessionValidUntil=lambda: slow(0),
+        # One passkey the wallet approves that this account never registered: shown, with no name.
+        getSessions=lambda: slow(([b"\x22" * 32], [2**40])),
         owner=lambda: slow(owner),
         paused=lambda: slow(False),
         maxOpGasCost=lambda: slow(10**17),
@@ -864,7 +860,9 @@ def test_wallet_read():
               "allowlist_enabled": True,
               "trusted_spenders": [],
           }
-          and body.get("session", {}).get("wallet_key") is None and body.get("session", {}).get("active") is False,
+          and body.get("session", {}).get("max_keys") == 5
+          and [(k["key_id"], k["device_name"], k["active"]) for k in body.get("session", {}).get("keys", [])]
+          == [("0x" + "22" * 32, None, True)],
           str({k: body.get(k) for k in ("is_owner", "paused", "spending", "limits", "session")}))
     rows = {row["ticker"]: row for row in body.get("balances", [])}
     check("every balance is there, in order",
@@ -872,8 +870,8 @@ def test_wallet_read():
     check("a token that can't be read is reported on its own row",
           rows.get("usdt", {}).get("error") and rows["usdt"]["raw"] is None and rows.get("usdc", {}).get("raw") == str(7 * 10**6),
           str(rows.get("usdt")))
-    # One call after another this is 11 wallet reads + the native balance + 2 per listed token + 1 per
-    # added one = 19 x DELAY. In two rounds it is about 2 x DELAY, plus what the test client costs.
+    # One call after another this is 10 wallet reads + the native balance + 2 per listed token + 1 per
+    # added one = 18 x DELAY. In two rounds it is about 2 x DELAY, plus what the test client costs.
     check("the reads go out together, not one after another", took < 7 * DELAY and in_flight["most"] >= 6,
           f"took {took:.2f}s, at most {in_flight['most']} reads at once")
     before = r_before.json() if r_before.status_code == 200 else {}

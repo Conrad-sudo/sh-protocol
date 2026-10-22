@@ -97,6 +97,14 @@ class _ChainIdOnceProvider(HTTPProvider):
 
     _chain_id_response: dict | None = None
 
+    # web3's CCIP-Read (EIP-3668) off. Left on, a contract we call can revert with OffchainLookup
+    # and web3 fetches whatever URL it names, from this server: http://169.254.169.254, a port on
+    # localhost, anything, redirects followed. Users pick contracts we call (a token added by
+    # address has its symbol() read before it is even saved), so that would let anyone make the
+    # server fetch inside its own network. Nothing here needs it: ens_names does the one lookup
+    # that does, itself, under guards.
+    global_ccip_read_enabled = False
+
     def __init__(self, endpoint_uri: str):
         session = requests.Session()
         # Not the environment's proxy and certificate settings. With them on, requests reads every

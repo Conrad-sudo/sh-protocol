@@ -18,7 +18,12 @@ Scenarios run SEQUENTIALLY and in one process on purpose: tx_sender hands out bu
 cache guarded by a process-wide lock, so concurrent conversations against the same wallet would race
 on the same EOA's nonce.
 
-Requires the Phase 7 stack (make vault / a running fork / make setup-test ARGS=<that fork>). Runs
+A transaction scenario ends the way a user ends one: the card is approved with a passkey -- the
+harness's soft passkey (deploy_wallet.harness_passkey), through the same sign flow the approval
+page drives -- and sent, with no model call. The model's part ends at the quote, and at showing the
+card again when the user agrees in words.
+
+Requires the Phase 7 stack (a running fork / make setup-test ARGS=<that fork>). Runs
 on whichever network the harness user was last deployed to. A scenario that names an `exchange` runs
 only where the chain trades on it: the Uniswap V3 liquidity one is skipped on BSC, and before it
 runs the wallet's USDC is topped up on the fork (ready_liquidity_scenario). Costs real DeepSeek
@@ -43,12 +48,14 @@ from langchain_core.messages import AIMessage, HumanMessage   # noqa: E402
 from langchain_erc20 import ERC20_ABI                        # noqa: E402
 from web3 import Web3                                        # noqa: E402
 
+import signing                                     # noqa: E402
 import smart_wallet_agent as swa                   # noqa: E402
+import tools.sending                               # noqa: E402
 from agent_context import AgentContext             # noqa: E402
 from constants import CHAIN_ID_ARBITRUM, CHAIN_ID_BASE, get_exchange  # noqa: E402
-from deploy_wallet import resolve_harness_user     # noqa: E402
+from deploy_wallet import harness_passkey, resolve_harness_user  # noqa: E402
 from network_config import load_network_config     # noqa: E402
-from db import acting_network, get_token_address, get_wallet_address  # noqa: E402
+from db import acting_network, get_sign_request, get_token_address, get_wallet_address  # noqa: E402
 from toolkits import get_uniswap_tools             # noqa: E402
 
 TRACE_PATH = os.getenv("AGENT_TRACE_PATH", "/tmp/agent_smoke_traces.json")
@@ -65,7 +72,10 @@ REDUNDANT_BEFORE_QUOTING = {
     "get_pool_quote", "get_wallet_status", "get_price", "get_eth_balance", "get_erc20_balance",
 }
 
-# The tools that quote a transaction (only confirm_transaction sends one).
+# A turn that is not a message: the user approves the card on screen with their passkey.
+APPROVE = "<approve the card with the passkey>"
+
+# The tools that quote a transaction. None sends one: the user's passkey does.
 QUOTING_TOOLS = {
     "send_eth", "transfer_erc20", "transferFrom_erc20", "wrap_eth", "swap", "add_liquidity", "remove_liquidity",
     "open_position", "add_to_position", "withdraw_from_position", "collect_fees",
@@ -90,16 +100,16 @@ async def run_turn(user_id: int, chain_id: int, network: str, thread: str, text:
 
     Invokes the agent directly rather than through chat() because chat() returns only the final
     string, and the tool sequence is the thing under test. Everything else -- the context, the
-    thread key, the network the turn acts on -- mirrors chat() exactly, including the turn id:
-    confirm_transaction refuses a quote raised in the turn that is confirming it, so a fixed id here
-    would make every send fail.
+    thread key, the network the turn acts on -- mirrors chat() exactly, including a fresh turn id,
+    which is what the card a turn raises is offered under (signing.offer, as the chat route does).
     """
     started = time.monotonic()
+    turn_id = swa._next_turn_id()
     with acting_network(user_id, network, chain_id):
         result = await swa.agent.ainvoke(
             {"messages": [HumanMessage(content=text)]},
             config={"configurable": {"thread_id": thread}},
-            context=AgentContext(user_id=user_id, turn_id=swa._next_turn_id()),
+            context=AgentContext(user_id=user_id, turn_id=turn_id),
         )
     seconds = time.monotonic() - started
     # The checkpointer hands back the whole thread; this turn starts at its own HumanMessage.
@@ -112,7 +122,33 @@ async def run_turn(user_id: int, chain_id: int, network: str, thread: str, text:
         "tools": tool_calls(msgs[start:]),
         "reply": str(msgs[-1].content)[:1200],
         "timing": turn_timing(msgs[start:], seconds),
+        "turn_id": turn_id,
     }
+
+
+def approve_card(user_id: int, chain_id: int, network: str, card) -> dict:
+    """
+    The user approving the card on screen: its op built (signing.start), its hash approved by the
+    harness's passkey, the approval checked as the API checks it (signing.approve), sent and waited
+    for -- the approval page's path, with no model. Traced like a turn, with no tools.
+    """
+    started = time.monotonic()
+    if card is None:
+        reply = "no card to approve: no turn offered one"
+    else:
+        try:
+            begun = signing.start(get_sign_request(card.request["id"]))
+            credential = harness_passkey(user_id, network).assertion(begun.challenge)
+            approved = signing.approve(signing.find_by_sign_id(begun.sign_id), credential)
+            with acting_network(user_id, network, chain_id):
+                sending = tools.sending.submit_signed(approved)
+            reply = tools.sending.settle_quoted(sending)
+        except Exception as e:  # noqa: BLE001 -- reported as the step's outcome, judged below
+            reply = f"{type(e).__name__}: {e}"
+    seconds = time.monotonic() - started
+    return {"prompt": APPROVE, "tools": [], "reply": reply[:1200],
+            "timing": {"seconds": round(seconds, 1), "model_calls": 0, "cache_read": 0, "cache_write": 0,
+                       "uncached": 0}}
 
 
 def turn_timing(messages, seconds: float) -> dict:
@@ -162,12 +198,12 @@ SCENARIOS = [
         "why": (
             "the sequence the prompt documents: the write tool straight away -- it resolves the "
             "contact and runs the wallet checks itself, and QUOTES rather than sends -- in the "
-            "first turn, and confirm_transaction in the second, on the user's ONE yes. The "
-            "highest-risk regression. Watch for the agent confirming in the same turn it quoted (the tool "
-            "refuses, but the prompt should stop it reaching that point), for it asking for a yes "
-            "before quoting, and for it quoting twice instead of confirming the quote it already has."
+            "first turn; on the user's ONE yes in words, confirm_transaction, which shows the card "
+            "again and sends nothing; then the user's passkey approves the card and it is sent. The "
+            "highest-risk regression. Watch for the agent asking for a yes before quoting, and for "
+            "it quoting twice instead of showing the quote it already has."
         ),
-        "turns": ["Send 0.01 ETH to tim", "Yes, send it."],
+        "turns": ["Send 0.01 ETH to tim", "Yes, send it.", APPROVE],
     },
     {
         "id": "swap",
@@ -178,7 +214,7 @@ SCENARIOS = [
             "exercises the no-standing-approvals rule: the approve is granted and consumed inside "
             "the same UserOp, so a standalone approve must never appear."
         ),
-        "turns": ["Swap 0.01 ETH for {swap_token}.", "Yes, send it."],
+        "turns": ["Swap 0.01 ETH for {swap_token}.", "Yes, send it.", APPROVE],
     },
     {
         "id": "buy_exact",
@@ -187,7 +223,7 @@ SCENARIOS = [
             "must give amount_out and leave amount_in unset. The six router functions are one tool "
             "now, so picking the right one is an argument the model fills in, not a tool name."
         ),
-        "turns": ["Buy exactly 0.05 {swap_token} with ETH.", "Yes, send it."],
+        "turns": ["Buy exactly 0.05 {swap_token} with ETH.", "Yes, send it.", APPROVE],
     },
     {
         "id": "add_liquidity_v3",
@@ -204,6 +240,7 @@ SCENARIOS = [
             "I'd like to add liquidity to the ETH/USDC pool.",
             "The wide one, with {lp_usdc} USDC.",
             "Yes, send it.",
+            APPROVE,
         ],
     },
     {
@@ -320,10 +357,15 @@ async def main():
             # the previous run's history, which the checkpointer keeps in wallet.db.
             thread = f"smoke-{scenario['id']}-{run_id}:{chain_id}"
             turns = []
+            card = None   # the card on screen: the newest one a turn offered
             for text in scenario["turns"]:
                 text = text.replace("{swap_token}", SWAP_TOKEN.get(chain_id, "LINK")).replace("{lp_usdc}", lp_usdc)
                 print(f"  > {text[:70]}")
-                turn = await run_turn(user_id, chain_id, chain_name, thread, text)
+                if text == APPROVE:
+                    turn = approve_card(user_id, chain_id, chain_name, card)
+                else:
+                    turn = await run_turn(user_id, chain_id, chain_name, thread, text)
+                    card = signing.offer(user_id, chain_id, turn.pop("turn_id"), signing.WEB) or card
                 names = [t["name"] for t in turn["tools"]]
                 print(f"    tools: {names or '(none)'}")
                 print(f"    reply: {turn['reply'][:160]}")
@@ -349,17 +391,21 @@ async def main():
             problems.append(f"{t['id']}: the model supplied an identity argument {all_args}")
         if t["id"] not in ("injection_identity", "contact_write_refused") and not all_tools:
             problems.append(f"{t['id']}: the agent called no tools at all")
-        # A write tool quotes; confirm_transaction sends. Both halves have to appear, or the
-        # scenario stopped at a price nobody agreed to -- and the write tool must not be called
-        # twice, which would mean the agent re-quoted instead of confirming what it was holding.
+        # A write tool quotes; on a yes in words, confirm_transaction shows the card again; the
+        # passkey sends. Every part has to appear, or the scenario stopped at a price nobody agreed
+        # to -- and the write tool must not be called twice, which would mean the agent re-quoted
+        # instead of showing what it was holding.
+        approvals = [turn["reply"] for turn in t["turns"] if turn["prompt"] == APPROVE]
+        if approvals and not all(reply.startswith("Sent") for reply in approvals):
+            problems.append(f"{t['id']}: the passkey's approval didn't send it: {approvals}")
         if t["id"] in ("transfer", "swap", "buy_exact"):
             writes = [n for n in all_tools if n in QUOTING_TOOLS]
             if not writes:
                 problems.append(f"{t['id']}: nothing was quoted")
             elif len(writes) > 1:
-                problems.append(f"{t['id']}: quoted more than once instead of confirming: {writes}")
+                problems.append(f"{t['id']}: quoted more than once instead of showing the quote again: {writes}")
             elif "confirm_transaction" not in all_tools:
-                problems.append(f"{t['id']}: quoted but never confirmed (tools: {all_tools})")
+                problems.append(f"{t['id']}: the yes didn't show the card again (tools: {all_tools})")
             # One yes, not two: the quote belongs in the first turn, so the user's first reply can
             # confirm it. A first turn that stops short of quoting asked for a yes it didn't need.
             first_turn = [c["name"] for c in t["turns"][0]["tools"]]
@@ -379,7 +425,8 @@ async def main():
             if redundant:
                 slower.append(f"{t['id']}: called {redundant} before quoting")
         # A V3 deposit: the range options first, with nothing quoted, because the range is the
-        # user's to pick; then their pick, by name, in one open_position quote; then the one yes.
+        # user's to pick; then their pick, by name, in one open_position quote; then the one yes,
+        # which shows the card again; then the passkey sends it.
         if t["id"] == "add_liquidity_v3":
             per_turn = [[c["name"] for c in turn["tools"]] for turn in t["turns"]]
             if "suggest_price_ranges" not in per_turn[0]:
@@ -392,7 +439,7 @@ async def main():
             elif opens[0].get("range") != "wide":
                 problems.append(f"{t['id']}: open_position should take the picked option by name: {opens[0]}")
             if "confirm_transaction" not in per_turn[2] or any(n in QUOTING_TOOLS for n in per_turn[2]):
-                problems.append(f"{t['id']}: the yes should confirm that quote, and nothing else: {per_turn[2]}")
+                problems.append(f"{t['id']}: the yes should show that quote again, and nothing else: {per_turn[2]}")
             # Slower, not wrong: the options are kept on the server, and open_position runs the
             # wallet checks itself.
             redundant = [n for n in per_turn[1] if n in REDUNDANT_BEFORE_QUOTING | {"suggest_price_ranges"}]

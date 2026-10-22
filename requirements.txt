@@ -23,9 +23,16 @@ langgraph==1.0.10
 langgraph-checkpoint-sqlite==3.1.0
 aiosqlite==0.22.1
 
-# Vault (session-key custody) + HTTP (bundler RPC)
-hvac==2.4.0
+# HTTP (bundler RPC, and the API's few words to Telegram: telegram_notify.py)
 requests==2.32.5
+
+# Passkeys (passkey.py, signing.py, routes/passkeys.py). py_webauthn checks every registration and
+# approval -- challenge, rp id, origin, user verification -- before anything is filed or sent.
+# Pinned exactly: what it accepts is a security boundary. cbor2 and cryptography come with it, and
+# are named because passkey.py reads COSE keys and handles P-256 signatures with them directly.
+webauthn==3.0.1
+cbor2==6.1.5
+cryptography==50.0.1
 
 # Config + Telegram front end
 python-dotenv==1.2.1

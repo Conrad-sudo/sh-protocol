@@ -1,10 +1,11 @@
 """
 The wallet agent's tools, one module per area:
 
-  common        what every tool shares: amounts, token and contact resolution, the session key
+  common        what every tool shares: amounts, token and contact resolution, legs
   checks        the wallet checks every transaction tool runs itself, and preflight_check
   quoting       turning a plan into a quote the user approves
-  sending       confirm_transaction (the only tool that sends) and cancel_transaction
+  sending       confirm_transaction (shows a quote's card again; never sends), cancel_transaction,
+                and the send of a transaction the user approved with their passkey
   wallet_reads  status, balances, prices, the token list and the contact list
   transfers     payments to saved contacts, and wrapping the native asset
   uniswap       swaps on either exchange, and PancakeSwap V2's liquidity (BSC)
@@ -115,8 +116,8 @@ def get_tools():
         get_price,
         # For questions only: every write tool below runs the same checks itself before it quotes.
         preflight_check,
-        # The only tool that sends anything, and its counterpart. Every other write tool stops at
-        # a quote -- see quotes.py for why the sending step is separate and turn-gated.
+        # The two tools that answer for a quote in words: neither sends. Every write tool stops at a
+        # quote, and only the user's passkey sends one -- see quotes.py.
         confirm_transaction,
         cancel_transaction,
         send_eth,

@@ -13,11 +13,13 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
 import { createSiweMessage } from 'viem/siwe'
 import { FAKE_WALLET_NAME, installFakeWallet } from '../fakeWallet.ts'
-import { walkOnboarding } from '../onboardingFlow.ts'
+import { walkOnboarding, type WalkOptions } from '../onboardingFlow.ts'
 
 /*
  * Shared by the real-fork specs: they sign and send real transactions on the local Sepolia fork
- * and write to wallet.db, so they need Vault, `make sepolia-fork` and the API with APP_FORK_MODE=1.
+ * and write to wallet.db, so they need `make sepolia-fork` (with `--hardfork osaka`, for the P-256
+ * precompile) and the API with APP_FORK_MODE=1. Passkeys come from Chromium's virtual authenticator
+ * (addPasskeyAuthenticator), which the API checks like any other.
  */
 
 export const RPC = 'http://127.0.0.1:8545'
@@ -102,7 +104,10 @@ export interface ApiWallet {
   is_owner: boolean
   paused: boolean
   spending: { daily_limit_usd: number; window_hours: number; watched_tokens: { ticker: string | null; address: Address }[] }
-  session: { key: Address | null; wallet_key: Address | null; is_app_key: boolean; active: boolean; expires_at: number | null }
+  session: {
+    max_keys: number
+    keys: { key_id: Hex; device_name: string | null; credential_id: string | null; valid_until: number; active: boolean }[]
+  }
 }
 
 export interface Account {
@@ -145,13 +150,19 @@ export async function signIn(page: Page, next: string) {
 
 /**
  * Signs in as a fresh owner and walks onboarding with the defaults: Sepolia, $100 a day, every
- * token, a 1 ETH prefund. Returns once the dashboard shows the new wallet.
+ * token, a 1 ETH prefund, and no passkey unless `passkey` makes one (the page then needs
+ * addPasskeyAuthenticator). Returns once the dashboard shows the new wallet.
  */
-export async function signInAndDeploy(page: Page, request: APIRequestContext, owner: RealOwner): Promise<Account> {
+export async function signInAndDeploy(
+  page: Page,
+  request: APIRequestContext,
+  owner: RealOwner,
+  { passkey }: Pick<WalkOptions, 'passkey'> = {},
+): Promise<Account> {
   await signIn(page, '/onboarding')
   await expect(page.getByRole('heading', { name: 'Create your wallet' })).toBeVisible()
 
-  await walkOnboarding(page)
+  await walkOnboarding(page, { passkey })
   await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
 
   // Signed in once: sign-in is rate limited, and the access token outlasts any one spec.

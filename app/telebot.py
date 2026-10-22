@@ -19,7 +19,12 @@ Commands, besides /start, /help and /chain:
     as a message would be. The assistant quotes; it has to, since only its tools can.
   - /cancel drops the quotes waiting on this network; /feedback stores a note for the team.
 A turn that raised exactly one quote is followed by a card the code writes, not the model -- what
-the quote does, its network, its fees -- with Confirm and Cancel buttons (quote_button).
+the quote does, its network, its fees -- with a "Confirm with passkey" button and a Cancel button.
+Confirm is a plain link to the web app's approval page (/c/<token>), where the user's passkey
+approves it: Telegram's rules forbid signing anything but TON inside a Mini App, so it is a link,
+never one. The API process checks the approval, sends the transaction and posts the outcome here
+(telegram_notify). Cancel is a button the bot answers itself (quote_button). A typed "yes" while a
+card waits gets the card again and no model call (signing.is_yes).
 
 Every network's turns share one agent, one checkpointer and one pool of bundler keys
 (TELEGRAM_BUNDLER_1, _2, ...). Sharing them is safe because tx_sender counts nonces per (chain,
@@ -56,22 +61,22 @@ from telegram.ext import (
 from smart_wallet_agent import (
     CANCEL_BUTTON,
     CANCELLED_REPLY,
-    CONFIRM_BUTTON,
     STALE_QUOTE,
+    answer_yes,
     cancel_quote,
     cancel_quotes,
     chat_turn,
     close_checkpointer,
-    confirm_quote,
     init_agent,
     open_checkpointer,
 )
+import signing
 from bundler import TELEGRAM_BUNDLER_ENV, use_bundler_key
 from chat_limits import CONFIRM_MAX_CONCURRENT, TELEGRAM_MAX_CONCURRENT, TurnGate, TurnRefused
 from redact import install_log_redaction
 from constants import SESSION_RENEWAL_WARNING_SECS, get_chain_display_name, get_exchange, get_native_asset_ticker
 from positions import read_positions
-from quotes import QUOTE_TTL_SECONDS, PendingTransaction, QuoteError, fee_text, offer
+from quotes import fee_text
 # The dashboard's own balance read, so /balance lists exactly what the web app shows.
 from routes.wallet import _token_balances
 from tools.common import _refuse_same_token, _token_address, _token_label
@@ -93,11 +98,12 @@ from db import (
     get_wallet_chains,
     link_telegram,
     schema_version,
+    set_sign_request_message,
     set_telegram_chain,
 )
 from network_config import load_network_config_by_name, network_name
 from telegram_bots import BOT_CHAINS, TOKEN_ENV, USERNAME_ENV, bot_token, legacy_vars_set
-from telegram_format import plain_text, split_message, to_telegram_html
+from telegram_format import code_escaped, headed, plain_text, to_telegram_html
 
 # Warn when less than this fraction of the window spending cap remains.
 BUDGET_ALERT_THRESHOLD = 0.10
@@ -145,8 +151,14 @@ EMPTY_REPLY = "Sorry, I have no answer to that. Please try again."
 # When a read command's read fails: the node is down or slow, most likely.
 READ_FAILED = "I couldn't read that from the network just now. Please try again in a minute."
 
-# A Confirm or Cancel tap on a quote raised on another network than the one in use.
+# A Cancel tap on a quote raised on another network than the one in use.
 OTHER_NETWORK_QUOTE = "That quote is for another network. Switch back to it with /chain first."
+
+# The card's Confirm: a link to the web app's approval page, where the user's passkey approves it.
+CONFIRM_LINK = "Confirm with passkey"
+
+# A tap on a card from before passkeys, whose Confirm was a button the bot answered.
+OLD_CONFIRM = "Confirming now takes your passkey: ask me again for a fresh quote, and tap “Confirm with passkey”."
 
 # How many transactions /history lists. The web app's History tab has them all.
 HISTORY_COMMAND_ROWS = 5
@@ -164,8 +176,9 @@ FEEDBACK_USAGE = "Write it after the command, like this: /feedback The swap quot
 # An amount in /send or /swap: digits, with at most 18 decimals -- the most any token has.
 _AMOUNT = re.compile(r"^\d+(\.\d{1,18})?$")
 
-# What a quote's buttons carry: "q:ok:<chain id>:<quote id>" to confirm, "q:no:…" to cancel.
-# quote_button checks every part against the tapping chat's own account and network.
+# What a quote's Cancel carries: "q:no:<chain id>:<quote id>". quote_button checks every part
+# against the tapping chat's own account and network. "q:ok:…" was a Confirm button before passkeys,
+# and is only answered now.
 _QUOTE_BUTTON = re.compile(r"^q:(ok|no):(\d{1,12}):([A-Za-z0-9_-]{1,32})$")
 
 # One turn at a time per conversation. Different users are answered side by side (the bot is built
@@ -186,9 +199,9 @@ _turn_gate = TurnGate()
 # default pool, which the wallet reads and the daily check use.
 _turn_threads = ThreadPoolExecutor(max_workers=TELEGRAM_MAX_CONCURRENT, thread_name_prefix="telegram-turn")
 
-# The threads quote-card taps run on: apart from the turns, so a Confirm never queues behind other
-# people's model calls while its quote runs out (QUOTE_TTL_SECONDS). Each is short: a Confirm returns
-# once its transaction is on the wire, and the wait for it runs in landing.py.
+# The threads quick actions run on -- a Cancel tap, /cancel, a typed "yes" answered without the
+# model: apart from the turns, so they never queue behind other people's model calls while a quote
+# runs out (quotes.QUOTE_TTL_SECONDS).
 _tap_threads = ThreadPoolExecutor(max_workers=CONFIRM_MAX_CONCURRENT, thread_name_prefix="telegram-tap")
 
 
@@ -350,51 +363,43 @@ async def _reply_on(send, chain_id: int, markdown: str):
         await _send_reply(send, piece)
 
 
-def _escaped(text: str) -> str:
-    """
-    Text the bot passes on as it is -- a send's outcome, which repeats the quote's action -- as
-    Telegram HTML: escaped, so a token's symbol in it can't become a link, with `code` kept as code.
-    """
-    return re.sub(r"`([^`\n]+)`", r"<code>\1</code>", html.escape(text, quote=False))
-
-
 async def _reply_lines(send, chain_id: int, lines: list[str]):
     """
     Sends a reply the bot wrote itself -- a read command's -- as Telegram HTML, headed by its
-    network's name, split between lines when long. Not through Markdown: what goes in it (a token's
-    symbol, a contact's name, a transaction's description) is escaped here, line by line, so text
+    network's name, split between lines when long (telegram_format.headed, which the API's
+    telegram_notify writes with too). Not through Markdown: what goes in it (a token's symbol, a
+    contact's name, a transaction's description) is escaped by the caller, line by line, so text
     that came from a token contract can never turn into a link or formatting.
 
     @param lines  Lines of Telegram HTML, each complete in itself, so a split between two of them
                   never cuts a tag in half.
     """
-    chain = html.escape(get_chain_display_name(chain_id))
-    for piece in split_message(f"<b>{chain}</b>\n\n" + "\n".join(lines)):
+    for piece in headed(get_chain_display_name(chain_id), lines):
         await _send_reply(send, piece)
 
 
 def _key_warning(status: dict, chain: str, now: int) -> str | None:
     """
-    The warning about the assistant's key, if one is due: it is inactive, or it runs out within
-    SESSION_RENEWAL_WARNING_SECS.
+    The warning about the user's passkeys, if one is due: no device is approved on the wallet any
+    more, or the last approval runs out within SESSION_RENEWAL_WARNING_SECS.
 
-    This is why the warnings matter to a Telegram-only user: renewing the key is an owner-signed
-    transaction they can only make in the web app, so being told after it lapsed means being told
-    too late.
+    This is why the warnings matter to a Telegram-only user: approving or renewing a device is an
+    owner-signed transaction they can only make in the web app, so being told after it lapsed means
+    being told too late.
     """
     if not status.get("session_active"):
         return (
-            f"⚠️ My access to your {chain} wallet is off: it was turned off, replaced or has run "
-            "out. I can still answer questions, but I can't send anything until you turn it back on "
-            "in the web app (Controls → Assistant)."
+            f"⚠️ None of your devices is approved on your {chain} wallet: they were removed or "
+            "their approval ran out. I can still answer questions, but nothing can be confirmed "
+            "until you approve a device in the web app (Controls → Devices)."
         )
     seconds_left = (status.get("session_expires_at") or 0) - now
     if 0 < seconds_left < SESSION_RENEWAL_WARNING_SECS:
         days_left = seconds_left // 86_400
         when = f"in {days_left} day{'s' if days_left != 1 else ''}" if days_left else "in under a day"
         return (
-            f"⏳ My access to your {chain} wallet runs out {when}. Renew it in the web app "
-            "(Controls → Assistant) to keep me able to send transactions for you."
+            f"⏳ Your devices' approval on your {chain} wallet runs out {when}. Renew it in the web "
+            "app (Controls → Devices) to keep confirming transactions with your passkey."
         )
     return None
 
@@ -657,7 +662,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"I look after {wallet}. Write to me — “Send 0.01 {ticker} to Sam”, “What can I still "
         "spend?” — or use a command:\n"
         "/balance – what's in the wallet\n"
-        "/limit – your spending limit and my access\n"
+        "/limit – your spending limit and your devices' approval\n"
         "/history – the last transactions\n"
         f"{positions}"
         "/contacts – who I can pay\n"
@@ -666,8 +671,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel – drop a quote I'm holding\n"
         "/web – open the web app\n"
         "/feedback – tell the team what you think\n\n"
-        "Before I send anything I show what it costs, and nothing goes out until you tap Confirm or "
-        "say yes. I can only pay contacts saved in the web app, within your spending limit.\n\n"
+        "Before I send anything I show what it costs, and nothing goes out until you tap “Confirm "
+        "with passkey” and approve it on your device. I can only pay contacts saved in the web app, "
+        "within your spending limit.\n\n"
         f"I act on one network at a time: {switch}."
     )
 
@@ -793,7 +799,7 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
 
     Rationed first (_turn_gate): a message past the account's ration gets no turn, and at most one
     reply per spell. Then one turn at a time per conversation (_turn_locks). A turn that raised
-    exactly one quote is followed by the quote's card, with its Confirm and Cancel buttons.
+    exactly one quote is followed by the quote's card (_show_card).
 
     @param text  What the user wrote, or the fixed words a /send or /swap stands for.
     """
@@ -809,7 +815,9 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
             async with _typing(context.bot, chat_id):
                 response, turn_id = await _on_turn_thread(chat_turn, user_id, chain_id, text, network)
             await _reply_on(update.message.reply_text, chain_id, response)
-            await _send_quote_card(update.message.reply_text, user_id, chain_id, turn_id)
+            offered = signing.offer(user_id, chain_id, turn_id, signing.TELEGRAM, telegram_chat_id=chat_id)
+            if offered is not None:
+                await _show_card(update.message.reply_text, offered.request, offered.token)
     finally:
         _turn_gate.release(user_id)
 
@@ -821,63 +829,126 @@ async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     The identity handed to the turn is resolved here, from the database, and is never anything the
     message says. So is the network: the one the account picked with /chain (resolve_active_chain),
     read as the message arrives. While there is none, the message gets the network buttons and no
-    turn.
+    turn. A typed "yes" while a card waits gets no turn either (_answer_yes).
     """
     acting = await _acting_account(update, context)
     if acting is None:
         return
+    user_id, chain_id, _ = acting
+    if signing.is_yes(update.message.text) and await _answer_yes(update, context, user_id, chain_id):
+        return
     await _run_turn(update, context, *acting, update.message.text)
 
 
-def quote_card(pending: PendingTransaction, now: float) -> tuple[str, InlineKeyboardMarkup]:
+async def _answer_yes(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, chain_id: int) -> bool:
     """
-    What a quote's Confirm and Cancel buttons sit under: written here from the stored quote, never
-    by the model. Tapping Confirm sends exactly this quote, so this, not the assistant's reply, is
-    what the user agrees to: the action (written by the package that built the calldata), the
-    network and the fees. Escaped, since the action can carry a token's own symbol.
+    Answers a typed "yes" while a card waits on this network: signing.YES_REPLY and the card again,
+    with no model call -- the model could do nothing more, since no tool sends. The card comes back
+    with a fresh link (signing.show_again), and the old card loses its buttons, since its link died.
 
-    @return  (the card as Telegram HTML, its buttons).
+    @return  False when no card waits, so the message is an ordinary turn after all.
     """
-    chain = get_chain_display_name(pending.chain_id)
-    minutes = max(1, math.ceil((QUOTE_TTL_SECONDS - (now - pending.created_at)) / 60))
+    chat_id = update.message.chat_id
+    async with _turn_locks[(chain_id, chat_id)]:
+        request = signing.waiting(user_id, chain_id, signing.TELEGRAM)
+        token = signing.show_again(request) if request is not None else None
+        if token is None:
+            return False
+        reply = await _on_tap_thread(answer_yes, user_id, chain_id, update.message.text)
+        await _take_buttons_off(context.bot, request)
+        await _reply_lines(update.message.reply_text, chain_id, [code_escaped(reply)])
+        await _show_card(update.message.reply_text, request, token)
+    return True
+
+
+def confirm_link(token: str) -> str:
+    """Where a card's Confirm leads: the web app's approval page for that card's link token."""
+    return f"{web_app_url().rstrip('/')}/c/{token}"
+
+
+def quote_card(request: dict, token: str, now: float) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    A quote's card: written here from the quote its sign request froze, never by the model. The
+    approval page shows and signs exactly this quote, so this, not the assistant's reply, is what
+    the user agrees to: the action (written by the package that built the calldata), the network
+    and the fees. Escaped, since the action can carry a token's own symbol.
+
+    Confirm is a plain link to the approval page (confirm_link), not a Mini App: Telegram allows no
+    signing but TON's inside one. Cancel is a button the bot answers (quote_button).
+
+    @param request  The sign request (db.sign_requests row).
+    @param token    Its current link token; any older one is dead.
+    @return         (the card as Telegram HTML, its buttons).
+    """
+    frozen = signing.thaw(request)
+    chain = get_chain_display_name(request["chain_id"])
+    minutes = max(1, math.ceil((request["expires_at"] - now) / 60))
     text = (
         f"<b>Confirm on {html.escape(chain)}?</b>\n"
-        f"{html.escape(pending.action)}\n"
-        f"Fees: {html.escape(fee_text(pending.cost))} · good for {minutes} minute{'s' if minutes != 1 else ''}"
+        f"{html.escape(frozen['action'])}\n"
+        f"Fees: {html.escape(fee_text(frozen['cost']))} · good for {minutes} minute{'s' if minutes != 1 else ''}\n"
+        f"Tap “{CONFIRM_LINK}”, then approve with Face ID, your fingerprint or your PIN."
     )
-    data = f"{pending.chain_id}:{pending.quote_id}"
     buttons = InlineKeyboardMarkup([[
-        InlineKeyboardButton(CONFIRM_BUTTON, callback_data=f"q:ok:{data}"),
-        InlineKeyboardButton(CANCEL_BUTTON, callback_data=f"q:no:{data}"),
+        InlineKeyboardButton(CONFIRM_LINK, url=confirm_link(token)),
+        _cancel_button(request),
     ]])
     return text, buttons
 
 
-async def _send_quote_card(send, user_id: int, chain_id: int, turn_id: int | None):
-    """Sends the quote card when the turn has one to offer (quotes.offer): it raised exactly one."""
-    pending = offer(user_id, chain_id, turn_id)
-    if pending is None:
+def _cancel_button(request: dict) -> InlineKeyboardButton:
+    """A card's Cancel: "q:no:<chain id>:<quote id>", which quote_button checks before it acts."""
+    return InlineKeyboardButton(CANCEL_BUTTON, callback_data=f"q:no:{request['chain_id']}:{request['quote_id']}")
+
+
+async def _show_card(send, request: dict, token: str):
+    """
+    Sends a quote's card and records which message it is, so the API can take its buttons off once
+    the passkey's approval has been dealt with (telegram_notify.tell).
+
+    Telegram refuses a button whose link a phone can't open -- a web app on localhost, in
+    development -- and refuses the whole message with it. The link then goes in the text instead,
+    and the card keeps only its Cancel.
+    """
+    text, buttons = quote_card(request, token, time.time())
+    try:
+        message = await send(text, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW, reply_markup=buttons)
+    except BadRequest:
+        logging.getLogger(__name__).warning("Telegram refused the card's link button; sent the link as text")
+        message = await send(
+            f"{text}\n\nApprove it here: {html.escape(confirm_link(token))}",
+            parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW,
+            reply_markup=InlineKeyboardMarkup([[_cancel_button(request)]]),
+        )
+    set_sign_request_message(request["id"], message.chat_id, message.message_id)
+
+
+async def _take_buttons_off(bot, request: dict):
+    """Takes the buttons off a request's card, if it has one. Refused for a message too old to edit."""
+    if request.get("telegram_chat_id") is None or request.get("telegram_message_id") is None:
         return
-    text, buttons = quote_card(pending, time.time())
-    await _send_reply(send, text, reply_markup=buttons)
+    with contextlib.suppress(BadRequest):
+        await bot.edit_message_reply_markup(
+            chat_id=request["telegram_chat_id"], message_id=request["telegram_message_id"], reply_markup=None
+        )
 
 
 async def quote_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles a tap on a quote's Confirm or Cancel button.
+    Handles a tap on a quote card's Cancel. (Confirm is a link to the approval page, which the API
+    answers; a "q:ok" tap can only come from a card made before passkeys, and is told so.)
 
     The button's data is checked, never trusted: the tap must come from a private chat, from that
     chat's own user, whose account is linked, and name the network the account is on now. The
     account comes from the chat, the network from resolve_active_chain; the quote id is only looked
-    up, and quotes.take refuses it unless it is this account's, on this network, unexpired and
-    unused -- so a forged or replayed tap sends nothing. The query is answered whatever happens, so
-    the button stops spinning.
+    up, and cancel_quote acts only on this account's quote on this network -- so a forged or
+    replayed tap cancels nothing of anyone else's. The query is answered whatever happens, so the
+    button stops spinning.
 
-    The buttons come off the card before anything runs, so a second tap has nothing to press. A
-    confirm then runs in the conversation's turn (_turn_locks), as a "yes" would, on a tap thread
-    (_tap_threads) rather than queueing behind other people's turns. It is answered once the
-    transaction is on the wire; a second message follows when it lands (landing.py), sent after
-    the turn is over, so the user can carry on meanwhile.
+    The buttons come off the card first, so a second tap has nothing to press. The cancel runs in
+    the conversation's turn (_turn_locks), on a tap thread (_tap_threads) rather than queueing
+    behind other people's turns. Its sign request is cancelled with the quote, so the card's link
+    can no longer approve it.
     """
     query = update.callback_query
     chat_id = _private_chat_id(update)
@@ -890,44 +961,39 @@ async def quote_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=UNLINKED_MESSAGE)
         return
     tapped = _QUOTE_BUTTON.match(query.data or "")
+    if tapped is not None and tapped[1] == "ok":
+        await query.answer(OLD_CONFIRM, show_alert=True)
+        return
     active = resolve_active_chain(user_id, context)
     if tapped is None or active is None or int(tapped[2]) != active[0]:
         await query.answer(OTHER_NETWORK_QUOTE, show_alert=True)
         return
-    confirm, quote_id = tapped[1] == "ok", tapped[3]
-    chain_id, network = active
+    quote_id = tapped[3]
+    chain_id, _ = active
 
     await query.answer()
     with contextlib.suppress(BadRequest):
-        # Refused for a message too old to edit: quotes.take still refuses a second confirm.
+        # Refused for a message too old to edit: a second Cancel finds nothing to cancel anyway.
         await query.edit_message_reply_markup(reply_markup=None)
     send = functools.partial(context.bot.send_message, chat_id)
-    landed = None
     async with _turn_locks[(chain_id, chat_id)]:
-        if confirm:
-            async with _typing(context.bot, chat_id):
-                try:
-                    confirmed = await _on_tap_thread(confirm_quote, user_id, chain_id, quote_id, network)
-                    outcome, landed = confirmed.text, confirmed.landed
-                except QuoteError:
-                    outcome = STALE_QUOTE
-        else:
-            cancelled = await _on_tap_thread(cancel_quote, user_id, chain_id, quote_id)
-            outcome = CANCELLED_REPLY if cancelled else STALE_QUOTE
-        await _reply_lines(send, chain_id, [_escaped(outcome)])
-    if landed is not None:
-        # Awaited here, not on a thread: the wait itself runs in landing's pool.
-        await _reply_lines(send, chain_id, [_escaped(await asyncio.wrap_future(landed))])
+        cancelled = await _on_tap_thread(cancel_quote, user_id, chain_id, quote_id)
+        await _reply_lines(send, chain_id, [code_escaped(CANCELLED_REPLY if cancelled is not None else STALE_QUOTE)])
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /cancel: drops every quote waiting on the network in use."""
+    """
+    Handles /cancel: drops every quote waiting on the network in use, with their sign requests, so
+    no card's link can approve one any more, and takes the buttons off those cards.
+    """
     acting = await _acting_account(update, context)
     if acting is None:
         return
     user_id, chain_id, _ = acting
     async with _turn_locks[(chain_id, update.message.chat_id)]:
         dropped = await _on_tap_thread(cancel_quotes, user_id, chain_id)
+    for request in dropped:
+        await _take_buttons_off(context.bot, request)
     await update.message.reply_text(CANCELLED_REPLY if dropped else "There was nothing to cancel.")
 
 
@@ -1078,7 +1144,7 @@ def _window(hours: float) -> str:
 def limit_lines(status: dict, chain: str, now: int) -> list[str]:
     """
     /limit's lines: what is left of the spending limit, whether the owner has paused the wallet,
-    and the assistant's access -- its warning when one is due (_key_warning), otherwise its date.
+    and the devices' approval -- its warning when one is due (_key_warning), otherwise its date.
     """
     lines = [
         f"Spending limit: ${status['remaining_usd']:,.2f} left of ${status['daily_limit_usd']:,.2f} "
@@ -1092,7 +1158,7 @@ def limit_lines(status: dict, chain: str, now: int) -> list[str]:
         lines.append(html.escape(warning))
     else:
         until = datetime.datetime.fromtimestamp(status["session_expires_at"], tz=datetime.timezone.utc)
-        lines.append(f"My access runs out on {until.day} {until:%b %Y}.")
+        lines.append(f"Your devices' approval runs out on {until.day} {until:%b %Y}.")
     return lines
 
 
@@ -1266,7 +1332,7 @@ COMMANDS = (
     ("start", start, "Start, or link this chat"),
     ("help", help_cmd, "What I can do"),
     ("balance", balance_cmd, "What's in the wallet"),
-    ("limit", limit_cmd, "Your spending limit and my access"),
+    ("limit", limit_cmd, "Your spending limit and your devices' approval"),
     ("history", history_cmd, "The last transactions"),
     ("positions", positions_cmd, "Your Uniswap positions"),
     ("contacts", contacts_cmd, "Who I can pay"),

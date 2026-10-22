@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      The page a Telegram Confirm button opens: /c/<token> serves this file (deploy/Caddyfile, and the
+      dev server's mitfah:confirm-page plugin in vite.config.ts). It is its own small entry, without
+      the app's wallet libraries, components or glass, so it opens fast in Telegram's in-app browser.
+      No inline scripts: the site's Content-Security-Policy allows only the ones in index.html.
+    -->
+    <title>Confirm a payment · Mitfah</title>
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#F6F8FB" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#07111F" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/confirm/main.tsx"></script>
+  </body>
+</html>

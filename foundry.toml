@@ -6,6 +6,14 @@ libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
 viaIR = true
+# Osaka, because Forge only has the P-256 precompile at 0x100 (RIP-7212 / EIP-7951) from Osaka on, and
+# SessionHandler verifies passkey signatures with it. Checked 2026-10-20 with solc 0.8.33: every
+# contract in src/, built for osaka and for prague, has byte-identical runtime AND creation code
+# (CBOR metadata aside), so this ships no osaka-only opcode to a chain that lacks it. Repeat that
+# comparison when bumping solc or OpenZeppelin (an OZ release may start emitting CLZ for osaka):
+# build each with FOUNDRY_EVM_VERSION=prague|osaka and diff `forge inspect <contract> deployedBytecode`.
+# Anvil needs the matching `--hardfork osaka` (see the Makefile).
+evm_version = "osaka"
 gas_reports = ["*"]
 remappings= ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
  ,"@account-abstraction/contracts/=lib/account-abstraction/contracts/",

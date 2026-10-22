@@ -1,35 +1,40 @@
 """
-Self-bundling: how every session-key UserOp reaches the EntryPoint, on every network.
+Self-bundling: how every passkey-signed UserOp reaches the EntryPoint, on every network.
 
 The app is its own ERC-4337 bundler everywhere -- plain Anvil, every fork and every live chain. It
-builds the UserOp, signs it with the wallet's session key, wraps it in EntryPoint.handleOps() and
-sends that outer transaction from a bundler EOA of its own, named as beneficiary so the EntryPoint
-repays the gas out of the wallet's own prefund. No third-party bundler ever holds a signed op.
+builds the UserOp, has the user's passkey sign its hash in their browser, wraps it in
+EntryPoint.handleOps() and sends that outer transaction from a bundler EOA of its own, named as
+beneficiary so the EntryPoint repays the gas out of the wallet's own prefund. No third-party bundler
+ever holds a signed op, and this server holds no key that can sign one.
 
 The order of work is part of the security model:
 
-  1. {quote_user_op} prices the op WITHOUT the session key. The wallet's execute() and
+  1. {quote_user_op} prices the op with no user key at all. The wallet's execute() and
      validateUserOp() are each estimated exactly as the EntryPoint will call them, and the whole
-     handleOps bundle is then simulated end to end -- all of it signed by a throwaway key that the
-     wallet never authorized, made to pass validation by a state override that exists only inside
-     the simulation. Nothing the RPC provider sees in this phase could be executed on chain.
-     (This used to sign a placeholder op with the REAL key just to estimate it -- an executable
-     transaction handed to the RPC.)
-  2. {prepare_user_op} signs the quoted op with the real key and estimates it once more as a whole
-     handleOps, which catches anything that moved in between and sizes the outer transaction. This
-     is the first executable op in the flow, so nothing reaches it until the user has agreed: the
-     two phases are split precisely so the cost can be shown, and confirmed, in between.
-  3. {submit_user_op} puts it in the chain's next bundle -- many users' ops in one handleOps, sent
+     handleOps bundle is then simulated end to end -- all of it signed by a throwaway passkey
+     (passkey.SoftPasskey) that the wallet never approved, made to pass validation by a state
+     override that exists only inside the simulation. Nothing the RPC provider sees in this phase
+     could be executed on chain.
+  2. {finalize_user_op} builds the op the user will approve, when the approval page opens
+     (/api/sign/start): fresh fees, a random nonce key, and gas sized for a passkey's signature.
+     Its hash is the WebAuthn challenge; the op can't change after that without the signature
+     failing.
+  3. {check_signed_user_op} runs the whole handleOps once more with the passkey's real signature,
+     which catches anything that moved in between and sizes the outer transaction. This is the
+     first executable op in the flow, and it exists only because the user approved it with Face
+     ID, a fingerprint or a PIN.
+  4. {submit_user_op} puts it in the chain's next bundle -- many users' ops in one handleOps, sent
      by one {Lane} per chain and key (see "Bundles" below) -- and {await_user_op} waits for it:
-     apart, so a Confirm button can answer once it is on the wire and leave the wait to a
+     apart, so an approval can be answered once it is on the wire and the wait left to a
      background thread (landing.py); {broadcast_user_op} does both in one call. Afterwards the op
      is looked up by its hash if its bundle reverted or stalled: a UserOp's signature does not
      cover the beneficiary, so someone else may have landed it first.
 """
+import dataclasses
 import os
 import threading
 from collections import Counter, deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -38,7 +43,6 @@ import rlp
 from dotenv import load_dotenv
 from eth_abi import decode as abi_decode, encode as abi_encode
 from eth_account import Account
-from eth_account.messages import encode_defunct
 from eth_account.signers.local import LocalAccount
 from eth_utils import keccak
 from web3 import Web3
@@ -50,14 +54,9 @@ from contract_errors import describe_revert_data, failed_op_index
 from contracts import load_entry_point
 from network_config import load_network_config
 from parallel import read_all
+from passkey import SoftPasskey, packed_length
 from tx_sender import Broadcast, confirm, send
-from userop import (
-    create_signed_user_op,
-    hash_user_op,
-    prepare_execute_call,
-    prepare_execute_batch_call,
-    session_nonce_read,
-)
+from userop import hash_user_op, passkey_nonce
 
 load_dotenv()
 
@@ -88,19 +87,38 @@ PENALTY_GAS_THRESHOLD = 40_000
 TX_BASE_GAS = 21_000
 ENTRY_POINT_OVERHEAD_GAS = 20_000
 
-# Storage slot holding SessionHandler's `currentSession` (low 20 bytes) packed with
-# `currentSessionValidUntil` (the 6 bytes above it), used to simulate a whole bundle without the
-# session key (see {_session_override}). A PLAIN slot, not a mapping base: the wallet authorizes one
-# key at a time, so there is no key to hash in. Never trusted blind -- the override is checked
-# against the live contract before the simulation is believed, so a layout change costs the quote
-# its precision and nothing else. Confirm with `forge inspect SessionHandler storageLayout`.
-CURRENT_SESSION_SLOT = 9
+# The storage slot of SessionHandler's `sessionValidUntil` mapping (keyId => uint48 deadline): the
+# slot (currentSession, currentSessionValidUntil) held before passkeys, kept so this number stays
+# the one to check. A key's deadline lives at keccak256(abi.encode(keyId, uint256(9))), which is
+# where the whole-bundle simulation plants a throwaway passkey (see {_session_override}). Never
+# trusted blind -- the override is checked against the live contract before the simulation is
+# believed, so a layout change costs the quote its precision and nothing else. Confirm with
+# `forge inspect SessionHandler storageLayout`.
+SESSION_VALID_UNTIL_SLOT = 9
 
-# The deadline written into the override's packed slot. Any far-future timestamp works; it only has
-# to outlast the simulated op, and a uint48 cannot hold a value this side of the year 8 million.
-# Writing 1 here (as the old boolean override did) would simulate a key that expired in 1970 and
-# every quote would die on AA22.
+# The deadline the override plants. Any far-future timestamp works; it only has to outlast the
+# simulated op, and a uint48 cannot hold a value this side of the year 8 million. The wallet returns
+# the deadline as the op's validity window, so planting a small one (1, say) would simulate a key
+# that expired in 1970 and every quote would die on AA22.
 OVERRIDE_SESSION_VALID_UNTIL = 2**47 - 1
+
+# How big a passkey's signature may be, which preVerificationGas is sized for. PVG pays for the
+# handleOps calldata, signature included, and is itself part of the hash the passkey signs -- so it
+# is fixed before the real signature exists, for the largest one a browser realistically sends:
+# authenticatorData of 37 bytes (64 here: the same padded size), and clientDataJSON of about 120
+# to 260 bytes (Chrome sometimes adds a member of its own; 384 leaves room). An approval that comes
+# back larger is refused rather than sent short: the bundler would pay the difference, and a
+# client could make that difference as large as it liked.
+SIGNATURE_AUTH_DATA_BUDGET = 64
+SIGNATURE_CLIENT_DATA_BUDGET = 384
+SIGNATURE_BUDGET = packed_length(SIGNATURE_AUTH_DATA_BUDGET, SIGNATURE_CLIENT_DATA_BUDGET)
+
+# What checking a passkey's signature adds to validation, for a node that refuses state overrides.
+# Without the override the throwaway passkey isn't planted, so the wallet turns it away before
+# checking the signature at all and the estimate misses the WebAuthn verification -- decoding,
+# base64url, two sha256 and the P-256 precompile (3,450 or 6,900 gas), measured well under this.
+# Over-sizing validation costs the user nothing: unused validation gas is refunded in full.
+P256_VERIFY_FALLBACK_GAS = 40_000
 
 # Arbitrum charges every transaction for posting its data to Ethereum, as extra gas units that the
 # EntryPoint never sees. Unless they go into preVerificationGas, the bundler pays that share of
@@ -159,12 +177,13 @@ _bundler_key_env = API_BUNDLER_ENV
 @dataclass
 class UserOpQuote:
     """
-    What one UserOp will cost, worked out WITHOUT the session key.
+    What one UserOp will cost, worked out with no user key at all.
 
     Everything a signed op needs except the signature and the nonce: the gas limits the op will
-    carry, the fee cap it will be priced at, and the simulated cost of the whole bundle. Held
-    between the moment the user is quoted and the moment they agree, so the transaction they
-    approve is priced from the same numbers it is later sent with.
+    carry, the fee cap it was priced at, and the simulated cost of the whole bundle. Held -- and,
+    once offered, frozen in its sign request -- between the moment the user is quoted and the moment
+    they approve, so the transaction they approve carries the gas it was quoted with. Its fees are
+    taken afresh when the approval page opens (finalize_user_op).
     """
 
     calldata: str            # SessionHandler.execute() calldata, hex, 0x-prefixed
@@ -231,6 +250,20 @@ class UserOpReverted(RuntimeError):
         super().__init__(message)
         self.tx_hash = tx_hash
         self.receipt = receipt
+
+
+@dataclass
+class FinalUserOp:
+    """
+    The op a user is asked to approve (finalize_user_op): complete but for its signature, and the
+    hash their passkey must sign. Nothing about it can change after the hash is shown: the
+    signature covers every field.
+    """
+
+    op: tuple            # the PackedUserOperation, with an empty signature
+    user_op_hash: bytes  # the WebAuthn challenge
+    max_fee: int         # its maxFeePerGas
+    tip: int             # its maxPriorityFeePerGas
 
 
 @dataclass
@@ -334,20 +367,24 @@ def _revert_reason(exc: Exception) -> str:
     return str(exc)
 
 
-def _estimate(w3: Web3, tx: dict, what: str) -> int:
+def _estimate(w3: Web3, tx: dict, what: str, state_override: dict | None = None) -> int:
     """
     eth_estimateGas, turning a revert into a RuntimeError that names the contract's error.
 
     A revert here is the cheapest place to learn a transaction would fail: nothing has been signed
-    with the real key and nothing has been sent, so it costs the user and the bundler nothing.
+    by the user and nothing has been sent, so it costs the user and the bundler nothing.
 
     Run against the PENDING block, whose timestamp is the next block's. Against "latest" it would
     run at the last mined block's time instead -- on a quiet chain (a fork most of all) that can be
     hours stale, so a price feed that is past its heartbeat by the time the transaction lands still
     passes the estimate, and the op is mined only to fail and charge the wallet for it.
+
+    @param state_override  Applied inside this one call only (see _session_override); None for none.
     """
     try:
-        return w3.eth.estimate_gas(tx, block_identifier="pending")
+        if state_override is None:
+            return w3.eth.estimate_gas(tx, block_identifier="pending")
+        return w3.eth.estimate_gas(tx, block_identifier="pending", state_override=state_override)
     except ContractLogicError as exc:
         raise RuntimeError(f"{what} would fail: {_revert_reason(exc)}. Nothing was sent.") from exc
 
@@ -387,43 +424,48 @@ def _estimate_verification_gas(
     w3: Web3,
     entry_point: Contract,
     session_handler: Contract,
-    sender: str,
     nonce: int,
     calldata: str,
-    probe_key: LocalAccount,
+    probe: SoftPasskey,
+    override: dict | None,
 ) -> int:
     """
-    Validation gas: validateUserOp estimated as the EntryPoint calls it, signed by a THROWAWAY key.
+    Validation gas: validateUserOp estimated as the EntryPoint calls it, signed by a THROWAWAY
+    passkey that the override plants in the wallet for this one call.
 
-    The wallet treats a signature it does not recognise as a failed check, not a revert (tryRecover
-    -> SIG_VALIDATION_FAILED), so a throwaway key walks the same path as the session key -- one
-    ecrecover, the owner read, one cold currentSession read -- at the same cost, while the op it
-    signs is worthless on chain: that key was never authorized.
+    The probe must be planted, unlike the old throwaway Ethereum key: the wallet looks a passkey's
+    deadline up BEFORE it checks the signature, and turns away a key it doesn't know at once -- far
+    cheaper than the real path, which decodes the approval, rebuilds its challenge and runs the
+    P-256 check. With the probe planted, the estimate walks that whole path at the real cost, with
+    an approval as long as the longest one budgeted for (SIGNATURE_CLIENT_DATA_BUDGET). Without
+    overrides (`override` None) the cost of the check is added instead (P256_VERIFY_FALLBACK_GAS).
 
-    The probe's gas fields are zero so the wallet's maxOpGasCost check prices it at nothing, and it
-    asks for a 1-wei prefund so the transfer to the EntryPoint is always counted. Both over-size
-    validation slightly when the real op needs no top-up, which costs the user nothing: unused
-    validation gas is refunded in full.
+    The wallet's challenge is the hash validateUserOp is handed, so the probe signs a zero hash and
+    the call names that same hash. The probe's gas fields are zero so the wallet's maxOpGasCost check
+    prices it at nothing, and it asks for a 1-wei prefund so the transfer to the EntryPoint is always
+    counted. Both over-size validation slightly when the real op needs no top-up, which costs the
+    user nothing: unused validation gas is refunded in full.
 
-    @param probe_key  The throwaway account, supplied by the caller rather than made here so the
-                      same key can be marked allowed in the whole-bundle simulation that follows.
+    @param probe     The throwaway passkey, supplied by the caller so the same one can be planted in
+                     the whole-bundle simulation that follows.
+    @param override  _session_override for the probe, or None when the node won't apply it.
     """
-    zero_hash = b"\x00" * 32
-    signature = probe_key.sign_message(encode_defunct(zero_hash)).signature
-    probe = (
-        sender, nonce, b"", bytes.fromhex(calldata[2:]),
-        b"\x00" * 32, 0, b"\x00" * 32, b"", bytes(signature),
+    probe_hash = b"\x00" * 32
+    signature = probe.contract_signature(probe_hash, pad_client_data_to=SIGNATURE_CLIENT_DATA_BUDGET)
+    op = (
+        session_handler.address, nonce, b"", bytes.fromhex(calldata[2:]),
+        b"\x00" * 32, 0, b"\x00" * 32, b"", signature,
     )
-    data = session_handler.encode_abi(
-        abi_element_identifier="validateUserOp", args=[probe, zero_hash, 1]
-    )
+    data = session_handler.encode_abi(abi_element_identifier="validateUserOp", args=[op, probe_hash, 1])
     # Unbuffered, for the same reason as the execution estimate: the caller buffers the LIMIT and
     # keeps this as what validation will really cost.
-    return _estimate(
+    gas = _estimate(
         w3,
         {"from": entry_point.address, "to": session_handler.address, "data": data},
         "Validating this transaction",
+        state_override=override,
     )
+    return gas if override is not None else gas + P256_VERIFY_FALLBACK_GAS
 
 
 def _unused_gas_penalty(gas_used: int, gas_limit: int) -> int:
@@ -433,46 +475,56 @@ def _unused_gas_penalty(gas_used: int, gas_limit: int) -> int:
     return (gas_limit - gas_used) * UNUSED_GAS_PENALTY_PERCENT // 100
 
 
-def _session_override(session_handler: Contract, key_address: str) -> dict:
+def session_valid_until_slot(key_id: str) -> bytes:
     """
-    A state override that makes the wallet treat `key_address` as its session key, unexpired.
+    Where SessionHandler keeps a passkey's deadline: keccak256(abi.encode(keyId, uint256(9))), the
+    mapping's own slot rule.
+
+    @param key_id  0x hex: keccak256(abi.encode(qx, qy)).
+    """
+    return keccak(abi_encode(["bytes32", "uint256"], [bytes.fromhex(key_id[2:]), SESSION_VALID_UNTIL_SLOT]))
+
+
+def _session_override(session_handler: Contract, key_id: str) -> dict:
+    """
+    A state override that makes the wallet approve the passkey `key_id` until far in the future.
 
     Lets the WHOLE bundle be simulated -- EntryPoint.handleOps end to end, validation and execution
-    together -- while it is still signed by a throwaway key. Without it the simulation stops at
-    AA24, so the only way to measure the real cost would be to sign with the session key and hand
-    an executable op to the node before the user has agreed to anything.
+    together -- while it is signed by a throwaway passkey. Without it the simulation stops at AA24,
+    so the only way to measure the real cost would be an op the user had already approved, handed
+    to the node before they had seen what it costs.
 
-    Writes the key and a far-future deadline TOGETHER, because they share one slot and the wallet
-    returns the deadline as the op's ERC-4337 validity window: a key with a zero deadline simulates
-    as expired and the whole bundle fails AA22 instead of being priced.
+    The wallet returns the key's deadline as the op's ERC-4337 validity window, so the deadline
+    planted is far in the future: a small one would simulate as expired and the whole bundle would
+    fail AA22 instead of being priced. The key needs no place in the wallet's list of keys
+    (getSessions): validation reads only the deadline.
 
     The override exists only inside that one eth_call: nothing is written to the chain and the key
-    is authorized nowhere else, so the op being simulated cannot be executed on chain by anybody.
-    The slot number is checked against the live contract before it is trusted (see
-    {_simulate_handle_ops}), so a storage-layout change degrades the quote rather than corrupting it.
+    is approved nowhere else, so the op being simulated cannot be executed on chain by anybody.
+    The slot is checked against the live contract before it is trusted (_override_honoured), so a
+    storage-layout change degrades the quote rather than corrupting it.
     """
-    packed = int(key_address, 16) | (OVERRIDE_SESSION_VALID_UNTIL << 160)
-    slot = CURRENT_SESSION_SLOT.to_bytes(32, "big")
+    slot = session_valid_until_slot(key_id)
     return {
         session_handler.address: {
-            "stateDiff": {"0x" + slot.hex(): "0x" + packed.to_bytes(32, "big").hex()}
+            "stateDiff": {"0x" + slot.hex(): "0x" + OVERRIDE_SESSION_VALID_UNTIL.to_bytes(32, "big").hex()}
         }
     }
 
 
-def _override_honoured(session_handler: Contract, probe_key: LocalAccount, override: dict) -> bool:
+def _override_honoured(session_handler: Contract, key_id: str, override: dict) -> bool:
     """
-    Whether the node honours `override` -- and whether CURRENT_SESSION_SLOT still points at the
-    packed (currentSession, currentSessionValidUntil) pair.
+    Whether the node honours `override` -- and whether SESSION_VALID_UNTIL_SLOT still holds the
+    sessionValidUntil mapping.
 
     A node that silently ignores overrides would otherwise fail the simulation on the signature and
-    have it reported to the user as "this transaction would fail". isSessionActive checks BOTH
-    halves of the slot, so a layout change that moved only the deadline is caught too. Needs only
-    the throwaway key, so it runs alongside the quote's first round of reads.
+    have it reported to the user as "this transaction would fail". isSessionActive(keyId) reads the
+    very slot the override writes, so a moved mapping reads zero and is caught. Needs only the
+    throwaway passkey, so it runs alongside the quote's first round of reads.
     """
     try:
         return bool(
-            session_handler.functions.isSessionActive(probe_key.address).call(state_override=override)
+            session_handler.functions.isSessionActive(bytes.fromhex(key_id[2:])).call(state_override=override)
         )
     except Exception:  # noqa: BLE001 -- any refusal means overrides are unusable here
         return False
@@ -486,7 +538,7 @@ def _simulate_handle_ops(
     override: dict,
 ) -> int | None:
     """
-    Gas for the whole handleOps bundle, with the throwaway key overridden into the allowlist.
+    Gas for the whole handleOps bundle, with the throwaway passkey planted by the override.
 
     Only called once _override_honoured has said the node will apply `override`.
 
@@ -547,8 +599,8 @@ def _pre_verification_gas(
     Counted from the handleOps transaction this op will actually ride in: its calldata at 4 gas per
     zero byte and 16 per non-zero byte, plus the fixed costs, plus the L1 data charge where the live
     chain makes one -- Arbitrum's in gas, an OP Stack chain's in wei, turned into gas at `gas_price`,
-    the base fee plus tip the EntryPoint will repay at. `op` must carry a signature of the real
-    length -- 65 bytes -- or the count is short.
+    the base fee plus tip the EntryPoint will repay at. `op` must carry a signature as long as the
+    real one may be -- SIGNATURE_BUDGET bytes, see _budget_signature -- or the count is short.
     """
     handle_ops = bytes.fromhex(
         entry_point.encode_abi(abi_element_identifier="handleOps", args=[[op], beneficiary])[2:]
@@ -604,91 +656,55 @@ def _pack_op(
     )
 
 
-def quote_user_op(
-    user_id: int,
-    session_handler: Contract,
+def _budget_signature(probe: SoftPasskey) -> bytes:
+    """
+    A passkey signature exactly SIGNATURE_BUDGET bytes long, for sizing preVerificationGas: the
+    probe's approval of a zero hash, its clientDataJSON padded to the budget. Laid out as a real
+    approval is -- the same words, with zero and non-zero bytes where a browser's would have them --
+    so the calldata counted, and an L2's L1 fee, are a real signature's at its largest.
+    """
+    return probe.contract_signature(b"\x00" * 32, pad_client_data_to=SIGNATURE_CLIENT_DATA_BUDGET)
+
+
+def _fees(
+    w3: Web3,
+    chain_name: str,
     entry_point: Contract,
-    calldata: str,
-    nonce: int,
-    bundler: LocalAccount,
-) -> UserOpQuote:
+    build: Callable[[int, int, int, bytes], tuple],
+    base_fee: int,
+    tip: int,
+    max_op_gas_cost: int,
+    call_gas: int,
+    verification_gas: int,
+    beneficiary: str,
+    signature: bytes,
+) -> tuple[int, int, int]:
     """
-    Works out what a UserOp will cost, WITHOUT the session key and without signing anything.
+    preVerificationGas, and the fee cap and tip an op is priced at, from the chain's base fee and
+    tip right now. Shared by the quote and the op built for approval, so the two price alike.
 
-    This is the half of the flow that can run before the user has agreed to the transaction. It
-    estimates both gas limits against the wallet as the EntryPoint will call it, sizes
-    preVerificationGas from the handleOps calldata the op will ride in, clamps the fee cap to what
-    the wallet's own maxOpGasCost allows, and simulates the entire bundle with a throwaway key
-    overridden into the session allowlist. Every op it touches is worthless on chain: the only key
-    that signed anything here was created for this call and is authorized nowhere.
+    A UserOp's fees are fixed at signing, so a thin cushion strands it the moment the base fee
+    climbs past the cap. The 2x base-fee headroom survives a spike of up to ~2x and is the figure
+    SessionHandler's {maxOpGasCost} was sized against. It is a cap, not a price: the EntryPoint
+    repays at min(cap, tip + base fee), the same as the outer transaction costs the bundler.
 
-    A revert anywhere in it means the transaction would fail, and is raised by name. That is the
-    cheapest possible place to find out -- before the user is asked, and before the bundler pays.
+    SessionHandler._validateUserOp prices the op at
+      (verificationGasLimit + callGasLimit + preVerificationGas) * maxFeePerGas
+    and reverts above the account's own maxOpGasCost. That revert happens during validation, where
+    the EntryPoint repays nothing, so the cap is clamped rather than let it happen.
 
-    @param user_id         The application user ID.
-    @param session_handler Bound SessionHandler contract (the UserOp sender).
-    @param entry_point     Bound EntryPoint contract.
-    @param calldata        Hex-encoded SessionHandler.execute() calldata (0x-prefixed).
-    @param nonce           The sender's current nonce, for the estimates only -- the op is built
-                           with a freshly read nonce when it is finally signed. None to read it
-                           here, alongside the other reads, which is quicker.
-    @param bundler         The account that will sign and pay for handleOps.
-    @return                The gas limits, fees and cost of the op.
-    @raises RuntimeError   If the op would fail, or the gas price exceeds what the wallet allows.
+    @param build      (preVerificationGas, fee cap, tip, signature) -> the op: PVG is counted from
+                      its calldata.
+    @param signature  A signature as long as the real one may be (_budget_signature).
+    @return           (pre_verification_gas, max_fee, tip).
+    @raises RuntimeError  If the base fee is already past what the wallet will pay for the op.
     """
-    w3, chain_id, chain_name = load_network_config(user_id)
-    probe_key = Account.create()
-    override = _session_override(session_handler, probe_key.address)
-
-    # Three rounds of reads rather than a dozen one after another: everything that needs nothing but
-    # the calldata goes out at once, then validation (which signs over the nonce), then the whole
-    # bundle (which needs every gas figure). See parallel.py.
-    reads = {
-        # First, so that when the transaction would fail, its revert is the error raised.
-        "call_gas_used": lambda: _estimate_call_gas(w3, entry_point, session_handler, calldata),
-        "block": lambda: w3.eth.get_block("latest"),
-        "tip": lambda: _priority_fee(w3),
-        "max_op_gas_cost": session_handler.functions.maxOpGasCost().call,
-        "override_honoured": lambda: _override_honoured(session_handler, probe_key, override),
-    }
-    if nonce is None:
-        reads["nonce"] = session_nonce_read(user_id, session_handler, entry_point)
-    first = read_all(reads)
-    if nonce is None:
-        nonce = first["nonce"]
-
-    # A UserOp's fees are fixed at signing, so a thin cushion strands it the moment the base fee
-    # climbs past the cap. The 2x base-fee headroom survives a spike of up to ~2x and is the figure
-    # SessionHandler's {maxOpGasCost} was sized against. It is a cap, not a price: the EntryPoint
-    # repays at min(cap, tip + base fee), the same as the outer transaction costs the bundler.
-    base_fee = first["block"]["baseFeePerGas"]
-    tip = first["tip"]
     max_fee = 2 * base_fee + tip
-
-    # Estimated first, then buffered: the op carries the LIMIT, the quote keeps the estimate.
-    call_gas_used = first["call_gas_used"]
-    verification_gas_used = _estimate_verification_gas(
-        w3, entry_point, session_handler, session_handler.address, nonce, calldata, probe_key
-    )
-    call_gas = int(call_gas_used * CALL_GAS_BUFFER)
-    verification_gas = int(verification_gas_used * VERIFICATION_GAS_BUFFER)
-
-    def build(pre_verification_gas: int, fee_cap: int, priority_fee: int, signature: bytes) -> tuple:
-        return _pack_op(
-            session_handler, calldata, nonce, call_gas, verification_gas,
-            pre_verification_gas, fee_cap, priority_fee, signature,
-        )
-
     pre_verification_gas = _pre_verification_gas(
-        w3, chain_name, entry_point, build(0, max_fee, tip, b"\x01" * 65), bundler.address, base_fee + tip
+        w3, chain_name, entry_point, build(0, max_fee, tip, signature), beneficiary, base_fee + tip
     )
-
-    # SessionHandler._validateUserOp prices the op at
-    #   (verificationGasLimit + callGasLimit + preVerificationGas) * maxFeePerGas
-    # and reverts above the account's own maxOpGasCost. That revert happens during validation, where
-    # the EntryPoint repays nothing, so clamp the cap rather than let it happen.
     op_gas = verification_gas + call_gas + pre_verification_gas
-    affordable_max_fee = first["max_op_gas_cost"] // op_gas
+    affordable_max_fee = max_op_gas_cost // op_gas
     if max_fee > affordable_max_fee:
         if affordable_max_fee <= base_fee:
             raise RuntimeError(
@@ -700,30 +716,98 @@ def quote_user_op(
         # Trim the spike cushion, not the tip: the tip is what actually buys inclusion.
         max_fee = affordable_max_fee
         tip = min(tip, max_fee)
+    return pre_verification_gas, max_fee, tip
 
-    # The whole bundle, signed by the throwaway key and simulated with that key overridden into the
-    # allowlist. Catches everything a real submission would hit -- the pause, the spending cap, the
+
+def quote_user_op(
+    user_id: int,
+    session_handler: Contract,
+    entry_point: Contract,
+    calldata: str,
+    bundler: LocalAccount,
+) -> UserOpQuote:
+    """
+    Works out what a UserOp will cost, with no user key and without anything the user has approved.
+
+    This is the half of the flow that runs before the user has agreed to the transaction. It
+    estimates both gas limits against the wallet as the EntryPoint will call them, sizes
+    preVerificationGas from the handleOps calldata the op will ride in (with a signature as long as
+    a passkey's may be), clamps the fee cap to what the wallet's own maxOpGasCost allows, and
+    simulates the entire bundle signed by a throwaway passkey the override plants in the wallet.
+    Every op it touches is worthless on chain: the only key that signed anything here was made for
+    this call and is approved nowhere.
+
+    A revert anywhere in it means the transaction would fail, and is raised by name. That is the
+    cheapest possible place to find out -- before the user is asked, and before the bundler pays.
+
+    @param user_id         The application user ID.
+    @param session_handler Bound SessionHandler contract (the UserOp sender).
+    @param entry_point     Bound EntryPoint contract.
+    @param calldata        Hex-encoded SessionHandler.execute() calldata (0x-prefixed).
+    @param bundler         The account that will sign and pay for handleOps.
+    @return                The gas limits, fees and cost of the op.
+    @raises RuntimeError   If the op would fail, or the gas price exceeds what the wallet allows.
+    """
+    w3, chain_id, chain_name = load_network_config(user_id)
+    probe = SoftPasskey()
+    override = _session_override(session_handler, probe.key_id)
+    # Any nonce key nobody has used validates, as long as it carries an op deadline: the op the user
+    # approves takes one of its own when it is built (finalize_user_op), so there is no nonce to read.
+    # The deadline is the planted key's, so neither can end the simulation early.
+    nonce = passkey_nonce(OVERRIDE_SESSION_VALID_UNTIL)
+
+    # Rounds of reads rather than a dozen one after another: everything that needs nothing but the
+    # calldata goes out at once, then validation (which needs to know whether the override is
+    # honoured), then the whole bundle (which needs every gas figure). See parallel.py.
+    first = read_all({
+        # First, so that when the transaction would fail, its revert is the error raised.
+        "call_gas_used": lambda: _estimate_call_gas(w3, entry_point, session_handler, calldata),
+        "block": lambda: w3.eth.get_block("latest"),
+        "tip": lambda: _priority_fee(w3),
+        "max_op_gas_cost": session_handler.functions.maxOpGasCost().call,
+        "override_honoured": lambda: _override_honoured(session_handler, probe.key_id, override),
+    })
+    honoured = first["override_honoured"]
+    base_fee = first["block"]["baseFeePerGas"]
+
+    # Estimated first, then buffered: the op carries the LIMIT, the quote keeps the estimate.
+    call_gas_used = first["call_gas_used"]
+    verification_gas_used = _estimate_verification_gas(
+        w3, entry_point, session_handler, nonce, calldata, probe, override if honoured else None
+    )
+    call_gas = int(call_gas_used * CALL_GAS_BUFFER)
+    verification_gas = int(verification_gas_used * VERIFICATION_GAS_BUFFER)
+
+    def build(pre_verification_gas: int, fee_cap: int, priority_fee: int, signature: bytes) -> tuple:
+        return _pack_op(
+            session_handler, calldata, nonce, call_gas, verification_gas,
+            pre_verification_gas, fee_cap, priority_fee, signature,
+        )
+
+    pre_verification_gas, max_fee, tip = _fees(
+        w3, chain_name, entry_point, build, base_fee, first["tip"], first["max_op_gas_cost"],
+        call_gas, verification_gas, bundler.address, _budget_signature(probe),
+    )
+
+    # The whole bundle, signed by the throwaway passkey and simulated with it planted in the
+    # wallet. Catches everything a real submission would hit -- the pause, the spending cap, the
     # oracle, a failing inner call -- and measures what the transaction actually burns.
     #
     # The probe signs the op's REAL userOpHash, which getUserOpHash derives from every field except
-    # the signature. Signing anything else recovers some unrelated address, which is not the key the
-    # override allows, and the whole simulation dies on AA24 instead of running.
+    # the signature: the wallet's challenge is that hash, so an approval of anything else fails the
+    # check and the simulation dies on AA24 instead of running. Its approval is as long as the
+    # longest budgeted, as the PVG above assumed.
     unsigned_probe = build(pre_verification_gas, max_fee, tip, b"")
     probe_op = build(
         pre_verification_gas, max_fee, tip,
-        bytes(
-            probe_key.sign_message(
-                encode_defunct(hash_user_op(unsigned_probe, entry_point, chain_id))
-            ).signature
+        probe.contract_signature(
+            hash_user_op(unsigned_probe, entry_point, chain_id), pad_client_data_to=SIGNATURE_CLIENT_DATA_BUDGET
         ),
     )
-    simulated_gas = (
-        _simulate_handle_ops(w3, entry_point, probe_op, bundler, override)
-        if first["override_honoured"]
-        else None
-    )
+    simulated_gas = _simulate_handle_ops(w3, entry_point, probe_op, bundler, override) if honoured else None
     # Without a simulation, size the outer transaction from the parts. It is an over-estimate of
     # the whole bundle, which costs nothing: the bundler pays for gas used, not for the limit.
+    op_gas = verification_gas + call_gas + pre_verification_gas
     outer_gas = int(simulated_gas * OUTER_GAS_BUFFER) if simulated_gas else op_gas
 
     return UserOpQuote(
@@ -756,7 +840,7 @@ def check_bundler_funds(
     and again just before broadcast against the gas the signed op actually needs.
 
     @param outer_gas  The outer transaction's gas limit, when a better figure than the quote's is
-                      available (prepare_user_op re-estimates it with the real signature).
+                      available (check_signed_user_op re-estimates it with the real signature).
     @param balance    The bundler's balance, when the caller has already read it alongside other
                       reads; read here otherwise.
     @raises RuntimeError if the bundler EOA cannot cover the outer transaction at the fee cap.
@@ -773,68 +857,98 @@ def check_bundler_funds(
         )
 
 
-def prepare_user_op(
+def finalize_user_op(
     user_id: int,
-    key_ciphertext: str,
     session_handler: Contract,
     entry_point: Contract,
     quote: UserOpQuote,
     bundler: LocalAccount,
+    op_deadline: int,
+) -> FinalUserOp:
+    """
+    Builds the op a user is about to approve with their passkey, when the approval page opens.
+
+    It carries the quote's calldata and gas limits unchanged -- so the transaction approved is the
+    one quoted -- with a fresh nonce key carrying `op_deadline` (userop.passkey_nonce) and fees taken
+    now: a quote can be minutes old, and the fee cap it was priced at may already be under the base
+    fee.
+    preVerificationGas is sized for the largest signature a browser realistically sends
+    (SIGNATURE_BUDGET), because it is part of the hash the passkey signs, and so has to be settled
+    before the signature exists. The quote's validation limit already has room for the passkey's
+    check: it was measured with an approval of that size.
+
+    @param quote    The quote it was offered from (its fees are not used).
+    @param bundler      The account the PVG is counted for; any of the process's bundlers sizes alike.
+    @param op_deadline  Unix time after which the wallet refuses the op, signed or not.
+    @return             The op and its hash, the WebAuthn challenge.
+    @raises RuntimeError  If the base fee is already past what the wallet will pay.
+    """
+    w3, chain_id, chain_name = load_network_config(user_id)
+    first = read_all({
+        "block": lambda: w3.eth.get_block("latest"),
+        "tip": lambda: _priority_fee(w3),
+        "max_op_gas_cost": session_handler.functions.maxOpGasCost().call,
+    })
+    nonce = passkey_nonce(op_deadline)
+
+    def build(pre_verification_gas: int, fee_cap: int, priority_fee: int, signature: bytes) -> tuple:
+        return _pack_op(
+            session_handler, quote.calldata, nonce, quote.call_gas, quote.verification_gas,
+            pre_verification_gas, fee_cap, priority_fee, signature,
+        )
+
+    pre_verification_gas, max_fee, tip = _fees(
+        w3, chain_name, entry_point, build, first["block"]["baseFeePerGas"], first["tip"],
+        first["max_op_gas_cost"], quote.call_gas, quote.verification_gas, bundler.address,
+        _budget_signature(SoftPasskey()),
+    )
+    op = build(pre_verification_gas, max_fee, tip, b"")
+    return FinalUserOp(op, hash_user_op(op, entry_point, chain_id), max_fee, tip)
+
+
+def check_signed_user_op(
+    user_id: int,
+    entry_point: Contract,
+    quote: UserOpQuote,
+    final: FinalUserOp,
+    signature: bytes,
+    bundler: LocalAccount,
 ) -> PreparedUserOp:
     """
-    Signs a quoted UserOp with the session key and checks it once more, ready for broadcast_user_op.
+    The approved op with its passkey signature, checked once more and sized, ready to submit.
 
-    The second half of the flow, and the first point at which an executable op exists. It carries
-    the quote's gas limits and fee cap unchanged -- so the transaction that goes out is the one the
-    user was quoted -- and re-reads only the nonce, which another op of theirs may have moved since.
+    The first point at which an executable op exists. The whole handleOps runs again with the real
+    signature: nothing has been sent yet, so this is still free, and it catches anything that moved
+    since the quote -- the price, the cap, the key itself revoked or run out -- before the bundler
+    pays. The estimate also sizes the outer transaction, and the bundler's balance is checked
+    against it.
 
-    @param user_id         The application user ID.
-    @param key_ciphertext  Vault Transit ciphertext for the session key ('vault:v1:...').
-    @param session_handler Bound SessionHandler contract (the UserOp sender).
-    @param entry_point     Bound EntryPoint contract.
-    @param quote           The quote from quote_user_op.
-    @param bundler         The account that will sign and pay for handleOps.
-    @return                The signed op, its hash, and the outer transaction's gas and fees.
-    @raises RuntimeError   If the op would fail, or the bundler cannot afford the outer
-                           transaction. Nothing is sent.
+    @param quote      The quote the op was built from: the chain and the outer gas fall back to it.
+    @param final      The op as finalize_user_op built it, and its hash.
+    @param signature  The passkey's approval, packed as the wallet reads it (passkey.contract_signature).
+    @param bundler    The account that will sign and pay for handleOps.
+    @return           The signed op, its hash, and the outer transaction's gas and fees.
+    @raises RuntimeError  If the op would fail, or the bundler cannot afford the outer transaction.
+                          Nothing is sent.
     """
-    w3, chain_id, _ = load_network_config(user_id)
-    # The three reads this needs depend on nothing but the wallet, so they go out together.
-    # from_block is read before the op exists, so the search for its receipt can only start early.
+    w3, _, _ = load_network_config(user_id)
+    signed = final.op[:-1] + (signature,)
+    data = entry_point.encode_abi(abi_element_identifier="handleOps", args=[[signed], bundler.address])
+    # The three reads this needs depend on nothing but the op, so they go out together. from_block
+    # is read before the op is sent, so the search for its receipt can only start early.
     first = read_all({
-        "nonce": session_nonce_read(user_id, session_handler, entry_point),
+        # First, so that a revert is the error raised.
+        "outer_gas": lambda: _estimate(
+            w3, {"from": bundler.address, "to": entry_point.address, "data": data}, "Submitting this transaction"
+        ),
         "from_block": lambda: w3.eth.block_number,
         "bundler_balance": lambda: w3.eth.get_balance(bundler.address),
     })
-
-    unsigned = _pack_op(
-        session_handler, quote.calldata, first["nonce"], quote.call_gas, quote.verification_gas,
-        quote.pre_verification_gas, quote.max_fee, quote.tip, b"",
-    )
-    user_op_hash = hash_user_op(unsigned, entry_point, chain_id)
-    signed = create_signed_user_op(
-        user_id=user_id, user_op=unsigned, entry_point=entry_point, key_ciphertext=key_ciphertext,
-        user_op_hash=user_op_hash,
-    )
-
-    # Re-run the whole bundle with the real signature. Nothing has been sent yet, so this is still
-    # free, and it catches anything that moved between the quote and the user agreeing to it.
-    outer_gas = _estimate(
-        w3,
-        {
-            "from": bundler.address,
-            "to": entry_point.address,
-            "data": entry_point.encode_abi(
-                abi_element_identifier="handleOps", args=[[signed], bundler.address]
-            ),
-        },
-        "Submitting this transaction",
-    )
-    outer_gas = int(outer_gas * OUTER_GAS_BUFFER)
-    fees = {"maxFeePerGas": quote.max_fee, "maxPriorityFeePerGas": quote.tip}
-
-    check_bundler_funds(user_id, quote, bundler, outer_gas, balance=first["bundler_balance"])
-    return PreparedUserOp(signed, user_op_hash, outer_gas, fees, first["from_block"])
+    outer_gas = int(first["outer_gas"] * OUTER_GAS_BUFFER)
+    priced = dataclasses.replace(quote, max_fee=final.max_fee, tip=final.tip)
+    check_bundler_funds(user_id, priced, bundler, outer_gas, balance=first["bundler_balance"])
+    fees = {"maxFeePerGas": final.max_fee, "maxPriorityFeePerGas": final.tip}
+    return PreparedUserOp(signed, final.user_op_hash, outer_gas, fees, first["from_block"])
 
 
 def find_user_op_receipt(w3: Web3, entry_point: Contract, user_op_hash: bytes, from_block: int):
@@ -880,7 +994,7 @@ def _replay_revert(w3: Web3, tx: dict, receipt) -> str:
 #   - One bad op reverts the lot. handleOps validates every op before running any, and one that
 #     fails validation reverts the whole transaction with FailedOp(index). So a bundle of several
 #     is simulated first; the op that fails is refused to its own user (NotSent) and dropped, and
-#     the rest are simulated again. A bundle of one skips this: prepare_user_op has just done it.
+#     the rest are simulated again. A bundle of one skips this: check_signed_user_op has just done it.
 #   - One fee for many ops. The EntryPoint repays each op at min(its cap, base fee + its tip), so a
 #     bundle is priced at the lowest cap and the lowest tip among its ops (_bundle_fees). An op
 #     whose cap the base fee has already passed would hold that price down for everyone, so it
@@ -1142,7 +1256,7 @@ class Lane:
                     f"still in flight. Nothing was sent; the operator has to top it up."
                 )
             return outer_gas
-        # Whittled down to one: prepare_user_op has already simulated it as a bundle of one.
+        # Whittled down to one: check_signed_user_op has already simulated it as a bundle of one.
         return batch[0].prepared.outer_gas if batch else 0
 
     def _wait(self, bundle: Bundle, cost: int, wallets: list[str]) -> None:
@@ -1213,7 +1327,7 @@ def submit_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAccount
     at once, as the only op in it, when nothing else is waiting.
 
     @param user_id   The application user ID.
-    @param prepared  The op from prepare_user_op.
+    @param prepared  The op from check_signed_user_op.
     @param bundler   The account that prepared it.
     @return          What await_user_op waits on. Everything it needs is bound here, so it can wait
                      on any thread, outside the turn's acting network (db.acting_network).
@@ -1334,63 +1448,9 @@ def await_user_op(submitted: SubmittedUserOp):
 def broadcast_user_op(user_id: int, prepared: PreparedUserOp, bundler: LocalAccount):
     """
     Sends a prepared UserOp and waits for it, on the calling thread: submit_user_op, then
-    await_user_op. For a caller with nothing to answer in between -- the unattended path.
+    await_user_op. For a caller with nothing to answer in between (the tests).
 
     @return  (tx_hash, receipt) of the transaction that executed the op.
     @raises  As submit_user_op and await_user_op do.
     """
     return await_user_op(submit_user_op(user_id, prepared, bundler))
-
-
-def send_user_op_as_session(user_id: int, key_ciphertext: str, target: str, value: int, data: bytes):
-    """
-    Orchestrates the full ERC-4337 UserOperation flow for a session key holder.
-
-    Packs (target, value, data) into ERC-7579 executionCalldata and encodes
-    SessionHandler.execute(mode, executionCalldata) as the UserOp calldata, fetches a nonce keyed to
-    the installed SpendingLimitModule, then prepares (estimates, signs, checks) and broadcasts it.
-
-    @param user_id        The application user ID.
-    @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
-    @param target         The contract address SessionHandler will call (e.g. USDC).
-    @param value          The ETH value in wei to forward with the inner call.
-    @param data           ABI-encoded inner calldata to execute on the target.
-    @return               A tuple of (tx_hash, receipt).
-    """
-    session_handler, entry_point, calldata, nonce = prepare_execute_call(user_id, target, value, data)
-    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
-
-
-def send_batch_user_op_as_session(user_id: int, key_ciphertext: str, executions: list[tuple[str, int, bytes]]):
-    """
-    Batch variant of send_user_op_as_session: submits several sub-calls as ONE atomic
-    execute(batchMode, ...) UserOp. Required for any flow that grants an approval —
-    SpendingLimitModule reverts the whole transaction if an approval survives it, so
-    [approve, spend(, approve 0)] must land together.
-
-    @param user_id        The application user ID.
-    @param key_ciphertext Vault Transit ciphertext for the session key ('vault:v1:...').
-    @param executions     List of (target_address, value_wei, calldata_bytes) triples, in order.
-    @return               A tuple of (tx_hash, receipt).
-    """
-    session_handler, entry_point, calldata, nonce = prepare_execute_batch_call(user_id, executions)
-    return _submit_user_op(user_id, key_ciphertext, session_handler, entry_point, calldata, nonce)
-
-
-def _submit_user_op(user_id: int, key_ciphertext: str, session_handler, entry_point, calldata: str, nonce: int):
-    """
-    Shared tail of the single-call and batch flows: quote, sign, then broadcast, in one go.
-
-    The unattended path. Anything the user is asked to approve first goes through quote_user_op
-    and prepare_user_op separately, so the cost can be shown between the two (see app/quotes.py).
-    """
-    with pick_bundler(user_id, session_handler.address) as bundler:
-        print("\n[1/2] Preparing transaction ...")
-        quote = quote_user_op(user_id, session_handler, entry_point, calldata, nonce, bundler)
-        check_bundler_funds(user_id, quote, bundler)
-        prepared = prepare_user_op(
-            user_id, key_ciphertext, session_handler, entry_point, quote, bundler
-        )
-        print("[2/2] Sending transaction   ...")
-        submitted = submit_user_op(user_id, prepared, bundler)
-    return await_user_op(submitted)

@@ -2,12 +2,13 @@ import { expect, test } from '@playwright/test'
 import { parseAbi, parseEther } from 'viem'
 import { sepolia } from 'viem/chains'
 import { formatTokenAmount } from '../../src/lib/format.ts'
+import { addPasskeyAuthenticator } from '../helpers.ts'
 import { installRealOwner, publicClient, requireLocalFork, signInAndDeploy } from './realSetup.ts'
 
 /*
  * The whole journey for real: sign up against the running API, prove a fresh key owns the account,
- * have that key sign and send deployWallet on the local Sepolia fork, then top the new wallet up
- * from the dashboard. Nothing is mocked. Run with: E2E_REAL=1 npx playwright test real
+ * make this device's passkey, have that key sign and send deployWallet (which approves the passkey)
+ * on the local Sepolia fork, then top the new wallet up from the dashboard. Nothing is mocked. Run with: E2E_REAL=1 npx playwright test real
  */
 
 test('a new user creates and funds a wallet on the local fork', async ({ page, request }, testInfo) => {
@@ -15,8 +16,9 @@ test('a new user creates and funds a wallet on the local fork', async ({ page, r
   test.setTimeout(180_000)
   await requireLocalFork(request)
 
+  const authenticator = await addPasskeyAuthenticator(page)
   const owner = await installRealOwner(page)
-  const account = await signInAndDeploy(page, request, owner)
+  const account = await signInAndDeploy(page, request, owner, { passkey: { deviceName: 'Test laptop' } })
   expect(owner.sentOn).toEqual([sepolia.id])
   await page.screenshot({ path: testInfo.outputPath('deployed.png') })
 
@@ -28,6 +30,9 @@ test('a new user creates and funds a wallet on the local fork', async ({ page, r
     paused: false,
     spending: { daily_limit_usd: 100, window_hours: 24 },
   })
+  // The one deploy approved the passkey this device made, under the name it was given.
+  const [credential] = await authenticator.credentials()
+  expect(wallet.session.keys).toMatchObject([{ device_name: 'Test laptop', credential_id: credential, active: true }])
 
   // And what the chain says, without the API in between.
   const code = await publicClient.getCode({ address: wallet.address })
@@ -38,6 +43,12 @@ test('a new user creates and funds a wallet on the local fork', async ({ page, r
     functionName: 'owner',
   })
   expect(onChainOwner).toBe(owner.account.address)
+  const [keyIds] = await publicClient.readContract({
+    address: wallet.address,
+    abi: parseAbi(['function getSessions() view returns (bytes32[] keyIds, uint48[] validUntils)']),
+    functionName: 'getSessions',
+  })
+  expect(keyIds).toEqual([wallet.session.keys[0].key_id])
   expect(await publicClient.getBalance({ address: wallet.address })).toBeGreaterThanOrEqual(parseEther('1'))
 
   // Topping up from the dashboard with the connected wallet.

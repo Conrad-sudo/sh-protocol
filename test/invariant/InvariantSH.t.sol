@@ -51,7 +51,7 @@ contract InvariantSH is StdInvariant, Test {
         watched[1] = address(dai);
         vm.prank(config.account);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, address(0), 0, new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0))));
 
         vm.deal(address(wallet), 100 ether);
         usdc.mint(address(wallet), 1_000_000e6);
@@ -124,22 +124,52 @@ contract InvariantSH is StdInvariant, Test {
         assertEq(wallet.getRemainingBudget(), expected, "remaining budget inconsistent with config");
     }
 
-    /// @notice The wallet's one session key and its deadline match the ghost bookkeeping.
-    function invariant_sessionKeyMatchesGhost() public view {
-        assertEq(wallet.currentSession(), handler.expectedSession(), "session key diverged");
-        assertEq(
-            wallet.currentSessionValidUntil(), handler.expectedSessionValidUntil(), "session deadline diverged"
-        );
+    /// @notice THE CAP: whatever the owner (or anyone) does, the wallet never lists more than
+    ///         {SessionHandler-MAX_SESSION_KEYS} passkeys.
+    function invariant_neverMoreThanFiveSessionKeys() public view {
+        (bytes32[] memory ids,) = wallet.getSessions();
+        assertLe(ids.length, 5, "more passkeys than the cap");
+        assertLe(ids.length, wallet.MAX_SESSION_KEYS(), "more passkeys than MAX_SESSION_KEYS");
     }
 
-    /// @notice The key and its deadline are only ever set together, so a live key can never carry a
-    ///         zero deadline -- which the EntryPoint would read as "valid forever".
-    function invariant_sessionKeyAndDeadlineAgree() public view {
-        assertEq(
-            wallet.currentSession() == address(0),
-            wallet.currentSessionValidUntil() == 0,
-            "session key and deadline out of step"
-        );
+    /// @notice The wallet's passkey list matches an independent model of its rules to the second:
+    ///         the same keys, the same deadlines, no key listed twice.
+    function invariant_sessionListMatchesGhost() public view {
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        assertEq(ids.length, handler.ghostLength(), "number of passkeys diverged");
+        for (uint256 i = 0; i < ids.length; i++) {
+            (bool found, uint48 expectedUntil) = handler.ghostFind(ids[i]);
+            assertTrue(found, "the wallet lists a passkey the model does not");
+            assertEq(untils[i], expectedUntil, "a passkey's deadline diverged");
+            for (uint256 j = i + 1; j < ids.length; j++) {
+                assertTrue(ids[i] != ids[j], "a passkey is listed twice");
+            }
+        }
+    }
+
+    /// @notice A key is listed iff its deadline is non-zero. A listed key with no deadline would be
+    ///         read by the EntryPoint as "valid forever"; a deadline without a listing would be a
+    ///         grant the owner's list does not show.
+    function invariant_listedIffDeadlineSet() public view {
+        (bytes32[] memory ids, uint48[] memory untils) = wallet.getSessions();
+        for (uint256 i = 0; i < ids.length; i++) {
+            assertGt(untils[i], 0, "a listed key carries no deadline");
+        }
+        for (uint256 n = 0; n < handler.POOL_SIZE(); n++) {
+            bytes32 id = handler.poolKeyId(n);
+            bool listed;
+            for (uint256 i = 0; i < ids.length; i++) {
+                if (ids[i] == id) listed = true;
+            }
+            assertEq(listed, wallet.sessionValidUntil(id) != 0, "listing and deadline disagree");
+        }
+    }
+
+    /// @notice Every call the handler made on the passkey list did what the model said it would:
+    ///         succeeded when it should have, reverted when it should have, and no non-owner and no
+    ///         off-curve key ever got through.
+    function invariant_passkeyCallsBehavedAsModelled() public view {
+        assertFalse(handler.violated(), handler.violation());
     }
 
     /// @notice Window bookkeeping stays sane: a positive duration and a start not in the future.

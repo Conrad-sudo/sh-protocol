@@ -26,6 +26,9 @@ def create_user(owner_addr: str | None = None) -> int:
             (owner_addr, int(time.time())),
         )
     except sqlite3.IntegrityError as e:
+        # The failed INSERT leaves this thread's write transaction open, holding the database's one
+        # write lock: every other thread's write would wait and fail "database is locked".
+        db.rollback()
         raise ValueError(f"Account already exists: {e}")
     db.commit()
     return cur.lastrowid
@@ -87,6 +90,7 @@ def link_telegram(user_id: int, chat_id: int):
     try:
         db.execute("UPDATE users SET telegram_chat_id = ? WHERE id = ?", (chat_id, user_id))
     except sqlite3.IntegrityError:
+        db.rollback()   # as in create_user: release the write lock the failed UPDATE holds
         raise ValueError("That Telegram account is already linked to another user.")
     db.commit()
 
