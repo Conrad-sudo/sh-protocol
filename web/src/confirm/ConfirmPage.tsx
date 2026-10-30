@@ -7,6 +7,7 @@ import { useNow } from '../hooks/useNow'
 import { explainError } from '../lib/errors'
 import { isPasskeyError, signWithPasskey } from '../lib/passkey'
 import { readChoice, resolveTheme, systemPrefersDark } from '../theme/themeStore'
+import { browserNav, browserUrl, phone, telegramAppUrl, telegramBrowser, whenLeft, type Phone } from './browser'
 
 /*
  * The page a Telegram quote's "Confirm with passkey" button opens: /c/<token>. Telegram may not sign
@@ -17,10 +18,18 @@ import { readChoice, resolveTheme, systemPrefersDark } from '../theme/themeStore
  * It starts the confirmation as the page loads and opens the passkey prompt at once: iOS Safari
  * allows one prompt per page load without a tap. Refused for want of a tap, the page shows one big
  * Confirm button, whose tap opens the prompt again.
+ *
+ * Telegram's own browser can't use passkeys at all, so there the page asks nothing: it reopens itself
+ * in the phone's own browser (Safari on an iPhone) and closes Telegram's behind it (./browser). Once
+ * the payment is sent or turned down on an iPhone, the page goes back to the chat in Telegram by
+ * itself; Android's Back button does that there.
  */
 
 /** A confirmation left waiting for the tap is started again this often, so its fees stay fresh. */
 const REFRESH_MS = 50_000
+
+/** How long "Sent" stays in view before the page goes back to Telegram. */
+const RETURN_MS = 1_500
 
 interface Note {
   tone: 'info' | 'error'
@@ -29,6 +38,8 @@ interface Note {
 
 type View =
   | { kind: 'loading' }
+  /** In Telegram's browser: leaving for the phone's own. `stuck` once that hasn't opened. */
+  | { kind: 'leaving'; on: Phone; stuck: boolean }
   /** The payment is shown; `step` is where its approval is. */
   | { kind: 'ready'; start: SignStart; step: 'prompting' | 'tap' | 'sending'; note?: Note }
   | { kind: 'sent'; start: SignStart; outcome: string }
@@ -119,7 +130,11 @@ function costText(cost: SignCost): string | null {
 }
 
 export function ConfirmPage({ token }: { token: string | null }) {
-  const [view, setView] = useState<View>(() => (token ? { kind: 'loading' } : { kind: 'expired' }))
+  const [inTelegram] = useState(telegramBrowser)
+  const [view, setView] = useState<View>(() => {
+    if (!token) return { kind: 'expired' }
+    return inTelegram ? { kind: 'leaving', on: inTelegram, stuck: false } : { kind: 'loading' }
+  })
   // Bumped by each attempt (the first load, a tap, Try again), so a late answer to an older one
   // changes nothing.
   const attempt = useRef(0)
@@ -144,7 +159,7 @@ export function ConfirmPage({ token }: { token: string | null }) {
    * page that asked is gone (React's development double mount unmounts it once).
    */
   const load = useEffectEvent((live: () => boolean) => {
-    if (!token) return
+    if (!token || inTelegram) return
     const mine = ++attempt.current
     void startOnce(token).then(
       start => {
@@ -177,6 +192,37 @@ export function ConfirmPage({ token }: { token: string | null }) {
       live = false
     }
   }, [token])
+
+  // In Telegram's browser: off to the phone's own, once (React's development double mount runs this
+  // twice), and Telegram's browser closes once the other is in front.
+  const hopped = useRef(false)
+  useEffect(() => {
+    if (!inTelegram) return
+    if (!hopped.current) {
+      hopped.current = true
+      browserNav.go(browserUrl(window.location.href, inTelegram))
+    }
+    return whenLeft(
+      () => browserNav.close(),
+      () => setView(current => (current.kind === 'leaving' ? { ...current, stuck: true } : current)),
+    )
+  }, [inTelegram])
+
+  // Done on a phone: this tab closes once Telegram is in front, and an iPhone goes back to it by
+  // itself (iOS asks first). Chrome won't open an app from a timer, so Android goes back with Back.
+  const done = view.kind === 'sent' || view.kind === 'declined'
+  const bot = done ? view.start.telegram_bot : null
+  useEffect(() => {
+    const on = phone()
+    if (!done || !on) return
+    const timer =
+      on === 'ios' && bot && BOT.test(bot) ? setTimeout(() => browserNav.go(telegramAppUrl(bot)), RETURN_MS) : undefined
+    const stop = whenLeft(() => browserNav.close())
+    return () => {
+      clearTimeout(timer)
+      stop()
+    }
+  }, [done, bot])
 
   // While it waits for the tap, the confirmation is built again now and then (fresh fees).
   const waiting = view.kind === 'ready' && view.step === 'tap'
@@ -281,6 +327,29 @@ function Body({
           Loading the payment…
         </p>
       )
+    case 'leaving': {
+      const ios = view.on === 'ios'
+      if (!view.stuck) {
+        return (
+          <p className="mfc-status" role="status">
+            {ios ? 'Opening Safari…' : 'Opening your browser…'}
+          </p>
+        )
+      }
+      return (
+        <>
+          <h1>{ios ? 'Open this in Safari' : 'Open this in your browser'}</h1>
+          <p>
+            {ios
+              ? "Telegram's browser can't use passkeys. Open the menu at the top, choose Open in Safari, and approve there with Face ID."
+              : "Telegram's browser can't use passkeys. Open the ⋮ menu, choose Open in Browser, and approve there with your fingerprint or screen lock."}
+          </p>
+          <a className="mfc-button" href={browserUrl(window.location.href, view.on)}>
+            {ios ? 'Open in Safari' : 'Open in browser'}
+          </a>
+        </>
+      )
+    }
     case 'expired':
       return (
         <>

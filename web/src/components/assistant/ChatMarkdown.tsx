@@ -22,7 +22,8 @@ const components: Components = {
 export function ChatMarkdown({ text }: { text: string }) {
   return (
     <div className="mf-md">
-      <Markdown remarkPlugins={[remarkGfm]} components={components}>
+      {/* Strikethrough needs "~~", as in Telegram: a quote's "~2,402 USDC" is "about", not a strike. */}
+      <Markdown remarkPlugins={[[remarkGfm, { singleTilde: false }]]} components={components}>
         {text}
       </Markdown>
     </div>

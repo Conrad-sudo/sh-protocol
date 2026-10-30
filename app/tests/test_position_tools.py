@@ -10,7 +10,6 @@ fork is test_e2e_fork.
 
 Run: make position-tools-test   (or: python app/tests/test_position_tools.py)
 """
-import asyncio
 import os
 import tempfile
 from types import SimpleNamespace
@@ -194,9 +193,10 @@ class FakeV3:
 state = {"chain": SEPOLIA, "v3": FakeV3(), "quotes": [], "positions": [], "read": []}
 
 
-def _quote_plan(runtime, plan, details="", legs=None, lp_pool=None):
+def _quote_plan(runtime, plan, details="", legs=None, lp_pool=None, slippage_bps=None):
     """Stands in for tools.quoting._quote_plan: records what would be priced and parked."""
-    state["quotes"].append({"plan": plan, "details": details, "legs": legs, "lp_pool": lp_pool})
+    state["quotes"].append({"plan": plan, "details": details, "legs": legs, "lp_pool": lp_pool,
+                            "slippage_bps": slippage_bps})
     return {"status": "NOT SENT", "details": details}
 
 
@@ -427,6 +427,7 @@ def test_quotes():
     check("a deposit counts both tokens as sent: the position that comes back has no price",
           quoted["legs"] == [("usdc", 100, SENT), ("eth", 0.0331, SENT)], str(quoted["legs"]))
     check("...and names no LP pool: positions are read off the chain", quoted["lp_pool"] is None)
+    check("...and carries its slippage, for the card", quoted["slippage_bps"] == 50, str(quoted["slippage_bps"]))
     details = quoted["details"]
     for label, text in (
         ("the range, as the user reads it", "Range: 2,849.87 – 3,150.22 USDC per ETH (the narrow option)"),
@@ -484,6 +485,7 @@ def test_quotes():
     quoted, args = state["quotes"][-1], v3.called("collect_fees")[-1]
     check("collecting fees counts nothing, and pays ETH as ETH", quoted["legs"] is None and args["native_out"] is True,
           str(args))
+    check("...and has no slippage to show", quoted["slippage_bps"] is None, str(quoted["slippage_bps"]))
     check("...its details say what is collected", "0.001 ETH and 3.2 USDC" in quoted["details"]
           and "stays as it is" in quoted["details"], quoted["details"])
 
@@ -553,7 +555,7 @@ def test_toolset_per_chain():
         shown = {t.name for t in smart_wallet_agent._tools_for_chain(every, UID)}
         check("a user with no network gets no liquidity tools", shown == others, str(sorted(shown ^ others)))
 
-        # Through the middleware itself, both ways the agent is run.
+        # Through the middleware itself, as the agent is run (invoke: the checkpointer is sync only).
         smart_wallet_agent.load_network_config = lambda _uid: (None, 56, "bsc-fork")
         middleware = smart_wallet_agent.ChainLiquidityTools()
         request = ModelRequest(model=None, messages=[], tools=every,
@@ -564,15 +566,9 @@ def test_toolset_per_chain():
             seen["sync"] = {t.name for t in req.tools}
             return "response"
 
-        async def ahandler(req):
-            seen["async"] = {t.name for t in req.tools}
-            return "response"
-
         result = middleware.wrap_model_call(request, handler)
-        asyncio.run(middleware.awrap_model_call(request, ahandler))
         check("the middleware narrows the model's tools when the agent is invoked",
               result == "response" and seen.get("sync") == others | v2, str(sorted(seen.get("sync", set()) ^ (others | v2))))
-        check("...and when it is awaited", seen.get("async") == others | v2)
         check("...without changing the request it was given", len(request.tools) == len(every))
     finally:
         smart_wallet_agent.load_network_config = original

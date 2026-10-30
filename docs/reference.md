@@ -32,7 +32,8 @@
 | `make ens-test` | Adding a contact by ENS name: a lookup can't be steered at our own network (the CCIP-Read SSRF guards) and Basenames still resolve, against a stand-in mainnet and gateway on 127.0.0.1 (`app/tests/test_ens_names.py`, offline) |
 | `make ens-live` | One read-only lookup of a real Basename through mainnet and its gateway (not part of `py-test`) |
 | `make passkeys-test` | Passkeys: an approval packed as the wallet reads it (checked against the contract's own known-answer vector), the op deadline in the nonce, making and managing passkeys, and a Telegram confirm link (`app/tests/test_passkeys.py`, offline) |
-| `make py-test` | All seventeen offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` + `chat-limits-test` + `redact-test` + `migrations-test` + `uniswap-v3-test` + `positions-test` + `position-tools-test` + `ens-test` + `passkeys-test` |
+| `make chat-memory-test` | The agent's conversation store: a turn saved once as it ends, a failed one as it stood, many at once on their own threads, two processes on one file (`app/tests/test_chat_memory.py`, offline) |
+| `make py-test` | All eighteen offline Python suites: `identity-test` + `auth-test` + `custom-tokens-test` + `history-test` + `movements-test` + `explorers-test` + `speed-test` + `bundler-test` + `telebot-test` + `chat-limits-test` + `redact-test` + `migrations-test` + `uniswap-v3-test` + `positions-test` + `position-tools-test` + `ens-test` + `passkeys-test` + `chat-memory-test` |
 | `make load-test` | How many chat turns one API process carries at once: the real API on a scratch database, a stand-in for DeepSeek answering each call in 1.5 s, and chats from many accounts at 8, 32, 64 and 128 at once (`ARGS="16 256"` for others; it raises the API's `CHAT_MAX_CONCURRENT` to the highest). Prints turns a second, turn times and the API's CPU per turn. Leaves out chain reads, which cost far more (50–200 ms a turn, measured on a mainnet fork) (`app/tests/load_test.py`; about 4 minutes, no credits, not part of `py-test`) |
 | `make e2e-test` | The full user journey against a running fork (`app/tests/test_e2e_fork.py`) — Sepolia by default, or `ARGS=arbitrum-fork`, `ARGS=base-fork` etc. On the Uniswap V3 forks (Ethereum, Sepolia, Arbitrum, Base) it swaps by every route against ETH/USDC and takes a liquidity position from its range options to its burn; on `bsc-fork`, PancakeSwap V2's swaps and LP tokens. On Arbitrum and Base it also fakes a sequencer outage. Needs `make setup-test ARGS=<that fork>` first |
 | `make agent-smoke` | A real agent conversation against the fork, checking it calls the right tools (`app/tests/test_agent_smoke.py`) — on a Uniswap V3 fork that includes adding liquidity: range options first, the user's pick, then one quote; costs DeepSeek credits |
@@ -146,7 +147,8 @@ sh-protocol/
 │   ├── agent_card.json
 │   ├── abi.py                       ← IEntryPoint, IERC20Extended, IReputationRegistry, mocks
 │   ├── tests/                       ← Python test scripts, run through make (see above)
-│   └── wallet.db                    ← not committed
+│   ├── wallet.db                    ← not committed
+│   └── wallet-chat.db               ← the agent's conversations; not committed
 ├── docs/
 │   ├── contracts.md
 │   ├── app.md
@@ -199,7 +201,7 @@ sh-protocol/
 | `requests` | HTTP client for bundler JSON-RPC calls |
 | `langchain` | Tool definitions and agent framework |
 | `langchain-deepseek` | Default DeepSeek LLM integration — swappable for any [LangChain-supported provider](https://python.langchain.com/docs/integrations/chat/) |
-| `langgraph` | Stateful agent execution with `AsyncSqliteSaver` checkpointer |
+| `langgraph` | Stateful agent execution; the conversations through `SqliteSaver`, a connection per thread (`chat_memory.py`) |
 | `python-telegram-bot[job-queue]` | Telegram Bot API client (v22 async) with APScheduler — only used by `make bot`; not needed for the CLI agent |
 | `markdown-it-py` | Parses the agent's Markdown so the Telegram bot can show it as Telegram formatting (`telegram_format.py`) |
 | `python-dotenv` | `.env` file loading |

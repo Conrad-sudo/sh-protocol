@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { SignStart } from '../api/types'
 import { PASSKEY_CREDENTIAL, SEPOLIA } from '../test/fixtures'
 import { json } from '../test/utils'
 import { b64url, installPasskeys, refused, signedCredential } from '../test/webauthn'
+import { browserNav } from './browser'
 import { ConfirmPage } from './ConfirmPage'
 import { tokenFromPath } from './token'
 
@@ -13,6 +14,28 @@ import { tokenFromPath } from './token'
 const TOKEN = 'Lk3v_Qp9-Zt2Xw8Yb4Rn6Sm1Hc5Jd7Fa'
 const EXPIRED = 'This confirmation has expired. Ask again.'
 const SENT = 'Sending — Transfer 5 USDC to sam. Waiting for the network to confirm it.'
+const IPHONE =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/23A341 Safari/604.1'
+const ANDROID =
+  'Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.0.0 Mobile Safari/537.36'
+
+/** The page on a phone: its user agent, and what Telegram's browser puts on the window, if it is that. */
+function onPhone(ua: string, telegram?: 'TelegramWebviewProxy' | 'TelegramWebview') {
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua)
+  if (telegram) vi.stubGlobal(telegram, {})
+  return {
+    go: vi.spyOn(browserNav, 'go').mockImplementation(() => {}),
+    close: vi.spyOn(browserNav, 'close').mockImplementation(() => {}),
+  }
+}
+
+/** The app sent to the background: another app is in front. */
+function putAway() {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+}
 
 /** POST /api/sign/start for the link's quote; each start gets a new sign_id, as the server's do. */
 function signStart(n: number): SignStart {
@@ -82,6 +105,9 @@ describe('ConfirmPage', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+    window.history.replaceState(null, '', '/')
   })
 
   it('shows the payment and opens the passkey prompt at once, then sends it', async () => {
@@ -224,6 +250,104 @@ describe('ConfirmPage', () => {
     expect(screen.getByText('Cancelled. Nothing was sent.')).toBeInTheDocument()
     expect(server.sent('/api/sign/cancel')[0].body).toEqual({ token: TOKEN })
     expect(server.sent('/api/sign/finish')).toEqual([])
+  })
+
+  it("leaves Telegram's browser on an iPhone for Safari, asking nothing, and closes it behind itself", async () => {
+    const browser = installPasskeys()
+    const nav = onPhone(IPHONE, 'TelegramWebviewProxy')
+    const server = stubServer()
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(screen.getByRole('status')).toHaveTextContent('Opening Safari…')
+    expect(nav.go).toHaveBeenCalledTimes(1)
+    expect(nav.go).toHaveBeenCalledWith(`x-safari-${window.location.href}`)
+    // Safari makes its own start: one made here would only be thrown away.
+    expect(server.requests).toEqual([])
+    expect(browser.get).not.toHaveBeenCalled()
+
+    putAway()
+    expect(nav.close).toHaveBeenCalledTimes(1)
+  })
+
+  it("says how to open Safari when Telegram's browser didn't hand the page over", async () => {
+    vi.useFakeTimers()
+    const nav = onPhone(IPHONE, 'TelegramWebviewProxy')
+    render(<ConfirmPage token={TOKEN} />)
+
+    act(() => {
+      vi.advanceTimersByTime(3_000)
+    })
+    expect(screen.getByRole('heading', { name: 'Open this in Safari' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open in Safari' })).toHaveAttribute('href', `x-safari-${window.location.href}`)
+    expect(nav.close).not.toHaveBeenCalled()
+  })
+
+  it('goes back to Telegram by itself once it is sent on a phone, and closes the tab', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    const nav = onPhone(IPHONE)
+    stubServer()
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(await screen.findByRole('heading', { name: /Sent/ })).toBeInTheDocument()
+    expect(nav.go).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    expect(nav.go).toHaveBeenCalledWith('tg://resolve?domain=MitfahBot')
+
+    putAway()
+    expect(nav.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays on the page once it is sent on a computer', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    const go = vi.spyOn(browserNav, 'go').mockImplementation(() => {})
+    stubServer()
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(await screen.findByRole('heading', { name: /Sent/ })).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    expect(go).not.toHaveBeenCalled()
+  })
+
+  it("leaves Telegram's browser on Android for the default browser, and says how when it can't", async () => {
+    vi.useFakeTimers()
+    window.history.replaceState(null, '', `/c/${TOKEN}`)
+    const nav = onPhone(ANDROID, 'TelegramWebviewProxy')
+    const server = stubServer()
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(screen.getByRole('status')).toHaveTextContent('Opening your browser…')
+    // An intent naming no app: Android opens the address in the default browser.
+    const intent = `intent://localhost:3000/c/${TOKEN}#Intent;scheme=http;end`
+    expect(nav.go).toHaveBeenCalledExactlyOnceWith(intent)
+    expect(server.requests).toEqual([])
+
+    act(() => {
+      vi.advanceTimersByTime(3_000)
+    })
+    expect(screen.getByRole('heading', { name: 'Open this in your browser' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open in browser' })).toHaveAttribute('href', intent)
+  })
+
+  it('stays put once it is sent on Android, where Back goes back to Telegram, and closes the tab', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    const nav = onPhone(ANDROID)
+    stubServer()
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(await screen.findByRole('heading', { name: /Sent/ })).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    // Chrome won't open an app from a timer: the link is there for a tap.
+    expect(nav.go).not.toHaveBeenCalled()
+    expect(screen.getByRole('link', { name: 'Back to Telegram' })).toHaveAttribute('href', 'https://t.me/MitfahBot')
+
+    putAway()
+    expect(nav.close).toHaveBeenCalledTimes(1)
   })
 
   it("says so on a browser that can't use passkeys", async () => {

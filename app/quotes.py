@@ -73,6 +73,12 @@ class PendingTransaction:
     # What it is meant to do, 'in' or 'out', for the History tab's groups while it is pending or if
     # it fails (tx_history.start_assistant_tx). None when the quote can't say.
     direction: str | None = None
+    # A swap's or a liquidity change's slippage tolerance, in basis points, for its card. None for
+    # anything else.
+    slippage_bps: int | None = None
+    # What it counts toward the spending limit, in USD, for its card. None for a write the limit
+    # doesn't meter (removing liquidity, a registry write).
+    charged_usd: float | None = None
     # Shown on a card for a passkey's approval, once the turn that raised it was over (offer).
     offered: bool = False
     # The user's message in the turn that raised it (AgentContext.message): the same words again
@@ -131,6 +137,8 @@ def put(
     lp_pool: dict | None = None,
     direction: str | None = None,
     request: str = "",
+    slippage_bps: int | None = None,
+    charged_usd: float | None = None,
 ) -> PendingTransaction:
     """
     Parks a quoted transaction and returns it, with the id its card will name.
@@ -154,6 +162,8 @@ def put(
         lp_pool=lp_pool,
         direction=direction,
         request=request,
+        slippage_bps=slippage_bps,
+        charged_usd=charged_usd,
     )
     with _lock:
         _prune(now)
@@ -328,6 +338,23 @@ def has_pending(user_id: int, chain_id: int) -> bool:
         _prune(time.time())
         found = [p for p in _pending.values() if p.user_id == user_id and p.chain_id == chain_id]
     return bool(_forget_closed(user_id, found))
+
+
+def drop_others(user_id: int, chain_id: int, keep: str) -> list[str]:
+    """
+    Discards every quote the user has on `chain_id` but `keep`: a new card is in front of them, and
+    an older quote left waiting would come back on the card once this one is dealt with
+    (signing.offer).
+
+    @return  The ids discarded.
+    """
+    with _lock:
+        doomed = [
+            q for q, p in _pending.items() if p.user_id == user_id and p.chain_id == chain_id and q != keep
+        ]
+        for quote_id in doomed:
+            del _pending[quote_id]
+        return doomed
 
 
 def drop_all(user_id: int, chain_id: int) -> list[str]:

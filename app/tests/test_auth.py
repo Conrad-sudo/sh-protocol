@@ -988,7 +988,7 @@ def test_chat_turn_returns_text_and_hides_failures():
     import smart_wallet_agent
 
     secret = "https://rpc.example/v2/API-KEY-must-never-leave"
-    turns = []
+    turns, saved_when = [], []
 
     class StubAgent:
         fail = False
@@ -997,8 +997,9 @@ def test_chat_turn_returns_text_and_hides_failures():
             # An empty conversation: nothing for chat() to start afresh.
             return SimpleNamespace(values={"messages": []})
 
-        def invoke(self, state, config, context):
+        def invoke(self, state, config, context, durability=None):
             turns.append((state["messages"][0].content, config["configurable"]["thread_id"], context.user_id))
+            saved_when.append(durability)
             if self.fail:
                 raise RuntimeError(f"HTTPError for url: {secret}")
             # Anthropic content blocks, not a string.
@@ -1021,6 +1022,7 @@ def test_chat_turn_returns_text_and_hides_failures():
               r.status_code == 200 and r.json() == {"reply": "You have 1.5 ETH."}, f"{r.status_code} {r.text[:160]}")
         check("the turn ran on the caller's own thread, message untouched",
               turns[-1] == ("what's my balance?", f"{body['user_id']}:11155111", body["user_id"]), str(turns))
+        check("and is saved once, as it ends", saved_when[-1] == "exit", str(saved_when))
 
         runs = len(turns)
         r = c.post("/api/chat", json={**ask, "chain_id": 999999}, headers=headers)
@@ -1122,7 +1124,7 @@ def test_chat_is_rationed():
         def get_state(self, config):
             return SimpleNamespace(values={"messages": []})
 
-        def invoke(self, state, config, context):
+        def invoke(self, state, config, context, durability=None):
             if self.block:
                 entered.set()
                 release.wait(10)

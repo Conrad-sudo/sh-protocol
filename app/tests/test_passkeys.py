@@ -374,6 +374,62 @@ def test_telegram_link():
         quotes.drop_all(user, CHAIN)
 
 
+def test_new_card_voids_older():
+    print("\n[6] a new card voids the older quotes on its chain: the old card can't come back and pay twice")
+    c = make_client()
+    body, _, _ = sign_in(c)
+    user = body["user_id"]
+    other_chain = 8453
+    try:
+        first = quotes.put(user, CHAIN, 1, "Send 1 ETH to sam", [], PRICED, {"total_usd": 0.3},
+                           request="Send 1 ETH to sam.")
+        old = signing.offer(user, CHAIN, 1, signing.TELEGRAM, telegram_chat_id=4343)
+        elsewhere = quotes.put(user, other_chain, 1, "Send 1 ETH to sam", [], PRICED, {"total_usd": 0.3})
+        signing.offer(user, other_chain, 1, signing.WEB)
+        unoffered = quotes.put(user, CHAIN, 2, "Wrap 1 ETH", [], PRICED, {"total_usd": 0.3})
+        quotes.put(user, CHAIN, 2, "Wrap 2 ETH", [], PRICED, {"total_usd": 0.3})
+        check("a turn that raises two quotes offers neither, and voids nothing",
+              signing.offer(user, CHAIN, 2, signing.WEB) is None
+              and signing.is_live(db.get_sign_request(old.request["id"])))
+
+        # The same request again, quoted afresh without confirm_transaction (2026-10-22).
+        second = quotes.put(user, CHAIN, 3, "Send 1 ETH to sam", [], PRICED, {"total_usd": 0.3},
+                            request="Send 1 ETH to sam.")
+        new = signing.offer(user, CHAIN, 3, signing.WEB)
+        check("the new card is offered", new is not None and new.pending.quote_id == second.quote_id)
+        check("the older card's sign request is cancelled, and handed back for its buttons",
+              [r["quote_id"] for r in new.superseded] == [first.quote_id]
+              and db.get_sign_request(old.request["id"])["status"] == "cancelled", str(new.superseded))
+        check("its link is dead", c.post("/api/sign/start", json={"token": old.token}).status_code == 404)
+        check("the older quotes, offered or not, are gone from the store",
+              not any(quotes.raised_in(user, CHAIN, t) for t in (1, 2)))
+        try:
+            quotes.get(user, CHAIN, unoffered.quote_id)
+            gone = False
+        except quotes.QuoteError:
+            gone = True
+        check("so confirm_transaction can't show one again either", gone)
+        check("the card waiting is the new one", quotes.offered(user, CHAIN).quote_id == second.quote_id)
+        check("another chain's card is left alone",
+              quotes.offered(user, other_chain).quote_id == elsewhere.quote_id
+              and signing.is_live(signing.find_by_quote(user, other_chain, elsewhere.quote_id)))
+
+        # Once the new card is dealt with, nothing comes back.
+        signing.cancel(new.request)
+        check("once it is dealt with, no older card comes back", quotes.offered(user, CHAIN) is None)
+    finally:
+        quotes.drop_all(user, CHAIN)
+        quotes.drop_all(user, other_chain)
+
+
+def test_is_yes():
+    print("\n[7] a typed reply that only agrees is a yes, however many agreeing words it has")
+    for typed in ("yes", "Yes.", "  ok!  ", "send it", "Yes, confirm it.", "yes please", "OK, go ahead!", "sure, do it"):
+        check(f"{typed!r} is a yes", signing.is_yes(typed))
+    for typed in ("no", "yes but 2 ETH", "send it to bob", "confirm the swap?", "don't send it", ""):
+        check(f"{typed!r} is not", not signing.is_yes(typed))
+
+
 if __name__ == "__main__":
     try:
         test_packing()
@@ -381,6 +437,8 @@ if __name__ == "__main__":
         test_registration()
         test_managing()
         test_telegram_link()
+        test_new_card_voids_older()
+        test_is_yes()
     finally:
         os.unlink(_tmp_db.name)
 

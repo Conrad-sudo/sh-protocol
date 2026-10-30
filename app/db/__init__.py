@@ -31,6 +31,9 @@ from dotenv import load_dotenv
 load_dotenv()
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.getenv("APP_DB_PATH") or os.path.join(_APP_DIR, "wallet.db")
+# The agent's conversations (chat_memory.ChatMemory): a file of their own beside it, wallet-chat.db,
+# so their writes never wait for wallet.db's write lock. The API and the Telegram bot share both.
+CHAT_DB_PATH = os.path.splitext(DB_PATH)[0] + "-chat.db"
 
 _local = threading.local()
 
@@ -41,8 +44,8 @@ def get_db() -> sqlite3.Connection:
 
     WAL and busy_timeout are set per connection (WAL is a persistent property of the FILE, but
     setting it is harmless and idempotent; busy_timeout is per connection and must be set every
-    time). Both matter now that FastAPI serves requests from a threadpool while the LangGraph
-    checkpointer writes the same file: the default journal mode lets one writer block every
+    time). Both matter because FastAPI serves requests from a threadpool while the Telegram bot,
+    another process, writes the same file: the default journal mode lets one writer block every
     reader, and the default busy_timeout of 0 turns any overlap straight into
     "database is locked" instead of a short wait.
     """

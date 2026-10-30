@@ -229,8 +229,8 @@ def chat_history(
     an old session key's ciphertext). See smart_wallet_agent.get_history.
     The thread is shared with Telegram, so messages sent there appear too.
 
-    A plain `def` for the same reason as post_chat: the checkpointer's sync read must not run on the
-    event loop.
+    A plain `def` for the same reason as post_chat: the checkpointer's read is sync, and must not
+    hold up the event loop.
 
     @param chain_id  The chain whose conversation to read.
     @param limit     How many of the most recent messages to return (1-200).
@@ -250,8 +250,8 @@ def delete_chat_history(chain_id: int | None = None, user_id: int = Depends(get_
     there. Quotes raised in it are discarded with it. The transaction history is kept: it records
     what happened on chain, which deleting a chat can't undo.
 
-    A plain `def`: deleting a checkpoint thread is a sync call into the async checkpointer, which
-    works only off the event loop.
+    A plain `def`: deleting a checkpoint thread is a sync write, which must not hold up the event
+    loop.
 
     @param chain_id  The chain whose conversation to delete; every chain's when omitted.
     @return          {"status": "cleared", "chain_ids": [...]}.

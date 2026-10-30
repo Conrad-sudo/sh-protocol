@@ -77,8 +77,10 @@ NO_PASSKEY = "No passkey on this device is approved for this wallet."
 YES_REPLY = "Tap Confirm and approve with your passkey."
 
 # A typed reply that only agrees (spec 6). While a card is waiting, it gets YES_REPLY and the card
-# again -- never a model call, which could do nothing more: no tool can send.
-_YES = re.compile(r"^(yes|y|yeah|yep|ok|okay|confirm|send|send it|go|go ahead|do it|sure)[.!\s]*$", re.IGNORECASE)
+# again -- never a model call, which could do nothing more: no tool can send. One or more agreeing
+# words in a row count ("Yes, confirm it.", "ok send it please"); any other word makes it not a yes.
+_AGREE = r"(?:yes|y|yeah|yep|ok|okay|sure|please|confirm(?: it)?|send(?: it)?|go(?: ahead)?|do it)"
+_YES = re.compile(rf"^{_AGREE}(?:[\s,.!]+{_AGREE})*[.!\s]*$", re.IGNORECASE)
 
 
 class Expired(Exception):
@@ -110,8 +112,9 @@ def token_hash(token: str) -> str:
 def freeze(pending: quotes.PendingTransaction) -> str:
     """
     A quote as its sign request keeps it: everything the approval page shows and the send needs --
-    the action, the executions, the cost, a deposit's pool, its direction, and the priced op
-    (bundler.UserOpQuote) whose calldata and gas limits the approved op carries.
+    the action, the executions, the cost, a deposit's pool, its direction, the slippage and limit
+    figures its card shows, and the priced op (bundler.UserOpQuote) whose calldata and gas limits
+    the approved op carries.
     """
     return json.dumps({
         "action": pending.action,
@@ -119,6 +122,8 @@ def freeze(pending: quotes.PendingTransaction) -> str:
         "cost": pending.cost,
         "lp_pool": pending.lp_pool,
         "direction": pending.direction,
+        "slippage_bps": pending.slippage_bps,
+        "charged_usd": pending.charged_usd,
         "quote": dataclasses.asdict(pending.quote),
     })
 
@@ -145,6 +150,9 @@ class Offer:
     pending: quotes.PendingTransaction
     request: dict        # its sign request (db.sign_requests row)
     token: str | None    # a Telegram card's link token, new with this offer; None on the web
+    # The sign requests of the user's older cards on the chain that this one voided (offer), so a
+    # Telegram caller can take their buttons off.
+    superseded: tuple[dict, ...] = ()
 
 
 def open_request(pending: quotes.PendingTransaction, origin: str, telegram_chat_id: int | None = None) -> Offer | None:
@@ -173,10 +181,25 @@ def offer(user_id: int, chain_id: int, turn_id: int | None, origin: str,
     """
     The card a turn ends with: the quote it offers (quotes.offer), with its sign request.
 
+    One card at a time per chain: every other quote the user has waiting there is voided, its sign
+    request cancelled, so its link and its card can no longer approve it. Otherwise an older quote
+    comes back on the card once this one is dealt with. 2026-10-22: a request asked again was quoted
+    afresh without confirm_transaction (so quotes.repeats never voided the first quote); once the
+    new card was sent, the web chat showed the first one again, and approving it would have paid
+    twice.
+
     @return  None when the turn offers no quote.
     """
     pending = quotes.offer(user_id, chain_id, turn_id)
-    return open_request(pending, origin, telegram_chat_id) if pending is not None else None
+    offered = open_request(pending, origin, telegram_chat_id) if pending is not None else None
+    if offered is None:
+        return None
+    quotes.drop_others(user_id, chain_id, keep=pending.quote_id)
+    superseded = tuple(
+        r for r in get_open_sign_requests(user_id, chain_id)
+        if r["quote_id"] != pending.quote_id and cancel_sign_request(r["id"])
+    )
+    return dataclasses.replace(offered, superseded=superseded)
 
 
 def show_again(request: dict) -> str | None:

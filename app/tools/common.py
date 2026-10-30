@@ -6,6 +6,7 @@ There is no session key here any more: the server holds none. A transaction is a
 user's passkey on their own device (signing.py), and which passkeys the wallet approves is read off
 the wallet itself where a check needs it (tools.checks).
 """
+import re
 from typing import NamedTuple
 
 from langchain_core.tools import ToolException
@@ -182,6 +183,44 @@ def _token_label(user_id: int, token: str) -> str:
             return listed["ticker"].upper()
     custom = _get_custom_token(user_id, chain_id, address)
     return custom["ticker"].upper() if custom else address
+
+
+_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\b")
+# "1 of 0x…" or "1 of the native asset", as the packages write an amount of a token.
+_AMOUNT_OF = re.compile(r"(\d[\d.,]*) of (0x[0-9a-fA-F]{40}\b|the native asset)")
+_NATIVE = re.compile(r"\b(?:the )?native asset\b")
+
+
+def _with_tickers(user_id: int, text: str) -> str:
+    """
+    A package's description of a call, with its tokens named the way the user knows them: "Swap 1
+    ETH for at least 2390.7 USDC" rather than "Swap 1 of the native asset for at least 2390.7 of
+    0x8335…".
+
+    Only a listed token or one the user added is named, from those two lists -- an added token can't
+    take a listed ticker or the native asset's name (custom_tokens) -- so the name is still written
+    by code, never by the model. Any other address (a recipient, a router) stays as it is.
+    """
+    _, chain_id, _ = load_network_config(user_id)
+    native = get_native_asset_ticker(chain_id)
+    tickers = {t["address"].lower(): t["ticker"].upper() for t in _get_listed_tokens(chain_id)}
+
+    def name(token: str) -> str:
+        if _NATIVE.fullmatch(token):
+            return native
+        if token.lower() not in tickers:
+            custom = _get_custom_token(user_id, chain_id, token)
+            tickers[token.lower()] = custom["ticker"].upper() if custom else token
+        return tickers[token.lower()]
+
+    def amount_of(match: re.Match) -> str:
+        token = name(match[2])
+        # "5 of 0x…" stays as it was for an address nobody named.
+        return match[0] if token == match[2] else f"{match[1]} {token}"
+
+    text = _AMOUNT_OF.sub(amount_of, text)
+    text = _NATIVE.sub(native, text)
+    return _ADDRESS.sub(lambda m: name(m[0]), text)
 
 
 def _refuse_same_token(user_id: int, a: str, b: str, why: str) -> None:

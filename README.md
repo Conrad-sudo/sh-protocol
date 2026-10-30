@@ -23,7 +23,7 @@ The reference application is a **web app** in `web/`: sign in with a browser wal
 
 ## Demo
 
-[![AI agent powered smart wallet — demo video](https://img.youtube.com/vi/OIOLdvbGoNQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=OIOLdvbGoNQ)
+[![AI agent powered smart wallet — demo video](https://img.youtube.com/vi/iB2V5SKfn6Y/maxresdefault.jpg)](https://www.youtube.com/shorts/iB2V5SKfn6Y)
 
 ---
 

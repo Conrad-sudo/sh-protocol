@@ -89,8 +89,8 @@ _conn.commit()
 # Every turn the assistant was asked for, as (user_id, chain_id, text, network).
 turns: list[tuple] = []
 reply_for_turns = {"text": "Done."}
-# What the next turns quote, as {"action", "cost"}: each turn puts every one in the quote store under
-# its own id, as the transaction tools would.
+# What the next turns quote, as {"action", "cost"} and, for a swap, "slippage_bps" and "charged_usd":
+# each turn puts every one in the quote store under its own id, as the transaction tools would.
 quotes_for_turns: list[dict] = []
 _turn_ids = itertools.count(10_000)
 
@@ -99,7 +99,8 @@ def fake_chat(user_id, chain_id, text, network):
     turns.append((user_id, chain_id, text, network))
     turn_id = next(_turn_ids)
     for q in quotes_for_turns:
-        quotes.put(user_id, chain_id, turn_id, q["action"], [], PRICED, q["cost"])
+        quotes.put(user_id, chain_id, turn_id, q["action"], [], PRICED, q["cost"],
+                   slippage_bps=q.get("slippage_bps"), charged_usd=q.get("charged_usd"))
     return reply_for_turns["text"], turn_id
 
 
@@ -125,7 +126,8 @@ class FakeBot:
     """
     The bot as handlers and jobs see it. `errors` maps a chat to what sending to it raises. What it
     sends lands in `sent` as (chat, text), and the options it was sent with in `options`. The cards
-    it took the buttons off land in `unbuttoned` as (chat, message id).
+    it took the buttons off land in `unbuttoned` as (chat, message id), and the messages it
+    rewrote in `edited` as (chat, message id, text).
     """
 
     def __init__(self, errors: dict | None = None):
@@ -133,6 +135,7 @@ class FakeBot:
         self.sent: list[tuple[int, str]] = []
         self.options: list[dict] = []
         self.unbuttoned: list[tuple[int, int]] = []
+        self.edited: list[tuple[int, int, str]] = []
 
     async def send_message(self, chat_id, text, **options):
         if chat_id in self.errors:
@@ -143,6 +146,9 @@ class FakeBot:
 
     async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None, **_):
         self.unbuttoned.append((chat_id, message_id))
+
+    async def edit_message_text(self, text, chat_id, message_id, **_):
+        self.edited.append((chat_id, message_id, text))
 
     async def send_chat_action(self, chat_id, action):
         pass
@@ -1324,7 +1330,7 @@ def _card_options(i: int) -> list[tuple[str, str]]:
     return buttons(reply_options[i]) if i < len(reply_options) else []
 
 
-CARD_TAIL = "Tap “Confirm with passkey”, then approve with Face ID, your fingerprint or your PIN."
+CARD_TAIL = "Tap “Confirm with passkey”, then approve with Face ID, fingerprint or PIN."
 
 
 def _card_text(action: str, fees: str, minutes: int = 5) -> str:
@@ -1337,17 +1343,16 @@ def _request_for(link: str) -> dict:
 
 
 def test_quote_card():
-    print("\n[14] a turn that raised one quote is followed by a card the code writes: a passkey link and Cancel")
+    print("\n[14] a turn that raised one quote is answered by a card the code writes alone: a passkey link and Cancel")
     user = make_user(8201, wallet_chains=(BASE,))
     db.save_contact(user, "Sam", SAM)
     action = f"Transfer 10 USDC to {SAM}"
     try:
         quotes_for_turns[:] = [{"action": action, "cost": {"total_usd": 0.3512, "max_total_usd": 0.5}}]
         replies, _ = run(telebot.start_chat, 8201, "send 10 usdc to sam")
-        check("the reply, then the card", len(replies) == 2 and replies[0] == "<b>Base</b>\n\nDone.", str(replies))
-        check("the card says what the passkey approves, where, for what, for how long, and how",
-              replies[1] == _card_text(action, "$0.35"), replies[1])
-        card = _card_options(1)
+        check("the card says what the passkey approves, where, for what, for how long, and how -- and the "
+              "model's reply isn't sent", replies == [_card_text(action, "$0.35")], str(replies))
+        card = _card_options(0)
         quote_id = card[1][1].rsplit(":", 1)[1] if len(card) == 2 else ""
         link = card[0][1] if card else ""
         check("with a link to the approval page and a Cancel naming the network and the quote",
@@ -1355,7 +1360,7 @@ def test_quote_card():
               and card[1] == ("✖️ Cancel", f"q:no:{BASE}:{quote_id}") and quotes._pending[quote_id].action == action,
               str(card))
         check("Cancel within Telegram's 64 bytes", len(card[1][1].encode()) <= 64 if card else False)
-        check("sent as HTML", reply_options[1].get("parse_mode") == ParseMode.HTML, str(reply_options[1]))
+        check("sent as HTML", reply_options[0].get("parse_mode") == ParseMode.HTML, str(reply_options[0]))
         request = _request_for(link)
         check("the link names this quote's sign request, on Base, offered in Telegram, frozen as quoted",
               request["quote_id"] == quote_id and request["chain_id"] == BASE and request["origin"] == "telegram"
@@ -1367,25 +1372,25 @@ def test_quote_card():
 
         turns.clear()
         replies, _ = run(telebot.send_cmd, 8201, args=["10", "USDC", "to", "Sam"])
-        check("/send gets its card the same way", len(replies) == 2 and replies[1].startswith("<b>Confirm on Base?</b>"),
+        check("/send gets its card the same way", len(replies) == 1 and replies[0].startswith("<b>Confirm on Base?</b>"),
               str(replies))
 
         quotes_for_turns[:] = [{"action": "Transfer 1 <b>[x](https://evil.example)</b> to 0xabc",
                                 "cost": {"total_usd": 0.004}}]
         replies, _ = run(telebot.start_chat, 8201, "send 1 x to 0xabc")
         check("the action is escaped, and a fee under a cent says so",
-              replies[1] == _card_text("Transfer 1 &lt;b&gt;[x](https://evil.example)&lt;/b&gt; to 0xabc", "under $0.01"),
-              replies[1])
+              replies == [_card_text("Transfer 1 &lt;b&gt;[x](https://evil.example)&lt;/b&gt; to 0xabc", "under $0.01")],
+              str(replies))
         quotes_for_turns[:] = [{"action": "Wrap 1 ETH", "cost": {"usd_unavailable": "no price", "total_native": 0.00021,
                                                                  "native_asset": "ETH"}}]
         replies, _ = run(telebot.start_chat, 8201, "wrap 1 eth")
         check("fees the quote couldn't price in USD are in the coin",
-              "\nFees: 0.00021 ETH · good for 5 minutes\n" in replies[1], replies[1])
+              "\nFees: 0.00021 ETH · good for 5 minutes\n" in replies[0], str(replies))
 
         replies, _ = run(telebot.start_chat, 8201, "wrap 1 eth", refuse_links=True)
-        card = _card_options(1)
+        card = _card_options(0)
         check("a link Telegram refuses on a button (a localhost web app) goes in the text; Cancel stays",
-              len(replies) == 2 and f"\n\nApprove it here: {WEB_APP}/c/" in replies[1]
+              len(replies) == 1 and f"\n\nApprove it here: {WEB_APP}/c/" in replies[0]
               and [label for label, _ in card] == ["✖️ Cancel"], f"{replies} {card}")
 
         quotes_for_turns[:] = [{"action": "one", "cost": {"total_usd": 1}}, {"action": "two", "cost": {"total_usd": 1}}]
@@ -1416,6 +1421,57 @@ def test_quote_card():
             db.cancel_sign_request(request["id"])
 
 
+def test_slippage_card():
+    print("\n[14a] a swap's card shows its slippage and limit; a new slippage cancels it for a new card")
+    user = make_user(8211, wallet_chains=(BASE,))
+    swap = "Add liquidity: 728.6605884068368 USDC and 1.0023691725439312 BNB"
+    raised = {"action": swap, "cost": {"total_usd": 0.512}, "slippage_bps": 50, "charged_usd": 1465.25}
+    try:
+        quotes_for_turns[:] = [raised]
+        replies, _ = run(telebot.start_chat, 8211, "add liquidity with 1 bnb and all my usdc")
+        check("one message: the action, the slippage, the fees, what the limit counts, how to approve, and that "
+              "the slippage can change",
+              replies == [f"<b>Confirm on Base?</b>\n{swap}\nSlippage: 0.5%\nFees: $0.51 · good for 5 minutes\n"
+                          f"Counts towards your limit: $1,465.25\n{CARD_TAIL}\n"
+                          f"Tell me if you want to change the slippage."], str(replies))
+        first = _request_for(_card_options(0)[0][1])
+
+        quotes_for_turns.clear()
+        replies, _ = run(telebot.start_chat, 8211, "what's the price of BNB?")
+        check("a turn with no quote is the model's reply, and the card waiting is left alone",
+              replies == ["<b>Base</b>\n\nDone."] and last_bot["bot"].edited == []
+              and db.get_sign_request(first["id"])["status"] == "open", f"{replies} {last_bot['bot'].edited}")
+
+        quotes_for_turns[:] = [{**raised, "slippage_bps": 100}]
+        replies, _ = run(telebot.start_chat, 8211, "make the slippage 1%")
+        check("a new slippage: only the new card", len(replies) == 1 and "\nSlippage: 1%\n" in replies[0], str(replies))
+        check("the old one's quote is cancelled, so its link approves nothing",
+              db.get_sign_request(first["id"])["status"] == "cancelled")
+        check("and its card now says so, its buttons gone",
+              last_bot["bot"].edited == [(8211, first["telegram_message_id"], f"<b>Cancelled on Base</b>\n{swap}\nSlippage: 0.5%")],
+              str(last_bot["bot"].edited))
+        second = _request_for(_card_options(0)[0][1])
+
+        def cancelling_turn(user_id, chain_id, text, network):
+            # The model's cancel_transaction, with nothing quoted in its place.
+            for request in db.get_open_sign_requests(user_id, chain_id):
+                db.cancel_sign_request(request["id"])
+            return "Cancelled. Nothing was sent.", next(_turn_ids)
+
+        telebot.chat_turn = cancelling_turn
+        replies, _ = run(telebot.start_chat, 8211, "actually, don't")
+        check("a quote the model cancels: its reply, and the card marked cancelled",
+              replies == ["<b>Base</b>\n\nCancelled. Nothing was sent."]
+              and [e[1] for e in last_bot["bot"].edited] == [second["telegram_message_id"]]
+              and last_bot["bot"].edited[0][2].startswith("<b>Cancelled on Base</b>\n"), f"{replies} {last_bot['bot'].edited}")
+    finally:
+        telebot.chat_turn = fake_chat
+        quotes_for_turns.clear()
+        quotes.drop_all(user, BASE)
+        for request in db.get_open_sign_requests(user, BASE):
+            db.cancel_sign_request(request["id"])
+
+
 def test_typed_yes():
     print("\n[14b] a typed “yes” while a card waits gets the card again, with a new link, and no turn")
     user = make_user(8251, wallet_chains=(BASE,))
@@ -1431,7 +1487,7 @@ def test_typed_yes():
         quotes_for_turns[:] = [{"action": "Wrap 1 ETH", "cost": {"total_usd": 0.2}}]
         run(telebot.start_chat, 8251, "wrap 1 eth")
         quotes_for_turns.clear()
-        first_link = _card_options(1)[0][1]
+        first_link = _card_options(0)[0][1]
         first = _request_for(first_link)
 
         turns.clear()
@@ -1657,6 +1713,7 @@ if __name__ == "__main__":
         test_read_commands()
         test_send_and_swap()
         test_quote_card()
+        test_slippage_card()
         test_typed_yes()
         test_quote_buttons()
         test_cancel_command()

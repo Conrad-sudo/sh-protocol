@@ -348,6 +348,22 @@ def _migrate_passkeys(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_chat_to_own_file(db: sqlite3.Connection):
+    """
+    The agent's conversations move out of wallet.db into a file of their own, wallet-chat.db
+    (2026-10-26, chat_memory.py), so their writes no longer wait for this file's one write lock.
+
+    LangGraph's two tables are dropped here, conversations and all, rather than copied: each one
+    starts afresh after every transaction anyway (smart_wallet_agent._start_fresh_if_due), and
+    the History tab, which is what lasts, stays. Everyone's next message starts a new one.
+    """
+    db.executescript("""
+        DROP TABLE IF EXISTS checkpoints;
+        DROP TABLE IF EXISTS writes;
+    """)
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -650,6 +666,7 @@ MIGRATIONS = (
     _migrate_telegram_chain,         # 6: the network chosen in the one Telegram bot
     _migrate_app_feedback,           # 7: the bot's /feedback
     _migrate_passkeys,               # 8: passkeys instead of server-held session keys
+    _migrate_chat_to_own_file,       # 9: the agent's conversations in wallet-chat.db
 )
 
 

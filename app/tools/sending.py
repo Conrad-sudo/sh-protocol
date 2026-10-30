@@ -134,7 +134,7 @@ class Sending:
     @property
     def text(self) -> str:
         """What to tell the user while it waits."""
-        return f"Sending — {self.action}. Waiting for the network to confirm it."
+        return f"Sending — {self.action}\nWaiting for the network to confirm it."
 
 
 def submit_signed(approved) -> Sending:
@@ -210,7 +210,7 @@ def settle_quoted(sending: Sending) -> str:
     Waits for a submitted transaction to land, and writes the outcome into the History tab. Needs
     no acting network: everything it reads was bound when the transaction was submitted.
 
-    @return  "Sent — <action>. Tx hash: `0x…`", then what is left of the spending limit.
+    @return  "✅ Sent — <action>", then what is left of the spending limit and the hash, a line each.
     @raises ToolException  If it never executed, or executed and failed.
     @raises TimeoutError   If neither it nor a rival's copy landed in time; its row stays pending.
     """
@@ -234,7 +234,7 @@ def settle_quoted(sending: Sending) -> str:
     positions.forget(sending.chain_id, session_handler.address)
     if not succeeded:
         raise ToolException(f"UserOp failed! tx: {Web3.to_hex(tx_hash)}")
-    return f"Sent — {sending.action}. Tx hash: `{Web3.to_hex(tx_hash)}`{_budget_left(budget)}"
+    return f"✅ Sent — {sending.action}{_budget_left(budget)}\nTx hash: {Web3.to_hex(tx_hash)}"
 
 
 def _remember_lp_pool(user_id: int, chain_id: int, pool: dict) -> None:
@@ -253,7 +253,7 @@ def _remember_lp_pool(user_id: int, chain_id: int, pool: dict) -> None:
 
 def _budget_left(budget) -> str:
     """
-    What is left of the spending limit, as a sentence to end a sent transaction's result with.
+    What is left of the spending limit, as a line of a sent transaction's result.
 
     Empty if it can't be read: the transaction has gone out, and failing to read what's left must
     not turn that into an error.
@@ -266,7 +266,7 @@ def _budget_left(budget) -> str:
         print(f"[settle_quoted] sent, but could not read the remaining budget: {type(e).__name__}")
         return ""
     # Below zero when the owner lowered the limit under what was already spent: nothing is left.
-    return f". Spending limit left this period: ${max(remaining, 0) / WEI_PER_ETH:,.2f}"
+    return f"\nSpending limit left this period: ${max(remaining, 0) / WEI_PER_ETH:,.2f}"
 
 
 @tool

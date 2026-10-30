@@ -301,7 +301,7 @@ test('a quoted transaction gets a card, and one tap sends it once a passkey appr
 
   const log = page.getByRole('log', { name: 'Conversation with Mitfah' })
   await expect(log.getByText('✅ Confirm')).toBeVisible()
-  await expect(log.getByText(`Sending — ${action}.`, { exact: false })).toBeVisible()
+  await expect(log.getByText(`Sending — ${action}`, { exact: false })).toBeVisible()
   await expect(card).toHaveCount(0)
   // Answered once on the wire: the chat is free again while the line below follows the send.
   await input.fill('thanks')

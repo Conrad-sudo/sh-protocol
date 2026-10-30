@@ -106,10 +106,13 @@ async def run_turn(user_id: int, chain_id: int, network: str, thread: str, text:
     started = time.monotonic()
     turn_id = swa._next_turn_id()
     with acting_network(user_id, network, chain_id):
-        result = await swa.agent.ainvoke(
+        # On a thread, as chat() runs: the checkpointer is sync only. The context goes with it.
+        result = await asyncio.to_thread(
+            swa.agent.invoke,
             {"messages": [HumanMessage(content=text)]},
             config={"configurable": {"thread_id": thread}},
             context=AgentContext(user_id=user_id, turn_id=turn_id),
+            durability=swa.DURABILITY,
         )
     seconds = time.monotonic() - started
     # The checkpointer hands back the whole thread; this turn starts at its own HumanMessage.
@@ -340,7 +343,7 @@ async def main():
     exchange = get_exchange(chain_id)
     lp_usdc = ready_liquidity_scenario(user_id, chain_id, chain_name) if exchange == "uniswap-v3" else ""
 
-    await swa.open_checkpointer()
+    swa.open_checkpointer()
     swa.init_agent()
 
     run_id = int(time.time())
@@ -354,7 +357,7 @@ async def main():
             # A distinct thread per scenario, so none of them inherits another's context. The
             # multi-turn scenarios deliberately share one -- a quote and its confirmation have to
             # be in the same conversation, in that order. The run id keeps a rerun from inheriting
-            # the previous run's history, which the checkpointer keeps in wallet.db.
+            # the previous run's history, which the checkpointer keeps in wallet-chat.db.
             thread = f"smoke-{scenario['id']}-{run_id}:{chain_id}"
             turns = []
             card = None   # the card on screen: the newest one a turn offered
@@ -374,7 +377,7 @@ async def main():
                 turns.append(turn)
             traces.append({**scenario, "turns": turns})
     finally:
-        await swa.close_checkpointer()
+        swa.close_checkpointer()
 
     with open(TRACE_PATH, "w") as f:
         json.dump(traces, f, indent=2)
@@ -396,7 +399,7 @@ async def main():
         # to -- and the write tool must not be called twice, which would mean the agent re-quoted
         # instead of showing what it was holding.
         approvals = [turn["reply"] for turn in t["turns"] if turn["prompt"] == APPROVE]
-        if approvals and not all(reply.startswith("Sent") for reply in approvals):
+        if approvals and not all(reply.startswith("✅ Sent") for reply in approvals):
             problems.append(f"{t['id']}: the passkey's approval didn't send it: {approvals}")
         if t["id"] in ("transfer", "swap", "buy_exact"):
             writes = [n for n in all_tools if n in QUOTING_TOOLS]

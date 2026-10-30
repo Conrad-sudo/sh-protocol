@@ -411,7 +411,7 @@ def test_assistant_sends_are_recorded_before_they_go():
         check("described by the quote's code-written action", newest["action"] == "Transfer 5 USDC to 0x5A3…", newest["action"])
         check("listed as outgoing from the start, by the quote's direction", newest["direction"] == "out", str(newest["direction"]))
         check("the reply carries the same 0x-prefixed hash", "0x" + "22" * 32 in reply, reply)
-        check("...and what is left of the spending limit", reply.endswith("Spending limit left this period: $123.45"), reply)
+        check("...and what is left of the spending limit", "\nSpending limit left this period: $123.45\nTx hash: 0x" in reply, reply)
 
         outcome["next"] = "reverted"
         try:
@@ -499,16 +499,16 @@ def test_assistant_sends_are_recorded_before_they_go():
         finally:
             tx_history.add_transaction = saved_add
         check("a history that can't be written never turns a sent payment into an error",
-              reply.startswith("Sent —"), reply)
+              reply.startswith("✅ Sent —"), reply)
 
         budget_left["value"] = RuntimeError("rpc down")
         reply = _send(user, "q6")
         check("a budget that can't be read never turns a sent payment into an error either",
-              reply.startswith("Sent —") and "Spending limit" not in reply, reply)
+              reply.startswith("✅ Sent —") and "Spending limit" not in reply, reply)
         budget_left["value"] = -5 * 10**18
         reply = _send(user, "q7")
         check("a limit lowered below what was spent shows nothing left, not a negative figure",
-              reply.endswith("Spending limit left this period: $0.00"), reply)
+              "\nSpending limit left this period: $0.00\nTx hash: 0x" in reply, reply)
     finally:
         restore()
 
@@ -590,7 +590,7 @@ def test_deposits_put_their_pool_on_the_dashboard():
         check("a plain send remembers no pool", seen["pools"] == [] and db.get_lp_tokens(user, CHAIN) == [])
 
         reply = _send(user, "q2", **deposit)
-        check("the deposit went out as usual", reply.startswith("Sent —"), reply)
+        check("the deposit went out as usual", reply.startswith("✅ Sent —"), reply)
         check("its pool was saved before it was broadcast, in the pool's own order (lower address first)",
               [(p["token0"], p["ticker0"], p["token1"], p["ticker1"]) for p in seen["pools"]]
               == [(USDC, "usdc", weth, "eth")], str(seen["pools"]))
@@ -604,7 +604,7 @@ def test_deposits_put_their_pool_on_the_dashboard():
 
         set_everywhere(tools, "_save_lp_token", broken)
         reply = _send(user, "q4", **deposit)
-        check("a pool that can't be saved never turns a sent deposit into an error", reply.startswith("Sent —"), reply)
+        check("a pool that can't be saved never turns a sent deposit into an error", reply.startswith("✅ Sent —"), reply)
     finally:
         set_everywhere(tools, "_save_lp_token", saved_save)
         restore()
@@ -1294,7 +1294,7 @@ def test_web_quote_cards():
         return c.get(f"/api/chat/history?chain_id={CHAIN}", headers=headers).json()["messages"]
 
     try:
-        _use_scripted_agent([AIMessage(content=f"reply {n}") for n in range(12)])
+        _use_scripted_agent([AIMessage(content=f"reply {n}") for n in range(14)])
         smart_wallet_agent.submit_signed, smart_wallet_agent.settle_quoted = fake_submit, fake_settle
         signing.load_session_handler = lambda _user: SimpleNamespace(
             address=WALLET, functions=SimpleNamespace(getSessions=lambda: _Call(tuple(zip(*wallet_keys["keys"])) or ([], []))))
@@ -1441,6 +1441,11 @@ def test_web_quote_cards():
         ask("second", "Transfer 2 USDC to sam")
         second = card()
         check("the newest offer is the card", second["action"] == "Transfer 2 USDC to sam", str(second))
+        check("and it voided the earlier one: its passkey can no longer approve it (2026-10-22, the old card came "
+              "back once the new one was dealt with, and could pay twice)",
+              first["quote_id"] not in quotes._pending and start(first["quote_id"]).status_code == 404)
+        check("another account's Cancel -> 409, and keeps it",
+              cancel(second["quote_id"], headers=other_headers).status_code == 409 and second["quote_id"] in quotes._pending)
         r = cancel(second["quote_id"])
         check("Cancel discards it", r.status_code == 200 and r.json() == {"outcome": smart_wallet_agent.CANCELLED_REPLY}
               and second["quote_id"] not in quotes._pending, f"{r.status_code} {r.text[:160]}")
@@ -1449,10 +1454,11 @@ def test_web_quote_cards():
               history()[-2:] == [{"role": "user", "text": "✖️ Cancel", "button": True},
                                  {"role": "assistant", "text": smart_wallet_agent.CANCELLED_REPLY, "button": True}],
               str(history()[-2:]))
-        check("the earlier quote, still waiting, is the card again", card() == first, str(card()))
+        check("no earlier card comes back", card() is None, str(card()))
         check("a second Cancel -> 409", cancel(second["quote_id"]).status_code == 409)
-        check("another account's Cancel -> 409, and keeps it",
-              cancel(first["quote_id"], headers=other_headers).status_code == 409 and first["quote_id"] in quotes._pending)
+
+        ask("third", "Transfer 3 USDC to sam")
+        third = card()
 
         def failed_turn(user_id, chain_id, text, network):
             quotes.put(user_id, chain_id, 99_999, "half-quoted", [], PRICED, {"total_usd": 1})
@@ -1460,7 +1466,7 @@ def test_web_quote_cards():
 
         routes.chat.chat_turn = failed_turn
         ask("send 3 usdc to sam")
-        check("a turn that failed offers nothing, whatever it raised", card() == first, str(card()))
+        check("a turn that failed offers nothing, whatever it raised, and voids nothing", card() == third, str(card()))
 
         check("clearing the chat takes the card with it",
               c.delete(f"/api/chat/history?chain_id={CHAIN}", headers=headers).status_code == 200 and card() is None)

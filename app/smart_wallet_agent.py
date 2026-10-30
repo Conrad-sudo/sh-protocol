@@ -7,9 +7,9 @@ from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import ToolException
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from chat_memory import ChatMemory
 from constants import get_exchange
-from db import DB_PATH, acting_network, cancel_sign_request, get_open_sign_requests, get_sign_request_by_quote
+from db import CHAT_DB_PATH, acting_network, cancel_sign_request, get_open_sign_requests, get_sign_request_by_quote
 from db.sign_requests import FAILED, SENT, end_sign_request
 from contract_errors import name_revert
 from network_config import load_network_config, network_name
@@ -35,7 +35,8 @@ SYSTEM_PROMPT = """You are a smart wallet agent that manages ERC20 tokens on beh
 Your replies are read on a phone, often in Telegram. Answer in a sentence or two: the answer first,
 then only what the user needs to act on it. No greeting, no recap of what you checked or which
 tools you called, no headings, and no closing offer of more help. Give each figure once. A list
-(balances, contacts, options) is one short line per item. Say more only when the user asks for it.
+(balances, contacts, options) is one short line per item, and so is a quote: one fact per line,
+never a paragraph. Say more only when the user asks for it.
 
 ## How this wallet works (read first)
 
@@ -144,14 +145,30 @@ Confirm and approving it with their passkey — Face ID, a fingerprint or a PIN.
 always:
 
 1. Call the transaction tool. You get a quote back.
-2. Show the quote in your own message, in two or three short lines: what `action` says (with its
-   `details`, if it has any) and the `network`; what it is worth and counts toward the spending
-   limit (`usd_value`, `charged_usd`), when the quote has them; the fees; and that nothing has been
-   sent yet. For example:
+2. Show the quote in your own message, ONE FACT PER LINE — short lines, never run together into a
+   paragraph, with no bullets, bold or headings:
+   - what it does, on which `network` (from `action`);
+   - what comes back, when `details` says (a swap's expected and least amounts, and its slippage);
+   - what it is worth and counts toward the spending limit (`usd_value`, `charged_usd`), when the
+     quote has them;
+   - the fees;
+   - anything else `details` says the user must know, a line each;
+   - for a swap on the default slippage: "Ask me to change the slippage";
+   - last: "Tap Confirm and approve with your passkey".
+   Write amounts to read easily: thousands commas, two decimals for dollar-sized amounts, enough
+   digits for small ones. The card under your reply carries the exact figures. For example:
 
-   Transfer 10 USDC to 0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF on Base — worth $10.00, counts
-   $10.00 toward your limit. Fees: $0.35. Nothing has been sent yet: tap Confirm and approve with
-   your passkey to send it.
+   Swap 1 ETH for USDC on Base
+   You get ~2,402.72 USDC, at least 2,390.71 (0.5% slippage).
+   Worth $2,401.65, counts $0.00 toward your limit.
+   Fees: $1.17
+   Ask me to change the slippage
+   Tap Confirm and approve with your passkey
+
+   Transfer 10 USDC to 0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF on Base
+   Worth $10.00, counts $10.00 toward your limit.
+   Fees: $0.35
+   Tap Confirm and approve with your passkey
 
    The fees are ONE figure (`fees_usd`, or `fees` when the quote can't price them in USD): never
    split them into a network fee and a protocol fee. They come on top of what is sent or spent, so
@@ -227,8 +244,8 @@ approves it on its card (see "Nothing sends until the user approves it with thei
   two. Use "eth" for the native asset on either side. Call it directly — no
   `get_quote_in`/`get_quote_out` and no balance check first: the quote's `details` say what should
   come back (or what it should cost), the bound the swap will accept, and the slippage tolerance.
-  Use the slippage the user gave, or leave the default 0.5% (50 bps); if you used the default, say
-  so and that they can ask for another figure (then `cancel_transaction` and quote again). The swap
+  Use the slippage the user gave, or leave the default 0.5% (50 bps); if you used the default, add
+  the line "Ask me to change the slippage" (if they do, `cancel_transaction` and quote again). The swap
   grants and consumes the router allowance atomically — never ask the user to approve anything.
 - **Swapping and sending in one go** (e.g. "swap 1 ETH for USDC and send it to Sandy"): use
   `swap`'s `recipient` argument — do NOT swap and then call `transfer_erc20`/`send_eth`. The
@@ -378,23 +395,29 @@ llm = ChatDeepSeek(
     # so a turn's second model call would fail. Off is also faster.
     extra_body={"thinking": {"type": "disabled"}},
 )
-_checkpointer_cm= None
 _checkpointer= None
 agent =None
 
+# How often a turn saves the conversation: once, as it ends, rather than after every step (the
+# model's call, each tool's result, ...). A conversation is only ever read between turns -- each
+# one runs alone (_turn_running) -- so the steps in between were writes nothing read. A turn that
+# raises is saved as it stood, as before. Only a crash mid-turn loses it, and its message with it,
+# which a conversation that starts afresh after every transaction can afford.
+DURABILITY = "exit"
 
-async def open_checkpointer():
-    global _checkpointer_cm, _checkpointer
-    _checkpointer_cm = AsyncSqliteSaver.from_conn_string(DB_PATH)
-    _checkpointer = await _checkpointer_cm.__aenter__()
-    await _checkpointer.setup()
 
-async def close_checkpointer():
-    global _checkpointer_cm, _checkpointer
-    if _checkpointer_cm:
-        await _checkpointer_cm.__aexit__(None, None, None)
-        _checkpointer_cm = None
-        _checkpointer = None
+def open_checkpointer():
+    """Opens the conversations' store (chat_memory.ChatMemory). Before init_agent, which builds on it."""
+    global _checkpointer
+    _checkpointer = ChatMemory(CHAT_DB_PATH)
+
+def close_checkpointer():
+    """
+    Lets the store go, at shutdown. Nothing is left to flush: each write is committed as it is
+    made, and each thread's connection closes with its thread.
+    """
+    global _checkpointer
+    _checkpointer = None
 
 def _tool_failure_message(exc: Exception) -> str:
     """
@@ -440,21 +463,13 @@ class ChainLiquidityTools(AgentMiddleware):
     is a wasted round trip ending in a refusal (each tool also refuses on the wrong chain, as a
     backstop); the hidden tool's description is also a few hundred tokens of every request.
 
-    A class rather than the @wrap_model_call decorator, which makes either a sync or an async hook:
-    chat() runs the agent synchronously, while the CLI harness and the agent smoke test await it,
-    and a middleware with only one of the two fails the other.
+    The sync hook only: every caller runs the agent with `invoke` (its checkpointer, ChatMemory, is
+    sync only).
     """
 
-    @staticmethod
-    def _narrowed(request):
-        context = request.runtime.context
-        return request.override(tools=_tools_for_chain(request.tools, getattr(context, "user_id", None)))
-
     def wrap_model_call(self, request, handler):
-        return handler(self._narrowed(request))
-
-    async def awrap_model_call(self, request, handler):
-        return await handler(self._narrowed(request))
+        context = request.runtime.context
+        return handler(request.override(tools=_tools_for_chain(request.tools, getattr(context, "user_id", None))))
 
 
 def init_agent():
@@ -655,7 +670,7 @@ async def main():
     quote prints its card, and a typed yes approves it with the harness's soft passkey
     (_cli_approve) -- there is no browser here to hold a real one. Anything else is a message.
     """
-    await open_checkpointer()
+    open_checkpointer()
     init_agent()
 
     # Same resolution the deploy harness uses: an explicit APP_USER_ID, or the account a
@@ -674,16 +689,17 @@ async def main():
 
               break
           if card is not None and signing.is_yes(user_input):
-              # Off the event loop: recording the tap writes through the async checkpointer's sync
-              # API, which refuses to run on the loop's own thread.
               await asyncio.to_thread(_cli_approve, user_id, chain_id, network, card)
               card = None
               continue
           turn_id = _next_turn_id()
-          response = await agent.ainvoke(
+          # On a thread, as chat() runs on the API's: the checkpointer is sync only.
+          response = await asyncio.to_thread(
+              agent.invoke,
               {"messages": [HumanMessage(content=user_input)]},
               config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
               context=AgentContext(user_id=user_id, turn_id=turn_id, message=user_input),
+              durability=DURABILITY,
           )
           print("Agent:", response["messages"][-1].content)
           offered = signing.offer(user_id, chain_id, turn_id, signing.WEB)
@@ -695,7 +711,7 @@ async def main():
                   f"  Fees: {quotes.fee_text(frozen['cost'])}. Type yes to approve it with the CLI's passkey.\n"
               )
     finally:
-      await close_checkpointer()
+      close_checkpointer()
 
 
 def _cli_approve(user_id: int, chain_id: int, network: str, card: "signing.Offer") -> None:
@@ -782,6 +798,7 @@ def chat_turn(user_id: int, chain_id: int, user_input: str, network: str) -> tup
             {"messages": [*carried, HumanMessage(content=user_input)]},
             config={"configurable": {"thread_id": thread_id(user_id, chain_id)}},
             context=AgentContext(user_id=user_id, turn_id=turn_id, message=user_input),
+            durability=DURABILITY,  # save the chat at the end of the turn, not after every step
         )
         # The model can answer in content blocks rather than a string; callers want the text.
         return _message_text(response["messages"][-1].content).strip(), turn_id
@@ -1015,8 +1032,8 @@ def get_history(user_id: int, chain_id: int, limit: int) -> list[dict]:
 
     The thread is shared with Telegram, so this includes messages sent there.
 
-    Sync on purpose, like chat(): the checkpointer is async, and its sync reads work only from a
-    thread other than the event loop's -- FastAPI's threadpool, for a plain `def` handler.
+    Sync, like chat() and the checkpointer it reads: the route runs it on FastAPI's threadpool (a
+    plain `def` handler), so the read never holds up the event loop.
 
     @param user_id   The application user ID, from the caller's token.
     @param chain_id  The chain whose conversation to read.

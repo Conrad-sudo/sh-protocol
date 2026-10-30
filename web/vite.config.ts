@@ -84,6 +84,9 @@ export default defineConfig({
     // and be refused.
     port: 3000,
     strictPort: true,
+    // A phone test reaches this server through Tailscale Funnel (https://<mac>.<tailnet>.ts.net),
+    // since Telegram won't link to localhost. Vite refuses any other Host header.
+    allowedHosts: ['.ts.net'],
     // Same origin as the page, so the refresh cookie (path /api/auth) is sent without CORS.
     proxy: {
       '/api': 'http://localhost:8000',

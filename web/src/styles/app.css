@@ -2915,6 +2915,11 @@ main p a {
   margin: 0 0 0.6em;
 }
 
+/* A single line break stays a line break, as in Telegram: a quote is written one fact per line. */
+.mf-md p {
+  white-space: pre-line;
+}
+
 .mf-md :is(ul, ol) {
   padding-left: 1.3em;
 }

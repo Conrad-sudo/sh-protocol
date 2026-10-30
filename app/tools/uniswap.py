@@ -103,6 +103,7 @@ def _quote_exact_input_swap(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=_with_note(
             f"{sold_name} spent: {amount_in}, {bought_name} received: about {expected:.6f}, at least "
             f"{minimum:.6f} (slippage tolerance {slippage_bps / 100:g}%){_destination_note(recipient)}",
@@ -130,6 +131,7 @@ def _quote_exact_output_swap(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=_with_note(
             f"{bought_name} received: {amount_out}, {sold_name} spent: about {expected:.6f}, at most "
             f"{maximum:.6f} (slippage tolerance {slippage_bps / 100:g}%){_destination_note(recipient)}",
@@ -495,6 +497,7 @@ def add_liquidity(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=(
             f"{_token_label(user_id, token_a)} deposited: {amount_a} (at least {a_min:.6f}), "
             f"{_token_label(user_id, token_b)} deposited: about {amount_b:.6f} (at least {b_min:.6f}), "
@@ -597,6 +600,7 @@ def remove_liquidity(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=(
             f"{_token_label(user_id, token_a)} returned: about {expected_a:.6f} (at least {a_min:.6f}), "
             f"{_token_label(user_id, token_b)} returned: about {expected_b:.6f} (at least {b_min:.6f}), "

@@ -34,6 +34,7 @@ from tools.common import (
     SENT,
     _native_units,
     _resolve_legs,
+    _with_tickers,
 )
 from userop import build_execute_calldata
 
@@ -117,7 +118,8 @@ def _action_of(plan: dict) -> str:
 
 
 def _quote_executions(
-    runtime, executions: list, action: str, legs: list | None = None, lp_pool: dict | None = None
+    runtime, executions: list, action: str, legs: list | None = None, lp_pool: dict | None = None,
+    slippage_bps: int | None = None,
 ) -> dict:
     """
     Checks a set of executions, prices them as one UserOperation, and parks it for the user to approve.
@@ -149,6 +151,8 @@ def _quote_executions(
                            liquidity), which only needs the pause and the key checked.
     @param lp_pool         A liquidity deposit's pool (see _lp_pool), for the send to put on the
                            dashboard. None for anything else.
+    @param slippage_bps    A swap's or a liquidity change's slippage tolerance, for its card. None
+                           for anything else.
     @return                The quote to show the user. NOTHING HAS BEEN SENT.
     @raises ToolException  If the wallet is paused, no passkey is approved on it (or every approval
                            is about to run out), it doesn't hold what the transaction sends (or
@@ -206,6 +210,8 @@ def _quote_executions(
         lp_pool=lp_pool,
         direction=_intended_direction(native_value, legs),
         request=runtime.context.message,
+        slippage_bps=slippage_bps,
+        charged_usd=figures.get("charged_usd"),
     )
 
     return {
@@ -220,10 +226,11 @@ def _quote_executions(
         **_shown_fees(pending.cost),
         "expires_in_seconds": quotes.QUOTE_TTL_SECONDS,
         "next_step": (
-            "Show the user, briefly: `action` (and its `details`, if any), the `network`, what it is "
-            "worth (`usd_value`) and counts toward the spending limit (`charged_usd`) where the "
-            "quote has them, the fees as the one figure given, and that nothing has been sent yet. "
-            "Plain words, never field names. Then STOP. A Confirm card for this quote appears with "
+            "Show the user, ONE FACT PER LINE as in your instructions' example, never a paragraph: "
+            "`action` and the `network`, then what its `details` say, what it is worth "
+            "(`usd_value`) and counts toward the spending limit (`charged_usd`) where the quote has "
+            "them, the fees as the one figure given, and last \"Tap Confirm and approve with your "
+            "passkey\". Plain words, never field names. Then STOP. A Confirm card for this quote appears with "
             "your reply: the user sends it by tapping Confirm and approving with their passkey "
             "(Face ID, fingerprint or PIN). You cannot send it. If they decline or change anything, "
             "call cancel_transaction and start again."
@@ -275,21 +282,24 @@ def _intended_direction(native_value: int, legs: list | None) -> str | None:
 
 
 def _quote_plan(
-    runtime, plan: dict, details: str = "", legs: list | None = None, lp_pool: dict | None = None
+    runtime, plan: dict, details: str = "", legs: list | None = None, lp_pool: dict | None = None,
+    slippage_bps: int | None = None,
 ) -> dict:
     """Checks and prices a package execution plan and parks it for approval. See {_quote_executions}.
 
-    @param details  Extra facts to put in front of the user before they approve -- the slippage
-                    bounds a swap will accept, where its output goes. These used to be printed
-                    beside the receipt, which was too late to be of any use.
-    @param legs     What moves, for the spending-limit check. See {_quote_executions}.
-    @param lp_pool  A liquidity deposit's pool. See {_quote_executions}.
+    @param details       Extra facts to put in front of the user before they approve -- the
+                         slippage bounds a swap will accept, where its output goes. These used to
+                         be printed beside the receipt, which was too late to be of any use.
+    @param legs          What moves, for the spending-limit check. See {_quote_executions}.
+    @param lp_pool       A liquidity deposit's pool. See {_quote_executions}.
+    @param slippage_bps  The slippage tolerance, for the card. See {_quote_executions}.
     """
     executions = [
         (Web3.to_checksum_address(call["to"]), call["value"], bytes.fromhex(call["data"][2:]))
         for call in plan["calls"]
     ]
-    quoted = _quote_executions(runtime, executions, _action_of(plan), legs, lp_pool)
+    action = _with_tickers(runtime.context.user_id, _action_of(plan))
+    quoted = _quote_executions(runtime, executions, action, legs, lp_pool, slippage_bps)
     if details:
         quoted["details"] = details
     return quoted

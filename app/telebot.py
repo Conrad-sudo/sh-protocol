@@ -18,8 +18,11 @@ Commands, besides /start, /help and /chain:
     wallet knows the token, that the contact is saved -- then put to the assistant in fixed words,
     as a message would be. The assistant quotes; it has to, since only its tools can.
   - /cancel drops the quotes waiting on this network; /feedback stores a note for the team.
-A turn that raised exactly one quote is followed by a card the code writes, not the model -- what
-the quote does, its network, its fees -- with a "Confirm with passkey" button and a Cancel button.
+A turn that raised exactly one quote is answered by a card the code writes, not the model -- what
+the quote does, its network, its slippage, its fees, what it counts toward the limit -- with a
+"Confirm with passkey" button and a Cancel button. The model's own reply to that turn is not sent:
+the card says it all, and one message is easier to read than two saying the same thing. A card
+whose quote a later turn cancelled -- the user changed the slippage, say -- is marked cancelled.
 Confirm is a plain link to the web app's approval page (/c/<token>), where the user's passkey
 approves it: Telegram's rules forbid signing anything but TON inside a Mini App, so it is a link,
 never one. The API process checks the approval, sends the transaction and posts the outcome here
@@ -90,6 +93,8 @@ from db import (
     get_all_contacts,
     get_contact,
     get_db,
+    get_open_sign_requests,
+    get_sign_request,
     get_telegram_chain,
     get_telegram_chats_on_chain,
     get_transactions,
@@ -101,6 +106,7 @@ from db import (
     set_sign_request_message,
     set_telegram_chain,
 )
+from db.sign_requests import CANCELLED
 from network_config import load_network_config_by_name, network_name
 from telegram_bots import BOT_CHAINS, TOKEN_ENV, USERNAME_ENV, bot_token, legacy_vars_set
 from telegram_format import code_escaped, headed, plain_text, to_telegram_html
@@ -799,7 +805,11 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
 
     Rationed first (_turn_gate): a message past the account's ration gets no turn, and at most one
     reply per spell. Then one turn at a time per conversation (_turn_locks). A turn that raised
-    exactly one quote is followed by the quote's card (_show_card).
+    exactly one quote is answered by the quote's card alone (_show_card), not the model's reply.
+
+    The cards waiting before the turn whose quotes it cancelled -- the model's cancel_transaction,
+    or a new card superseding them (signing.offer) -- are marked cancelled (_void_card), so the
+    only card left with buttons is the one that can still be approved.
 
     @param text  What the user wrote, or the fixed words a /send or /swap stands for.
     """
@@ -812,12 +822,16 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
         return
     try:
         async with _turn_locks[(chain_id, chat_id)]:
+            waiting = get_open_sign_requests(user_id, chain_id, signing.TELEGRAM)
             async with _typing(context.bot, chat_id):
                 response, turn_id = await _on_turn_thread(chat_turn, user_id, chain_id, text, network)
-            await _reply_on(update.message.reply_text, chain_id, response)
             offered = signing.offer(user_id, chain_id, turn_id, signing.TELEGRAM, telegram_chat_id=chat_id)
-            if offered is not None:
+            if offered is None:
+                await _reply_on(update.message.reply_text, chain_id, response)
+            else:
                 await _show_card(update.message.reply_text, offered.request, offered.token)
+            for request in waiting:
+                await _void_card(context.bot, request)
     finally:
         _turn_gate.release(user_id)
 
@@ -866,12 +880,28 @@ def confirm_link(token: str) -> str:
     return f"{web_app_url().rstrip('/')}/c/{token}"
 
 
+def _what_it_does(frozen: dict) -> list[str]:
+    """
+    A card's lines saying what its quote does: the action, escaped, since it can carry a token's own
+    symbol, and a swap's or a liquidity change's slippage tolerance.
+
+    @param frozen  The quote, as signing.thaw returns it. One frozen before the card showed the
+                   slippage has no "slippage_bps", and shows none.
+    """
+    lines = [html.escape(frozen["action"])]
+    if frozen.get("slippage_bps") is not None:
+        lines.append(f"Slippage: {frozen['slippage_bps'] / 100:g}%")
+    return lines
+
+
 def quote_card(request: dict, token: str, now: float) -> tuple[str, InlineKeyboardMarkup]:
     """
     A quote's card: written here from the quote its sign request froze, never by the model. The
     approval page shows and signs exactly this quote, so this, not the assistant's reply, is what
-    the user agrees to: the action (written by the package that built the calldata), the network
-    and the fees. Escaped, since the action can carry a token's own symbol.
+    the user agrees to: the action (written by the package that built the calldata), the network,
+    the slippage, the fees, and what it counts toward the spending limit. It is the turn's whole
+    answer (_run_turn), so a quote with a slippage says it can be changed: asking for another one
+    is a new turn, whose new card replaces this one.
 
     Confirm is a plain link to the approval page (confirm_link), not a Mini App: Telegram allows no
     signing but TON's inside one. Cancel is a button the bot answers (quote_button).
@@ -883,17 +913,26 @@ def quote_card(request: dict, token: str, now: float) -> tuple[str, InlineKeyboa
     frozen = signing.thaw(request)
     chain = get_chain_display_name(request["chain_id"])
     minutes = max(1, math.ceil((request["expires_at"] - now) / 60))
-    text = (
-        f"<b>Confirm on {html.escape(chain)}?</b>\n"
-        f"{html.escape(frozen['action'])}\n"
-        f"Fees: {html.escape(fee_text(frozen['cost']))} · good for {minutes} minute{'s' if minutes != 1 else ''}\n"
-        f"Tap “{CONFIRM_LINK}”, then approve with Face ID, your fingerprint or your PIN."
+    lines = [f"<b>Confirm on {html.escape(chain)}?</b>", *_what_it_does(frozen)]
+    lines.append(
+        f"Fees: {html.escape(fee_text(frozen['cost']))} · good for {minutes} minute{'s' if minutes != 1 else ''}"
     )
+    if frozen.get("charged_usd") is not None:
+        lines.append(f"Counts towards your limit: ${frozen['charged_usd']:,.2f}")
+    lines.append(f"Tap “{CONFIRM_LINK}”, then approve with Face ID, fingerprint or PIN.")
+    if frozen.get("slippage_bps") is not None:
+        lines.append("Tell me if you want to change the slippage.")
     buttons = InlineKeyboardMarkup([[
         InlineKeyboardButton(CONFIRM_LINK, url=confirm_link(token)),
         _cancel_button(request),
     ]])
-    return text, buttons
+    return "\n".join(lines), buttons
+
+
+def cancelled_card(request: dict) -> str:
+    """What a card becomes once a later turn cancels its quote (_void_card): what it did, and that it's off."""
+    chain = get_chain_display_name(request["chain_id"])
+    return "\n".join([f"<b>Cancelled on {html.escape(chain)}</b>", *_what_it_does(signing.thaw(request))])
 
 
 def _cancel_button(request: dict) -> InlineKeyboardButton:
@@ -931,6 +970,31 @@ async def _take_buttons_off(bot, request: dict):
         await bot.edit_message_reply_markup(
             chat_id=request["telegram_chat_id"], message_id=request["telegram_message_id"], reply_markup=None
         )
+
+
+async def _void_card(bot, request: dict):
+    """
+    Rewrites a request's card as cancelled_card, if the request has been cancelled since it was
+    read -- its quote replaced by a new one, or dropped by the assistant -- and the card is known.
+    The edit leaves no buttons. Should Telegram refuse it (a message too old to edit), the buttons
+    still come off.
+
+    @param request  The request as it was read before (a row of get_open_sign_requests). It is read
+                    again here, so one sent or still open meanwhile is left alone.
+    """
+    current = get_sign_request(request["id"])
+    if current is None or current["status"] != CANCELLED:
+        return
+    chat_id, message_id = current.get("telegram_chat_id"), current.get("telegram_message_id")
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await bot.edit_message_text(
+            cancelled_card(current), chat_id=chat_id, message_id=message_id,
+            parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW,
+        )
+    except BadRequest:
+        await _take_buttons_off(bot, current)
 
 
 async def quote_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1396,10 +1460,10 @@ async def serve(bot: Application):
     """
     Runs the bot until the process is told to stop (Ctrl-C, or SIGTERM from a service manager).
 
-    Not Application.run_polling, which owns the event loop: here the checkpointer every turn shares
-    opens in the same loop before the first update and closes after the last.
+    Not Application.run_polling, which owns the event loop and its shutdown: here the checkpointer
+    every turn shares opens before the first update and closes after the last.
     """
-    await open_checkpointer()
+    open_checkpointer()
     init_agent()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1419,7 +1483,7 @@ async def serve(bot: Application):
             print(f"@{bot.bot.username} is serving {', '.join(bot.bot_data['networks'].values())}.")
             await stop.wait()
     finally:
-        await close_checkpointer()
+        close_checkpointer()
 
 
 def main():
@@ -1455,6 +1519,13 @@ def main():
         networks[chain_id] = network
     if not networks:
         raise SystemExit("The bot can't start: none of its networks is up (see above).")
+    if not web_app_url().startswith("https://"):
+        # Telegram refuses a button that links to localhost or plain http, so every card would go
+        # out without its Confirm (_show_card) -- and a phone couldn't open the page anyway.
+        print(
+            f"Cards will have no Confirm button: the web app is at {web_app_url()}. Set WEB_APP_URL "
+            f"(and SIWE_DOMAIN, CORS_ORIGINS) to a public https address the phone can open."
+        )
     asyncio.run(serve(build_bot(token, networks)))
 
 

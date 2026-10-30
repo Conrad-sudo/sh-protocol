@@ -59,12 +59,12 @@ async def lifespan(_app: FastAPI):
     /api/chat request fails on the first attribute access.
     """
     anyio.to_thread.current_default_thread_limiter().total_tokens = API_THREADS
-    await open_checkpointer()
+    open_checkpointer()
     init_agent()
     try:
         yield
     finally:
-        await close_checkpointer()
+        close_checkpointer()
 
 
 app = FastAPI(lifespan=lifespan)

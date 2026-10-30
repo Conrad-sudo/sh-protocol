@@ -12,6 +12,7 @@
 | Owner private key | Full control over the account — and, since 2026-10-01, the only way to sign in to the Mitfah account (§4.10) |
 | Bundler private keys (`API_BUNDLER_n`, `TELEGRAM_BUNDLER_n`) | Submit UserOps to the EntryPoint on every network — the app is its own bundler; a pool of keys per process (three each today) |
 | `wallet.db` | Stores contacts, wallet addresses, the passkeys' public keys and credential ids, and pending sign requests — nothing that can sign |
+| `wallet-chat.db` | The agent's conversations (LangGraph checkpoints, tool results included), beside `wallet.db` — nothing that can sign |
 
 ---
 
@@ -294,8 +295,8 @@ On-chain this is metered correctly and needs no new check: routing output away m
 ---
 
 ### 4.3 `wallet.db` Compromise
-**Threat:** `wallet.db` stores contacts, wallet addresses, the passkeys' public keys and credential ids, pending sign requests, the agent's conversations (LangGraph checkpoints, tool results included) and the transaction history (hash, description, network and time of each transaction — public on chain anyway).
-**Mitigation in place:** Nothing in it can sign. Since migration 8 the server holds no session key in any form, so a copy of `wallet.db` cannot move funds. Writing to it grants nothing either: a passkey row the attacker adds is a key no wallet has granted on chain, and only the owner can grant one. A Telegram confirm link is stored only as its SHA-256, so the table can't be read back into working links. Conversations from before 2026-10-02 may still hold old session-key ciphertexts, which are useless now that the Vault container is destroyed (§4.1).
+**Threat:** `wallet.db` stores contacts, wallet addresses, the passkeys' public keys and credential ids, pending sign requests and the transaction history (hash, description, network and time of each transaction — public on chain anyway). The agent's conversations (LangGraph checkpoints, tool results included) are in `wallet-chat.db` beside it, on the same volume, so a copy of one is likely a copy of both.
+**Mitigation in place:** Nothing in it can sign. Since migration 8 the server holds no session key in any form, so a copy of `wallet.db` cannot move funds. Writing to it grants nothing either: a passkey row the attacker adds is a key no wallet has granted on chain, and only the owner can grant one. A Telegram confirm link is stored only as its SHA-256, so the table can't be read back into working links. Migration 9 (2026-10-26) dropped the conversations `wallet.db` used to hold, with the old session-key ciphertexts those from before 2026-10-02 carried — useless anyway now that the Vault container is destroyed (§4.1). A dropped table's bytes stay in the file's free pages until reused, or until `VACUUM` clears them.
 **Residual risk:** Contacts and conversations are exposed in plaintext.
 
 ---
@@ -411,7 +412,7 @@ Note the reputation writes are deliberately *not* restricted this way: a user's 
 
 ### 4.11 The Approval Page and What the Passkey Signs (2026-10-21)
 
-**What it is:** every transaction the assistant prepares is sent only after the user approves it with a passkey: on the Assistant page's card, or on `/c/<token>`, the standalone page a Telegram card links to (`web/confirm.html`, `web/src/confirm/`; no wallet libraries, no glass). The page shows the server's summary of the operation (action, network, fees), asks the passkey to sign the operation's `userOpHash`, and posts the answer back (§4.2). The wallet checks the signature on chain through the P-256 precompile, with user verification required (§2).
+**What it is:** every transaction the assistant prepares is sent only after the user approves it with a passkey: on the Assistant page's card, or on `/c/<token>`, the standalone page a Telegram card links to (`web/confirm.html`, `web/src/confirm/`; no wallet libraries, no glass). The page shows the server's summary of the operation (action, network, fees), asks the passkey to sign the operation's `userOpHash`, and posts the answer back (§4.2). Opened in Telegram's own browser, where passkeys can't work, it reopens the same address in the phone's browser (`x-safari-https://` on an iPhone, an `intent://` naming no app on Android) and asks nothing where it was; the token goes nowhere it wasn't already (docs/app.md, `signing.py`). The wallet checks the signature on chain through the P-256 precompile, with user verification required (§2).
 
 **Threat — what you see is not what you sign.** The passkey prompt shows only the site's name, never the transaction. What the user reads is the summary the **server** wrote, and the challenge is a hash they cannot check against it. A compromised server, or a script injected into Mitfah's pages, could show one transaction and ask the passkey to sign another.
 **Mitigations in place:** The summary and the op are both built from the one frozen sign request (`signing.freeze`), which is made from a quote the code wrote, never from text the model or the browser supplied; the challenge is the hash of the op the server itself stored, and `/api/sign/finish` sends only that op. The web app is served with a strict Content-Security-Policy (`deploy/Caddyfile`, kept in step by `web/src/securityHeaders.test.ts`), and the approval page loads none of the main app's third-party wallet code. On chain the cap, the admin guard and the contact-only destinations bound what any signed op can do.

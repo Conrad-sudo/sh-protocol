@@ -412,6 +412,7 @@ def open_position(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=(
             f"Range: {_span(summary['min_price'], summary['max_price'], summary['full_range'], base, quote)} "
             f"({picked}), in the {summary['fee_pct']:g}% fee pool. {_range_status(summary, base, quote)}. "
@@ -499,6 +500,7 @@ def add_to_position(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=(
             f"Adds to position #{position_id} ({base}/{quote}), whose range stays "
             f"{_span(summary['min_price'], summary['max_price'], summary['full_range'], base, quote)}; it "
@@ -625,6 +627,7 @@ def withdraw_from_position(
     return _quote_plan(
         runtime,
         plan,
+        slippage_bps=slippage_bps,
         details=(
             f"Takes {percent:g}% of position #{position_id} ({base}/{quote}) out: about "
             f"{_amount(expected_b)} {base} and {_amount(expected_q)} {quote} (at least {_amount(min_b)} "

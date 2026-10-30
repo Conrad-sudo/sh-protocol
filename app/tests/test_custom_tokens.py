@@ -652,6 +652,28 @@ def test_action_line_drops_approvals():
     check("approvals alone are still described", "Approve" in tools.quoting._action_of({"calls": [approve]}))
 
 
+def test_action_line_names_tokens():
+    print("\n[8b] a quote's action names tokens by ticker, and leaves every other address alone")
+    uid = db.create_user()
+    original = tools.common.load_network_config
+    tools.common.load_network_config = lambda _uid: (Web3(), CHAIN, NETWORK)
+    try:
+        db.save_custom_token(uid, CHAIN, PEPE, "pepe", None, 18)
+        recipient = _addr(0xC0DE)
+        for raw, named in (
+            (f"Swap 1 of the native asset for at least 2390.707382 of {USDC} (Uniswap V3, 0.05% pool)",
+             "Swap 1 ETH for at least 2390.707382 USDC (Uniswap V3, 0.05% pool)"),
+            (f"Swap 5 of {PEPE} for at least 0.1 of the native asset", "Swap 5 PEPE for at least 0.1 ETH"),
+            (f"Remove 0.5 LP tokens for {WETH}/native asset", "Remove 0.5 LP tokens for WETH/ETH"),
+            (f"Transfer 1 of {USDC} to {recipient}", f"Transfer 1 USDC to {recipient}"),
+            (f"Swap 1 of {SHIB} for at least 2 of {USDC}", f"Swap 1 of {SHIB} for at least 2 USDC"),
+        ):
+            line = tools.common._with_tickers(uid, raw)
+            check(f"named: {named[:48]}", line == named, line)
+    finally:
+        tools.common.load_network_config = original
+
+
 def test_ierc20_cache_follows_the_address():
     print("\n[6] a removed and re-added name never reaches the old contract")
     uid = db.create_user()
@@ -1045,14 +1067,15 @@ def test_deposits_name_their_pool():
         "max_price": 3150.0, "full_range": False, "current_price": 3000.0, "in_range": True, "amount_b": 0.03,
         "tick_lower": -1000, "tick_upper": 1000,
     }}
-    pools = []
+    pools, slippages = [], []
 
     class Package:
         def __getitem__(self, _name):
             return SimpleNamespace(invoke=lambda _args: plan)
 
-    def quote(_runtime, _executions, _action, _legs=None, lp_pool=None):
+    def quote(_runtime, _executions, _action, _legs=None, lp_pool=None, slippage_bps=None):
         pools.append(lp_pool)
+        slippages.append(slippage_bps)
         return {}
 
     original = tools.uniswap.get_uniswap_tools, tools.quoting._quote_executions
@@ -1078,6 +1101,7 @@ def test_deposits_name_their_pool():
         _with_tool_fakes(uid, watched={USDC, WETH})
         tools.positions.open_position.func(runtime, token_a="usdc", amount_a=100, min_price=2850, max_price=3150)
         check("a Uniswap V3 position's quote names no pool for the LP-token list", pools[-1] is None, str(pools[-1]))
+        check("each quote carries its slippage, for the card", slippages == [50] * 5, str(slippages))
     finally:
         set_everywhere(tools, "get_uniswap_tools", original[0])
         set_everywhere(tools, "_quote_executions", original[1])
@@ -1116,6 +1140,7 @@ if __name__ == "__main__":
         test_ierc20_cache_follows_the_address()
         test_tools_only_reach_tokens_the_owner_chose()
         test_action_line_drops_approvals()
+        test_action_line_names_tokens()
         test_deposits_name_their_pool()
     finally:
         os.unlink(_tmp_db.name)

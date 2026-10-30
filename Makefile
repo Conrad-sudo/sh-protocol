@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test py-test e2e-test agent-smoke load-test api api-prod
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod
 
 
 
@@ -131,12 +131,17 @@ ens-test:
 passkeys-test:
 	.venv/bin/python3 app/tests/test_passkeys.py
 
+# The agent's conversation store (chat_memory.py): a turn saved once as it ends, a failed one as it
+# stood, many at once on their own threads, two processes on one file. A stand-in model. Offline.
+chat-memory-test:
+	.venv/bin/python3 app/tests/test_chat_memory.py
+
 # One read-only lookup of a real Basename through mainnet and its gateway. Not part of py-test.
 ens-live:
 	.venv/bin/python3 app/tests/test_ens_names.py --live
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
@@ -213,8 +218,8 @@ LOCAL_RPC_URL := http://127.0.0.1:$(FORK_PORT_$(ARGS))
 endif
 
 # $(call start_fork,<upstream RPC>,<network name>): forks the upstream at its latest block on that
-# network's port, then gives every bundler key (API_BUNDLER_n, TELEGRAM_BUNDLER_n) 100 of the native
-# coin each (`fund`) as soon as the node answers, so a fresh fork is ready to deploy to.
+# network's port, then gives every bundler key (API_BUNDLER_n, TELEGRAM_BUNDLER_n) and USER_ACCOUNT
+# 100 of the native coin each (`fund`) as soon as the node answers, so a fresh fork is ready to deploy to.
 #
 # Anvil runs in the background only so the funding can happen after it starts; the recipe then
 # waits on it, so it stays in the foreground as before. The trap is what makes Ctrl+C stop it: a
@@ -239,7 +244,7 @@ until cast chain-id --rpc-url http://127.0.0.1:$(FORK_PORT_$(2)) >/dev/null 2>&1
 done; \
 kill -0 $$pid 2>/dev/null || exit 1; \
 if $(MAKE) --no-print-directory fund ARGS=$(2) >/dev/null; then \
-	echo "Funded every bundler key with 100 native coin each on $(2)."; \
+	echo "Funded every bundler key and USER_ACCOUNT with 100 native coin each on $(2)."; \
 else \
 	echo "Funding the bundlers on $(2) failed; the fork is still running. Retry: make fund ARGS=$(2)"; \
 fi; \
@@ -282,6 +287,9 @@ celo-fork:
 # The addresses are derived from the keys rather than kept in .env twice. Recursively expanded (=),
 # so cast only runs when `fund` does, and inside an @-silenced recipe, so no key is ever echoed.
 BUNDLER_ADDRESSES = $(foreach key,$(filter API_BUNDLER_% TELEGRAM_BUNDLER_%,$(.VARIABLES)),$(shell cast wallet address --private-key $($(key))))
+# USER_ACCOUNT is the test user's own EOA (an address, not a key), funded beside the bundlers so
+# it can pay for its own wallet's onboarding on a fresh fork. Left out when .env doesn't set it.
+FUND_ADDRESSES = $(BUNDLER_ADDRESSES) $(USER_ACCOUNT)
 
 # anvil_setBalance only exists on a local node, so this runs for fork networks and bare "anvil"
 # and skips everything else. Stated as an ALLOWLIST on purpose: the previous form skipped a
@@ -293,7 +301,7 @@ BUNDLER_ADDRESSES = $(foreach key,$(filter API_BUNDLER_% TELEGRAM_BUNDLER_%,$(.V
 # their own keys there, so those are funded on it too.
 fund:
 	@if echo "$(ARGS)" | grep -qE 'fork|^anvil$$'; then \
-		for address in $(BUNDLER_ADDRESSES); do \
+		for address in $(FUND_ADDRESSES); do \
 			cast rpc anvil_setBalance $$address $(100_ETH) --rpc-url $(LOCAL_RPC_URL) || exit 1; \
 		done; \
 	else \
@@ -368,6 +376,14 @@ NETWORK_ARGS := $(strip --rpc-url $(DEPLOY_RPC) $(DEPLOY_SIGNER) --broadcast $(D
 deploy: 
 	forge script script/DeploySHProtocol.s.sol $(NETWORK_ARGS)
 
+# Deploys to all four forks in turn. ARGS picks the network when the Makefile is read, so each
+# chain needs its own make run; the first failure stops the rest.
+deploy-all:
+	$(MAKE) deploy ARGS=mainnet-fork
+	$(MAKE) deploy ARGS=arbitrum-fork
+	$(MAKE) deploy ARGS=base-fork
+	$(MAKE) deploy ARGS=bsc-fork
+
 
 
 # ── Python ────────────────────────────────────────────────────────────────────
@@ -429,9 +445,20 @@ wipe-db:
 	rm ./app/wallet.db
 	rm ./app/wallet.db-shm
 	rm ./app/wallet.db-wal
+	rm -f ./app/wallet-chat.db ./app/wallet-chat.db-shm ./app/wallet-chat.db-wal
 clear-broadcast:
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/31337/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/42161/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/8453/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/11155111/*
 	rm -rf ./broadcast/DeploySHProtocol.s.sol/1/*
+
+funnel-off:
+	tailscale funnel --https=443 off
+funnel-on:
+	tailscale funnel --bg 3000
+funnel-status:
+	tailscale funnel status
+dev:
+	cd web && npx vite build && npx vite preview --port 3000 --strictPort
+

@@ -14,6 +14,7 @@ out/
 
 session_keys.db
 wallet.db
+wallet-chat.db
 # SQLite WAL sidecars -- recreated on every open, never meaningful to commit
 *.db-shm
 *.db-wal

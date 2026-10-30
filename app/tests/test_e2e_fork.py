@@ -237,8 +237,8 @@ def approve_and_send(user_id: int, quote_id: str) -> str:
     """
     A quote approved with the account's passkey (approve_quote), sent, and waited for.
 
-    @return  What the user is told once it lands: "Sent — <action>. Tx hash: `0x…`", and what is
-             left of the limit.
+    @return  What the user is told once it lands: "✅ Sent — <action>", then what is left of the
+             limit and the hash, a line each.
     @raises ToolException  If there is no such quote waiting, or it would fail, or it failed.
     """
     return tools.sending.settle_quoted(send_approved(approve_quote(user_id, quote_id)))
@@ -1342,7 +1342,7 @@ def test_bundler_pool(c: TestClient):
         results = list(pool.map(confirm, wallets))
     wall = time.monotonic() - started
     failed = [(item["kind"], text[:160]) for item, (sending, text, *_) in zip(wallets, results) if sending is None
-              or not text.startswith("Sent")]
+              or not text.startswith("✅ Sent")]
     check(f"all {n} Confirms went out and landed", not failed, str(failed[:5]))
 
     by_key = Counter(sending.submitted.lane.bundler.address for sending, *_ in results if sending)

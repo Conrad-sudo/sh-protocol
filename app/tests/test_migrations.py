@@ -12,6 +12,7 @@ import tempfile
 from checks import check, finish   # first: it puts app/ on sys.path for the imports below
 
 import db                           # noqa: E402
+from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 
 SEPOLIA = 11155111
 _files: list[str] = []
@@ -49,6 +50,8 @@ def test_new_database():
            "passkeys", "passkey_challenges", "sign_requests"}
           <= _tables(conn), str(sorted(_tables(conn))))
     check("and no table of server-held session keys", not {"session_keys", "pending_session_keys"} & _tables(conn),
+          str(sorted(_tables(conn))))
+    check("nor of conversations, which have a file of their own", not {"checkpoints", "writes"} & _tables(conn),
           str(sorted(_tables(conn))))
     check("with the newest columns", {"direction", "movements_read"} <= _columns(conn, "transactions")
           and {"telegram_chain_id", "webauthn_handle"} <= _columns(conn, "users"))
@@ -208,6 +211,35 @@ def test_passkeys():
     check("running it again changes nothing", "passkeys" in _tables(conn) and "webauthn_handle" in _columns(conn, "users"))
 
 
+def test_conversations_leave():
+    print("\n[8] migration 9 drops the conversations, which now have a file of their own")
+    _use_new_file()
+    original = db.schema.MIGRATIONS
+    db.schema.MIGRATIONS = original[:8]
+    try:
+        db.init_db()
+    finally:
+        db.schema.MIGRATIONS = original
+    conn = db.get_db()
+    user_id = db.create_user("0x00000000000000000000000000000000000000C4")
+    # As the old checkpointer left them in wallet.db, with a conversation in them.
+    SqliteSaver(conn).setup()
+    conn.execute(
+        "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint) VALUES (?, '', ?, ?)",
+        (f"{user_id}:{SEPOLIA}", "1", b"a conversation"),
+    )
+    conn.commit()
+    check("it starts at version 8 with a conversation in it",
+          db.schema_version(conn) == 8 and {"checkpoints", "writes"} <= _tables(conn))
+
+    db.init_db()
+    check("it ends at the latest version without the conversation tables",
+          db.schema_version(conn) == len(db.MIGRATIONS) and not {"checkpoints", "writes"} & _tables(conn))
+    check("the account is kept", (db.get_user_by_id(user_id) or {}).get("owner_addr", "").lower() == "0x00000000000000000000000000000000000000c4")
+    db.schema._migrate_chat_to_own_file(conn)
+    check("running it again changes nothing", not {"checkpoints", "writes"} & _tables(conn))
+
+
 if __name__ == "__main__":
     try:
         test_new_database()
@@ -217,6 +249,7 @@ if __name__ == "__main__":
         test_telegram_chain_column()
         test_feedback_table()
         test_passkeys()
+        test_conversations_leave()
     finally:
         if hasattr(db._local, "db"):
             db._local.db.close()
