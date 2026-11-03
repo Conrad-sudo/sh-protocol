@@ -1,7 +1,7 @@
 # SessionHandler Protocol 🔑🤖⛓️
 
 [![CI](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml/badge.svg)](https://github.com/Conrad-sudo/sh-protocol/actions/workflows/test.yml)
-[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.33-363636?logo=solidity)](https://soliditylang.org)
 [![Built with Foundry](https://img.shields.io/badge/built%20with-Foundry-FFDB1C)](https://getfoundry.sh)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org)
@@ -209,6 +209,4 @@ CI (`.github/workflows/test.yml`) checks the smart contracts only, on every push
 
 ## License
 
-[Business Source License 1.1](LICENSE) until **2029-06-12**, after which it becomes MIT. The
-interfaces in `src/interfaces/` and the test mocks in `src/mocks/` stay MIT (some are adapted from
-Chainlink and OpenZeppelin), as do the tests and deploy scripts.
+[MIT](LICENSE). The submodules in `lib/` keep their own licenses.

@@ -1,7 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Conrad Japhet
-// Use of this software is governed by the Business Source License included in the LICENSE file.
-// Change Date: 2029-06-12. Change License: MIT.
 pragma solidity 0.8.33;
 
 import {IEntryPoint, PackedUserOperation} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
