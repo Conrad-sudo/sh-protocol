@@ -15,6 +15,7 @@ import {
   useRegistrationOptions,
 } from '../../hooks/usePasskeys'
 import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS } from '../../lib/assistant'
+import { limitApplies } from '../../lib/spending'
 import { formatDate, formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
 import { DEVICE_NAME_MAX, defaultDeviceName, deviceNameProblem, passkeysSupported } from '../../lib/passkey'
 import { errorText } from '../../lib/tx'
@@ -37,9 +38,11 @@ function grantText(wallet: WalletState, who: string, renewing: boolean) {
   const until = formatDate(Date.now() + ASSISTANT_KEY_TTL_SECS * 1_000)
   const { daily_limit_usd: limit, window_hours: hours } = wallet.spending
   const period = formatWindow(Math.round(hours * 3_600))
+  // A wallet that counts nothing has no spending limit to quote, whatever figure it holds.
+  const upTo = limitApplies(wallet.spending) ? `up to ${formatUsd(limit)} every ${period}` : 'with no spending limit'
   const text = renewing
-    ? `${who} keeps approving the assistant's payments from this wallet for another ${ASSISTANT_KEY_DAYS} days, until ${until}, up to ${formatUsd(limit)} every ${period}.`
-    : `${who} will be able to approve the assistant's payments from this wallet for ${ASSISTANT_KEY_DAYS} days, until ${until}, up to ${formatUsd(limit)} every ${period}.`
+    ? `${who} keeps approving the assistant's payments from this wallet for another ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
+    : `${who} will be able to approve the assistant's payments from this wallet for ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
   return { text, until }
 }
 

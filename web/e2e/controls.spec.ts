@@ -22,6 +22,10 @@ import {
  * screen sizes, in both themes, against a mocked API and a fake browser wallet.
  */
 
+// The Controls page is the tallest there is, and a full-page photo of it on a phone takes 15-25s
+// when every project runs at once: past the default 30s with the clicks around it.
+test.describe.configure({ timeout: 60_000 })
+
 const SEPOLIA = 11155111
 const ADDRESS = '0x2222222222222222222222222222222222222222'
 const OWNER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
@@ -39,6 +43,36 @@ const ALLOWLIST_SUGGESTED = [
 ]
 /** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
 const ALLOWLIST_OFF = { enabled: false, targets: [], suggested: ALLOWLIST_SUGGESTED }
+/** GET /api/wallet/{chain_id}/recurring before any schedule, then after one is set up. */
+const PAYEE = '0x3333333333333333333333333333333333333333'
+const NO_RECURRING = {
+  available: true,
+  module: '0x7ec0000000000000000000000000000000000000',
+  fee_per_payment_wei: '20000000000000',
+  native_ticker: 'ETH',
+  min_interval_secs: 3_600,
+  schedules: [] as object[],
+}
+const RENT = {
+  schedule_id: 1,
+  token: USDC,
+  ticker: 'USDC',
+  decimals: 6,
+  amount_raw: '20000000',
+  amount_text: '20',
+  recipient: PAYEE,
+  recipient_name: 'landlord',
+  interval_secs: 2_592_000,
+  next_due: 1_900_000_000,
+  end_at: null,
+  status: 'live',
+  last_tx: null,
+  last_run_at: null,
+  last_error: null,
+  retry_at: null,
+  summary: '20 USDC to landlord every 30 days',
+}
+
 /** The key id the server gives a passkey made during a test. */
 const NEW_KEY_ID = `0x${'ef'.repeat(32)}`
 /** POST /api/passkeys/register/options: for this site, ES256 only, the user verified. */
@@ -77,6 +111,7 @@ async function mockServer(
 ) {
   let current = wallet
   let currentAllowlist = allowlist
+  let currentRecurring = NO_RECURRING
   const prepared: Prepared[] = []
   const sent: { tx: WalletTx; chainId: number }[] = []
   const sessionConfirms: string[] = []
@@ -107,6 +142,11 @@ async function mockServer(
       return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH } })
     }
     if (/^\/api\/wallet\/\d+\/allowlist$/.test(path)) return route.fulfill({ json: currentAllowlist })
+    if (/^\/api\/wallet\/\d+\/recurring$/.test(path)) return route.fulfill({ json: currentRecurring })
+    if (path === '/api/wallet/recurring/confirm') {
+      currentRecurring = { ...NO_RECURRING, schedules: [RENT] }
+      return route.fulfill({ json: { status: 'confirmed', tx_hash: TX_HASH, recurring: currentRecurring } })
+    }
     if (path === '/api/wallet/session/confirm') {
       sessionConfirms.push(path)
       if (afterConfirm) current = afterConfirm
@@ -118,6 +158,8 @@ async function mockServer(
         return route.fulfill({ json: TOKEN })
       case '/api/me':
         return route.fulfill({ json: { ...ME, owner_addr: OWNER, wallet_chains: [SEPOLIA] } })
+      case '/api/contacts':
+        return route.fulfill({ json: { contacts: [{ name: 'landlord', address: PAYEE }] } })
       case '/api/passkeys':
         return route.fulfill({
           json: {
@@ -160,8 +202,8 @@ async function mockServer(
           json: {
             tokens: [
               { ticker: 'usdc', address: USDC },
-              // As the API flags it: the wrapped native token always counts, like ETH.
-              { ticker: 'weth', address: WETH, always_counted: true },
+              // As the API flags it: the wrapped native token counts exactly when ETH does.
+              { ticker: 'weth', address: WETH, follows_native: true },
             ],
           },
         })
@@ -218,10 +260,13 @@ test('changes that loosen a limit ask first', async ({ page }, testInfo) => {
   await confirm.getByRole('button', { name: 'Raise limit' }).click()
   await expect(page.getByText('Spending limit set to $500.00.')).toBeVisible()
 
-  // This wallet predates WETH always counting; counting it tightens the limit, so it goes straight through.
-  await expect(page.getByText('Not counted yet')).toBeVisible()
-  await page.getByRole('button', { name: 'Count WETH toward the limit' }).click()
-  await expect(page.getByText('WETH now counts toward your limit.')).toBeVisible()
+  // ETH and WETH share one switch. Taking them out of the limit loosens it, so that asks too.
+  await page.getByRole('button', { name: 'Stop counting ETH and WETH' }).click()
+  const stop = page.getByRole('alertdialog').filter({ hasText: 'ETH and WETH' })
+  await expect(stop).toContainText('The assistant will be able to move ETH and WETH out of this wallet without any limit.')
+  await expectNoSidewaysScroll(page)
+  await stop.getByRole('button', { name: 'Stop counting ETH and WETH' }).click()
+  await expect(page.getByText('ETH and WETH no longer count toward your limit.')).toBeVisible()
 
   await page.getByRole('button', { name: 'Advanced' }).click()
   // It predates Uniswap V3 too, so it's offered the spenders new wallets start with.
@@ -233,7 +278,40 @@ test('changes that loosen a limit ask first', async ({ page }, testInfo) => {
 
   expect(prepared.map(p => p.body)).toEqual([
     { chain_id: SEPOLIA, daily_limit_usd: 500 },
-    { chain_id: SEPOLIA, token: 'weth', action: 'add' },
+    { chain_id: SEPOLIA, metered: false },
+  ])
+})
+
+test('setting up a recurring payment', async ({ page }, testInfo) => {
+  const { prepared } = await mockServer(page, walletState(SEPOLIA, ADDRESS))
+  await page.goto('/controls')
+  await connectOwner(page)
+
+  const panel = page.locator('.mf-card').filter({ has: page.getByRole('heading', { name: 'Recurring payments' }) })
+  await expect(panel.getByText('No recurring payments yet.')).toBeVisible()
+  await panel.getByRole('combobox', { name: 'Pay with' }).click()
+  await page.getByRole('option', { name: 'USDC' }).click()
+  await panel.getByLabel('Amount each time').fill('20')
+  await panel.getByRole('combobox', { name: 'Pay to' }).click()
+  await page.getByRole('option', { name: 'landlord' }).click()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-recurring-form')
+
+  await panel.getByRole('button', { name: 'Set up payment' }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('send 20 USDC to landlord every 30 days, starting now, until you cancel it')
+  await confirm.getByRole('button', { name: 'Set up' }).click()
+  await expect(page.getByText('Recurring payment set up.')).toBeVisible()
+  await expect(panel.getByRole('list', { name: 'Recurring payments' })).toContainText('20 USDC to landlord every 30 days')
+  await expect(panel.getByRole('button', { name: 'Cancel the payment of 20 USDC to landlord every 30 days' })).toBeVisible()
+  await expectNoSidewaysScroll(page)
+  await snap(page, testInfo, 'controls-recurring-set')
+
+  expect(prepared).toEqual([
+    {
+      path: '/api/wallet/recurring/prepare',
+      body: { chain_id: SEPOLIA, token: USDC, amount: '20', to: PAYEE, interval_secs: 2_592_000, first_due: null, end_at: null },
+    },
   ])
 })
 
@@ -337,7 +415,7 @@ test('renewing a device before it runs out', async ({ page }, testInfo) => {
 
   await row.getByRole('button', { name: 'Renew iPhone' }).click()
   const confirm = page.getByRole('alertdialog')
-  await expect(confirm).toContainText('iPhone keeps approving the assistant\'s payments from this wallet for another 30 days')
+  await expect(confirm).toContainText('iPhone keeps approving the assistant\'s payments from this wallet for another 90 days')
   await confirm.getByRole('button', { name: 'Renew' }).click()
   await expect(page.getByText(/^iPhone renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeVisible()
   await expect(row.getByText('Active', { exact: true })).toBeVisible()
@@ -345,7 +423,7 @@ test('renewing a device before it runs out', async ({ page }, testInfo) => {
   expect(prepared).toEqual([
     {
       path: '/api/wallet/session/prepare',
-      body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+      body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 90 * 86_400 },
     },
   ])
   expect(sessionConfirms).toHaveLength(1)
@@ -391,7 +469,7 @@ test('adding this device: a real passkey is made, then the owner wallet adds it'
   made = held[0]
   expect(server.registered).toEqual([{ credentialId: made, deviceName: 'Work laptop' }])
   expect(server.prepared.map(p => p.body)).toEqual([
-    { chain_id: SEPOLIA, action: 'add', key_id: NEW_KEY_ID, ttl_secs: 30 * 86_400 },
+    { chain_id: SEPOLIA, action: 'add', key_id: NEW_KEY_ID, ttl_secs: 90 * 86_400 },
   ])
   // Read again once confirmed: the list shows the new device as this one.
   await page.reload()

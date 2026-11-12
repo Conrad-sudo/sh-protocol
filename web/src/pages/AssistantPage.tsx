@@ -134,7 +134,7 @@ function Chat({ wallet, mode }: { wallet: WalletState; mode: LayoutMode }) {
     })
   }
 
-  const payTicker = (wallet.spending.watched_tokens.find(t => t.ticker)?.ticker ?? chain?.native_ticker ?? 'eth').toUpperCase()
+  const payTicker = (chain?.native_ticker ?? 'eth').toUpperCase()
   // Only where the assistant can swap: the network has an exchange and lists a stablecoin to buy.
   const swapTo = SWAP_TARGETS.find(ticker => tokens.data?.some(token => token.ticker === ticker))
   const swap =

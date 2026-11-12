@@ -10,7 +10,7 @@ import { b64url, installPasskeys, refused, signedCredential } from '../test/weba
 
 const CHAINS = [{ chain_id: SEPOLIA, name: 'sepolia', native_ticker: 'ETH', fork: false }]
 const TOKENS = [
-  { ticker: 'weth', address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', always_counted: true },
+  { ticker: 'weth', address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', follows_native: true },
   { ticker: 'usdc', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' },
 ]
 const SAM: Contact = { name: 'sam', address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }
@@ -477,9 +477,9 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
 
     const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
-    await user.click(await within(suggestions).findByRole('button', { name: 'Send 5 USDC to sam…' }))
+    await user.click(await within(suggestions).findByRole('button', { name: 'Send 0.01 ETH to sam…' }))
     expect(posted).toHaveLength(0)
-    expect(await composer()).toHaveValue('Send 5 USDC to sam')
+    expect(await composer()).toHaveValue('Send 0.01 ETH to sam')
     expect(await composer()).toHaveFocus()
 
     await user.click(within(suggestions).getByRole('button', { name: 'What’s in my wallet?' }))
@@ -505,7 +505,7 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
 
     const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
-    expect(await within(suggestions).findByRole('button', { name: 'Send 5 USDC to sam…' })).toBeInTheDocument()
+    expect(await within(suggestions).findByRole('button', { name: 'Send 0.01 ETH to sam…' })).toBeInTheDocument()
     expect(within(suggestions).queryByRole('button', { name: /^Swap/ })).toBeNull()
   })
 
@@ -653,6 +653,32 @@ describe('AssistantPage', () => {
     expect(notice).toHaveClass('rs-message-error')
     const aside = screen.getByRole('complementary', { name: 'What the assistant can do' })
     expect(within(aside).getByText('No limit')).toBeInTheDocument()
+    expect(within(aside).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(aside).queryByText('$0.00')).not.toBeInTheDocument()
+    cleanup()
+
+    setViewportWidth(390)
+    stubServer({ wallet: makeWalletState({ spending }) })
+    await renderRoutes(routes, '/assistant')
+    expect(await screen.findByText('No spending limit')).toBeInTheDocument()
+  })
+
+  it('says "No limit" beside the chat when nothing counts toward one, never "$0 of $0"', async () => {
+    // As a wallet made with the limit skipped: the hook is on, $0 is stored, nothing is counted.
+    const spending = {
+      ...makeWalletState().spending,
+      daily_limit_usd: 0,
+      spent_usd: 0,
+      remaining_usd: 0,
+      native_metered: false,
+      watched_tokens: [],
+    }
+    stubServer({ wallet: makeWalletState({ spending }) })
+    await renderRoutes(routes, '/assistant')
+
+    const aside = await screen.findByRole('complementary', { name: 'What the assistant can do' })
+    expect(within(aside).getByText('No limit')).toBeInTheDocument()
+    expect(within(aside).getByText('Nothing counts toward a spending limit on this wallet.')).toBeInTheDocument()
     expect(within(aside).queryByRole('progressbar')).not.toBeInTheDocument()
     expect(within(aside).queryByText('$0.00')).not.toBeInTheDocument()
     cleanup()

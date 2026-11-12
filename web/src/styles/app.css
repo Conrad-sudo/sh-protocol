@@ -259,7 +259,7 @@
 .mf-tab-pill {
   position: absolute;
   border-radius: 999px;
-  background: rgb(255 255 255 / 58%);
+  background: rgb(255 255 255 / 42%);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 95%),
     inset 0 -1px 0 rgb(6 42 78 / 6%),
@@ -687,19 +687,19 @@ body:has(.mf-wallpaper) {
   --mf-safe-shadow: #062a4e;
   --mf-safe-shadow-alpha: 0.2;
   --mf-safe-seam: rgb(6 42 78 / 45%);
-  --mf-safe-face: #e3e9f0;
-  --mf-safe-grip: #c9d2dd;
+  --mf-safe-face: #c3cbd4;
+  --mf-safe-grip: #aab4c0;
   --mf-safe-groove: #8f9fb3;
-  --mf-safe-crest: rgb(255 255 255 / 75%);
+  --mf-safe-crest: rgb(255 255 255 / 55%);
   --mf-safe-step: rgb(6 42 78 / 22%);
   --mf-safe-ink: #0b2f59;
-  --mf-safe-engraving: rgb(255 255 255 / 85%);
+  --mf-safe-engraving: rgb(255 255 255 / 60%);
   --mf-safe-lit: 0.55;
   --mf-safe-shade: 0.14;
   --mf-safe-sheen: 0.55;
-  --mf-safe-under: #ffffff;
+  --mf-safe-under: #d9dee4;
   --mf-safe-under-alpha: 0.9;
-  --mf-safe-index: #f4f7fa;
+  --mf-safe-index: #d3d9e0;
   --mf-safe-index-edge: #062a4e;
   --mf-safe-glow: var(--mf-green);
 
@@ -1812,23 +1812,25 @@ main p a {
 
 /*
  * RSuite paints messages on a hard-coded white base (`.rs-message { background: #fff }`) and lays
- * the state tint over it. Our dark tints are translucent, so dark mode needs a dark base.
+ * the state tint over it. The tints are translucent, so both themes need the plate as the base:
+ * white would be a bright patch on the slate page, and unreadable in dark.
  */
-.rs-theme-dark .rs-message {
+.rs-message {
   background: var(--rs-bg-card);
 }
 
 /*
  * Red and amber outline/link buttons take their text from the same 500 shade as the filled ones,
- * which is dark enough for white text but only 3:1 on the dark page. Use the lighter text tones.
+ * which is right for white text but only about 3:1 on either page. Use the text tones instead:
+ * darker in light, lighter in dark.
  */
-.rs-theme-dark .rs-btn[data-color='red'] {
+.rs-btn[data-color='red'] {
   --rs-btn-ghost-text: var(--mf-danger);
   --rs-btn-ghost-border: var(--mf-danger);
   --rs-btn-link-text: var(--mf-danger);
 }
 
-.rs-theme-dark .rs-btn[data-color='orange'] {
+.rs-btn[data-color='orange'] {
   --rs-btn-ghost-text: var(--mf-warning);
   --rs-btn-ghost-border: var(--mf-warning);
   --rs-btn-link-text: var(--mf-warning);
@@ -2480,17 +2482,6 @@ main p a {
 /* The onboarding token picker. RSuite's inline CheckboxGroup is a flex row that never wraps, so a
    network with twenty tokens ran off the edge and the overflow was clipped. Equal columns wrap and
    line the tickers up: three on a phone, five at the step's full width. */
-.mf-token-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: 4px 12px;
-}
-
-.mf-token-grid > .rs-checkbox {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
 /* ── Contacts ───────────────────────────────────────────────────────────── */
 
 .mf-section-head {

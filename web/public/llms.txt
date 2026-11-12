@@ -14,7 +14,7 @@
 - The assistant pays only your saved contacts, and it can't add new ones.
 - Every payment is quoted first, with what it costs, and goes only when you say yes.
 - Only your browser wallet can change the limit or the rules.
-- The assistant loses its access after 30 days unless you renew it. You can turn it off sooner.
+- The assistant loses its access after 90 days unless you renew it. You can turn it off sooner.
 - Pausing the wallet stops everything in one click. You can still withdraw while it's paused.
 
 ## Costs

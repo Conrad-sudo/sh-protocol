@@ -4,7 +4,7 @@ import { useConnection, useSwitchChain } from 'wagmi'
 import {
   Button,
   Checkbox,
-  CheckboxGroup,
+  CheckPicker,
   Form,
   Input,
   Loader,
@@ -56,10 +56,13 @@ const WIZARD_INDEX: Record<WizardStep, number> = { network: 0, limits: 1, fund: 
 
 interface Draft {
   chainId: number | null
+  /** Asked for, and sent, only when something counts toward it (see `counts`). */
   limitUsd: number | null
   windowSecs: number
-  /** null until the user changes it: then every listed token is watched. */
-  tickers: string[] | null
+  /** Whether the native token counts toward the limit. Its wrapped form goes with it. Off to begin with. */
+  countNative: boolean
+  /** The tokens the user ticked. Nothing else counts. */
+  tickers: string[]
   prefund: string | null
   /**
    * The passkey the new wallet trusts from the start, so this device can approve the assistant's
@@ -77,6 +80,22 @@ const BUSY: DeployPhase[] = ['preparing', 'signing', 'confirming']
  * signs the deploy, so it owns the result. If the browser wallet has since disconnected or moved to
  * another account, the page asks for it back first.
  */
+/**
+ * The tokens the user ticked, from this network's list. The wrapped native token is never among
+ * them: it counts exactly when the native token does, and the API puts it on the list itself then.
+ */
+function pickedTokens(tokens: Token[], tickers: string[]) {
+  return tokens.filter(t => !t.follows_native && tickers.includes(t.ticker))
+}
+
+/**
+ * Whether the new wallet counts anything toward a spending limit. If it doesn't, there is no limit
+ * to set: the step leaves the fields out and the wallet is made with none.
+ */
+function counts(draft: Pick<Draft, 'countNative' | 'tickers'>, tokens: Token[]) {
+  return draft.countNative || pickedTokens(tokens, draft.tickers).length > 0
+}
+
 export function OnboardingPage() {
   const { address, chainId: walletChainId, isConnected } = useConnection()
   const { data: me } = useMe()
@@ -91,7 +110,8 @@ export function OnboardingPage() {
     chainId: null,
     limitUsd: 100,
     windowSecs: 86_400,
-    tickers: null,
+    countNative: false,
+    tickers: [],
     prefund: null,
     passkey: null,
   })
@@ -140,15 +160,16 @@ export function OnboardingPage() {
   }
 
   const createWallet = async (tokens: Token[]) => {
-    if (!address || chainId === null || draft.limitUsd === null) return
-    const { tickers } = draft
+    const limited = counts(draft, tokens)
+    if (!address || chainId === null || (limited && draft.limitUsd === null)) return
     await deploy({
       chain_id: chainId,
       deployer: address,
-      daily_limit_usd: draft.limitUsd,
+      // No limit for a wallet that counts nothing: the API takes 0 only then.
+      daily_limit_usd: limited ? (draft.limitUsd ?? 0) : 0,
       window_secs: draft.windowSecs,
-      // The wrapped native token always counts; the API adds it anyway, but the request says so too.
-      watched_tokens: tickers === null ? tokens : tokens.filter(t => t.always_counted || tickers.includes(t.ticker)),
+      watched_tokens: pickedTokens(tokens, draft.tickers),
+      count_native: draft.countNative,
       prefund_eth: prefund,
       key_id: draft.passkey?.key_id ?? null,
       session_ttl_secs: ASSISTANT_KEY_TTL_SECS,
@@ -270,8 +291,9 @@ export function OnboardingPage() {
       <StepBody title="Prefund your Mitfah smart wallet">
         <Text muted>
           This is your Mitfah smart wallet's starting balance. Your assistant pays for everything from it — payments,
-          swaps and every other transaction, plus their network fees — and never uses the funds in the wallet you
-          connected. It can only spend within your limit. You can add more or withdraw any time.
+          swaps and every other transaction, plus their network fees.
+          {draft.countNative || draft.tickers.length > 0 ? ' It can only spend within your limit.' : ''} You can add
+          more or withdraw any time.
         </Text>
         <Form fluid className="mf-auth-form">
           <Form.Group controlId="prefund">
@@ -285,7 +307,29 @@ export function OnboardingPage() {
             {!valid && <Form.Text className="mf-error-text">Enter an amount like 0.05.</Form.Text>}
           </Form.Group>
         </Form>
-        <StepNav onBack={() => setStep('limits')} onNext={() => setStep('passkey')} nextDisabled={!valid} />
+        <div className="mf-step-nav">
+          <Button appearance="subtle" onClick={() => setStep('limits')}>
+            Back
+          </Button>
+          <div className="mf-step-nav-end">
+            <Button
+              appearance="link"
+              onClick={() => {
+                setDraft(d => ({ ...d, prefund: '0' }))
+                setStep('passkey')
+              }}
+            >
+              Skip for now
+            </Button>
+            <Button appearance="primary" disabled={!valid} onClick={() => setStep('passkey')}>
+              Continue
+            </Button>
+          </div>
+        </div>
+        <Text size="sm" muted className="mf-settings-note">
+          Skipped, the wallet starts empty: the assistant can't pay for anything until you add funds from the
+          dashboard.
+        </Text>
       </StepBody>
     )
   } else if (step === 'passkey' && chainId !== null) {
@@ -381,41 +425,27 @@ function LimitsStep({
   onNext: () => void
 }) {
   const tokens = useTokens(chainId)
-  const always = tokens.data?.filter(t => t.always_counted).map(t => t.ticker) ?? []
-  const selected = [...new Set([...always, ...(draft.tickers ?? tokens.data?.map(t => t.ticker) ?? [])])]
+  const wrapped = tokens.data?.filter(t => t.follows_native).map(t => t.ticker.toUpperCase()) ?? []
+  // The wrapped native token isn't offered: it counts with the native one, so there's nothing to choose.
+  const choosable = tokens.data?.filter(t => !t.follows_native) ?? []
+  // A token ticked on another network, before going back to change it, isn't on this list.
+  const selected = draft.tickers.filter(ticker => choosable.some(t => t.ticker === ticker))
+  // Nothing counted means no limit to set: the fields below appear with the first thing that counts.
+  const limited = draft.countNative || selected.length > 0
   const limitValid = draft.limitUsd !== null && Number.isInteger(draft.limitUsd) && draft.limitUsd >= 1
 
   return (
     <StepBody title="How much may the assistant spend?">
       <Form fluid className="mf-auth-form">
-        <Form.Group controlId="limit">
-          <Form.Label>Spending limit</Form.Label>
-          <NumberInput
-            id="limit"
-            prefix="$"
-            min={1}
-            step={10}
-            value={draft.limitUsd ?? ''}
-            onChange={value => {
-              const n = Number(value)
-              onChange({ limitUsd: value === '' || value === null || Number.isNaN(n) ? null : Math.floor(n) })
-            }}
-          />
-          <Form.Text>
-            The most the assistant can move out of your wallet per period, in US dollars, across all tokens.
-          </Form.Text>
-          {!limitValid && <Form.Text className="mf-error-text">Enter a whole number of dollars, at least $1.</Form.Text>}
-        </Form.Group>
-
-        <Form.Group controlId="window">
-          <Form.Label>Period</Form.Label>
-          <SegmentedControl
-            aria-label="Period"
-            data={WINDOW_CHOICES}
-            value={draft.windowSecs}
-            onChange={value => onChange({ windowSecs: Number(value) })}
-          />
-          <Form.Text>The limit refills every {formatWindow(draft.windowSecs)}.</Form.Text>
+        <Form.Group controlId="count-native">
+          <Checkbox
+            id="count-native"
+            checked={draft.countNative}
+            onChange={(_value, checked) => onChange({ countNative: checked })}
+          >
+            Count {nativeTicker} toward a spending limit
+          </Checkbox>
+          {wrapped.length > 0 && <Form.Text>{wrapped.join(' and ')} counts with it.</Form.Text>}
         </Form.Group>
 
         <Form.Group controlId="tokens">
@@ -425,28 +455,72 @@ function LimitsStep({
           ) : tokens.isError ? (
             <QueryError what="the token list" onRetry={() => void tokens.refetch()} />
           ) : (
-            <CheckboxGroup
-              name="tokens"
-              className="mf-token-grid"
+            <CheckPicker
+              id="tokens"
+              // A <label for> can't name the picker's div, so point at the label RSuite rendered.
+              aria-labelledby="tokens-label"
+              placeholder={choosable.length > 0 ? 'Choose tokens' : 'No other tokens on this network'}
+              disabled={choosable.length === 0}
+              block
+              // A long list opens upward rather than off the screen, and is short enough to fit either way.
+              placement="autoVerticalStart"
+              listboxMaxHeight={240}
+              // One click on "clear" would take every token out of the limit.
+              cleanable={false}
+              searchable={choosable.length > 8}
+              data={choosable.map(token => ({ value: token.ticker, label: token.ticker.toUpperCase() }))}
               value={selected}
-              onChange={value => onChange({ tickers: [...new Set([...always, ...value.map(String)])] })}
-            >
-              {tokens.data.map(token => (
-                // The wrapped native token is ticked for good: it counts like the native asset.
-                <Checkbox key={token.ticker} value={token.ticker} disabled={token.always_counted}>
-                  {token.ticker.toUpperCase()}
-                </Checkbox>
-              ))}
-            </CheckboxGroup>
+              onChange={value => onChange({ tickers: value })}
+            />
           )}
-          <Form.Text>
-            {[nativeTicker, ...always.map(t => t.toUpperCase())].join(' and ')} always{' '}
-            {always.length > 0 ? 'count' : 'counts'}. Tokens you untick can be moved without limit — keep them
-            ticked unless you have a reason.
-          </Form.Text>
+          {choosable.length > 0 && (
+            <Form.Text>Tick any token you want limited: one you leave unticked can be moved without limit.</Form.Text>
+          )}
         </Form.Group>
+
+        {limited ? (
+          <>
+            <Form.Group controlId="limit">
+              <Form.Label>Spending limit</Form.Label>
+              <NumberInput
+                id="limit"
+                prefix="$"
+                min={1}
+                step={10}
+                value={draft.limitUsd ?? ''}
+                onChange={value => {
+                  const n = Number(value)
+                  onChange({ limitUsd: value === '' || value === null || Number.isNaN(n) ? null : Math.floor(n) })
+                }}
+              />
+              <Form.Text>
+                The most the assistant can move out of your wallet per period, in US dollars, across what counts
+                toward it.
+              </Form.Text>
+              {!limitValid && (
+                <Form.Text className="mf-error-text">Enter a whole number of dollars, at least $1.</Form.Text>
+              )}
+            </Form.Group>
+
+            <Form.Group controlId="window">
+              <Form.Label>Period</Form.Label>
+              <SegmentedControl
+                aria-label="Period"
+                data={WINDOW_CHOICES}
+                value={draft.windowSecs}
+                onChange={value => onChange({ windowSecs: Number(value) })}
+              />
+              <Form.Text>The limit refills every {formatWindow(draft.windowSecs)}.</Form.Text>
+            </Form.Group>
+          </>
+        ) : (
+          <Text muted>
+            A spending limit applies once something counts toward it. You can skip it for now and set one any time
+            in Controls.
+          </Text>
+        )}
       </Form>
-      <StepNav onBack={onBack} onNext={onNext} nextDisabled={!limitValid || tokens.isPending} />
+      <StepNav onBack={onBack} onNext={onNext} nextDisabled={(limited && !limitValid) || tokens.isPending} />
     </StepBody>
   )
 }
@@ -470,8 +544,17 @@ function ReviewStep({
 }) {
   const { chainId: walletChainId } = useConnection()
   const tokens = useTokens(draft.chainId ?? 0)
-  const always = tokens.data?.filter(t => t.always_counted).map(t => t.ticker) ?? []
-  const watched = [...new Set([...always, ...(draft.tickers ?? tokens.data?.map(t => t.ticker) ?? [])])]
+  const limited = counts(draft, tokens.data ?? [])
+  // What counts, as it will be on the wallet: the native token with its wrapped form, then the picks.
+  const counted = [
+    ...(draft.countNative
+      ? [
+          chain?.native_ticker ?? 'Native token',
+          ...(tokens.data ?? []).filter(t => t.follows_native).map(t => t.ticker.toUpperCase()),
+        ]
+      : []),
+    ...pickedTokens(tokens.data ?? [], draft.tickers).map(t => t.ticker.toUpperCase()),
+  ]
   const onRightNetwork = walletChainId === draft.chainId
 
   return (
@@ -482,15 +565,23 @@ function ReviewStep({
         <dt>Owner</dt>
         <dd>{owner ? <AddressText address={owner} /> : '—'}</dd>
         <dt>Spending limit</dt>
-        <dd className="mf-num">
-          {draft.limitUsd !== null ? formatUsd(draft.limitUsd) : '—'} every {formatWindow(draft.windowSecs)}
-        </dd>
+        {limited ? (
+          <dd className="mf-num">
+            {draft.limitUsd !== null ? formatUsd(draft.limitUsd) : '—'} every {formatWindow(draft.windowSecs)}
+          </dd>
+        ) : (
+          <dd>None</dd>
+        )}
         <dt>Counts toward the limit</dt>
-        <dd>{[chain?.native_ticker ?? 'Native token', ...watched.map(t => t.toUpperCase())].join(', ')}</dd>
+        <dd>{counted.length > 0 ? counted.join(', ') : 'Nothing'}</dd>
         <dt>Wallet prefund</dt>
-        <dd className="mf-num">
-          {draft.prefund} {chain?.native_ticker}
-        </dd>
+        {Number(draft.prefund) > 0 ? (
+          <dd className="mf-num">
+            {draft.prefund} {chain?.native_ticker}
+          </dd>
+        ) : (
+          <dd>None: add funds from the dashboard any time</dd>
+        )}
         <dt>Assistant's access</dt>
         <dd>
           {draft.passkey

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Form, NumberInput, SegmentedControl, Text } from 'rsuite'
 import { formatUsd, formatWindow } from '../../lib/format'
-import { WINDOW_CHOICES } from '../../lib/spending'
+import { limitApplies, WINDOW_CHOICES } from '../../lib/spending'
 import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
@@ -27,6 +27,8 @@ function LimitEditor({ wallet, tx, locked, start, ask, periodSecs }: ControlPane
   const [value, setValue] = useState<number | null>(current)
   const valid = value !== null && Number.isInteger(value) && value >= 0
   const changed = valid && value !== current
+  // With nothing counted the limit binds nothing, so its usual explanations would be untrue.
+  const applies = limitApplies(wallet.spending)
 
   const save = () => {
     if (!valid) return
@@ -75,11 +77,15 @@ function LimitEditor({ wallet, tx, locked, start, ask, periodSecs }: ControlPane
         </div>
         {!valid ? (
           <Form.Text className="mf-error-text">Enter a whole number of dollars, $0 or more.</Form.Text>
+        ) : !applies ? (
+          <Form.Text>
+            Nothing counts toward the limit yet, so it has no effect. Set it here, then choose what counts below.
+          </Form.Text>
         ) : value === 0 ? (
           <Form.Text>A $0 limit stops the assistant spending without turning it off.</Form.Text>
         ) : (
           <Form.Text>
-            The most the assistant can spend per period, across all tokens. Lowering it doesn't undo what's already
+            The most the assistant can spend per period, across the tokens that count toward it. Lowering it doesn't undo what's already
             been spent.
           </Form.Text>
         )}

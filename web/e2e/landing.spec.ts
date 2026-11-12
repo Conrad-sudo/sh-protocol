@@ -35,10 +35,10 @@ test('home page', async ({ page }, testInfo) => {
   const first = page.getByText('Does Mitfah hold my money?')
   const second = page.getByText('What can the assistant do?')
   await first.click()
-  await expect(page.getByText('Mitfah never has your owner key')).toBeVisible()
+  await expect(page.getByText('Mitfah holds no user private keys')).toBeVisible()
   await second.click()
   await expect(page.getByText('Check balances, send tokens')).toBeVisible()
-  await expect(page.getByText('Mitfah never has your owner key')).toBeHidden()
+  await expect(page.getByText('Mitfah holds no user private keys')).toBeHidden()
 
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'home')

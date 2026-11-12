@@ -2,9 +2,10 @@ import { Text } from 'rsuite'
 import type { WalletState } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
-import { summarizeSpending } from '../../lib/spending'
+import { limitApplies, summarizeSpending } from '../../lib/spending'
 import { GlassPanel } from '../Glass'
 import { LimitDial } from '../LimitDial'
+import { LinkButton } from '../LinkButton'
 
 const endsAtFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
 
@@ -12,6 +13,23 @@ const endsAtFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour
 export function SpendingCard({ spending }: { spending: WalletState['spending'] }) {
   const now = useNow(30_000)
   const { limit, left, spent, percentLeft, periodSecs, endsAt, ended } = summarizeSpending(spending, now)
+
+  // Nothing counts toward it, so there is no limit to show: not "$0 left of $0".
+  if (!limitApplies(spending)) {
+    return (
+      <GlassPanel bordered header={<h2>Spending limit</h2>} className="mf-card">
+        <p className="mf-budget-left">
+          <strong className="mf-budget-unlimited">No limit</strong>
+        </p>
+        <Text size="sm" muted>
+          Nothing counts toward a spending limit on this wallet.
+        </Text>
+        <LinkButton to="/controls" appearance="link" size="sm" className="mf-budget-manage">
+          Choose what counts
+        </LinkButton>
+      </GlassPanel>
+    )
+  }
 
   let status: string
   if (limit === 0) status = "The limit is $0, so the assistant can't spend anything."

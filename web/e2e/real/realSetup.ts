@@ -13,7 +13,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
 import { createSiweMessage } from 'viem/siwe'
 import { FAKE_WALLET_NAME, installFakeWallet } from '../fakeWallet.ts'
-import { walkOnboarding, type WalkOptions } from '../onboardingFlow.ts'
+import { closeTokenPicker, countNative, TOKEN_PICKER, walkOnboarding, type WalkOptions } from '../onboardingFlow.ts'
 
 /*
  * Shared by the real-fork specs: they sign and send real transactions on the local Sepolia fork
@@ -162,7 +162,17 @@ export async function signInAndDeploy(
   await signIn(page, '/onboarding')
   await expect(page.getByRole('heading', { name: 'Create your wallet' })).toBeVisible()
 
-  await walkOnboarding(page, { passkey })
+  await walkOnboarding(page, {
+    passkey,
+    // Only what's ticked counts. ETH (and WETH with it), so the limit covers what the wallet is
+    // funded with; and USDC, which controls.real.spec stops counting.
+    editLimits: async step => {
+      await countNative(step)
+      await step.getByRole('combobox', { name: TOKEN_PICKER }).click()
+      await page.getByRole('option', { name: 'USDC' }).getByText('USDC').click()
+      await closeTokenPicker(page)
+    },
+  })
   await expect(page.getByText('Your Mitfah smart wallet on Sepolia')).toBeVisible({ timeout: 120_000 })
 
   // Signed in once: sign-in is rate limited, and the access token outlasts any one spec.

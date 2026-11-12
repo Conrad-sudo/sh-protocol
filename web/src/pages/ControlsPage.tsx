@@ -5,7 +5,9 @@ import { useSelectedChain } from '../chain/useSelectedChain'
 import { AdvancedPanel } from '../components/controls/AdvancedPanel'
 import { DevicesPanel } from '../components/controls/DevicesPanel'
 import { EmergencyPanel } from '../components/controls/EmergencyPanel'
+import { RecurringPanel } from '../components/controls/RecurringPanel'
 import { SpendingPanel } from '../components/controls/SpendingPanel'
+import { TokenCapsPanel } from '../components/controls/TokenCapsPanel'
 import { TokensPanel } from '../components/controls/TokensPanel'
 import type { Confirmation } from '../components/controls/types'
 import { ConfirmModal } from '../components/owner/ConfirmModal'
@@ -21,7 +23,7 @@ const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the 
 
 /**
  * Everything the owner can change about the wallet: the brake, the devices that approve payments,
- * the limit, and what it counts.
+ * the limit, what it counts, and the payments it makes by itself.
  */
 export function ControlsPage() {
   const view = useWalletView()
@@ -72,6 +74,8 @@ function Controls({ wallet }: { wallet: WalletState }) {
         <DevicesPanel {...panel} />
         <SpendingPanel {...panel} />
         <TokensPanel {...panel} chain={chain} />
+        <TokenCapsPanel {...panel} />
+        <RecurringPanel {...panel} />
         <AdvancedPanel {...panel} chain={chain} />
       </div>
       {confirmation && (

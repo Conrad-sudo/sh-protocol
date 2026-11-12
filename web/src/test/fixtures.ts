@@ -82,7 +82,13 @@ export function makeWalletState(
       remaining_usd: 60,
       window_hours: 24,
       window_start: nowSecs - 3_600,
-      watched_tokens: [{ ticker: 'usdc', address: USDC }],
+      // The native token counts, so its wrapped form is watched with it.
+      native_metered: true,
+      watched_tokens: [
+        { ticker: 'weth', address: WETH },
+        { ticker: 'usdc', address: USDC },
+      ],
+      token_caps: [],
     },
     session: makeSession('on', nowSecs),
     limits: {
@@ -94,7 +100,7 @@ export function makeWalletState(
     balances: [
       { ticker: 'eth', address: null, native: true, decimals: 18, raw: '1500000000000000000', amount: 1.5 },
       { ticker: 'usdc', address: USDC, native: false, decimals: 6, raw: '25000000', amount: 25 },
-      { ticker: 'weth', address: WETH, native: false, always_counted: true, decimals: 18, raw: '0', amount: 0 },
+      { ticker: 'weth', address: WETH, native: false, follows_native: true, decimals: 18, raw: '0', amount: 0 },
     ],
     positions: [],
     ...overrides,

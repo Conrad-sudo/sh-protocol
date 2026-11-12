@@ -3,8 +3,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Message, useToaster } from 'rsuite'
 import { useConnection, useSendTransaction, useSwitchChain } from 'wagmi'
 import { ApiError } from '../api/client'
-import { confirmOwnerTx, confirmSessionTx, prepareOwnerAction } from '../api/wallet'
-import type { OwnerAction, SessionBlock, WalletState } from '../api/types'
+import { confirmOwnerTx, confirmRecurringTx, confirmSessionTx, prepareOwnerAction } from '../api/wallet'
+import type { OwnerAction, RecurringPayments, SessionBlock, WalletState } from '../api/types'
 import { useAuth } from '../auth/useAuth'
 import {
   errorText,
@@ -57,8 +57,11 @@ interface PendingOwnerTx {
   txHash: string
   key: string
   success: string
-  /** `session` for a device's passkey, which has its own confirm endpoint; absent for the rest. */
-  confirmWith?: 'session'
+  /**
+   * `session` for a device's passkey and `recurring` for a recurring payment, which have confirm
+   * endpoints of their own; absent for the rest.
+   */
+  confirmWith?: 'session' | 'recurring'
   /** When the wallet handed the hash back (ms). Every wait is measured from it, not from a page visit. */
   sentAt: number
   /** The network still hadn't seen it after UNSEEN_GRACE_MS: kept only for "Check again". */
@@ -80,9 +83,15 @@ const pendingKey = (userId: number | null, chainId: number) => `mitfah-pending-o
  * Asks the API once whether the transaction has mined, through the endpoint that finishes it. A
  * device's passkey comes back with the wallet's keys as they are now.
  */
-async function confirmOnce(pending: PendingOwnerTx): Promise<{ mined: boolean; seen?: boolean; session?: SessionBlock }> {
+async function confirmOnce(
+  pending: PendingOwnerTx,
+): Promise<{ mined: boolean; seen?: boolean; session?: SessionBlock; recurring?: RecurringPayments }> {
   const body = { chain_id: pending.chainId, tx_hash: pending.txHash }
   const signal = timeoutSignal(REQUEST_TIMEOUT_MS)
+  if (pending.confirmWith === 'recurring') {
+    const answer = await confirmRecurringTx(body, signal)
+    return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true, recurring: answer.recurring }
+  }
   if (pending.confirmWith !== 'session') {
     const answer = await confirmOwnerTx(body, signal)
     return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true }
@@ -173,7 +182,7 @@ export function useOwnerAction(chainId: number, owner: string) {
     const stale = () => generation.current !== mine
     try {
       for (;;) {
-        const { mined, seen, session } = await confirmOnce(pending)
+        const { mined, seen, session, recurring } = await confirmOnce(pending)
         if (stale()) return { kind: 'stale' }
         if (mined) {
           writePending(storageKey, null)
@@ -181,6 +190,8 @@ export function useOwnerAction(chainId: number, owner: string) {
           if (session) {
             queryClient.setQueryData<WalletState | null>(['wallet', pending.chainId], old => old && { ...old, session })
           }
+          // So do the recurring payments, as the confirm read them back from the chain.
+          if (recurring) queryClient.setQueryData(['recurring', pending.chainId], recurring)
           await queryClient.invalidateQueries({ queryKey: ['wallet', pending.chainId] })
           return { kind: 'confirmed' }
         }
@@ -283,6 +294,7 @@ export function useOwnerAction(chainId: number, owner: string) {
       const txHash = await sendTransactionAsync({ ...toTxRequest(tx), chainId })
       pending = { chainId, txHash, key, success, sentAt: Date.now() }
       if (action.kind === 'session') pending.confirmWith = 'session'
+      if (action.kind === 'recurring') pending.confirmWith = 'recurring'
     } catch (error) {
       // Given up on already, so whatever the wallet says now is no longer news.
       if (!abandoned()) fail(error, key)

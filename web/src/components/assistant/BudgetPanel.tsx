@@ -4,7 +4,7 @@ import type { Contact, WalletState } from '../../api/types'
 import { useContacts } from '../../hooks/useContacts'
 import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatUsd } from '../../lib/format'
-import { summarizeSpending } from '../../lib/spending'
+import { limitApplies, summarizeSpending } from '../../lib/spending'
 import { GlassLayer, GlassPanel } from '../Glass'
 import { LimitDial } from '../LimitDial'
 import { LinkButton } from '../LinkButton'
@@ -28,7 +28,7 @@ export function BudgetPanel({ wallet }: { wallet: WalletState }) {
   return (
     <aside className="mf-chat-aside" aria-label="What the assistant can do">
       <GlassPanel bordered header={<h2>Left to spend</h2>} className="mf-card">
-        {wallet.spending.hook_installed ? (
+        {wallet.spending.hook_installed && limitApplies(wallet.spending) ? (
           <>
             <LimitDial
               percent={percentLeft}
@@ -49,7 +49,9 @@ export function BudgetPanel({ wallet }: { wallet: WalletState }) {
               <strong className="mf-budget-unlimited">No limit</strong>
             </p>
             <Text size="sm" muted>
-              The spending limit isn’t switched on for this wallet.
+              {wallet.spending.hook_installed
+                ? 'Nothing counts toward a spending limit on this wallet.'
+                : 'The spending limit isn’t switched on for this wallet.'}
             </Text>
           </>
         )}
@@ -107,7 +109,7 @@ export function BudgetStrip({ wallet }: { wallet: WalletState }) {
   return (
     <div className="mf-budget-strip mf-glass-surface">
       <GlassLayer shape="capsule" />
-      {wallet.spending.hook_installed ? (
+      {wallet.spending.hook_installed && limitApplies(wallet.spending) ? (
         <span>
           <strong className="mf-num">{formatUsd(left)}</strong> of <span className="mf-num">{formatUsd(limit)}</span>{' '}
           left

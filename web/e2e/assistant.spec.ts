@@ -208,8 +208,8 @@ test('an empty conversation offers somewhere to start', async ({ page }, testInf
   await expectComposerInView(page)
   await snap(page, testInfo, 'assistant-empty')
 
-  await suggestions.getByRole('button', { name: 'Send 5 USDC to sam…' }).click()
-  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('Send 5 USDC to sam')
+  await suggestions.getByRole('button', { name: 'Send 0.01 ETH to sam…' }).click()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('Send 0.01 ETH to sam')
   expect(posted).toHaveLength(0)
 
   await suggestions.getByRole('button', { name: 'What’s in my wallet?' }).click()

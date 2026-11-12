@@ -2,7 +2,7 @@ import { Button, Text } from 'rsuite'
 import { useContacts } from '../../hooks/useContacts'
 
 interface SuggestedPromptsProps {
-  /** The token the payment example uses. */
+  /** The native token: the payment example sends a small amount of it. */
   payTicker: string
   /** The swap example's two tokens, or null where the assistant can't swap. */
   swap: { from: string; to: string } | null
@@ -23,7 +23,7 @@ export function SuggestedPrompts({ payTicker, swap, onAsk, onDraft, disabled }: 
     'Which tokens count toward my limit?',
   ]
   const drafts = [
-    ...(payee ? [`Send 5 ${payTicker} to ${payee}`] : []),
+    ...(payee ? [`Send 0.01 ${payTicker} to ${payee}`] : []),
     ...(swap ? [`Swap 1 ${swap.from} for ${swap.to}`] : []),
   ]
 

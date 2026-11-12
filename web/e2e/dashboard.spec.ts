@@ -155,7 +155,8 @@ test('an active wallet', async ({ page }, testInfo) => {
   await expect(page.getByText('Active', { exact: true })).toBeVisible()
   await expect(page.getByText('Assistant on')).toBeVisible()
   await expect(page.getByRole('progressbar', { name: '60% of the limit left' })).toBeVisible()
-  await expect(page.getByRole('rowheader', { name: /^WETH/ })).toContainText('Not limited')
+  // ETH counts on this wallet, so WETH counts with it.
+  await expect(page.getByRole('rowheader', { name: /^WETH/ })).not.toContainText('Not limited')
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'dashboard-active')
 })
@@ -339,7 +340,7 @@ test('removing a token that counts asks to stop counting it first', async ({ pag
   await mockServer(page, new Map([[SEPOLIA, walletState(SEPOLIA, ADDRESS)]]))
   await page.goto('/dashboard')
 
-  // ETH and WETH always count, so they have no Remove.
+  // ETH never has a Remove, and WETH has none while it counts with ETH.
   await expect(page.getByRole('button', { name: /^Remove .+ from your dashboard$/ })).toHaveCount(1)
   await page.getByRole('button', { name: 'Remove USDC from your dashboard' }).click()
   const dialog = page.getByRole('alertdialog', { name: 'Remove USDC?' })

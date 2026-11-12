@@ -7,21 +7,21 @@
 
 :root {
   color-scheme: light;
-  --mfc-page: #edf0f4;
-  --mfc-plate: #fafbfc;
+  --mfc-page: #c5ccd4;
+  --mfc-plate: #d5dae0;
   --mfc-text: #0b1a2c;
   --mfc-heading: #062a4e;
   --mfc-muted: #45546a;
-  --mfc-rule: #d5dce5;
+  --mfc-rule: #b0b9c4;
   --mfc-primary: #0b335d;
   --mfc-primary-hover: #062a4e;
   --mfc-primary-text: #ffffff;
   --mfc-link: #1f4f80;
   --mfc-focus: #1f4f80;
-  --mfc-info-bg: #e8eef5;
-  --mfc-error-bg: #f8e6e4;
-  --mfc-error-text: #9c2a25;
-  --mfc-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 1px 0 rgb(6 42 78 / 6%), 0 18px 36px -24px rgb(6 42 78 / 35%);
+  --mfc-info-bg: rgb(31 79 128 / 10%);
+  --mfc-error-bg: rgb(194 54 47 / 12%);
+  --mfc-error-text: #8c2621;
+  --mfc-shadow: inset 0 1px 0 rgb(255 255 255 / 55%), 0 1px 0 rgb(6 42 78 / 8%), 0 18px 36px -24px rgb(6 42 78 / 40%);
 }
 
 @media (prefers-color-scheme: dark) {

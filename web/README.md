@@ -133,9 +133,15 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   price" and "Not limited". Withdraw sends an ERC-20's address, not its ticker, so added tokens
   withdraw like any other.
 
+- **A token can have a limit in its own units** instead of counting in USD (`TokenCapsPanel` in
+  Controls): any token except the native one and its wrapped form, and one that counts in USD has to
+  stop counting first. Setting or lowering one goes straight through; raising or removing one asks
+  first. `BalancesCard` shows what's left in place of "Not limited", and such a token has no Remove
+  link until its limit comes off.
+
 - **The dashboard shows only the user's tokens**: the native token, the ones picked at deploy (and
-  counted since), and the ones added. Every row but the native token and WETH/WBNB has a Remove
-  link (`RemoveTokenModal`). A token that still counts goes in two steps — "Stop counting" (the
+  counted since), and the ones added. Every row but the native token, and WETH/WBNB while
+  it counts, has a Remove link (`RemoveTokenModal`). A token that still counts goes in two steps — "Stop counting" (the
   owner's signature), then remove — because the dashboard must show everything the limit covers;
   the API refuses the removal otherwise. The page shares one `useOwnerAction` between the header
   actions and `BalancesCard`, so only one owner change is ever in flight.
@@ -146,10 +152,22 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   deposit, so it has no Remove link, and it isn't flagged "Not limited": the assistant can't send
   it. The Withdraw drawer lists it like any token.
 
-- **WETH/WBNB always count.** `/api/tokens` flags the wrapped native token `always_counted`. The
-  onboarding picker shows it ticked and locked ("ETH and WETH always count"); Controls lists it
-  under "Always counts" with no Remove, or — on a wallet made before the rule — "Not counted yet"
-  with a one-click "Count it". The picker for other tokens never offers it.
+- **ETH/BNB counts only if the user chooses, and WETH/WBNB goes with it.** Onboarding's limits step
+  has a "Count ETH toward a spending limit" checkbox, unticked by default ("WETH counts with it"),
+  above the token picker, which leaves the wrapped token out (`/api/tokens` flags it
+  `follows_native`) and starts with nothing ticked. The limit and period fields appear only once
+  something counts; until then the step says a limit applies once something counts and can be
+  skipped, and the deploy sends `count_native` and a limit of 0. Controls has one "ETH and WETH"
+  row with Counted / Not counted and a single switch (`native-metering/prepare`); stopping asks
+  first, and counting needs a limit set. If the two ever split (an owner call made outside Mitfah),
+  the row says "WETH not counted yet" or "WETH still counted" with a one-click fix. A wallet that
+  counts nothing shows "No limit" (`limitApplies` in `src/lib/spending.ts`) on the dashboard, the
+  chat's budget panel and Controls. The add-token dialog offers no count checkbox for WETH or on a
+  wallet with no limit.
+
+- **Periods and passkey length.** The period choices are 12 hours, 24 hours, 7 days and 1 month
+  (`WINDOW_CHOICES`; the contract's ceiling is about 194 days). The site approves a passkey for
+  90 days (`ASSISTANT_KEY_DAYS`), the contract's most.
 
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
   written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. Colour carries

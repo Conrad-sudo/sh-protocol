@@ -8,6 +8,8 @@ import type {
   OwnerAction,
   OwnerTxConfirmResult,
   PreparedTx,
+  RecurringPayments,
+  RecurringTxConfirmResult,
   SessionTxConfirmResult,
   Token,
   WalletState,
@@ -79,6 +81,12 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
       return ['/api/wallet/withdraw/prepare', { chain_id, token: action.token, amount: action.amount, to: action.to }]
     case 'watched-token':
       return ['/api/wallet/watched-tokens/prepare', { chain_id, token: action.token, action: action.action }]
+    case 'native-metering':
+      return ['/api/wallet/native-metering/prepare', { chain_id, metered: action.metered }]
+    case 'token-cap':
+      return action.action === 'set'
+        ? ['/api/wallet/token-caps/prepare', { chain_id, token: action.token, action: 'set', limit: action.limit }]
+        : ['/api/wallet/token-caps/prepare', { chain_id, token: action.token, action: 'remove' }]
     case 'daily-limit':
       return ['/api/wallet/daily-limit/prepare', { chain_id, daily_limit_usd: action.dailyLimitUsd }]
     case 'window':
@@ -100,6 +108,21 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
       return ['/api/wallet/session-gas-budget/prepare', { chain_id, budget_eth: action.budgetEth }]
     case 'allowlist':
       return ['/api/wallet/allowlist/prepare', { chain_id, action: action.action, targets: action.targets }]
+    case 'recurring':
+      return action.action === 'create'
+        ? [
+            '/api/wallet/recurring/prepare',
+            {
+              chain_id,
+              token: action.token,
+              amount: action.amount,
+              to: action.to,
+              interval_secs: action.intervalSecs,
+              first_due: action.firstDue ?? null,
+              end_at: action.endAt ?? null,
+            },
+          ]
+        : ['/api/wallet/recurring/cancel/prepare', { chain_id, schedule_id: action.scheduleId }]
   }
 }
 
@@ -115,6 +138,16 @@ export function prepareOwnerAction(chainId: number, action: OwnerAction, signal?
 /** Waits for an owner transaction. Answers `pending` (HTTP 202) until it has mined. */
 export function confirmOwnerTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
   return apiFetch<OwnerTxConfirmResult>('/api/wallet/tx/confirm', { method: 'POST', body, signal })
+}
+
+/** The wallet's recurring payments, read from the chain: live ones first. */
+export function fetchRecurring(chainId: number, signal?: AbortSignal) {
+  return apiFetch<RecurringPayments>(`/api/wallet/${chainId}/recurring`, { signal })
+}
+
+/** confirmOwnerTx for creating or cancelling a recurring payment; answers with the schedules once mined. */
+export function confirmRecurringTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
+  return apiFetch<RecurringTxConfirmResult>('/api/wallet/recurring/confirm', { method: 'POST', body, signal })
 }
 
 /**

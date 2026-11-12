@@ -4,7 +4,7 @@ import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import type { WalletState } from '../api/types'
 import { routes } from '../routes'
-import { makePosition, makeSession, makeWalletState, SEPOLIA, USDC } from '../test/fixtures'
+import { makePosition, makeSession, makeWalletState, SEPOLIA, USDC, WETH } from '../test/fixtures'
 import { answerRpc, isRpc, json, ME, renderRoutes, setViewportWidth, TOKEN, WALLET } from '../test/utils'
 
 // Owner transactions poll with a 2 s gap; the tests don't wait.
@@ -160,11 +160,62 @@ describe('DashboardPage', () => {
     expect(row('ETH')).toHaveTextContent('1.5')
     expect(row('USDC')).toHaveTextContent('25')
     expect(row('USDC')).not.toHaveTextContent('Not limited')
-    // WETH is not watched, so the assistant could move it without limit.
-    expect(row('WETH')).toHaveTextContent('Not limited')
+    // This wallet counts ETH, and WETH with it, so neither is flagged.
+    expect(row('ETH')).not.toHaveTextContent('Not limited')
+    expect(row('WETH')).not.toHaveTextContent('Not limited')
     expect(screen.getByRole('button', { name: 'Add funds' })).toBeInTheDocument()
     // No liquidity positions, so no card for them.
     expect(screen.queryByRole('heading', { name: 'Liquidity positions' })).toBeNull()
+  })
+
+  it('flags ETH and WETH like any other token when the owner leaves them out of the limit', async () => {
+    const base = makeWalletState().spending
+    stubServer({
+      wallets: {
+        [SEPOLIA]: [
+          makeWalletState({
+            spending: { ...base, native_metered: false, watched_tokens: base.watched_tokens.filter(t => t.ticker !== 'weth') },
+          }),
+        ],
+      },
+    })
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    const balances = within(screen.getByRole('table', { name: 'Token balances' }))
+    const row = (ticker: string) => balances.getByRole('rowheader', { name: new RegExp(`^${ticker}`) }).closest('tr')!
+    expect(row('ETH')).toHaveTextContent('Not limited')
+    expect(row('WETH')).toHaveTextContent('Not limited')
+    expect(row('USDC')).not.toHaveTextContent('Not limited')
+    // USDC still counts, so the limit is still shown.
+    expect(screen.getByText('Limit').nextElementSibling).toHaveTextContent('$100.00 every 24 hours')
+    // Not counted, WETH can come off the dashboard like any token. ETH never does.
+    expect(screen.getAllByRole('button', { name: /from your dashboard$/ }).map(b => b.getAttribute('aria-label'))).toEqual([
+      'Remove USDC from your dashboard',
+      'Remove WETH from your dashboard',
+    ])
+  })
+
+  it('says there is no limit when nothing counts toward one, rather than "$0 left"', async () => {
+    const base = makeWalletState().spending
+    stubServer({
+      wallets: {
+        [SEPOLIA]: [
+          makeWalletState({
+            // As a wallet made with the limit skipped: $0 stored, nothing counted.
+            spending: { ...base, daily_limit_usd: 0, spent_usd: 0, remaining_usd: 0, native_metered: false, watched_tokens: [] },
+          }),
+        ],
+      },
+    })
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    expect(screen.getByText('No limit')).toBeInTheDocument()
+    expect(screen.getByText('Nothing counts toward a spending limit on this wallet.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Choose what counts' })).toHaveAttribute('href', '/controls')
+    expect(screen.queryByRole('progressbar', { name: /of the limit left/ })).toBeNull()
+    expect(screen.queryByText(/The limit is \$0/)).toBeNull()
   })
 
   it('warns about everything that weakens the protection', async () => {
@@ -586,7 +637,7 @@ describe('DashboardPage', () => {
     expect(row).toHaveTextContent('No price')
     expect(row).toHaveTextContent('Not limited')
     expect(row).toHaveTextContent('5')
-    expect(screen.getByText('Tokens marked "No price" can never count toward your limit: Mitfah has no price for them.')).toBeInTheDocument()
+    expect(screen.getByText(`Tokens marked "No price" can't count toward your USD limit, because Mitfah has no price for them. You can give one a limit of its own in Controls.`)).toBeInTheDocument()
     // Looked up by its checksummed address; added once.
     expect(requests).toEqual([
       { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: NOT_A_TOKEN } },
@@ -599,7 +650,7 @@ describe('DashboardPage', () => {
   it('shows LP tokens with what they hold, and lets the owner withdraw them', async () => {
     const POOL = '0x4444444444444444444444444444444444444444'
     const lp = {
-      ticker: 'eth/usdc lp', address: POOL, native: false, custom: false, always_counted: false, lp: true,
+      ticker: 'eth/usdc lp', address: POOL, native: false, custom: false, follows_native: false, lp: true,
       decimals: 18, raw: '10000000000000000000', amount: 10,
       underlying: [
         { ticker: 'eth', decimals: 18, raw: '40000000000000000000' },
@@ -712,7 +763,7 @@ describe('DashboardPage', () => {
     await renderRoutes(routes, '/dashboard')
 
     await walletHeader()
-    // Every token can come off the dashboard except ETH and WETH, which always count.
+    // Every token can come off the dashboard except ETH, and WETH while it counts with ETH.
     expect(screen.getAllByRole('button', { name: /from your dashboard$/ }).map(b => b.getAttribute('aria-label'))).toEqual([
       'Remove USDC from your dashboard',
       'Remove PEPE from your dashboard',
@@ -788,6 +839,115 @@ describe('DashboardPage', () => {
     expect(prepared).toEqual([
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdt', action: 'add' } },
     ])
+  })
+
+  it('adds WETH without offering to count it: it counts with ETH, which Controls switches', async () => {
+    const base = makeWalletState()
+    const weth = { chain_id: SEPOLIA, address: WETH, ticker: 'weth', symbol: 'WETH', name: 'Wrapped Ether', decimals: 18, balance_raw: '0', listed: true }
+    // A wallet that leaves ETH out of the limit, and so doesn't show WETH until it is added.
+    const ethOut = makeWalletState({
+      spending: { ...base.spending, native_metered: false, watched_tokens: [{ ticker: 'usdc', address: USDC }] },
+      balances: base.balances.filter(b => b.ticker !== 'weth'),
+    })
+    const { requests, prepared } = stubServer({
+      wallets: { [SEPOLIA]: [ethOut, makeWalletState({ spending: ethOut.spending })] },
+      extra: {
+        [`GET /api/tokens?chain_id=${SEPOLIA}`]: () =>
+          json(200, { tokens: [{ ticker: 'usdc', address: USDC }, { ticker: 'weth', address: WETH, follows_native: true }] }),
+        'POST /api/tokens/custom/lookup': () => json(200, weth),
+        'POST /api/tokens/custom': () => json(201, weth),
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add token' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a token' })
+    await user.type(within(dialog).getByLabelText('Token contract address'), WETH)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    const preview = await screen.findByRole('dialog', { name: 'Add WETH?' })
+    expect(preview).toHaveTextContent(
+      'It counts toward your spending limit exactly when ETH does. You can switch that in Controls.',
+    )
+    expect(within(preview).queryByRole('checkbox')).toBeNull()
+    await user.click(within(preview).getByRole('button', { name: 'Add token' }))
+
+    expect(await screen.findByText('WETH added. It now shows in your balances.')).toBeInTheDocument()
+    // Added to the dashboard only: no owner transaction was asked for.
+    expect(prepared).toEqual([])
+    expect(requests.map(r => r.route).filter(route => route.startsWith('POST'))).toEqual([
+      'POST /api/tokens/custom/lookup',
+      'POST /api/tokens/custom',
+    ])
+  })
+
+  it("adds a listed token without offering to count it on a wallet that has no limit yet", async () => {
+    const USDT = '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0'
+    const usdt = { chain_id: SEPOLIA, address: USDT, ticker: 'usdt', symbol: 'USDT', name: 'Tether USD', decimals: 6, balance_raw: '0', listed: true }
+    const base = makeWalletState().spending
+    const noLimit = makeWalletState({
+      spending: { ...base, daily_limit_usd: 0, spent_usd: 0, remaining_usd: 0, native_metered: false, watched_tokens: [] },
+    })
+    const { prepared } = stubServer({
+      wallets: { [SEPOLIA]: [noLimit] },
+      extra: {
+        'POST /api/tokens/custom/lookup': () => json(200, usdt),
+        'POST /api/tokens/custom': () => json(201, usdt),
+      },
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    await user.click(screen.getByRole('button', { name: 'Add token' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a token' })
+    await user.type(within(dialog).getByLabelText('Token contract address'), USDT)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    const preview = await screen.findByRole('dialog', { name: 'Add USDT?' })
+    // Counting it against the $0 the wallet holds would stop the assistant spending it at all.
+    expect(preview).toHaveTextContent(
+      'This wallet has no spending limit yet. Set one in Controls, then you can count USDT toward it.',
+    )
+    expect(within(preview).queryByRole('checkbox')).toBeNull()
+    await user.click(within(preview).getByRole('button', { name: 'Add token' }))
+    expect(await screen.findByText('USDT added. It now shows in your balances.')).toBeInTheDocument()
+    expect(prepared).toEqual([])
+  })
+
+  it('shows what is left of a limit on a token, and offers no way to remove it from there', async () => {
+    const LINK = '0x779877A7B0D9E8603169DdbD7836e478b4624789'
+    stubServer({
+      wallets: {
+        [SEPOLIA]: [
+          makeWalletState({
+            spending: {
+              ...makeWalletState().spending,
+              token_caps: [
+                {
+                  ticker: 'link',
+                  address: LINK,
+                  decimals: 18,
+                  limit_raw: '150000000000000000000',
+                  remaining_raw: '50000000000000000000',
+                },
+              ],
+            },
+            balances: [
+              ...makeWalletState().balances,
+              { ticker: 'link', address: LINK, native: false, decimals: 18, raw: '1000000000000000000', amount: 1 },
+            ],
+          }),
+        ],
+      },
+    })
+    await renderRoutes(routes, '/dashboard')
+
+    await walletHeader()
+    const row = (await screen.findByRole('rowheader', { name: /^LINK/ })).closest('tr')!
+    expect(row).toHaveTextContent('50 left')
+    expect(row).not.toHaveTextContent('Not limited')
+    expect(within(row).queryByRole('button', { name: /Remove/ })).toBeNull()
   })
 
   it('stops counting a token before removing it from the dashboard', async () => {

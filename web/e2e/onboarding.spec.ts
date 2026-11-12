@@ -1,7 +1,8 @@
+import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import { installFakeWallet, type WalletTx } from './fakeWallet.ts'
 import { addPasskeyAuthenticator, expectNoSidewaysScroll, expectTheme, isApiUrl, ME, passkey, snap, TOKEN, walletState } from './helpers.ts'
-import { walkOnboarding } from './onboardingFlow.ts'
+import { closeTokenPicker, countNative, TOKEN_PICKER, walkOnboarding } from './onboardingFlow.ts'
 
 /*
  * Creating a wallet at real screen sizes, in both themes, with a fake browser wallet. The API is
@@ -14,15 +15,17 @@ const TX_HASH = `0x${'12'.repeat(32)}`
 const PREDICTED = '0x2222222222222222222222222222222222222222'
 const TOKENS = [
   { ticker: 'usdc', address: '0x3333333333333333333333333333333333333333' },
-  // As the API flags it: the wrapped native token always counts, like ETH.
-  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', always_counted: true },
+  // As the API flags it: the wrapped native token counts exactly when ETH does, so it is never picked.
+  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', follows_native: true },
 ]
 // Every token the app offers on mainnet: the longest list any network has.
 const MAINNET_TICKERS = 'aave ape arb bnb comp crv dai ens imx link oneinch sand sushi uni usdc usdt wbtc weth wtao yfi'
 const MAINNET_TOKENS = MAINNET_TICKERS.split(' ').map((ticker, i) => ({
   ticker,
   address: `0x${(i + 1).toString(16).padStart(40, '0')}`,
+  follows_native: ticker === 'weth',
 }))
+const MAINNET_CHOOSABLE = MAINNET_TOKENS.filter(token => !token.follows_native)
 /** The key id the server gives the passkey made during onboarding. */
 const NEW_KEY_ID = `0x${'ef'.repeat(32)}`
 /** POST /api/passkeys/register/options: for this site, ES256 only, the user verified. */
@@ -141,7 +144,7 @@ async function mockServer(page: Page, tokens = TOKENS): Promise<Recorded> {
               wallet_address: PREDICTED,
               key_id: keyId,
               session_key_authorized: keyId !== null,
-              session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 30 * 86_400,
+              session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 90 * 86_400,
             },
           })
         }
@@ -165,11 +168,26 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
       await snap(page, testInfo, `onboarding-${name}`)
     },
     editLimits: async step => {
-      await step.getByLabel('Spending limit').fill('250')
+      // Nothing counts to begin with, ETH included, so there is no limit to set until something does.
+      await expect(step.getByLabel('Spending limit', { exact: true })).toHaveCount(0)
+      await expect(step.getByText(/You can skip it for now and set one any time in Controls\./)).toBeVisible()
+      await countNative(step)
+      await expect(step.getByText('WETH counts with it.')).toBeVisible()
+      await step.getByLabel('Spending limit', { exact: true }).fill('250')
+      await expect(step.getByText('1 month')).toBeVisible()
       await step.getByText('7 days').click()
-      // WETH is ticked for good; USDC can be unticked.
-      await expect(step.getByRole('checkbox', { name: 'WETH' })).toBeDisabled()
-      await step.getByText('USDC').click()
+      await expectNoSidewaysScroll(page)
+      await snap(page, testInfo, 'onboarding-limits-counting')
+      // Nothing starts ticked, and WETH isn't offered: it goes with ETH.
+      await step.getByRole('combobox', { name: TOKEN_PICKER }).click()
+      const usdc = page.getByRole('option', { name: 'USDC' })
+      await expect(usdc).toHaveAttribute('aria-selected', 'false')
+      await expect(page.getByRole('option', { name: 'WETH' })).toHaveCount(0)
+      await expectNoSidewaysScroll(page)
+      await snap(page, testInfo, 'onboarding-token-picker')
+      await usdc.getByText('USDC').click()
+      await expect(usdc).toHaveAttribute('aria-selected', 'true')
+      await closeTokenPicker(page)
     },
     passkey: { deviceName: 'Work laptop' },
   })
@@ -192,10 +210,12 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
       deployer: WALLET,
       daily_limit_usd: 250,
       window_secs: 604_800,
-      watched_tokens: [TOKENS[1]],
+      // Only the pick: the API puts WETH on the list itself, because ETH counts.
+      watched_tokens: [TOKENS[0]],
+      count_native: true,
       prefund_eth: '1',
       key_id: NEW_KEY_ID,
-      session_ttl_secs: 30 * 86_400,
+      session_ttl_secs: 90 * 86_400,
     },
   ])
   // The passkey the browser really made, saved under the name given.
@@ -204,32 +224,79 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
   expect(recorded.confirms).toBe(2)
 })
 
-test("a network's whole token list wraps into columns, every ticker on screen", async ({ page }, testInfo) => {
-  // RSuite's inline CheckboxGroup is a flex row that never wraps: mainnet's twenty tokens once ran
-  // off the edge and were clipped, all but five of them on a phone.
+test("a network's whole token list is in the dropdown, every ticker reachable", async ({ page }, testInfo) => {
   await mockServer(page, MAINNET_TOKENS)
   await page.goto('/onboarding')
 
   await walkOnboarding(page, {
     editLimits: async step => {
-      const items = step.locator('.rs-checkbox')
-      await expect(items).toHaveCount(MAINNET_TOKENS.length)
-      const group = (await step.locator('.rs-checkbox-group').boundingBox())!
-      const boxes = await items.evaluateAll(els => els.map(el => el.getBoundingClientRect().toJSON() as DOMRect))
-      for (const [i, box] of boxes.entries()) {
-        const ticker = MAINNET_TOKENS[i].ticker
-        expect(box.left, `${ticker} starts inside the list`).toBeGreaterThanOrEqual(group.x - 0.5)
-        expect(box.right, `${ticker} ends inside the list`).toBeLessThanOrEqual(group.x + group.width + 0.5)
+      await step.getByRole('combobox', { name: TOKEN_PICKER }).click()
+      const options = page.getByRole('option')
+      await expect(options).toHaveCount(MAINNET_CHOOSABLE.length)
+      // WETH goes with ETH on mainnet, so it's left out. BNB is an ordinary token there, so it isn't.
+      await expect(page.getByRole('option', { name: 'WETH' })).toHaveCount(0)
+      await expect(page.getByRole('option', { name: 'BNB' })).toBeAttached()
+      // Tapping the list must not bring up a phone's keyboard over it.
+      await expect(page.getByPlaceholder('Search')).not.toBeFocused()
+      await snap(page, testInfo, 'onboarding-token-list-open')
+      await expect(page.getByPlaceholder('Search')).toBeInViewport({ ratio: 1 })
+      await expect(page.getByRole('option', { name: 'AAVE' })).toBeInViewport({ ratio: 1 })
+      // On a phone it's a sheet from the bottom; elsewhere it opens upward rather than off the screen.
+      if (!testInfo.project.name.startsWith('phone')) {
+        await expect(page.locator('.rs-picker-popup')).toBeInViewport({ ratio: 1 })
       }
-      // Columns: every row starts its tickers where the first row does.
-      const firstRowTop = boxes[0].top
-      const columns = boxes.filter(box => Math.abs(box.top - firstRowTop) < 1).map(box => Math.round(box.left))
-      expect(columns.length).toBeGreaterThan(1)
-      for (const box of boxes) expect(columns).toContain(Math.round(box.left))
+      const { width } = page.viewportSize()!
+      for (const { ticker } of MAINNET_CHOOSABLE) {
+        const option = page.getByRole('option', { name: ticker.toUpperCase(), exact: true })
+        await option.scrollIntoViewIfNeeded()
+        await expect(option, `${ticker} is on screen`).toBeInViewport()
+        const box = (await option.boundingBox())!
+        expect(box.x, `${ticker} starts on screen`).toBeGreaterThanOrEqual(0)
+        expect(box.x + box.width, `${ticker} ends on screen`).toBeLessThanOrEqual(width)
+      }
       await expectNoSidewaysScroll(page)
-      await snap(page, testInfo, 'onboarding-token-grid')
+      await snap(page, testInfo, 'onboarding-token-list')
+      // RSuite draws a checkbox inside each role="option" of a CheckPicker (nested-interactive). It
+      // can't be changed from here, and the option itself carries the state and takes the keyboard:
+      // see the keyboard test below.
+      const { violations } = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+        .disableRules(['nested-interactive'])
+        .analyze()
+      expect(
+        violations
+          .filter(violation => violation.impact === 'serious' || violation.impact === 'critical')
+          .map(violation => `${violation.id} (${violation.impact}): ${violation.nodes.map(node => node.target).join(' · ')}`),
+      ).toEqual([])
+      await closeTokenPicker(page)
     },
   })
+})
+
+test('the token dropdown works from the keyboard', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('desktop'), 'A keyboard test; one screen size is enough here.')
+  const recorded = await mockServer(page)
+  await page.goto('/onboarding')
+
+  await walkOnboarding(page, {
+    editLimits: async step => {
+      await step.getByRole('combobox', { name: TOKEN_PICKER }).focus()
+      await page.keyboard.press('Enter')
+      const usdc = page.getByRole('option', { name: 'USDC' })
+      await expect(usdc).toBeVisible()
+
+      await page.keyboard.press('ArrowDown')
+      await page.keyboard.press('Enter')
+      await expect(usdc).toHaveAttribute('aria-selected', 'true')
+
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('listbox')).toBeHidden()
+    },
+  })
+
+  await expect.poll(() => recorded.deploy).toHaveLength(1)
+  // A token ticked with ETH left out: that token alone counts, against the $100 the field starts with.
+  expect(recorded.deploy[0]).toMatchObject({ watched_tokens: [TOKENS[0]], count_native: false, daily_limit_usd: 100 })
 })
 
 test('choosing a network the wallet is not on asks it to switch', async ({ page }, testInfo) => {

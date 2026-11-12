@@ -56,7 +56,7 @@ const RULES: { icon: ReactNode; tries: string; wallet: string }[] = [
   {
     icon: <TimeIcon />,
     tries: 'Keep its access for good',
-    wallet: 'Loses it after 30 days unless you renew it. You can turn it off sooner.',
+    wallet: 'Loses it after 90 days unless you renew it. You can turn it off sooner.',
   },
   {
     icon: <PauseRoundIcon />,
@@ -68,7 +68,7 @@ const RULES: { icon: ReactNode; tries: string; wallet: string }[] = [
 const FAQ = [
   {
     q: 'What is Mitfah?',
-    a: 'A smart wallet with an AI assistant. Tell it what you want in plain words, like “swap 50 USDC for ETH” or “send 20 USDC to Sam”, and it does it on-chain for you, always within the limits you set. It’s built on the SessionHandler protocol.',
+    a: 'Mitfah is a smart wallet interface powered by an AI assistant. Tell it what you want in plain words, like “swap 50 USDC for ETH” or “send 20 USDC to Sam”, and it does it on-chain for you, always within the limits you set. It’s built on the SessionHandler protocol.',
   },
   {
     q: 'What is a smart wallet?',
@@ -76,7 +76,7 @@ const FAQ = [
   },
   {
     q: 'Does Mitfah hold my money?',
-    a: 'No. Your money sits in a smart contract wallet that your own browser wallet owns. Mitfah never has your owner key, so it can’t take the funds or change your limits.',
+    a: 'No. Your money sits in a smart contract wallet that your own browser wallet owns. Mitfah holds no user private keys or session keys, so it cannot move your funds or change your limits. Mitfah is the interface layer between you and your smart wallet account.',
   },
   {
     q: 'What can the assistant do?',

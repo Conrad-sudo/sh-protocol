@@ -22,9 +22,10 @@ const PREDICTED = '0x2222222222222222222222222222222222222222'
 const PENDING_KEY = 'mitfah-pending-deploy:7'
 const TOKENS = [
   { ticker: 'usdc', address: '0x3333333333333333333333333333333333333333' },
-  // The API flags the wrapped native token: it always counts, like ETH.
-  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', always_counted: true },
+  // The API flags the wrapped native token: it counts exactly when ETH does, so it is never picked.
+  { ticker: 'weth', address: '0x4444444444444444444444444444444444444444', follows_native: true },
 ]
+const TOKEN_PICKER = 'Tokens that count toward the limit'
 /** The passkey made during onboarding, as POST /api/passkeys/register saves it. */
 const NEW_CREDENTIAL = b64url('work-laptop-passkey')
 const NEW_PASSKEY: RegisteredPasskey = {
@@ -158,7 +159,7 @@ function stubServer({
                 wallet_address: PREDICTED,
                 key_id: keyId,
                 session_key_authorized: keyId !== null,
-                session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 30 * 86_400,
+                session_key_expires_at: keyId === null ? 0 : Math.floor(Date.now() / 1000) + 90 * 86_400,
               }),
             )
           }
@@ -213,18 +214,38 @@ describe('OnboardingPage', () => {
     expect(within(network).getByRole('radio', { name: /Sepolia/ })).toBeChecked()
     await user.click(within(network).getByRole('button', { name: 'Continue' }))
 
-    // Limits: $250 a week. USDC unticked; WETH can't be, it always counts like ETH.
+    // Limits. Nothing counts to begin with, ETH included, so there is no limit to set yet.
     const limits = await step('How much may the assistant spend?')
+    const picker = await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
+    expect(picker).toHaveTextContent('Choose tokens')
+    const countEth = within(limits).getByRole('checkbox', { name: 'Count ETH toward a spending limit' })
+    expect(countEth).not.toBeChecked()
+    expect(within(limits).getByText('WETH counts with it.')).toBeInTheDocument()
+    expect(within(limits).queryByLabelText('Spending limit')).toBeNull()
+    expect(within(limits).queryByRole('radiogroup', { name: 'Period' })).toBeNull()
+    expect(within(limits).getByText(/You can skip it for now and set one any time in Controls\./)).toBeInTheDocument()
+    expect(within(limits).getByRole('button', { name: 'Continue' })).toBeEnabled()
+
+    // Counting ETH brings the limit and its period: $250 a week. The month is offered too.
+    await user.click(countEth)
+    expect(countEth).toBeChecked()
     const limit = within(limits).getByLabelText('Spending limit')
+    expect(limit).toHaveValue('100')
     await user.clear(limit)
+    // With something counted, the limit is no longer optional.
+    expect(within(limits).getByText('Enter a whole number of dollars, at least $1.')).toBeInTheDocument()
+    expect(within(limits).getByRole('button', { name: 'Continue' })).toBeDisabled()
     await user.type(limit, '250')
+    expect(within(limits).getByText('1 month')).toBeInTheDocument()
     await user.click(within(limits).getByText('7 days'))
-    const weth = await within(limits).findByRole('checkbox', { name: 'WETH' })
-    expect(weth).toBeChecked()
-    expect(weth).toBeDisabled()
-    expect(within(limits).getByText(/ETH and WETH always count\./)).toBeInTheDocument()
-    await user.click(within(limits).getByRole('checkbox', { name: 'USDC' }))
-    expect(within(limits).getByRole('checkbox', { name: 'WETH' })).toBeChecked()
+    // WETH isn't offered among the tokens: it goes with ETH.
+    await user.click(picker)
+    const usdc = await screen.findByRole('option', { name: 'USDC' })
+    expect(usdc).toHaveAttribute('aria-selected', 'false')
+    expect(screen.queryByRole('option', { name: 'WETH' })).toBeNull()
+    await user.click(within(usdc).getByText('USDC'))
+    expect(screen.getByRole('option', { name: 'USDC' })).toHaveAttribute('aria-selected', 'true')
+    expect(picker).toHaveTextContent('USDC')
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
 
     // The prefund: 1 ETH by default on a local test network.
@@ -245,10 +266,10 @@ describe('OnboardingPage', () => {
     const review = await step('Check the details')
     const summary = (term: string) => within(review).getByText(term).nextElementSibling
     expect(summary('Spending limit')).toHaveTextContent('$250.00 every 7 days')
-    expect(summary('Counts toward the limit')).toHaveTextContent('ETH, WETH')
+    expect(summary('Counts toward the limit')).toHaveTextContent('ETH, WETH, USDC')
     expect(summary('Wallet prefund')).toHaveTextContent('1 ETH')
     expect(summary("Assistant's access")).toHaveTextContent(
-      '30 days, approved with the passkey on “Work laptop”; renewable any time in Controls',
+      '90 days, approved with the passkey on “Work laptop”; renewable any time in Controls',
     )
     await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
 
@@ -265,10 +286,12 @@ describe('OnboardingPage', () => {
         deployer: WALLET,
         daily_limit_usd: 250,
         window_secs: 604_800,
-        watched_tokens: [TOKENS[1]],
+        // Only the pick: the API puts WETH on the list itself, because ETH counts.
+        watched_tokens: [TOKENS[0]],
+        count_native: true,
         prefund_eth: '1',
         key_id: NEW_PASSKEY.key_id,
-        session_ttl_secs: 30 * 86_400,
+        session_ttl_secs: 90 * 86_400,
       },
     ])
     expect(calls.sent).toHaveLength(1)
@@ -412,7 +435,7 @@ describe('OnboardingPage', () => {
     await connect(user)
     await user.click(within(await step('Where should your wallet live?')).getByRole('button', { name: 'Continue' }))
     const limits = await step('How much may the assistant spend?')
-    await within(limits).findByRole('checkbox', { name: 'WETH' })
+    await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
     await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
     await user.click(within(await step('Create your passkey')).getByRole('button', { name: 'Skip for now' }))
@@ -441,7 +464,7 @@ describe('OnboardingPage', () => {
     await connect(user)
     await user.click(within(await step('Where should your wallet live?')).getByRole('button', { name: 'Continue' }))
     const limits = await step('How much may the assistant spend?')
-    await within(limits).findByRole('checkbox', { name: 'WETH' })
+    await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
     await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
   }
@@ -458,6 +481,9 @@ describe('OnboardingPage', () => {
     await user.click(within(passkey).getByRole('button', { name: 'Skip for now' }))
 
     const review = await step('Check the details')
+    // Nothing was ticked and ETH was left uncounted, so nothing counts and there is no limit.
+    expect(within(review).getByText('Counts toward the limit').nextElementSibling).toHaveTextContent(/^Nothing$/)
+    expect(within(review).getByText('Spending limit').nextElementSibling).toHaveTextContent(/^None$/)
     expect(within(review).getByText("Assistant's access").nextElementSibling).toHaveTextContent(
       "None yet: the assistant can't send anything until you add a device in Controls",
     )
@@ -465,8 +491,66 @@ describe('OnboardingPage', () => {
     expect(
       await screen.findByText('Your wallet is ready on Sepolia. Add a device in Controls so the assistant can send payments.'),
     ).toBeInTheDocument()
-    expect(calls.deploy[0]).toMatchObject({ key_id: null })
+    // The limit step was passed untouched: no limit is sent, whatever the field would have held.
+    expect(calls.deploy[0]).toMatchObject({ key_id: null, daily_limit_usd: 0, count_native: false, watched_tokens: [] })
     expect(calls.registered).toEqual([])
+  })
+
+  it('asks for a limit as soon as a token is ticked, and stops once nothing counts again', async () => {
+    installPasskeys()
+    const calls = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    await connect(user)
+    await user.click(within(await step('Where should your wallet live?')).getByRole('button', { name: 'Continue' }))
+    const limits = await step('How much may the assistant spend?')
+    const picker = await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
+    expect(within(limits).queryByLabelText('Spending limit')).toBeNull()
+
+    // A token alone is enough to need one, with ETH still left out.
+    await user.click(picker)
+    await user.click(within(await screen.findByRole('option', { name: 'USDC' })).getByText('USDC'))
+    expect(within(limits).getByLabelText('Spending limit')).toHaveValue('100')
+    await user.click(within(screen.getByRole('option', { name: 'USDC' })).getByText('USDC'))
+    expect(within(limits).queryByLabelText('Spending limit')).toBeNull()
+    await user.click(within(screen.getByRole('option', { name: 'USDC' })).getByText('USDC'))
+    await user.keyboard('{Escape}')
+
+    await user.click(within(limits).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await step('Prefund your Mitfah smart wallet')).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await step('Create your passkey')).getByRole('button', { name: 'Skip for now' }))
+    const review = await step('Check the details')
+    expect(within(review).getByText('Counts toward the limit').nextElementSibling).toHaveTextContent(/^USDC$/)
+    expect(within(review).getByText('Spending limit').nextElementSibling).toHaveTextContent('$100.00 every 24 hours')
+    await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
+    await screen.findByText('Your Mitfah smart wallet on Sepolia')
+    expect(calls.deploy[0]).toMatchObject({ daily_limit_usd: 100, count_native: false, watched_tokens: [TOKENS[0]] })
+  })
+
+  it('creates an empty wallet when the prefund is skipped', async () => {
+    installPasskeys()
+    const calls = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/onboarding')
+
+    await connect(user)
+    await user.click(within(await step('Where should your wallet live?')).getByRole('button', { name: 'Continue' }))
+    const limits = await step('How much may the assistant spend?')
+    await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
+    await user.click(within(limits).getByRole('button', { name: 'Continue' }))
+    const fund = await step('Prefund your Mitfah smart wallet')
+    expect(within(fund).getByText(/the assistant can't pay for anything until you add funds/)).toBeInTheDocument()
+    await user.click(within(fund).getByRole('button', { name: 'Skip for now' }))
+    await user.click(within(await step('Create your passkey')).getByRole('button', { name: 'Skip for now' }))
+
+    const review = await step('Check the details')
+    expect(within(review).getByText('Wallet prefund').nextElementSibling).toHaveTextContent(
+      'None: add funds from the dashboard any time',
+    )
+    await user.click(within(review).getByRole('button', { name: 'Create wallet' }))
+    expect(await screen.findByText('Your Mitfah smart wallet on Sepolia')).toBeInTheDocument()
+    expect(calls.deploy[0]).toMatchObject({ prefund_eth: '0' })
   })
 
   it('uses the passkey this device already has', async () => {

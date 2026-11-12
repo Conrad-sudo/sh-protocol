@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
-import type { Allowlist, AllowlistEntry, Passkey, RegisteredPasskey, WalletState } from '../api/types'
+import type {
+  Allowlist,
+  AllowlistEntry,
+  Contact,
+  Passkey,
+  RecurringPayment,
+  RecurringPayments,
+  RegisteredPasskey,
+  WalletState,
+} from '../api/types'
 import { routes } from '../routes'
 import { formatDate } from '../lib/format'
 import { chainName } from '../wallet/chains'
@@ -35,8 +44,8 @@ const LINK = '0x779877A7B0D9E8603169DdbD7836e478b4624789'
 const TOKENS = [
   { ticker: 'link', address: LINK },
   { ticker: 'usdc', address: USDC },
-  // The API flags the wrapped native token: it always counts, like ETH.
-  { ticker: 'weth', address: WETH, always_counted: true },
+  // The API flags the wrapped native token: it counts exactly when ETH does, and moves with it.
+  { ticker: 'weth', address: WETH, follows_native: true },
 ]
 const PENDING_KEY = `mitfah-pending-owner-tx:7:${SEPOLIA}`
 // What every new wallet on Sepolia trusts, as /api/chains lists it: Uniswap V3's router, then its
@@ -53,6 +62,36 @@ const USDC_ENTRY: AllowlistEntry = { address: USDC, label: 'USDC' }
 const REGISTRY_ENTRY: AllowlistEntry = { address: REGISTRY, label: 'ERC-8004 review registry' }
 /** GET /api/wallet/{chain_id}/allowlist for a wallet that has never used it. */
 const ALLOWLIST_OFF: Allowlist = { enabled: false, targets: [], suggested: [ROUTER_ENTRY, USDC_ENTRY, REGISTRY_ENTRY] }
+
+/** GET /api/wallet/{chain_id}/recurring for a wallet with the module and no schedules yet. */
+const NO_RECURRING: RecurringPayments = {
+  available: true,
+  module: '0x7ec0000000000000000000000000000000000000',
+  fee_per_payment_wei: '20000000000000',
+  native_ticker: 'ETH',
+  min_interval_secs: 3_600,
+  schedules: [],
+}
+const PAYEE = '0x3333333333333333333333333333333333333333'
+const RENT: RecurringPayment = {
+  schedule_id: 4,
+  token: USDC,
+  ticker: 'USDC',
+  decimals: 6,
+  amount_raw: '20000000',
+  amount_text: '20',
+  recipient: PAYEE,
+  recipient_name: 'landlord',
+  interval_secs: 2_592_000,
+  next_due: 1_900_000_000,
+  end_at: null,
+  status: 'live',
+  last_tx: null,
+  last_run_at: null,
+  last_error: null,
+  retry_at: null,
+  summary: '20 USDC to landlord every 30 days',
+}
 
 /** A passkey made on this device during a test, as the server saves it. */
 const NEW_CREDENTIAL = b64url('work-laptop-passkey')
@@ -100,6 +139,12 @@ interface ServerOptions {
   passkeys?: Passkey[]
   /** DELETE /api/passkeys/{key_id} refuses with this 409 detail. */
   refuseDelete?: string
+  /** Holds GET /api/tokens until this settles. */
+  tokensReady?: Promise<void>
+  /** GET /api/wallet/{chain_id}/recurring; the last one keeps answering. */
+  recurring?: RecurringPayments[]
+  /** GET /api/contacts. */
+  contacts?: Contact[]
 }
 
 interface Prepared {
@@ -121,10 +166,15 @@ function stubServer({
   otherWallets = {},
   passkeys = [makePasskey()],
   refuseDelete,
+  tokensReady = Promise.resolve(),
+  recurring = [NO_RECURRING],
+  contacts = [],
 }: ServerOptions = {}) {
   const prepared: Prepared[] = []
   const confirms: Record<string, unknown>[] = []
   const sessionConfirms: Record<string, unknown>[] = []
+  const recurringConfirms: Record<string, unknown>[] = []
+  let recurringReads = 0
   const sent: Record<string, string>[] = []
   const sentTo: string[] = []
   const registered: Record<string, unknown>[] = []
@@ -178,7 +228,7 @@ function stubServer({
           }),
         )
       }
-      if (url.startsWith('/api/tokens')) return Promise.resolve(json(200, { tokens: TOKENS }))
+      if (url.startsWith('/api/tokens')) return tokensReady.then(() => json(200, { tokens: TOKENS }))
       const walletRead = /^\/api\/wallet\/(\d+)$/.exec(url)
       if (walletRead) {
         const other = otherWallets[Number(walletRead[1])]
@@ -210,6 +260,20 @@ function stubServer({
         deleted.push(keyId)
         accountPasskeys.splice(accountPasskeys.findIndex(p => p.key_id === keyId), 1)
         return Promise.resolve(new Response(null, { status: 204 }))
+      }
+      if (/^\/api\/wallet\/\d+\/recurring$/.test(url)) {
+        const answer = recurring[Math.min(recurringReads, recurring.length - 1)]
+        recurringReads += 1
+        return Promise.resolve(json(200, answer))
+      }
+      if (url === '/api/contacts') return Promise.resolve(json(200, { contacts }))
+      if (url === '/api/wallet/recurring/confirm') {
+        recurringConfirms.push(body)
+        return Promise.resolve(
+          recurringConfirms.length % 2 === 1
+            ? json(202, { status: 'pending', tx_hash: body.tx_hash })
+            : json(200, { status: 'confirmed', tx_hash: body.tx_hash, recurring: recurring[recurring.length - 1] }),
+        )
       }
       if (/^\/api\/wallet\/\d+\/allowlist$/.test(url)) {
         const answer = allowlists[Math.min(allowlistReads, allowlists.length - 1)]
@@ -244,6 +308,7 @@ function stubServer({
     prepared,
     confirms,
     sessionConfirms,
+    recurringConfirms,
     sent,
     sentTo,
     registered,
@@ -340,7 +405,7 @@ describe('ControlsPage', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Renew iPhone?')).toBeInTheDocument()
     expect(dialog).toHaveTextContent(
-      /iPhone keeps approving the assistant's payments from this wallet for another 30 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+      /iPhone keeps approving the assistant's payments from this wallet for another 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
     )
     await user.click(within(dialog).getByRole('button', { name: 'Renew' }))
 
@@ -348,7 +413,7 @@ describe('ControlsPage', () => {
     expect(server.prepared).toEqual([
       {
         path: '/api/wallet/session/prepare',
-        body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+        body: { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 90 * 86_400 },
       },
     ])
     // Through the endpoint that reads the wallet's keys back, never the generic one.
@@ -376,14 +441,14 @@ describe('ControlsPage', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Add iPhone?')).toBeInTheDocument()
     expect(dialog).toHaveTextContent(
-      /iPhone will be able to approve the assistant's payments from this wallet for 30 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+      /iPhone will be able to approve the assistant's payments from this wallet for 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
     )
     await user.click(within(dialog).getByRole('button', { name: 'Add device' }))
     expect(await screen.findByText(/^iPhone can approve payments on Sepolia until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
 
     expect(server.prepared.map(p => p.body)).toEqual([
       { chain_id: SEPOLIA, action: 'remove', key_id: PASSKEY_ID },
-      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 90 * 86_400 },
     ])
     expect(server.sessionConfirms).toHaveLength(4)
     expect(server.confirms).toEqual([])
@@ -495,7 +560,7 @@ describe('ControlsPage', () => {
     await user.click(screen.getByRole('button', { name: 'Add this device' }))
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent(
-      /Your browser will first ask you to create a passkey\. This device \(“Work laptop”\) will be able to approve the assistant's payments from this wallet for 30 days/,
+      /Your browser will first ask you to create a passkey\. This device \(“Work laptop”\) will be able to approve the assistant's payments from this wallet for 90 days/,
     )
     // Fetched while the dialog asks, so the confirming tap can open the browser's prompt at once.
     await waitFor(() => expect(server.optionsAsked()).toBe(1))
@@ -508,7 +573,7 @@ describe('ControlsPage', () => {
       { credential: expect.objectContaining({ id: NEW_CREDENTIAL, type: 'public-key' }), device_name: 'Work laptop' },
     ])
     expect(server.prepared.map(p => p.body)).toEqual([
-      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
+      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 90 * 86_400 },
     ])
     // This browser made it, so the list says which device is this one.
     expect(await within(row('Work laptop')).findByText('This device')).toBeInTheDocument()
@@ -542,8 +607,8 @@ describe('ControlsPage', () => {
       await screen.findByText(new RegExp(`^Work laptop can approve payments on ${chainName(BSC)} until`)),
     ).toBeInTheDocument()
     expect(server.prepared.map(p => p.body)).toEqual([
-      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
-      { chain_id: BSC, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 30 * 86_400 },
+      { chain_id: SEPOLIA, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 90 * 86_400 },
+      { chain_id: BSC, action: 'add', key_id: NEW_PASSKEY.key_id, ttl_secs: 90 * 86_400 },
     ])
     // The second went out on BSC, after the wallet switched there.
     expect(server.sentTo).toHaveLength(2)
@@ -570,7 +635,7 @@ describe('ControlsPage', () => {
     expect(await screen.findByText(/^iPhone can approve payments on Sepolia until/)).toBeInTheDocument()
     expect(server.registered).toEqual([])
     expect(server.prepared.map(p => p.body)).toEqual([
-      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 30 * 86_400 },
+      { chain_id: SEPOLIA, action: 'add', key_id: PASSKEY_ID, ttl_secs: 90 * 86_400 },
     ])
   })
 
@@ -694,13 +759,10 @@ describe('ControlsPage', () => {
 
     await connect(user)
     const counted = screen.getByRole('list', { name: 'Counted tokens' })
-    expect(within(counted).getByText('Always counts')).toBeInTheDocument()
+    // ETH and its wrapped form share one row: they count together.
+    const nativeRow = (await within(counted).findByText('ETH and WETH')).closest('li')!
+    expect(nativeRow).toHaveTextContent('Counted')
     expect(within(counted).getByText('USDC')).toBeInTheDocument()
-
-    // This wallet predates WETH always counting, so WETH has its own one-click fix.
-    expect(await within(counted).findByText('Not counted yet')).toBeInTheDocument()
-    await user.click(within(counted).getByRole('button', { name: 'Count WETH toward the limit' }))
-    expect(await screen.findByText('WETH now counts toward your limit.')).toBeInTheDocument()
 
     // Any other listed token is added from the picker, which never offers WETH.
     await user.click(await screen.findByRole('combobox', { name: 'Add a token' }))
@@ -716,21 +778,48 @@ describe('ControlsPage', () => {
     expect(await screen.findByText('USDC no longer counts toward your limit.')).toBeInTheDocument()
 
     expect(server.prepared).toEqual([
-      { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'weth', action: 'add' } },
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'link', action: 'add' } },
       { path: '/api/wallet/watched-tokens/prepare', body: { chain_id: SEPOLIA, token: 'usdc', action: 'remove' } },
     ])
   })
 
-  it('shows WETH as always counting, with no way to stop it', async () => {
-    stubServer({
+  it("sets a limit in a token's own units, never offering one that counts in USD", async () => {
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(await screen.findByRole('combobox', { name: 'Token' }))
+    // USDC counts in USD and WETH always does, so neither can take a limit of its own.
+    expect(screen.queryByRole('option', { name: 'USDC' })).toBeNull()
+    expect(screen.queryByRole('option', { name: 'WETH' })).toBeNull()
+    await user.click(await screen.findByRole('option', { name: 'LINK' }))
+    await user.type(screen.getByLabelText('Token limit per period'), '150')
+    await user.click(screen.getByRole('button', { name: 'Set limit' }))
+
+    expect(await screen.findByText('LINK is limited to 150 per period.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/token-caps/prepare',
+        body: { chain_id: SEPOLIA, token: LINK, action: 'set', limit: '150' },
+      },
+    ])
+  })
+
+  it('shows what is left of a limit, and asks before raising or removing it but not lowering it', async () => {
+    const server = stubServer({
       wallets: [
         makeWalletState({
           spending: {
             ...makeWalletState().spending,
-            watched_tokens: [
-              { ticker: 'usdc', address: USDC },
-              { ticker: 'weth', address: WETH },
+            token_caps: [
+              {
+                ticker: 'link',
+                address: LINK,
+                decimals: 18,
+                limit_raw: '150000000000000000000',
+                remaining_raw: '50000000000000000000',
+              },
             ],
           },
         }),
@@ -740,15 +829,173 @@ describe('ControlsPage', () => {
     await renderRoutes(routes, '/controls')
 
     await connect(user)
-    const counted = screen.getByRole('list', { name: 'Counted tokens' })
-    const wethRow = (await within(counted).findByText('WETH')).closest('li')!
-    expect(wethRow).toHaveTextContent('Always counts')
-    expect(within(counted).getAllByText('Always counts')).toHaveLength(2)
-    expect(within(counted).queryByRole('button', { name: 'Stop counting WETH' })).toBeNull()
-    expect(within(counted).getByRole('button', { name: 'Stop counting USDC' })).toBeInTheDocument()
+    const list = await screen.findByRole('list', { name: 'Tokens with their own limit' })
+    expect(within(list).getByText('50 of 150 left')).toBeInTheDocument()
+
+    // A token with its own limit can't count in USD too, and here that was the last one left to add.
+    expect(screen.queryByRole('combobox', { name: 'Add a token' })).toBeNull()
+
+    await user.click(await screen.findByRole('combobox', { name: 'Token' }))
+    await user.click(await screen.findByRole('option', { name: 'LINK' }))
+    const amount = screen.getByLabelText('Token limit per period')
+
+    await user.type(amount, '100')
+    await user.click(screen.getByRole('button', { name: 'Set limit' }))
+    expect(await screen.findByText('LINK is limited to 100 per period.')).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await user.clear(amount)
+    await user.type(amount, '200')
+    await user.click(screen.getByRole('button', { name: 'Set limit' }))
+    const raising = await screen.findByRole('alertdialog')
+    expect(raising).toHaveTextContent('up to 200 LINK per period, up from 150')
+    await user.click(within(raising).getByRole('button', { name: 'Raise limit' }))
+    expect(await screen.findByText('LINK is limited to 200 per period.')).toBeInTheDocument()
+
+    await user.click(within(list).getByRole('button', { name: 'Remove the limit on LINK' }))
+    const removing = await screen.findByRole('alertdialog')
+    expect(removing).toHaveTextContent('The assistant will be able to move LINK out of this wallet without any limit.')
+    await user.click(within(removing).getByRole('button', { name: 'Remove limit' }))
+    expect(await screen.findByText('LINK no longer has a limit of its own.')).toBeInTheDocument()
+
+    expect(server.prepared.map(p => p.body)).toEqual([
+      { chain_id: SEPOLIA, token: LINK, action: 'set', limit: '100' },
+      { chain_id: SEPOLIA, token: LINK, action: 'set', limit: '200' },
+      { chain_id: SEPOLIA, token: LINK, action: 'remove' },
+    ])
   })
 
-  it('says when every listed token already counts, and leaves an unlisted one alone', async () => {
+  it('refuses a limit a token cannot hold, and offers only existing limits once the list is full', async () => {
+    const cap = (address: string, ticker: string) => ({
+      ticker,
+      address,
+      decimals: 6,
+      limit_raw: '1000000',
+      remaining_raw: '1000000',
+    })
+    const eight = Array.from({ length: 8 }, (_, i) => cap(`0x${String(i + 1).padStart(40, '0')}`, `t${i}`))
+    stubServer({
+      wallets: [makeWalletState({ spending: { ...makeWalletState().spending, token_caps: eight } })],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(await screen.findByRole('combobox', { name: 'Token' }))
+    expect(screen.queryByRole('option', { name: 'LINK' })).toBeNull()
+    await user.click(await screen.findByRole('option', { name: 'T0' }))
+    await user.type(screen.getByLabelText('Token limit per period'), '1.1234567')
+    expect(await screen.findByText("T0 can't be split into more than 6 decimal places.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set limit' })).toBeDisabled()
+  })
+
+  it("doesn't show WETH as a token of its own while the token list loads", async () => {
+    let release!: () => void
+    stubServer({ tokensReady: new Promise<void>(resolve => (release = resolve)) })
+    await renderRoutes(routes, '/controls')
+
+    // The wallet is here, but which token goes with ETH isn't known yet, so no rows are drawn.
+    expect(await screen.findByRole('heading', { name: 'Tokens that count toward the limit' })).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Counted tokens' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop counting WETH' })).toBeNull()
+
+    release()
+    const counted = await screen.findByRole('list', { name: 'Counted tokens' })
+    expect(within(counted).getByText('ETH and WETH')).toBeInTheDocument()
+    expect(within(counted).queryByRole('button', { name: 'Stop counting WETH' })).toBeNull()
+  })
+
+  it('switches ETH and WETH together: asks before it stops counting them, not before it counts them', async () => {
+    const on = makeWalletState()
+    const off = makeWalletState({
+      spending: { ...on.spending, native_metered: false, watched_tokens: [{ ticker: 'usdc', address: USDC }] },
+    })
+    // The wallet is read again after each change: on, then off, then on.
+    const server = stubServer({ wallets: [on, off, on] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const counted = screen.getByRole('list', { name: 'Counted tokens' })
+    const row = () => within(counted).getByText('ETH and WETH').closest('li')!
+    await within(counted).findByText('ETH and WETH')
+    expect(row()).toHaveTextContent('Counted')
+    // WETH has no button of its own: the one switch moves both.
+    expect(within(counted).queryByRole('button', { name: 'Stop counting WETH' })).toBeNull()
+    expect(within(counted).getByRole('button', { name: 'Stop counting USDC' })).toBeInTheDocument()
+
+    await user.click(within(row()).getByRole('button', { name: 'Stop counting ETH and WETH' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('The assistant will be able to move ETH and WETH out of this wallet without any limit.')
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting ETH and WETH' }))
+    expect(await screen.findByText('ETH and WETH no longer count toward your limit.')).toBeInTheDocument()
+
+    // Read again, the wallet counts neither. Counting them tightens the limit, so nothing is asked.
+    const count = await within(counted).findByRole('button', { name: 'Count ETH and WETH toward the limit' })
+    expect(row()).toHaveTextContent('Not counted')
+    // One click sends it: with no confirm button pressed, the success below proves nothing was asked.
+    await user.click(count)
+    expect(await screen.findByText('ETH and WETH now count toward your limit.')).toBeInTheDocument()
+
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/native-metering/prepare', body: { chain_id: SEPOLIA, metered: false } },
+      { path: '/api/wallet/native-metering/prepare', body: { chain_id: SEPOLIA, metered: true } },
+    ])
+  })
+
+  it('puts WETH back in step with ETH when the two were split on the wallet directly', async () => {
+    const base = makeWalletState().spending
+    // ETH counts but WETH was taken off the list; then the other way round.
+    const ethOnly = makeWalletState({ spending: { ...base, watched_tokens: [{ ticker: 'usdc', address: USDC }] } })
+    const wethOnly = makeWalletState({ spending: { ...base, native_metered: false } })
+    const server = stubServer({ wallets: [ethOnly, wethOnly] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const counted = screen.getByRole('list', { name: 'Counted tokens' })
+    expect(await within(counted).findByText('WETH not counted yet')).toBeInTheDocument()
+    await user.click(within(counted).getByRole('button', { name: 'Count WETH toward the limit' }))
+    expect(await screen.findByText('WETH now counts toward your limit, like ETH.')).toBeInTheDocument()
+
+    expect(await within(counted).findByText('WETH still counted')).toBeInTheDocument()
+    await user.click(within(counted).getByRole('button', { name: 'Stop counting WETH' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('The assistant will be able to move WETH out of this wallet without any limit.')
+    await user.click(within(dialog).getByRole('button', { name: 'Stop counting WETH' }))
+    expect(await screen.findByText('WETH no longer counts toward your limit, like ETH.')).toBeInTheDocument()
+
+    // Either way it is the one switch, set to where ETH already is.
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/native-metering/prepare', body: { chain_id: SEPOLIA, metered: true } },
+      { path: '/api/wallet/native-metering/prepare', body: { chain_id: SEPOLIA, metered: false } },
+    ])
+  })
+
+  it('asks for a spending limit before anything is counted on a wallet made without one', async () => {
+    const base = makeWalletState().spending
+    stubServer({
+      wallets: [
+        makeWalletState({
+          spending: { ...base, daily_limit_usd: 0, spent_usd: 0, remaining_usd: 0, native_metered: false, watched_tokens: [] },
+        }),
+      ],
+    })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const counted = screen.getByRole('list', { name: 'Counted tokens' })
+    // Counting something against a $0 limit would stop the assistant spending it at all.
+    expect(await within(counted).findByRole('button', { name: 'Count ETH and WETH toward the limit' })).toBeDisabled()
+    expect(screen.getByText(/^Set a spending limit above first\./)).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Add a token' })).toHaveAttribute('aria-disabled', 'true')
+    // The limit itself says why it does nothing yet, instead of "a $0 limit stops the assistant".
+    expect(screen.getByText(/^Nothing counts toward the limit yet, so it has no effect\./)).toBeInTheDocument()
+    expect(screen.queryByText(/A \$0 limit stops the assistant/)).toBeNull()
+  })
+
+  it('says when every other listed token already counts, and leaves an unlisted one alone', async () => {
     const unlisted = '0x7777777777777777777777777777777777777777'
     stubServer({
       wallets: [
@@ -767,7 +1014,7 @@ describe('ControlsPage', () => {
     })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText('Every token Mitfah lists on this network already counts.')).toBeInTheDocument()
+    expect(await screen.findByText('Every other token Mitfah lists on this network already counts.')).toBeInTheDocument()
     expect(screen.getByText("Not a token Mitfah lists, so it can't be removed here.")).toBeInTheDocument()
   })
 
@@ -1295,5 +1542,113 @@ describe('ControlsPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Create your wallet' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Controls', level: 1 })).toBeInTheDocument()
+  })
+})
+
+
+describe('ControlsPage — recurring payments', () => {
+  beforeEach(() => {
+    resetClientForTests()
+    localStorage.clear()
+    sessionStorage.clear()
+    setViewportWidth(1280)
+  })
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('lists live schedules with their next payment and why the last attempt failed', async () => {
+    const failing = { ...RENT, last_error: 'BudgetExceeded', retry_at: 1_900_000_300 }
+    stubServer({ recurring: [{ ...NO_RECURRING, schedules: [failing, { ...RENT, schedule_id: 3, status: 'cancelled' }] }] })
+    await renderRoutes(routes, '/controls')
+
+    const list = await screen.findByRole('list', { name: 'Recurring payments' })
+    // Only live ones: a cancelled schedule isn't listed.
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(list).getByText('20 USDC to landlord every 30 days')).toBeInTheDocument()
+    expect(within(list).getByText(/^Next payment/)).toBeInTheDocument()
+    expect(within(list).getByText(/The last attempt couldn't go through: BudgetExceeded\. Trying again/)).toBeInTheDocument()
+  })
+
+  it('sets one up to a contact, asking first, and confirms it on its own endpoint', async () => {
+    const after = { ...NO_RECURRING, schedules: [RENT] }
+    const server = stubServer({ recurring: [NO_RECURRING, after], contacts: [{ name: 'landlord', address: PAYEE }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    expect(await screen.findByText('No recurring payments yet.')).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Pay with' }))
+    await user.click(await screen.findByRole('option', { name: 'USDC' }))
+    await user.type(screen.getByLabelText('Amount each time'), '20')
+    await user.click(screen.getByRole('combobox', { name: 'Pay to' }))
+    await user.click(await screen.findByRole('option', { name: 'landlord' }))
+    await user.click(screen.getByRole('button', { name: 'Set up payment' }))
+
+    // Money leaves without asking again, so it asks once, here.
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('send 20 USDC to landlord every 30 days, starting now, until you cancel it')
+    expect(dialog).toHaveTextContent('0.00002 ETH')
+    await user.click(within(dialog).getByRole('button', { name: 'Set up' }))
+
+    expect(await screen.findByText('Recurring payment set up.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/recurring/prepare',
+        body: {
+          chain_id: SEPOLIA,
+          token: USDC,
+          amount: '20',
+          to: PAYEE,
+          interval_secs: 2_592_000,
+          first_due: null,
+          end_at: null,
+        },
+      },
+    ])
+    expect(server.recurringConfirms).toHaveLength(2)
+    expect(server.confirms).toEqual([])
+    // The confirm's answer is the list now: no wait for another read.
+    expect(await screen.findByText('20 USDC to landlord every 30 days')).toBeInTheDocument()
+  })
+
+  it('refuses an interval under an hour and a payment to the wallet itself, before anything is signed', async () => {
+    const server = stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.type(await screen.findByLabelText('Amount each time'), '1')
+    await user.type(screen.getByLabelText('Pay to'), makeWalletState().address)
+    expect(screen.getByText("The wallet can't pay itself.")).toBeInTheDocument()
+    await user.clear(screen.getByLabelText('Every'))
+    await user.type(screen.getByLabelText('Every'), '0')
+    expect(screen.getByText('Pay at most once an hour.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set up payment' })).toBeDisabled()
+    expect(server.prepared).toEqual([])
+  })
+
+  it('cancels one in a tap', async () => {
+    const server = stubServer({ recurring: [{ ...NO_RECURRING, schedules: [RENT] }, NO_RECURRING] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(await screen.findByRole('button', { name: 'Cancel the payment of 20 USDC to landlord every 30 days' }))
+
+    expect(await screen.findByText('Recurring payment cancelled.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/recurring/cancel/prepare', body: { chain_id: SEPOLIA, schedule_id: 4 } },
+    ])
+    expect(await screen.findByText('No recurring payments yet.')).toBeInTheDocument()
+  })
+
+  it('says so for a wallet without the module', async () => {
+    stubServer({ recurring: [{ ...NO_RECURRING, available: false, module: null }] })
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText(/This wallet can't make recurring payments/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set up payment' })).toBeNull()
   })
 })

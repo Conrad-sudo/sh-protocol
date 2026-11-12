@@ -102,7 +102,7 @@ test('the owner changes the wallet from Controls on the local fork', async ({ pa
   await expect(page.getByRole('button', { name: `Renew ${DEVICE}` })).toBeVisible()
 
   // Stop counting a token: asks first.
-  const token = wallet.spending.watched_tokens[0]
+  const token = wallet.spending.watched_tokens.find(t => t.ticker === 'usdc')!
   const name = token.ticker!.toUpperCase()
   expect(await onChain.watched(token.address)).toBe(true)
   await page.getByRole('button', { name: `Stop counting ${name}` }).click()

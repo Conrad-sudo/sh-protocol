@@ -1,7 +1,7 @@
 import type { SessionBlock, SessionKey } from '../api/types'
 
-/** How long a device may approve payments when the owner adds or renews it. The wallet allows 90. */
-export const ASSISTANT_KEY_DAYS = 30
+/** How long a device may approve payments when the owner adds or renews it: the most the wallet allows. */
+export const ASSISTANT_KEY_DAYS = 90
 export const ASSISTANT_KEY_TTL_SECS = ASSISTANT_KEY_DAYS * 86_400
 
 /**

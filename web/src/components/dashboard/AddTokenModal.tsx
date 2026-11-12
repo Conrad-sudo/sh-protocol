@@ -7,8 +7,10 @@ import type { Chain, CustomToken, WalletState } from '../../api/types'
 import { addCustomToken, lookupCustomToken } from '../../api/wallet'
 import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { useOwnerReadiness } from '../../hooks/useOwnerReadiness'
+import { useTokens } from '../../hooks/useTokens'
 import { addressProblem } from '../../lib/contacts'
 import { formatTokenAmount } from '../../lib/format'
+import { limitApplies } from '../../lib/spending'
 import { errorText } from '../../lib/tx'
 import { CopyButton } from '../CopyButton'
 import { FullAddress } from '../FullAddress'
@@ -49,6 +51,10 @@ function tokenAddressProblem(address: string): string | null {
  * A token Mitfah lists has a price, so the dialog offers to count it toward the limit too. Adding
  * needs no signature; counting is an owner transaction, sent straight after. If that is cancelled
  * or fails, the token stays added and the dialog offers to try again.
+ *
+ * Two listed tokens are only added, with a line saying why: the wrapped native token, which counts
+ * exactly when the native one does (Controls switches both), and any token on a wallet made with no
+ * limit, where counting it would stop the assistant spending it at all until a limit is set.
  */
 export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, onAdded }: AddTokenModalProps) {
   const chainId = wallet.chain_id
@@ -73,8 +79,14 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
   const ready = address !== '' && !addressError && !lookup.isPending
 
   const ticker = preview?.ticker.toUpperCase()
+  const tokens = useTokens(chainId)
+  const followsNative =
+    preview !== null &&
+    (tokens.data?.some(t => t.follows_native && t.address.toLowerCase() === preview.address.toLowerCase()) ?? false)
+  const needsLimit = wallet.spending.daily_limit_usd === 0 && !limitApplies(wallet.spending)
+  const canCount = !followsNative && !needsLimit
   // Counting needs the owner's signature, so it is only offered once the owner wallet is connected.
-  const counting = count && readiness === 'ready'
+  const counting = canCount && count && readiness === 'ready'
   const countFailed =
     added && tx.state.key === COUNT_KEY && ['cancelled', 'abandoned', 'error'].includes(tx.state.phase)
 
@@ -139,7 +151,16 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
                 <CopyButton value={preview.address} label="Token contract address" />
               </dd>
             </dl>
-            {preview.listed ? (
+            {preview.listed && !canCount ? (
+              <Message type="info" showIcon className="mf-settings-note">
+                <strong>Pricing is available for {ticker}.</strong>{' '}
+                <Text as="span">
+                  {followsNative
+                    ? `It counts toward your spending limit exactly when ${chain?.native_ticker ?? 'the native token'} does. You can switch that in Controls.`
+                    : `This wallet has no spending limit yet. Set one in Controls, then you can count ${ticker} toward it.`}
+                </Text>
+              </Message>
+            ) : preview.listed ? (
               <>
                 <Message type="info" showIcon className="mf-settings-note">
                   <strong>Pricing is available for {ticker}.</strong>{' '}

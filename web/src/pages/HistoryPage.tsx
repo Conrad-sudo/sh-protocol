@@ -37,6 +37,7 @@ const SOURCE: Record<Transaction['source'], string> = {
   assistant: 'By your assistant',
   owner: 'By you',
   outside: 'Outside Mitfah',
+  recurring: 'Recurring payment',
 }
 
 const STATUS: Record<Transaction['status'], { label: string; tone: StatusTone }> = {

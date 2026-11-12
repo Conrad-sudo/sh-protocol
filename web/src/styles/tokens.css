@@ -5,8 +5,8 @@
  * .rs-theme-dark (a class CustomProvider puts on <body>), and these use the same selectors so the
  * later declaration wins.
  *
- * The palette is the wallpaper's: brushed aluminium, the logo's navy ring, the circuit's green.
- * Colour carries meaning, so it stays out of decoration:
+ * The palette is the wallpaper's: brushed metal (slate grey in light, near-black in dark), the
+ * logo's navy ring, the circuit's green. Colour carries meaning, so it stays out of decoration:
  *   navy (light) / steel (dark)  your own actions — primary buttons, links, focus
  *   green                        the wallet is live: active, assistant on, what's left to spend
  *   amber                        a change that loosens a limit
@@ -14,23 +14,29 @@
  */
 
 :root {
-  /* Brand */
+  /*
+   * Brand. Green, amber and red are text colours here, a shade darker than the buttons' fills, so
+   * they stay 4.5:1 on the slate page.
+   */
   --mf-navy: #062a4e;
-  --mf-green: #0a8a5a;
+  --mf-green: #075f3e;
   --mf-green-glow: rgb(10 138 90 / 22%);
-  --mf-warning: #9a6412;
-  --mf-danger: #c2362f;
+  --mf-warning: #754c0e;
+  --mf-danger: #9b2b26;
   --mf-muted: #45546a;
 
-  /* Metal: the page is aluminium, surfaces are plates screwed onto it. */
-  --mf-steel: #edf0f4;
-  --mf-plate: #fafbfc;
-  --mf-rule: #d5dce5;
-  --mf-rule-strong: #b9c4d2;
-  --mf-bezel-light: #ffffff;
-  --mf-bezel-dark: #8d9db1;
-  --mf-dial-track: #dfe5ec;
-  --mf-tick: #9aa8b9;
+  /*
+   * Metal: the page is slate, surfaces are plates screwed onto it. Grey rather than near-white, so
+   * the light theme isn't glaring.
+   */
+  --mf-steel: #c5ccd4;
+  --mf-plate: #d5dae0;
+  --mf-rule: #b0b9c4;
+  --mf-rule-strong: #94a0ae;
+  --mf-bezel-light: #e6eaee;
+  --mf-bezel-dark: #6f8197;
+  --mf-dial-track: #b9c2cc;
+  --mf-tick: #75849a;
 
   /*
    * Two faces. Bodoni Moda is the dial's lettering, as on a watch face: the wordmark, titles and the
@@ -69,12 +75,34 @@
 
   /* Secondary buttons are plates: the page's surface with a hairline edge. */
   --rs-btn-default-bg: var(--mf-plate);
-  --rs-btn-default-hover-bg: #ffffff;
-  --rs-btn-default-active-bg: #e6ebf1;
+  --rs-btn-default-hover-bg: #dfe3e8;
+  --rs-btn-default-active-bg: #bcc4ce;
   --rs-btn-default-text: var(--mf-navy);
   --rs-btn-default-hover-text: var(--mf-navy);
   --rs-btn-default-active-text: var(--mf-navy);
   --rs-btn-default-border-color: var(--mf-rule);
+
+  /* An empty checkbox's edge: RSuite's grey all but vanishes on glass. 3:1 against the page. */
+  --rs-checkbox-border: #607084;
+
+  /*
+   * RSuite's own surfaces are white, which on slate would be the brightest thing on screen. Fields
+   * sit a shade lighter than a plate so they still read as somewhere to type; menus, dialogs and
+   * drawers are a lighter plate. RSuite re-declares every one of these for dark.
+   */
+  --rs-input-bg: #e0e4e9;
+  --rs-input-disabled-bg: #ccd2d9;
+  --rs-bg-overlay: #dde2e7;
+  --rs-bg-well: #ccd2d9;
+  --rs-btn-default-disabled-bg: #ccd2d9;
+  --rs-checkbox-disabled-bg: #ccd2d9;
+  --rs-radio-tile-bg: #e0e4e9;
+  --rs-segmented-control-bg: #ccd2d9;
+  --rs-segmented-control-border-color: #ccd2d9;
+  --rs-segmented-control-pill-indicator-bg: #e6eaee;
+  --rs-form-errormessage-bg: #dde2e7;
+  --rs-tag-bg: #ccd2d9;
+  --rs-listbox-option-group-bg: #dde2e7;
 
   /* Surfaces and text */
   --rs-body: var(--mf-steel);
@@ -119,22 +147,25 @@
   --rs-sidenav-inverse-selected-text: var(--mf-navy);
   --rs-sidenav-inverse-footer-border: var(--mf-rule);
 
-  /* Status tags (StatusTag): soft fill, dark text, AA in both themes. */
-  --mf-tag-success-bg: #e3f3ec;
-  --mf-tag-success-text: #066644;
-  --mf-tag-neutral-bg: #e6ebf1;
+  /*
+   * Status tags (StatusTag): a see-through tint, so a tag never shows up as a pale patch, and dark
+   * text. AA in both themes, against a tint over the page as well as over a plate.
+   */
+  --mf-tag-success-bg: rgb(10 138 90 / 13%);
+  --mf-tag-success-text: #05583a;
+  --mf-tag-neutral-bg: #bcc5cf;
   --mf-tag-neutral-text: #34445a;
-  --mf-tag-warning-bg: #f8eedc;
-  --mf-tag-warning-text: #7a4f0e;
-  --mf-tag-danger-bg: #f8e6e4;
-  --mf-tag-danger-text: #9c2a25;
+  --mf-tag-warning-bg: rgb(154 100 18 / 13%);
+  --mf-tag-warning-text: #68430c;
+  --mf-tag-danger-bg: rgb(194 54 47 / 12%);
+  --mf-tag-danger-text: #8c2621;
 
   /* The user's own chat messages: a navy plate, as their own actions are navy. */
-  --mf-bubble-user: #e3eaf3;
+  --mf-bubble-user: #bccadb;
 
   /* A plate's edge catches the light on top and casts a short shadow below. */
-  --mf-plate-shadow: inset 0 1px 0 rgb(255 255 255 / 90%), 0 1px 0 rgb(6 42 78 / 6%),
-    0 18px 36px -24px rgb(6 42 78 / 35%);
+  --mf-plate-shadow: inset 0 1px 0 rgb(255 255 255 / 55%), 0 1px 0 rgb(6 42 78 / 8%),
+    0 18px 36px -24px rgb(6 42 78 / 40%);
 }
 
 .rs-theme-dark {
@@ -183,6 +214,8 @@
   --rs-btn-default-hover-text: #f2f6fb;
   --rs-btn-default-active-text: #e6edf5;
   --rs-btn-default-border-color: var(--mf-rule-strong);
+
+  --rs-checkbox-border: #6a809a;
 
   --rs-body: var(--mf-steel);
   --rs-bg-card: var(--mf-plate);

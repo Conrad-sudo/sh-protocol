@@ -37,10 +37,10 @@ export interface Token {
   ticker: string
   address: string
   /**
-   * The wrapped native token (WETH, WBNB): it always counts toward the limit, like the native asset
-   * it wraps. The API adds it to every new wallet and won't remove it.
+   * The wrapped native token (WETH, WBNB): it counts toward the limit exactly when the native asset
+   * does. It is never picked or dropped on its own: the native asset's one switch moves both.
    */
-  always_counted?: boolean
+  follows_native?: boolean
 }
 
 /**
@@ -63,6 +63,11 @@ export interface DeployRequest {
   daily_limit_usd: number
   window_secs: number
   watched_tokens: Token[]
+  /**
+   * Whether the native asset (and its wrapped form with it) counts toward the limit. With this off
+   * and no watched tokens, nothing counts, and `daily_limit_usd` may then be 0: no limit.
+   */
+  count_native: boolean
   /** Native-token amount as a decimal string, e.g. "0.05". */
   prefund_eth: string
   /**
@@ -122,6 +127,17 @@ export interface Chain {
 export type Exchange = 'uniswap-v3' | 'pancakeswap-v2'
 
 /** One row of GET /api/wallet/{chain_id} `balances`. A token that could not be read has `error`. */
+/** A token the wallet limits in its own units, instead of counting it toward the USD limit. */
+export interface TokenCap {
+  /** null for a token Mitfah neither lists nor knows from the user's own list. */
+  ticker: string | null
+  address: string
+  /** null when the token doesn't answer: its figures are then only known in base units. */
+  decimals: number | null
+  limit_raw: string
+  remaining_raw: string
+}
+
 export interface TokenBalance {
   ticker: string
   /** null for the native asset. */
@@ -133,10 +149,10 @@ export interface TokenBalance {
    */
   custom?: boolean
   /**
-   * The wrapped native token (WETH, WBNB): it always counts toward the limit, so it can't be
-   * removed from the dashboard. Absent for the native asset, which can't be removed either.
+   * The wrapped native token (WETH, WBNB): it counts toward the limit exactly when the native asset
+   * does, so it comes off the dashboard only once that is switched off. Absent for the native asset.
    */
-  always_counted?: boolean
+  follows_native?: boolean
   /** A custom token's own name(), when it has a readable one. */
   name?: string | null
   /**
@@ -344,8 +360,12 @@ export interface WalletState {
     window_hours: number
     /** Unix seconds. The period ends `window_hours` later. */
     window_start: number
-    /** ERC-20s that count toward the limit. The native asset always counts and is not listed. */
+    /** Whether the native asset counts toward the limit: the owner's choice, switched in Controls. */
+    native_metered: boolean
+    /** ERC-20s that count toward the limit. The native asset is never listed: see `native_metered`. */
     watched_tokens: { ticker: string | null; address: string }[]
+    /** Tokens with a limit in their own units instead. A token is on one list or the other. */
+    token_caps: TokenCap[]
   }
   session: SessionBlock
   limits: {
@@ -378,6 +398,11 @@ export type OwnerAction =
   | { kind: 'unpause' }
   | { kind: 'withdraw'; token: string; amount: string; to: string }
   | { kind: 'watched-token'; token: string; action: 'add' | 'remove' }
+  /** Whether the native asset counts toward the limit. Its wrapped form moves with it, in the same transaction. */
+  | { kind: 'native-metering'; metered: boolean }
+  /** `token` may be an address. `limit` is whole tokens, as a decimal string. */
+  | { kind: 'token-cap'; token: string; action: 'set'; limit: string }
+  | { kind: 'token-cap'; token: string; action: 'remove' }
   | { kind: 'daily-limit'; dailyLimitUsd: number }
   | { kind: 'window'; windowSecs: number }
   /**
@@ -395,6 +420,70 @@ export type OwnerAction =
    * be empty when the list already has entries); `remove` takes exactly one; `disable` ignores them.
    */
   | { kind: 'allowlist'; action: 'enable' | 'add' | 'remove' | 'disable'; targets: string[] }
+  /**
+   * A recurring payment, signed on the wallet's recurring payments module. `create` pays `amount` of
+   * `token` (a ticker, an address, or the native ticker) to the address `to` every `intervalSecs`,
+   * from `firstDue` (Unix seconds; absent = now) until `endAt` (absent = until cancelled).
+   */
+  | {
+      kind: 'recurring'
+      action: 'create'
+      token: string
+      amount: string
+      to: string
+      intervalSecs: number
+      firstDue?: number
+      endAt?: number
+    }
+  | { kind: 'recurring'; action: 'cancel'; scheduleId: number }
+
+/** One recurring payment, from GET /api/wallet/{chain_id}/recurring. */
+export interface RecurringPayment {
+  schedule_id: number
+  /** The token's address; the zero address for the native coin. */
+  token: string
+  ticker: string
+  /** Null when the token's decimals can't be read: `amount_raw` is then all there is. */
+  decimals: number | null
+  amount_raw: string
+  /** Each payment in whole units, as the server writes it ("100", "0.5"). */
+  amount_text: string
+  recipient: string
+  /** A contact's name, "your owner address", or the shortened address. */
+  recipient_name: string
+  interval_secs: number
+  /** Unix seconds: when the next payment falls due. */
+  next_due: number
+  /** Unix seconds: the last moment a payment may fall due; null for no end. */
+  end_at: number | null
+  /** `live` until cancelled, finished (its last payment ran) or gone (the module was removed). */
+  status: 'live' | 'cancelled' | 'finished' | 'gone'
+  last_tx: string | null
+  last_run_at: number | null
+  /** Why the last attempt couldn't go through; null once one has. */
+  last_error: string | null
+  /** Unix seconds: when a refused payment is tried again. */
+  retry_at: number | null
+  /** "100 USDC to sam every 30 days". */
+  summary: string
+}
+
+/** GET /api/wallet/{chain_id}/recurring. */
+export interface RecurringPayments {
+  /** False for a wallet without the recurring payments module (made before it existed, or removed). */
+  available: boolean
+  module: string | null
+  /** What each payment pays the protocol, in wei of the native coin: its fee plus the keeper's. */
+  fee_per_payment_wei: string | null
+  native_ticker: string
+  min_interval_secs: number
+  schedules: RecurringPayment[]
+}
+
+/** POST /api/wallet/recurring/confirm: like /api/wallet/tx/confirm, answering with the schedules once mined. */
+export type RecurringTxConfirmResult =
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
+  | { status: 'confirmed'; tx_hash: string; recurring: RecurringPayments }
 
 /** One contract on, or worth adding to, the wallet's contract allowlist. */
 export interface AllowlistEntry {
@@ -514,10 +603,11 @@ export interface Transaction {
   id: number
   chain_id: number
   /**
-   * Who sent it: the assistant (from the web chat or Telegram), the owner in the browser, or
-   * someone or something outside Mitfah, as a block explorer reported it.
+   * Who sent it: the assistant (from the web chat or Telegram), the owner in the browser, Mitfah
+   * paying one of the owner's recurring payments, or someone or something outside Mitfah, as a
+   * block explorer reported it.
    */
-  source: 'assistant' | 'owner' | 'outside'
+  source: 'assistant' | 'owner' | 'outside' | 'recurring'
   /** What it does, written by the server from the transaction itself. */
   action: string
   /** `dropped`: never mined, and now never will be. */

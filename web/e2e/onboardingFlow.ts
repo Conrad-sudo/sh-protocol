@@ -32,6 +32,23 @@ export interface WalkOptions {
  * caller decides what a finished deploy should look like. The account must already sign in as the
  * fake wallet's address; signing in proved it, so there is no verify step.
  */
+export const TOKEN_PICKER = 'Tokens that count toward the limit'
+
+/**
+ * Ticks "Count ETH toward a spending limit" on the limits step, which brings the limit and period
+ * fields. Nothing counts until this or a token is ticked, and the step can then be passed with no limit.
+ */
+export async function countNative(step: Locator) {
+  await step.getByText(/^Count \w+ toward a spending limit$/).click()
+  await expect(step.getByLabel('Spending limit', { exact: true })).toBeVisible()
+}
+
+/** The open list covers Continue, so a person shuts it first: a click or tap anywhere else does. */
+export async function closeTokenPicker(page: Page) {
+  await page.mouse.click(5, 5)
+  await expect(page.getByRole('listbox')).toBeHidden()
+}
+
 export async function walkOnboarding(page: Page, { network, editLimits, onStep, passkey = 'skip' }: WalkOptions = {}) {
   const step = async (name: StepName) => {
     const region = page.getByRole('region', { name: STEPS[name] })
@@ -56,7 +73,7 @@ export async function walkOnboarding(page: Page, { network, editLimits, onStep, 
 
   const limits = await step('limits')
   // The token list loads separately; Continue stays disabled until it has.
-  await expect(limits.getByRole('checkbox').first()).toBeAttached()
+  await expect(limits.getByRole('combobox', { name: TOKEN_PICKER })).toBeVisible()
   await editLimits?.(limits)
   await next(limits)
 
