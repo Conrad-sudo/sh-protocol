@@ -25,6 +25,7 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {configuredTokens} from "../utils/ConfiguredTokens.sol";
 import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
+import {IERC20Extended} from "../../src/interfaces/IERC20Extended.sol";
 import {MockWeth} from "../../src/mocks/MockWeth.sol";
 import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
@@ -49,7 +50,7 @@ import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
  *        by the spending cap exactly like session-key UserOps -- most metering tests below drive
  *        execute() as the owner for brevity. (The EntryPoint flow is exercised end-to-end in
  *        SessionGuardTest.t.sol.)
- *      - onlyEntryPointOrSelfOrOwner reverts with OZAccount.AccountUnauthorized;
+ *      - execute() reverts for any other caller with OZAccount.AccountUnauthorized;
  *        onlyOwner passthroughs revert with Ownable.OwnableUnauthorizedAccount -- two different
  *        errors depending on which function you're testing.
  *      - Module errors carry the SpendingLimitModule_ prefix; oracle errors the PriceOracle_ prefix.
@@ -111,7 +112,7 @@ contract SHProtocolTest is Test {
         watched[1] = address(dai);
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0))));
 
         harness = new SpendingLimitModuleHarness(address(feeRegistry));
         spender = new MockSpender();
@@ -169,9 +170,8 @@ contract SHProtocolTest is Test {
         // has never been set (the window between deploying the registry and the module).
         SHRegistry bareRegistry = new SHRegistry(
             address(this),
-            feeRegistry.MIN_PROTOCOL_FEE(),
-            feeRegistry.MIN_PROTOCOL_FEE(),
-            feeRegistry.MAX_PROTOCOL_FEE(),
+            _protocolFeeAtFloor(),
+            _keeperFeeAtFloor(),
             address(treasury),
             address(oracle),
             config.reputationRegistry,
@@ -187,7 +187,53 @@ contract SHProtocolTest is Test {
 
         address[] memory watched = new address[](0);
         vm.expectRevert(SHFactory.SHFactory_SpendingLimitModuleNotSet.selector);
-        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
+        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
+    }
+
+    /// @dev The executor is required too: with the hook set but no RecurringPaymentModule, the
+    ///      factory refuses rather than deploy a wallet missing a module every wallet is meant to have.
+    function test_deployWallet_revertsWhenRecurringModuleUnset() public {
+        SHRegistry bareRegistry = new SHRegistry(
+            address(this),
+            _protocolFeeAtFloor(),
+            _keeperFeeAtFloor(),
+            address(treasury),
+            address(oracle),
+            config.reputationRegistry,
+            config.identityRegistry,
+            config.entryPoint,
+            1
+        );
+        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry))));
+        SHFactory bareFactory = new SHFactory(
+            address(this),
+            address(bareRegistry),
+            SessionHandler.GasCeilings({maxOpGasCost: config.maxOpGasCost, sessionGasBudget: config.sessionGasBudget})
+        );
+
+        address[] memory watched = new address[](0);
+        vm.expectRevert(SHFactory.SHFactory_RecurringPaymentModuleNotSet.selector);
+        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
+    }
+
+    /// @dev Every wallet comes with the recurring-payment executor installed, alongside the hook.
+    function test_deployWallet_installsRecurringPaymentExecutor() public view {
+        address recurring = feeRegistry.recurringPaymentModule();
+        assertTrue(recurring != address(0));
+        assertTrue(wallet.isModuleInstalled(MODULE_TYPE_EXECUTOR, recurring, ""));
+        assertTrue(wallet.isModuleInstalled(MODULE_TYPE_HOOK, address(module), ""));
+    }
+
+    function _protocolFeeAtFloor() internal view returns (SHRegistry.FeeBounds memory) {
+        return SHRegistry.FeeBounds(
+            feeRegistry.MIN_PROTOCOL_FEE(), feeRegistry.MIN_PROTOCOL_FEE(), feeRegistry.MAX_PROTOCOL_FEE()
+        );
+    }
+
+    function _keeperFeeAtFloor() internal view returns (SHRegistry.FeeBounds memory) {
+        return SHRegistry.FeeBounds(
+            feeRegistry.MIN_KEEPER_FEE(), feeRegistry.MIN_KEEPER_FEE(), feeRegistry.MAX_KEEPER_FEE()
+        );
     }
 
     function test_deployWallet_revertsOnUnpricedWatchedToken() public {
@@ -198,7 +244,7 @@ contract SHProtocolTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced))
         );
-        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     /// @dev Every token NetworkConfig names must reach the oracle. DeploySHProtocol lists them by
@@ -217,26 +263,29 @@ contract SHProtocolTest is Test {
 
         // The failure users actually saw: a wallet watching all of them deploys.
         vm.prank(owner);
-        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     function test_deployWallet_revertsOnZeroWindow() public {
         address[] memory watched = new address[](0);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidWindowDuration.selector);
-        factory.deployWallet(DAILY_LIMIT, 0, watched, bytes32(0), bytes32(0), 0, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, 0, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
     }
 
     function test_initialize_cannotRerun() public {
         address[] memory watched = new address[](0);
+        address recurringModule = feeRegistry.recurringPaymentModule(); // before expectRevert, or it latches here
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         wallet.initialize(
             SessionHandler.InitConfig({
                 owner: rando,
                 walletId: 9,
                 spendingLimitModule: address(module),
+                recurringPaymentModule: recurringModule,
                 dailyLimitUsd: 1,
                 windowDuration: 1,
                 watchedTokens: watched,
+                nativeMetered: true,
                 sessionKeyX: bytes32(0),
                 sessionKeyY: bytes32(0),
                 sessionKeyValidUntil: 0,
@@ -250,7 +299,7 @@ contract SHProtocolTest is Test {
         vm.deal(kani, 1 ether);
         vm.prank(kani);
         address funded =
-            factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0));
+            factory.deployWallet{value: 1 ether}(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
         assertEq(funded.balance, 1 ether);
     }
 
@@ -269,7 +318,7 @@ contract SHProtocolTest is Test {
         return SessionHandler(
             payable(
                 factory.deployWallet(
-                    DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, _sessionDeadline(), spenders
+                    DAILY_LIMIT, WINDOW, new address[](0), true, key.qx, key.qy, _sessionDeadline(), spenders
                 )
             )
         );
@@ -314,18 +363,18 @@ contract SHProtocolTest is Test {
         // Not a point on the curve.
         vm.prank(kani);
         vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
-        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, bytes32(uint256(key.qy) ^ 1), _sessionDeadline(), new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), true, key.qx, bytes32(uint256(key.qy) ^ 1), _sessionDeadline(), new address[](0));
 
         // One coordinate zero is NOT the owner-only sentinel: it is judged by the curve and refused.
         vm.prank(kani);
         vm.expectRevert(SessionHandler.SessionHandler_InvalidSessionKey.selector);
-        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), bytes32(0), bytes32(uint256(1)), _sessionDeadline(), new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), true, bytes32(0), bytes32(uint256(1)), _sessionDeadline(), new address[](0));
 
         // A deadline in the past.
         uint48 past = uint48(block.timestamp);
         vm.prank(kani);
         vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionExpiryInPast.selector, past));
-        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, past, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), true, key.qx, key.qy, past, new address[](0));
 
         // A deadline beyond the longest life a key may have. (The read is hoisted above the prank: a
         // call inside expectRevert's arguments would use the prank up.)
@@ -333,7 +382,7 @@ contract SHProtocolTest is Test {
         uint48 tooFar = uint48(block.timestamp) + maxTtl + 1;
         vm.prank(kani);
         vm.expectRevert(abi.encodeWithSelector(SessionHandler.SessionHandler_SessionTtlTooLong.selector, tooFar, maxTtl));
-        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), key.qx, key.qy, tooFar, new address[](0));
+        factory.deployWallet(DAILY_LIMIT, WINDOW, new address[](0), true, key.qx, key.qy, tooFar, new address[](0));
 
         assertEq(factory.deployCount(kani), 0, "a refused deploy consumed no wallet");
     }
@@ -448,7 +497,7 @@ contract SHProtocolTest is Test {
     function test_onInstall_revertsIfAlreadyInstalled() public {
         vm.prank(address(wallet));
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_AlreadyInstalled.selector);
-        module.onInstall(abi.encode(DAILY_LIMIT, WINDOW, new address[](0)));
+        module.onInstall(abi.encode(DAILY_LIMIT, WINDOW, new address[](0), true));
     }
 
     function test_uninstall_wipesStateAndReinstallStartsFresh() public {
@@ -463,7 +512,7 @@ contract SHProtocolTest is Test {
         address[] memory watched = new address[](1);
         watched[0] = address(dai);
         vm.prank(owner);
-        wallet.installModule(MODULE_TYPE_HOOK, address(module), abi.encode(int256(1e18), uint256(2 days), watched));
+        wallet.installModule(MODULE_TYPE_HOOK, address(module), abi.encode(int256(1e18), uint256(2 days), watched, true));
 
         SpendingLimitModule.Config memory cfg = module.getConfig(address(wallet));
         assertTrue(cfg.installed);
@@ -509,16 +558,16 @@ contract SHProtocolTest is Test {
         wallet.setDailyLimit(-1);
     }
 
-    /// @notice The limit is stored as an int128, so anything larger must be refused rather than cut
+    /// @notice The limit is stored as an int88, so anything larger must be refused rather than cut
     ///         off; the largest value that fits is still accepted.
-    function test_setDailyLimit_aboveInt128Reverts() public {
+    function test_setDailyLimit_aboveInt88Reverts() public {
         vm.prank(owner);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidDailyLimit.selector);
-        wallet.setDailyLimit(int256(type(int128).max) + 1);
+        wallet.setDailyLimit(int256(type(int88).max) + 1);
 
         vm.prank(owner);
-        wallet.setDailyLimit(type(int128).max);
-        assertEq(wallet.getConfig().dailyLimitUsd, type(int128).max);
+        wallet.setDailyLimit(type(int88).max);
+        assertEq(wallet.getConfig().dailyLimitUsd, type(int88).max);
     }
 
     /// @notice postCheck checks the new tally against the limit BEFORE storing it (that ordering is
@@ -555,7 +604,11 @@ contract SHProtocolTest is Test {
         wallet.setWindowDuration(0);
 
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_InvalidWindowDuration.selector);
-        wallet.setWindowDuration(uint256(type(uint48).max) + 1);
+        wallet.setWindowDuration(uint256(type(uint24).max) + 1);
+
+        // The ceiling is what the uint24 field holds: 16,777,215 seconds, about 194 days.
+        wallet.setWindowDuration(type(uint24).max);
+        assertEq(wallet.getConfig().windowDuration, type(uint24).max);
 
         wallet.setWindowDuration(2 days);
         vm.stopPrank();
@@ -590,6 +643,467 @@ contract SHProtocolTest is Test {
         assertEq(wallet.getConfig().watchedTokens.length, 1);
     }
 
+    /// @dev Removing a token moves the last one into the gap. If the moved token's stored position went
+    ///      stale, this exact sequence would delete USDC from the list while it still read as watched,
+    ///      and USDC transfers would stop counting toward the cap.
+    function test_removeWatchedToken_movedTokenStaysMetered() public {
+        vm.startPrank(owner);
+        wallet.addWatchedToken(address(weth)); // [usdc, dai, weth]
+        wallet.removeWatchedToken(address(usdc)); // [weth, dai]
+        wallet.addWatchedToken(address(usdc)); // [weth, dai, usdc]
+        wallet.removeWatchedToken(address(weth)); // [usdc, dai]
+        vm.stopPrank();
+
+        address[] memory watched = wallet.getConfig().watchedTokens;
+        assertEq(watched.length, 2);
+        assertEq(watched[0], address(usdc));
+        assertEq(watched[1], address(dai));
+        assertTrue(wallet.isWatched(address(usdc)));
+        assertFalse(wallet.isWatched(address(weth)));
+
+        uint256 overLimit = 10_000e6;
+        int256 attempted = oracle.getPrice(address(usdc), overLimit);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_BudgetExceeded.selector, attempted, DAILY_LIMIT
+            )
+        );
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, overLimit)));
+    }
+
+    function test_removeWatchedToken_canRemoveTheTokenThatMoved() public {
+        vm.startPrank(owner);
+        wallet.addWatchedToken(address(weth)); // [usdc, dai, weth]
+        wallet.removeWatchedToken(address(usdc)); // [weth, dai]
+        wallet.removeWatchedToken(address(weth)); // [dai]
+        vm.stopPrank();
+
+        address[] memory watched = wallet.getConfig().watchedTokens;
+        assertEq(watched.length, 1);
+        assertEq(watched[0], address(dai));
+    }
+
+    /// @dev Uninstall can only clear entries it finds through the lists, so a list that drifted from the
+    ///      mapping would leave watched/trusted entries behind for the next install to inherit.
+    function test_onUninstall_afterMovesLeavesNothingBehind() public {
+        address account = makeAddr("eoaAccount");
+        address[] memory watched = new address[](2);
+        watched[0] = address(usdc);
+        watched[1] = address(dai);
+        address spenderA = address(0x1001);
+        address spenderB = address(0x1002);
+        address spenderC = address(0x1003);
+        address spenderD = address(0x1004);
+
+        vm.startPrank(account);
+        module.onInstall(abi.encode(int256(1e18), uint256(1 days), watched, true));
+        module.addWatchedToken(address(weth)); // [usdc, dai, weth]
+        module.removeWatchedToken(address(usdc)); // [weth, dai]
+        module.addWatchedToken(address(usdc)); // [weth, dai, usdc]
+        module.removeWatchedToken(address(weth)); // [usdc, dai]
+        module.addTrustedSpender(spenderA);
+        module.addTrustedSpender(spenderB);
+        module.addTrustedSpender(spenderC); // [A, B, C]
+        module.removeTrustedSpender(spenderA); // [C, B]
+        module.addTrustedSpender(spenderD); // [C, B, D]
+        module.removeTrustedSpender(spenderC); // [D, B]
+        module.onUninstall("");
+
+        address[] memory onlyUsdc = new address[](1);
+        onlyUsdc[0] = address(usdc);
+        module.onInstall(abi.encode(int256(1e18), uint256(1 days), onlyUsdc, true));
+        vm.stopPrank();
+
+        assertEq(module.getConfig(account).watchedTokens.length, 1);
+        assertEq(module.getConfig(account).watchedTokens[0], address(usdc));
+        assertFalse(module.isWatched(account, address(dai)));
+        assertFalse(module.isWatched(account, address(weth)));
+        assertEq(module.getConfig(account).trustedSpenders.length, 0);
+        assertFalse(module.isTrustedSpender(account, spenderB));
+        assertFalse(module.isTrustedSpender(account, spenderD));
+    }
+
+    /// @dev Any order of adds and removes must leave each token on the list exactly once if it should be
+    ///      watched and not at all otherwise, with isWatched agreeing. The top bit of an op picks add or remove.
+    function testFuzz_watchedList_staysInSyncWithLookup(uint8[] calldata ops) public {
+        address[3] memory tokens = [address(usdc), address(dai), address(weth)];
+        bool[3] memory expected = [true, true, false]; // setUp watches usdc and dai
+
+        vm.startPrank(owner);
+        for (uint256 i = 0; i < ops.length; i++) {
+            uint256 id = (ops[i] & 0x7f) % 3;
+            bool add = ops[i] & 0x80 == 0;
+            if (add) wallet.addWatchedToken(tokens[id]);
+            else wallet.removeWatchedToken(tokens[id]);
+            expected[id] = add;
+        }
+        vm.stopPrank();
+
+        address[] memory watched = wallet.getConfig().watchedTokens;
+        for (uint256 id = 0; id < 3; id++) {
+            uint256 count;
+            for (uint256 i = 0; i < watched.length; i++) {
+                if (watched[i] == tokens[id]) count++;
+            }
+            assertEq(count, expected[id] ? 1 : 0, "list disagrees with the expected membership");
+            assertEq(wallet.isWatched(tokens[id]), expected[id], "isWatched disagrees with the expected membership");
+        }
+    }
+
+    /// @dev Same as the watched-list fuzz, over more entries since spenders needn't be priced.
+    function testFuzz_trustedSpenders_staysInSyncWithLookup(uint8[] calldata ops) public {
+        uint256 pool = 8; // below MAX_TRUSTED_SPENDERS, so an add can never hit the cap
+        bool[] memory expected = new bool[](pool);
+
+        vm.startPrank(owner);
+        for (uint256 i = 0; i < ops.length; i++) {
+            uint256 id = (ops[i] & 0x7f) % pool;
+            address entry = address(uint160(0x1000 + id));
+            bool add = ops[i] & 0x80 == 0;
+            if (add) wallet.addTrustedSpender(entry);
+            else wallet.removeTrustedSpender(entry);
+            expected[id] = add;
+        }
+        vm.stopPrank();
+
+        address[] memory trusted = wallet.getConfig().trustedSpenders;
+        for (uint256 id = 0; id < pool; id++) {
+            address entry = address(uint160(0x1000 + id));
+            uint256 count;
+            for (uint256 i = 0; i < trusted.length; i++) {
+                if (trusted[i] == entry) count++;
+            }
+            assertEq(count, expected[id] ? 1 : 0, "list disagrees with the expected membership");
+            assertEq(
+                wallet.isTrustedSpender(entry), expected[id], "isTrustedSpender disagrees with the expected membership"
+            );
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    WHICH BALANCES preCheck READS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Expects the wallet's balance of `token` to be read `times` times during the next call.
+    function _expectBalanceReads(address token, uint64 times) internal {
+        vm.expectCall(token, abi.encodeCall(IERC20.balanceOf, (address(wallet))), times);
+    }
+
+    function test_tokenSend_readsOnlyThatToken() public {
+        uint256 amount = 100e6;
+        _expectBalanceReads(address(usdc), 2); // before and after
+        _expectBalanceReads(address(dai), 0);
+
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+
+        assertEq(_spentInWindow(), oracle.getPrice(address(usdc), amount));
+    }
+
+    function test_nativeSendToAnAddressWithNoCode_readsNoToken() public {
+        _expectBalanceReads(address(usdc), 0);
+        _expectBalanceReads(address(dai), 0);
+
+        _ownerExecute(kani, 0.1 ether, "");
+
+        assertEq(_spentInWindow(), oracle.getPrice(address(0), 0.1 ether));
+    }
+
+    /// @dev Sending ETH to WETH is a wrap. Read only the native side and it would count as spending.
+    function test_nativeSendToAContract_readsEveryToken() public {
+        vm.prank(owner);
+        wallet.addWatchedToken(address(weth));
+        uint256 wethEthBefore = address(weth).balance;
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+        _expectBalanceReads(address(weth), 2);
+
+        _ownerExecute(address(weth), 0.1 ether, "");
+
+        assertEq(address(weth).balance, wethEthBefore + 0.1 ether);
+        assertEq(_spentInWindow(), 0, "a wrap is not spending");
+    }
+
+    function test_callDataToAnAddressWithNoCode_readsEveryToken() public {
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecute(kani, 0, hex"12345678");
+    }
+
+    function test_unwatchedTokenSend_readsEveryToken() public {
+        ERC20Mock other = new ERC20Mock("Other", "OTH", 18);
+        other.mint(address(wallet), 1e18);
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecute(address(other), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e18)));
+
+        assertEq(_spentInWindow(), 0);
+    }
+
+    function test_removedToken_isNoLongerAPlainSend() public {
+        vm.prank(owner);
+        wallet.removeWatchedToken(address(usdc));
+        _expectBalanceReads(address(usdc), 0); // no longer on the list
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
+
+        assertEq(_spentInWindow(), 0);
+    }
+
+    /// @dev Any other function on a watched token could move more than the caller named.
+    function test_otherFunctionOnAWatchedToken_readsEveryToken() public {
+        int256 expectedUsd = oracle.getPrice(address(usdc), 100e6);
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.burn, (address(wallet), 100e6)));
+
+        assertEq(_spentInWindow(), expectedUsd);
+    }
+
+    function test_nonExecuteCalldata_readsEveryToken() public {
+        vm.prank(address(wallet));
+        bytes memory hookData = module.preCheck(address(0), 0, "");
+
+        (,, address[] memory tokens,,,) = abi.decode(hookData, (bool, uint256, address[], uint256[], address[], address[]));
+        assertEq(tokens.length, 2);
+    }
+
+    /// @dev Delegatecalled code runs as the wallet, so nothing in the calldata says what it moves.
+    function test_delegatecall_readsEveryTokenAndMeters() public {
+        MockDelegateSend sender = new MockDelegateSend();
+        uint256 amount = 100e6;
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        vm.prank(owner);
+        wallet.execute(
+            bytes32(uint256(0xff) << 248),
+            abi.encodePacked(address(sender), abi.encodeCall(MockDelegateSend.send, (address(usdc), kani, amount)))
+        );
+
+        assertEq(usdc.balanceOf(kani), amount);
+        assertEq(_spentInWindow(), oracle.getPrice(address(usdc), amount));
+    }
+
+    /// @dev A token sent twice is read once. Read twice, postCheck would charge the whole outflow twice.
+    function test_batchOfPlainSends_readsEachTokenOnceAndChargesOnce() public {
+        Execution[] memory execs = new Execution[](3);
+        execs[0] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
+        execs[1] = Execution(kani, 0.1 ether, "");
+        execs[2] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 50e6)));
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 0);
+
+        _ownerExecuteBatch(execs);
+
+        int256 expectedUsd = oracle.getPrice(address(usdc), 150e6) + oracle.getPrice(address(0), 0.1 ether);
+        assertEq(_spentInWindow(), expectedUsd);
+    }
+
+    /// @dev One contract call in a batch brings the whole list back, even when it comes last.
+    function test_batchWithAContractCall_readsEveryTokenAndMeters() public {
+        MockBurnBridge bridge = new MockBurnBridge();
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
+        execs[1] = Execution(address(bridge), 0, abi.encodeCall(MockBurnBridge.withdraw, (address(dai), 100e18)));
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecuteBatch(execs);
+
+        int256 expectedUsd = oracle.getPrice(address(usdc), 100e6) + oracle.getPrice(address(dai), 100e18);
+        assertEq(_spentInWindow(), expectedUsd);
+    }
+
+    function test_approvalThenPull_readsEveryTokenAndMeters() public {
+        MockSpender spender = new MockSpender();
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(usdc), 0, abi.encodeCall(IERC20.approve, (address(spender), 100e6)));
+        execs[1] =
+            Execution(address(spender), 0, abi.encodeCall(MockSpender.pull, (address(usdc), address(wallet), 100e6)));
+        _expectBalanceReads(address(usdc), 2);
+        _expectBalanceReads(address(dai), 2);
+
+        _ownerExecuteBatch(execs);
+
+        assertEq(_spentInWindow(), oracle.getPrice(address(usdc), 100e6));
+    }
+
+    /// @dev The reason a list can't be worked out from calldata: a bridge can burn the caller's tokens
+    ///      with no approval and without the token being the call's target. The fork version of this
+    ///      is test_bridgeWithdraw_isMeteredThoughDaiIsNeverCalled in SHBaseUniswapV3Test.
+    function test_burnWithNoApprovalOrTokenCall_isMetered() public {
+        MockBurnBridge bridge = new MockBurnBridge();
+        uint256 amount = 100e18;
+        uint256 daiBefore = dai.balanceOf(address(wallet));
+
+        _ownerExecute(address(bridge), 0, abi.encodeCall(MockBurnBridge.withdraw, (address(dai), amount)));
+
+        assertEq(dai.balanceOf(address(wallet)), daiBefore - amount);
+        assertEq(_spentInWindow(), oracle.getPrice(address(dai), amount));
+    }
+
+    function test_burnWithNoApprovalOrTokenCall_overTheCapReverts() public {
+        MockBurnBridge bridge = new MockBurnBridge();
+        uint256 amount = 10_000e18;
+
+        vm.prank(owner);
+        vm.expectPartialRevert(SpendingLimitModule.SpendingLimitModule_BudgetExceeded.selector);
+        wallet.execute(
+            bytes32(0),
+            abi.encodePacked(
+                address(bridge), uint256(0), abi.encodeCall(MockBurnBridge.withdraw, (address(dai), amount))
+            )
+        );
+    }
+
+    /// @dev Outer calldata can hold a harmless-looking send where a naive reader expects the execution,
+    ///      with the real one further along. The hook and the account must both follow the offset, or
+    ///      the hook would snapshot the decoy and miss what actually runs.
+    function test_nonCanonicalExecuteOffset_cannotHideACallFromTheMeter() public {
+        MockBurnBridge bridge = new MockBurnBridge();
+        uint256 amount = 100e18;
+        uint256 daiBefore = dai.balanceOf(address(wallet));
+        bytes memory decoy =
+            abi.encode(abi.encodePacked(address(usdc), uint256(0), abi.encodeCall(ERC20Mock.transfer, (kani, 1))));
+        bytes memory real = abi.encodePacked(
+            address(bridge), uint256(0), abi.encodeCall(MockBurnBridge.withdraw, (address(dai), amount))
+        );
+        // abi.encode(bytes) leads with its own 0x20 offset word, which the decoy region drops.
+        bytes memory decoyRegion = new bytes(decoy.length - 32);
+        for (uint256 i = 0; i < decoyRegion.length; i++) {
+            decoyRegion[i] = decoy[i + 32];
+        }
+        bytes memory outer = abi.encodePacked(
+            SessionHandler.execute.selector,
+            bytes32(0),
+            uint256(0x40 + decoyRegion.length),
+            decoyRegion,
+            uint256(real.length),
+            real
+        );
+
+        vm.prank(owner);
+        (bool ok,) = address(wallet).call(outer);
+
+        assertTrue(ok);
+        assertEq(usdc.balanceOf(kani), 0, "the decoy must not run");
+        assertEq(dai.balanceOf(address(wallet)), daiBefore - amount, "the real call must run");
+        assertEq(_spentInWindow(), oracle.getPrice(address(dai), amount), "the real call must be metered");
+    }
+
+    /// @dev Whatever mix of plain sends a batch holds, the charge is exactly the value that left.
+    function testFuzz_plainSends_chargeExactlyWhatLeft(uint8[] calldata picks) public {
+        uint256 count = picks.length > 8 ? 8 : picks.length;
+        Execution[] memory execs = new Execution[](count);
+        uint256 usdcOut;
+        uint256 daiOut;
+        uint256 nativeOut;
+        for (uint256 i = 0; i < count; i++) {
+            uint256 units = picks[i] % 5 + 1;
+            if (picks[i] % 3 == 0) {
+                execs[i] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, units * 1e6)));
+                usdcOut += units * 1e6;
+            } else if (picks[i] % 3 == 1) {
+                execs[i] = Execution(address(dai), 0, abi.encodeCall(ERC20Mock.transfer, (kani, units * 1e18)));
+                daiOut += units * 1e18;
+            } else {
+                execs[i] = Execution(kani, units * 1e15, "");
+                nativeOut += units * 1e15;
+            }
+        }
+
+        _ownerExecuteBatch(execs);
+
+        int256 expectedUsd = oracle.getPrice(address(usdc), usdcOut) + oracle.getPrice(address(dai), daiOut)
+            + oracle.getPrice(address(0), nativeOut);
+        assertEq(_spentInWindow(), expectedUsd);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                  ONE CONFIG SLOT, ORACLE READ ONLY WHEN PRICED
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The two flags, the window, the tally and the limit all sit in Config's first slot, which is
+    ///         what lets a spend read the limit without a second cold storage read. The list comes next.
+    function test_config_scalarFieldsShareOneSlot() public {
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
+
+        SpendingLimitModule.Config memory cfg = wallet.getConfig();
+        address hookModule = address(wallet.SH_MODULE());
+        // _configs is the module's first storage variable.
+        bytes32 slot = keccak256(abi.encode(address(wallet), uint256(0)));
+        uint256 word = uint256(vm.load(hookModule, slot));
+
+        assertEq(word & 0xff, 1, "installed");
+        assertEq((word >> 8) & 0xff, 1, "nativeMetered");
+        assertEq(uint32(word >> 16), cfg.windowStart, "windowStart");
+        assertEq(uint24(word >> 48), cfg.windowDuration, "windowDuration");
+        assertEq(int88(uint88(word >> 72)), cfg.spentInWindow, "spentInWindow");
+        assertEq(int88(uint88(word >> 160)), cfg.dailyLimitUsd, "dailyLimitUsd");
+        assertGt(cfg.spentInWindow, 0, "the spend was metered");
+        assertEq(uint256(vm.load(hookModule, bytes32(uint256(slot) + 1))), cfg.watchedTokens.length, "the list follows");
+    }
+
+    /// @notice At the largest limit, a spend the tally can hold is stored exactly.
+    function test_spendNearTheLargestLimit_isStoredExactly() public {
+        vm.prank(owner);
+        wallet.setDailyLimit(type(int88).max);
+        uint256 amount = 150_000_000e6;
+        usdc.mint(address(wallet), amount);
+        int256 usd = oracle.getPrice(address(usdc), amount);
+
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+
+        assertEq(_spentInWindow(), usd);
+    }
+
+    /// @notice A spend past what the tally can hold is refused by the limit check, not cut off in the store.
+    function test_spendPastTheLargestLimit_revertsRatherThanWraps() public {
+        vm.prank(owner);
+        wallet.setDailyLimit(type(int88).max);
+        uint256 amount = 200_000_000e6;
+        usdc.mint(address(wallet), amount);
+        int256 usd = oracle.getPrice(address(usdc), amount);
+        assertGt(usd, type(int88).max);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_BudgetExceeded.selector, usd, int256(type(int88).max)
+            )
+        );
+        _ownerExecute(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)));
+    }
+
+    function test_nothingMetered_makesNoRegistryRead() public {
+        ERC20Mock other = new ERC20Mock("Other", "OTH", 18);
+        other.mint(address(wallet), 1e18);
+        vm.expectCall(address(wallet.REGISTRY()), abi.encodeWithSignature("priceOracle()"), 0);
+
+        _ownerExecute(address(other), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e18)));
+
+        assertEq(_spentInWindow(), 0);
+    }
+
+    /// @notice Native and two tokens moved: all three are priced, off one read of the oracle's address.
+    function test_severalBalancesMoved_readTheOracleAddressOnce() public {
+        vm.deal(address(wallet), 1 ether);
+        Execution[] memory batch = new Execution[](3);
+        batch[0] = Execution(makeAddr("noCode"), 1e15, "");
+        batch[1] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 100e6)));
+        batch[2] = Execution(address(dai), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 50e18)));
+        int256 usd =
+            oracle.getPrice(address(0), 1e15) + oracle.getPrice(address(usdc), 100e6) + oracle.getPrice(address(dai), 50e18);
+        vm.expectCall(address(wallet.REGISTRY()), abi.encodeWithSignature("priceOracle()"), 1);
+
+        _ownerExecuteBatch(batch);
+
+        assertEq(_spentInWindow(), usd);
+    }
+
     function test_moduleSetters_revertForNonInstalledCaller() public {
         vm.startPrank(rando);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_NotInstalled.selector);
@@ -622,9 +1136,8 @@ contract SHProtocolTest is Test {
         // pointing at bigOracle (owner/fee/agentId are irrelevant to the watched-list cap).
         SHRegistry bigRegistry = new SHRegistry(
             address(this),
-            feeRegistry.MIN_PROTOCOL_FEE(),
-            feeRegistry.MIN_PROTOCOL_FEE(),
-            feeRegistry.MAX_PROTOCOL_FEE(),
+            _protocolFeeAtFloor(),
+            _keeperFeeAtFloor(),
             address(this),
             address(bigOracle),
             config.reputationRegistry,
@@ -640,7 +1153,7 @@ contract SHProtocolTest is Test {
             first32[i] = tokens[i];
         }
         vm.prank(account);
-        freshModule.onInstall(abi.encode(int256(1e18), uint256(1 days), first32));
+        freshModule.onInstall(abi.encode(int256(1e18), uint256(1 days), first32, true));
 
         vm.prank(account);
         vm.expectRevert(SpendingLimitModule.SpendingLimitModule_TooManyWatchedTokens.selector);
@@ -1371,6 +1884,122 @@ contract SHProtocolTest is Test {
         assertEq(usdc.allowance(address(wallet), address(spender)), 0);
     }
 
+    /// @dev Gives the priced `usdc` mock the legacy allowance functions. Etching keeps its storage, and
+    ///      the new code's immutable decimals are set to match.
+    function _giveUsdcLegacyAllowanceFunctions() internal {
+        vm.etch(address(usdc), address(new MockLegacyAllowanceToken(usdc.decimals())).code);
+    }
+
+    function _legacyGrants() internal pure returns (bytes4[2] memory) {
+        return [IERC20Extended.increaseAllowance.selector, IERC20Extended.increaseApproval.selector];
+    }
+
+    /// @notice A legacy grant left standing would be pulled in a later transaction, which the hook
+    ///         never runs in. It must fail exactly as a standing `approve` does.
+    function test_legacyGrant_standingRevertsWithResidual() public {
+        _giveUsdcLegacyAllowanceFunctions();
+        bytes4[2] memory grants = _legacyGrants();
+        for (uint256 i = 0; i < grants.length; i++) {
+            vm.prank(owner);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    SpendingLimitModule.SpendingLimitModule_StandingApprovalNotAllowed.selector,
+                    address(usdc),
+                    address(spender),
+                    uint256(100e6)
+                )
+            );
+            wallet.execute(
+                bytes32(0),
+                abi.encodePacked(
+                    address(usdc), uint256(0), abi.encodeWithSelector(grants[i], address(spender), uint256(100e6))
+                )
+            );
+        }
+    }
+
+    function test_legacyGrant_consumedInSameTx_passesAndMetersOutflow() public {
+        _giveUsdcLegacyAllowanceFunctions();
+        bytes4[2] memory grants = _legacyGrants();
+        for (uint256 i = 0; i < grants.length; i++) {
+            int256 spentBefore = _spentInWindow();
+            Execution[] memory execs = new Execution[](2);
+            execs[0] = Execution(address(usdc), 0, abi.encodeWithSelector(grants[i], address(spender), uint256(100e6)));
+            execs[1] = Execution(
+                address(spender), 0, abi.encodeCall(MockSpender.pull, (address(usdc), address(wallet), 100e6))
+            );
+
+            _ownerExecuteBatch(execs);
+
+            assertEq(usdc.allowance(address(wallet), address(spender)), 0);
+            assertEq(_spentInWindow() - spentBefore, oracle.getPrice(address(usdc), 100e6), "outflow not metered");
+        }
+    }
+
+    function test_legacyGrant_unlimitedRejectedUpFront() public {
+        _giveUsdcLegacyAllowanceFunctions();
+        bytes4[2] memory grants = _legacyGrants();
+        for (uint256 i = 0; i < grants.length; i++) {
+            vm.prank(owner);
+            vm.expectRevert(SpendingLimitModule.SpendingLimitModule_UnlimitedApprovalRejected.selector);
+            wallet.execute(
+                bytes32(0),
+                abi.encodePacked(
+                    address(usdc), uint256(0), abi.encodeWithSelector(grants[i], address(spender), type(uint256).max)
+                )
+            );
+        }
+    }
+
+    function test_legacyGrant_unpricedTokenToUntrustedSpenderRejected() public {
+        MockLegacyAllowanceToken unpriced = new MockLegacyAllowanceToken(18);
+        bytes4[2] memory grants = _legacyGrants();
+        for (uint256 i = 0; i < grants.length; i++) {
+            vm.prank(owner);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    SpendingLimitModule.SpendingLimitModule_TokenNotPriced.selector, address(unpriced)
+                )
+            );
+            wallet.execute(
+                bytes32(0),
+                abi.encodePacked(
+                    address(unpriced), uint256(0), abi.encodeWithSelector(grants[i], address(spender), uint256(1e18))
+                )
+            );
+        }
+    }
+
+    /// @notice Mainnet SAND's other grant functions are refused before anything runs, whether alone or
+    ///         behind a harmless call in a batch. usdc doesn't have them, which is the point: the
+    ///         refusal goes by selector, and the token's code is never reached.
+    function test_untrackableGrants_refusedAloneAndInABatch() public {
+        bytes[] memory calls = new bytes[](4);
+        calls[0] = abi.encodeCall(IERC20Extended.approveFor, (address(wallet), address(spender), uint256(1)));
+        calls[1] = abi.encodeCall(IERC20Extended.addAllowanceIfNeeded, (address(wallet), address(spender), uint256(1)));
+        calls[2] = abi.encodeCall(IERC20Extended.approveAndCall, (address(spender), uint256(1), bytes("")));
+        calls[3] = abi.encodeCall(IERC20Extended.paidCall, (address(spender), uint256(1), bytes("")));
+
+        for (uint256 i = 0; i < calls.length; i++) {
+            bytes memory refusal = abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_UnsupportedApprovalCall.selector,
+                address(usdc),
+                bytes4(calls[i])
+            );
+
+            vm.prank(owner);
+            vm.expectRevert(refusal);
+            wallet.execute(bytes32(0), abi.encodePacked(address(usdc), uint256(0), calls[i]));
+
+            Execution[] memory execs = new Execution[](2);
+            execs[0] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, uint256(1))));
+            execs[1] = Execution(address(usdc), 0, calls[i]);
+            vm.prank(owner);
+            vm.expectRevert(refusal);
+            wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
+        }
+    }
+
     function test_approveThenRevokeInSameTx_passes() public {
         // Residual-based check: granting then zeroing within one tx leaves nothing standing.
         Execution[] memory execs = new Execution[](2);
@@ -1538,7 +2167,7 @@ contract SHProtocolTest is Test {
 
         address[] memory watched = new address[](0);
         vm.prank(owner);
-        wallet.installModule(MODULE_TYPE_HOOK, address(module), abi.encode(DAILY_LIMIT, WINDOW, watched));
+        wallet.installModule(MODULE_TYPE_HOOK, address(module), abi.encode(DAILY_LIMIT, WINDOW, watched, true));
         assertFalse(wallet.isTrustedSpender(address(spender)));
         assertEq(wallet.getConfig().trustedSpenders.length, 0);
     }
@@ -1577,6 +2206,13 @@ contract SHProtocolTest is Test {
         assertFalse(harness.isApproveCandidate(abi.encodeCall(ERC20Mock.approve, (kani, uint256(0)))));
         assertFalse(harness.isApproveCandidate(abi.encodeCall(ERC20Mock.approve, (kani, type(uint256).max))));
         assertTrue(harness.isApproveCandidate(abi.encodeCall(ERC20Mock.approve, (kani, uint256(5e6)))));
+
+        assertTrue(harness.isApproveCandidate(abi.encodeCall(IERC20Extended.increaseAllowance, (kani, uint256(5e6)))));
+        assertTrue(harness.isApproveCandidate(abi.encodeCall(IERC20Extended.increaseApproval, (kani, uint256(5e6)))));
+        assertFalse(harness.isApproveCandidate(abi.encodeCall(IERC20Extended.increaseApproval, (kani, uint256(0)))));
+        assertFalse(
+            harness.isApproveCandidate(abi.encodeCall(IERC20Extended.increaseApproval, (kani, type(uint256).max)))
+        );
     }
 
     function test_validateApproval_pathsAndReverts() public {
@@ -1620,6 +2256,29 @@ contract SHProtocolTest is Test {
         assertEq(spenders[0], kani);
         assertEq(tokens[1], address(dai));
         assertEq(spenders[1], rando);
+    }
+
+    /// @notice The counting pass and the recording pass must agree on every kind of grant, or the
+    ///         arrays would be mis-sized.
+    function test_collectApprovals_batchRecordsEveryKindOfGrant() public view {
+        Execution[] memory execs = new Execution[](4);
+        execs[0] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.approve, (kani, uint256(1e6))));
+        execs[1] = Execution(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, uint256(1e6))));
+        execs[2] = Execution(address(dai), 0, abi.encodeCall(IERC20Extended.increaseAllowance, (rando, uint256(2e18))));
+        execs[3] = Execution(address(usdc), 0, abi.encodeCall(IERC20Extended.increaseApproval, (rando, uint256(3e6))));
+
+        (address[] memory tokens, address[] memory spenders) = harness.collectApprovals(
+            address(this), true, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs)
+        );
+
+        assertEq(tokens.length, 3);
+        assertEq(spenders.length, 3);
+        assertEq(tokens[0], address(usdc));
+        assertEq(spenders[0], kani);
+        assertEq(tokens[1], address(dai));
+        assertEq(spenders[1], rando);
+        assertEq(tokens[2], address(usdc));
+        assertEq(spenders[2], rando);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1685,5 +2344,40 @@ contract SHProtocolTest is Test {
 contract MockSpender {
     function pull(address token, address from, uint256 amount) external {
         IERC20(token).transferFrom(from, address(this), amount);
+    }
+}
+
+/**
+ * @notice A token with the two legacy allowance functions, each adding to the current allowance.
+ */
+contract MockLegacyAllowanceToken is ERC20Mock {
+    constructor(uint8 decimals_) ERC20Mock("Legacy", "LGC", decimals_) {}
+
+    function increaseAllowance(address spender, uint256 added) external returns (bool) {
+        _approve(msg.sender, spender, allowance(msg.sender, spender) + added);
+        return true;
+    }
+
+    function increaseApproval(address spender, uint256 added) external returns (bool) {
+        _approve(msg.sender, spender, allowance(msg.sender, spender) + added);
+        return true;
+    }
+}
+
+/**
+ * @notice Burns the caller's tokens with no allowance, as an L2 standard bridge does on a withdrawal.
+ */
+contract MockBurnBridge {
+    function withdraw(address token, uint256 amount) external {
+        ERC20Mock(token).burn(msg.sender, amount);
+    }
+}
+
+/**
+ * @notice Sends a token from whoever delegatecalls into it.
+ */
+contract MockDelegateSend {
+    function send(address token, address to, uint256 amount) external {
+        IERC20(token).transfer(to, amount);
     }
 }

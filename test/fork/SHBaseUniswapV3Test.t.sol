@@ -54,6 +54,48 @@ contract SHBaseUniswapV3Test is SHUniswapV3ForkTestBase {
         feeds[1] = config.usdcUsdPriceFeed;
     }
 
+    function _tokensWithIncreaseApproval() internal view override returns (address[] memory tokens) {
+        tokens = new address[](1);
+        tokens[0] = config.link;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    BRIDGE BURN (real bridge)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Base's standard bridge burns the caller's bridged DAI with no approval, and DAI is never
+    ///         the call's target. Nothing in the calldata says DAI moved, which is why anything but a
+    ///         plain send reads every watched token.
+    function test_bridgeWithdraw_isMeteredThoughDaiIsNeverCalled() public {
+        address l2StandardBridge = 0x4200000000000000000000000000000000000010;
+        uint256 amount = 100e18;
+        vm.prank(owner);
+        wallet.addWatchedToken(config.dai);
+        deal(config.dai, address(wallet), amount);
+        assertEq(IERC20(config.dai).allowance(address(wallet), l2StandardBridge), 0);
+        int256 expectedUsd = oracle.getPrice(config.dai, amount);
+
+        vm.prank(owner);
+        wallet.execute(
+            bytes32(0),
+            abi.encodePacked(
+                l2StandardBridge,
+                uint256(0),
+                abi.encodeWithSignature(
+                    "withdrawTo(address,address,uint256,uint32,bytes)",
+                    config.dai,
+                    makeAddr("elsewhere"),
+                    amount,
+                    uint32(200_000),
+                    bytes("")
+                )
+            )
+        );
+
+        assertEq(IERC20(config.dai).balanceOf(address(wallet)), 0);
+        assertEq(int256(wallet.getConfig().spentInWindow), expectedUsd);
+    }
+
     /*//////////////////////////////////////////////////////////////
                     L2 SEQUENCER GATE (real feed)
     //////////////////////////////////////////////////////////////*/

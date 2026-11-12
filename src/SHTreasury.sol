@@ -76,12 +76,6 @@ contract SHTreasury is Ownable, ReentrancyGuard {
     ///      can never change afterwards, so it carries the same guarantee an immutable would.
     SHRegistry public REGISTRY;
 
-    /// @notice Cumulative ETH received as protocol fees since deployment.
-    /// @dev Wei, not USD. Fees collected at different ETH prices are summed here, so multiplying it
-    ///      by a spot price does not give dollar revenue; that needs each execution's price, which is
-    ///      off-chain work.
-    uint256 public totalFeesCollected;
-
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -133,9 +127,9 @@ contract SHTreasury is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Accepts ETH fee payments from SessionHandler wallets.
-    receive() external payable {
-        totalFeesCollected += msg.value;
-    }
+    /// @dev Keeps no running total: one would cost every session-key execution ~5,000 gas, and each
+    ///      wallet's {SessionHandler-ProtocolFeePaid} event already records the fee it paid.
+    receive() external payable {}
 
     /*//////////////////////////////////////////////////////////////
                            EXTERNAL FUNCTIONS
@@ -208,6 +202,18 @@ contract SHTreasury is Ownable, ReentrancyGuard {
      */
     function setProtocolFee(uint256 newFee) external onlyOwner registrySet {
         REGISTRY.setProtocolFee(newFee);
+    }
+
+    /**
+     * @notice Updates the keeper fee, charged on top of the protocol fee each time an executor module
+     *         runs a payment. Only callable by the owner.
+     * @dev Pays back the gas the protocol's backend spends sending those payments. Like the protocol
+     *      fee it is a flat wei amount, re-set here when gas or the native price drifts.
+     * @param newFee The new fee, in wei. Must be within
+     *               [SHRegistry.MIN_KEEPER_FEE, SHRegistry.MAX_KEEPER_FEE] and a whole number of gwei.
+     */
+    function setKeeperFee(uint256 newFee) external onlyOwner registrySet {
+        REGISTRY.setKeeperFee(newFee);
     }
 
     /**
@@ -322,6 +328,17 @@ contract SHTreasury is Ownable, ReentrancyGuard {
      */
     function setSpendingLimitModule(address newModule) external onlyOwner registrySet {
         REGISTRY.setSpendingLimitModule(newModule);
+    }
+
+    /**
+     * @notice Sets the RecurringPaymentModule installed as an executor on wallets deployed from this
+     *         point on. Only callable by the owner.
+     * @dev Lives on the registry for the same reason as {setSpendingLimitModule}. Does not touch
+     *      wallets already deployed — they keep the executor they were initialized with.
+     * @param newModule The deployed RecurringPaymentModule address. Must not be address(0).
+     */
+    function setRecurringPaymentModule(address newModule) external onlyOwner registrySet {
+        REGISTRY.setRecurringPaymentModule(newModule);
     }
 
     /**

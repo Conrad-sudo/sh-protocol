@@ -10,6 +10,7 @@ import {SessionHandler} from "../src/SessionHandler.sol";
 import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
 import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol";
 import {SpendingLimitModule} from "../src/SpendingLimitModule.sol";
+import {RecurringPaymentModule} from "../src/RecurringPaymentModule.sol";
 import "./Constants.s.sol";
 
 /**
@@ -38,8 +39,9 @@ import "./Constants.s.sol";
  */
 contract DeploySHProtocol is Script {
     /// @notice The protocol fee's bounds and starting value, in USD with 18 decimals. SHRegistry
-    ///         stores wei, so {run} converts these through the chain's native price feed at deploy
-    ///         time, giving every chain the same dollar range in its own native token.
+    ///         takes wei (whole gwei), so {run} converts these through the chain's native price feed
+    ///         at deploy time, giving every chain the same dollar range in its own native token. The
+    ///         keeper fee's dollar figures differ per chain, so they live in HelperConfig.
     /// @dev The bounds are immutable once deployed and so drift in dollar terms as the native price
     ///      moves. The 20x gap is the room for that: the starting fee sits near the floor, so the
     ///      native price can triple before the floor forces the fee up, and fall ~6x before the
@@ -161,10 +163,12 @@ contract DeploySHProtocol is Script {
         priceFeeds[22] = config.cakeUsdPriceFeed;
         heartbeats[22] = config.cakeHeartbeat;
 
-        // The fee in wei, at this chain's current native price. priceFeeds[0] is the native feed.
-        uint256 initialFee = _usdToNative(INITIAL_PROTOCOL_FEE_USD, priceFeeds[0]);
-        uint256 minFee = _usdToNative(MIN_PROTOCOL_FEE_USD, priceFeeds[0]);
-        uint256 maxFee = _usdToNative(MAX_PROTOCOL_FEE_USD, priceFeeds[0]);
+        // Both fees in wei, at this chain's current native price. priceFeeds[0] is the native feed.
+        // The protocol fee's dollar range is the same everywhere; the keeper fee's is per chain.
+        SHRegistry.FeeBounds memory protocolFee =
+            _feeBounds(INITIAL_PROTOCOL_FEE_USD, MIN_PROTOCOL_FEE_USD, MAX_PROTOCOL_FEE_USD, priceFeeds[0]);
+        SHRegistry.FeeBounds memory keeperFee =
+            _feeBounds(config.keeperFeeUsd, config.minKeeperFeeUsd, config.maxKeeperFeeUsd, priceFeeds[0]);
 
         vm.deal(config.account, 100 ether); // Fund the deployer account with 100 ETH for deployment costs
 
@@ -185,9 +189,8 @@ contract DeploySHProtocol is Script {
         //    a deployed wallet needs, so the factory below stores none of them itself.
         SHRegistry registry = new SHRegistry(
             address(treasury),
-            initialFee,
-            minFee,
-            maxFee,
+            protocolFee,
+            keeperFee,
             address(treasury),
             address(oracle),
             config.reputationRegistry,
@@ -206,6 +209,11 @@ contract DeploySHProtocol is Script {
         SpendingLimitModule module = new SpendingLimitModule(address(registry));
         treasury.setSpendingLimitModule(address(module));
 
+        // 6b. The recurring-payment executor, installed on every wallet the factory deploys. It
+        //     reads nothing at construction; it is registered the same way as the hook, for symmetry.
+        RecurringPaymentModule recurringModule = new RecurringPaymentModule();
+        treasury.setRecurringPaymentModule(address(recurringModule));
+
         // 7. Factory, owned by the treasury. It reads EntryPoint, both ERC-8004 registries, and the
         //    module from the registry, so beyond owner + registry it takes only this chain's
         //    starting gas ceilings for every wallet it deploys.
@@ -219,6 +227,27 @@ contract DeploySHProtocol is Script {
         treasury.setFactory(address(factory));
 
         vm.stopBroadcast();
+    }
+
+    /**
+     * @dev Converts a fee's starting value and bounds from USD to wei, each a whole number of gwei as
+     *      SHRegistry requires. The floor rounds UP and the ceiling DOWN, so the range only narrows;
+     *      the starting value rounds down and is then lifted to the floor if rounding left it below.
+     */
+    function _feeBounds(uint256 initialUsd, uint256 minUsd, uint256 maxUsd, address nativeFeed)
+        internal
+        view
+        returns (SHRegistry.FeeBounds memory bounds)
+    {
+        uint256 minWei = _usdToNative(minUsd, nativeFeed);
+        // Dividing then multiplying is the point here: it drops everything below one gwei.
+        // forge-lint: disable-next-line(divide-before-multiply)
+        bounds.min = ((minWei + 1 gwei - 1) / 1 gwei) * 1 gwei;
+        // forge-lint: disable-next-line(divide-before-multiply)
+        bounds.max = (_usdToNative(maxUsd, nativeFeed) / 1 gwei) * 1 gwei;
+        // forge-lint: disable-next-line(divide-before-multiply)
+        bounds.initial = (_usdToNative(initialUsd, nativeFeed) / 1 gwei) * 1 gwei;
+        if (bounds.initial < bounds.min) bounds.initial = bounds.min;
     }
 
     /**

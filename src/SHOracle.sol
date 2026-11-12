@@ -225,7 +225,7 @@ contract SHOracle is Ownable {
      *
      * @param token  Token address. Use address(0) for native ETH.
      * @param amount Amount of the token in its native base units.
-     * @return       USD value with 18 decimals of precision.
+     * @return USD value with 18 decimals of precision.
      */
     function getPrice(address token, uint256 amount) public view returns (int256) {
         Feed memory f = sFeeds[token]; // single SLOAD: feed + decimals + heartbeat all in one slot

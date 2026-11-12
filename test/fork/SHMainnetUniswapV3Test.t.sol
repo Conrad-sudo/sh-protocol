@@ -42,4 +42,10 @@ contract SHMainnetUniswapV3Test is SHUniswapV3ForkTestBase {
         feeds[0] = config.ethUsdPriceFeed;
         feeds[1] = config.daiUsdPriceFeed;
     }
+
+    function _tokensWithIncreaseApproval() internal view override returns (address[] memory tokens) {
+        tokens = new address[](2);
+        tokens[0] = config.link;
+        tokens[1] = config.wbtc;
+    }
 }

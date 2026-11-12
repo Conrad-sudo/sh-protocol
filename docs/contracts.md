@@ -2,7 +2,7 @@
 
 The smart contract layer implements the SessionHandler Protocol as an **ERC-7579 modular account system**: shared infrastructure contracts deployed once per chain, and per-user `SessionHandler` smart wallets deployed on demand through `SHFactory`.
 
-The account (`SessionHandler`) validates its own UserOperations and manages its session keys, which are **passkeys** (P-256 keys on the user's own devices, up to five per wallet). The USD spending cap lives in a single installable **hook** (`SpendingLimitModule`) that meters net portfolio value around every execution, so any ERC-7579 account could reuse it.
+The account (`SessionHandler`) validates its own UserOperations and manages its session keys, which are **passkeys** (P-256 keys on the user's own devices, up to five per wallet). The USD spending cap lives in a single installable **hook** (`SpendingLimitModule`) that meters net portfolio value around every execution, so any ERC-7579 account could reuse it. Every wallet also gets one **executor** (`RecurringPaymentModule`), which sends recurring payments the owner approved once; each payment goes back through the wallet's guard, fee and cap.
 
 ## Contract Overview
 
@@ -10,15 +10,16 @@ The account (`SessionHandler`) validates its own UserOperations and manages its 
 src/
 ├── SHFactory.sol              ← User-facing factory — deploys one SessionHandler per user, assigns sequential walletIds
 ├── SHTreasury.sol             ← Protocol admin root — owns SHRegistry, SHOracle, and SHFactory; fee sink
-├── SHRegistry.sol             ← Central config store — every address a wallet needs (EntryPoint, both ERC-8004 registries, module, oracle, treasury, fee, agentId)
+├── SHRegistry.sol             ← Central config store — every address a wallet needs (EntryPoint, both ERC-8004 registries, both modules, oracle, treasury, both fees, agentId)
 ├── SHOracle.sol               ← Chainlink-based USD value converter
 ├── SessionHandler.sol         ← ERC-7579 smart account — self-validation, passkey session keys, cap config, admin guard
 ├── SpendingLimitModule.sol   ← ERC-7579 Hook (type 4 only) — global USD spending cap (net-value metering)
+├── RecurringPaymentModule.sol ← ERC-7579 Executor (type 2) — owner-approved recurring payments, run by a keeper
 ├── utils/
 │   └── WebAuthnNative.sol        ← OpenZeppelin's WebAuthn verifier, calling the P-256 precompile only (no Solidity fallback)
 ├── interfaces/
 │   ├── IWETH.sol                 ← WETH interface (extends IERC20Extended)
-│   ├── IERC20Extended.sol        ← IERC20 + IERC20Metadata, plus legacy increaseAllowance (for selector matching only)
+│   ├── IERC20Extended.sol        ← IERC20 + IERC20Metadata, plus non-standard allowance functions (for selector matching only)
 │   ├── AggregatorV3Interface.sol ← Vendored Chainlink price-feed interface (used by SHOracle)
 │   ├── IIdentityRegistry.sol     ← ERC-8004 IIdentityRegistry interface
 │   └── IReputationRegistry.sol   ← ERC-8004 IReputationRegistry interface
@@ -30,23 +31,27 @@ src/
     └── MockWeth.sol               ← WETH mock with deposit/withdraw for Anvil
 
 script/
-├── DeploySHProtocol.s.sol     ← Deployment entry point (SHTreasury → SHOracle → agent → SHRegistry → setRegistry → module → setSpendingLimitModule → SHFactory → setFactory)
+├── DeploySHProtocol.s.sol     ← Deployment entry point (SHTreasury → SHOracle → agent → SHRegistry → setRegistry → module → setSpendingLimitModule → recurring module → setRecurringPaymentModule → SHFactory → setFactory)
 ├── Constants.s.sol            ← Chain IDs, canonical addresses, per-network token/Chainlink-feed addresses, Anvil mock prices
 ├── HelperConfig.s.sol         ← Chain-specific configuration resolver (Mainnet, Sepolia, BSC, Arbitrum, Base, Anvil)
 └── SendPackedUserOp.s.sol     ← ERC-7579 UserOp construction and signing helper (single + batch)
 
 test/
 ├── unit/
-│   ├── SHProtocolTest.t.sol            ← Core unit suite: deploy, module lifecycle, metering, approvals, trusted spenders, passkey management (97 tests)
-│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (78 tests)
+│   ├── SHProtocolTest.t.sol            ← Core unit suite: deploy, module lifecycle, metering, approvals, trusted spenders, passkey management (131 tests)
+│   ├── TokenCapTest.t.sol              ← Limits in a token's own units: setters, charging, allowed calls, broken tokens
+│   ├── NativeMeteringTest.t.sol        ← ETH/BNB counted or not: the deploy choice, both directions, the switch and WETH with it (22 tests)
+│   ├── SessionGuardTest.t.sol          ← End-to-end guard + session-key auth proof via the real EntryPoint (85 tests)
 │   ├── PasskeyValidationTest.t.sol     ← How a passkey-signed UserOp is validated: what passes, every way it can fail, the op deadline, gas (54 tests)
 │   ├── SHAdminTest.t.sol               ← Admin surface: the SHTreasury ownership graph, the oracle timelock, feed admin (70 tests)
+│   ├── RecurringPaymentTest.t.sol      ← RecurringPaymentModule on a real wallet: who may create/cancel, when run pays, guard/fee/cap on each payment, gas (26 tests)
+│   ├── RegistryFeeTest.t.sol           ← The two fees in gwei beside the treasury, setKeeperFee, setRecurringPaymentModule (13 tests)
 │   └── SpendingLimitModuleHarness.sol ← Test harness exposing the module's internal calldata/approval helpers
 ├── utils/
 │   ├── PasskeyHelper.sol               ← A soft passkey: builds WebAuthn assertions the way a browser + authenticator do
 │   └── ConfiguredTokens.sol            ← Every ERC-20 a NetworkConfig names, to check the deploy script prices them all
 ├── fork/
-│   ├── SHForkTestBase.sol              ← Shared abstract fork suite (14 tests) parameterized per network; V2 venue hooks: swap calldata, _trustedSpenders(), liquidity round-trip
+│   ├── SHForkTestBase.sol              ← Shared abstract fork suite (24 tests) parameterized per network; V2 venue hooks: swap calldata, _trustedSpenders(), liquidity round-trip
 │   ├── SHUniswapV3ForkTestBase.sol     ← Same suite on Uniswap V3: swaps through SwapRouter02, trusts it and the position manager, and a position round-trip (mint → half out → rest out + burn)
 │   ├── SHMainnetUniswapV3Test.t.sol    ← Mainnet-fork instance (WETH→DAI, V3 0.3%)
 │   ├── SHSepoliaUniswapV3Test.t.sol    ← Sepolia-fork instance (WETH→USDC, V3 0.05%)
@@ -64,34 +69,47 @@ test/
 
 ## `SHRegistry.sol`
 
-The `SHRegistry` is the central configuration store. Deployed `SessionHandler` wallets read runtime parameters — protocol fee, treasury address, price oracle, and agent identity — from this single contract, so any parameter can be updated by the operator without redeploying user wallets. It is owned by `SHTreasury`, and all admin flows through `SHTreasury`'s pass-through setters. The `owner` is supplied to the constructor rather than taken from `msg.sender`, so the registry is deployed already owned by the treasury with no follow-up `transferOwnership`.
+The `SHRegistry` is the central configuration store. Deployed `SessionHandler` wallets read runtime parameters — protocol fee, keeper fee, treasury address, price oracle, and agent identity — from this single contract, so any parameter can be updated by the operator without redeploying user wallets. It is owned by `SHTreasury`, and all admin flows through `SHTreasury`'s pass-through setters. The `owner` is supplied to the constructor rather than taken from `msg.sender`, so the registry is deployed already owned by the treasury with no follow-up `transferOwnership`.
 
 **Stored parameters:**
 
 | Parameter | Type | Purpose |
 |---|---|---|
-| `protocolFee` | `uint96` | Flat fee **in wei** charged on every session-key execution, bounded to `[MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]`. `getFee()` returns it as stored — no oracle call. See [Protocol fee](#protocol-fee) below. |
-| `MIN_PROTOCOL_FEE` / `MAX_PROTOCOL_FEE` | `uint256` (immutable) | The fee's bounds in wei, set by the constructor. The deploy script converts **$0.005 and $0.10** through the chain's native price, so each chain gets the same dollar range in its own coin. |
+| `_protocolFeeGwei` | `uint48` (private) | Flat fee charged on every session-key execution, stored **in gwei**; `protocolFee()` and `getFee()` return it in wei, with no oracle call. Bounded to `[MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]`. See [Protocol fee](#protocol-fee) below. |
+| `MIN_PROTOCOL_FEE` / `MAX_PROTOCOL_FEE` | `uint256` (immutable) | The fee's bounds in wei (whole gwei), set by the constructor. The deploy script converts **$0.005 and $0.10** through the chain's native price, so each chain gets the same dollar range in its own coin. |
+| `_keeperFeeGwei` | `uint48` (private) | Flat fee added on top of the protocol fee **only** when an executor module runs a payment, stored in gwei; `keeperFee()` returns wei. It pays back the gas the backend spends sending recurring payments. See [Keeper fee](#keeper-fee). |
+| `MIN_KEEPER_FEE` / `MAX_KEEPER_FEE` | `uint256` (immutable) | The keeper fee's bounds in wei (whole gwei). Dollar figures are **per chain** in `HelperConfig`. The floor may be zero. |
 | `treasury` | `address` | `SHTreasury` — fee sink and admin root (owns this registry, the oracle, and the factory) |
 | `priceOracle` | `address` | Canonical `SHOracle` address for USD accounting. **Also governs spending-cap enforcement** — `SpendingLimitModule` resolves it from here on every valuation, so changing it changes how every deployed wallet meters spending. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8. |
 | `agentId` | `uint256` | ERC-8004 token ID of the registered protocol agent. **`0` is a valid id** — ERC-8004 registries mint from 0, so no zero-check exists or should. |
 | `spendingLimitModule` | `address` | Hook installed on wallets deployed from here on. Owner-settable; **not** a constructor arg — see below. Changing it never touches existing wallets. |
+| `recurringPaymentModule` | `address` | Executor installed on wallets deployed from here on. Owner-settable like `spendingLimitModule` (the user's choice, for symmetry); changing it never touches existing wallets. More sensitive than the hook setter: an executor can move funds (within the guard and the cap), a hook can only refuse. |
 | `ENTRY_POINT` | `address` (immutable) | Canonical ERC-4337 EntryPoint; `SHFactory` bakes it into the `SessionHandler` implementation, so every wallet shares it |
 | `REPUTATION_REGISTRY` | `address` (immutable) | Reputation Registry, baked into the implementation the same way |
 | `IDENTITY_REGISTRY` | `address` (immutable) | ERC-8004 Identity Registry, baked into the implementation the same way |
 | `factory` | `address` | The SHFactory deploying against this registry. Off-chain discoverability only — no contract reads it. |
 
 ```solidity
+struct FeeBounds { uint256 initial; uint256 min; uint256 max; }   // wei, each a whole gwei
+
 uint256 public immutable MIN_PROTOCOL_FEE;   // wei — $0.005 at the native price on deploy day
 uint256 public immutable MAX_PROTOCOL_FEE;   // wei — $0.10 at the native price on deploy day
+uint256 public immutable MIN_KEEPER_FEE;     // wei — per chain (HelperConfig); may be 0
+uint256 public immutable MAX_KEEPER_FEE;     // wei — per chain (HelperConfig)
+uint256 public constant MAX_STORABLE_FEE = type(uint48).max * 1 gwei;   // ≈ 281,000 ETH
 
 uint256 public constant ORACLE_TIMELOCK = 2 days;
 
-function getFee() external view returns (uint256);   // protocolFee in wei, as stored
-function setProtocolFee(uint256 newFee) external onlyOwner;
+function getFee() external view returns (uint256);        // protocol fee in wei (same as protocolFee())
+function protocolFee() public view returns (uint256);     // wei
+function keeperFee() public view returns (uint256);       // wei
+function feeConfig() external view returns (address treasury, uint256 protocolFee, uint256 keeperFee);   // one slot
+function setProtocolFee(uint256 newFee) external onlyOwner;   // wei, whole gwei, within bounds
+function setKeeperFee(uint256 newFee) external onlyOwner;     // wei, whole gwei, within bounds
 function setTreasury(address newTreasury) external onlyOwner;
 function setAgentId(uint256 newId) external onlyOwner;
 function setSpendingLimitModule(address newModule) external onlyOwner;
+function setRecurringPaymentModule(address newModule) external onlyOwner;
 function setFactory(address newFactory) external onlyOwner;
 
 // Oracle changes are two-phase and delayed (see below)
@@ -102,9 +120,9 @@ address public pendingPriceOracle;
 uint48 public pendingPriceOracleEta;
 ```
 
-> **Storage is packed.** `protocolFee` is a `uint96` sharing a slot with `treasury` (so `_applyFee`'s two registry reads cost one storage read, not two), and `pendingPriceOracleEta` is a `uint48` sharing a slot with `pendingPriceOracle`. Both are wide enough: the constructor refuses a `MAX_PROTOCOL_FEE` past `uint96`, and a `uint48` timestamp lasts millions of years. The setters still take `uint256`. `agentId` stays `uint256` because an external registry mints it.
+> **Storage is packed.** `treasury` and both fees share **one slot** (slot 6: 160 + 48 + 48 bits), so `_applyFee`'s single `feeConfig()` call costs one storage read. That is why the fees are stored in **gwei** as `uint48`s: two `uint128`s would fill a slot by themselves and push `treasury` into a second one, making every session-key transaction read two slots. Everything outside the contract stays in wei — the setters take wei and refuse anything that is not a whole gwei (`SHRegistry_FeeNotWholeGwei`, never silently rounded), and the getters return wei. A `uint48` of gwei holds up to ≈ 281,000 ETH; the constructor refuses a ceiling past `MAX_STORABLE_FEE`. `pendingPriceOracleEta` is a `uint48` sharing a slot with `pendingPriceOracle`. `agentId` stays `uint256` because an external registry mints it.
 
-> **`setPriceOracle` was replaced by a two-phase timelock.** The oracle governs every wallet's spending cap, so repointing it is the single highest-impact action the operator key can take. `proposePriceOracle` records the candidate and starts a 2-day delay; `commitPriceOracle` applies it once the ETA passes; `cancelPriceOracle` withdraws it. `proposePriceOracle` also **rejects an oracle that cannot price native (`address(0)`)**, and **the constructor makes the same check on the initial oracle**. The module meters the native balance delta on every metered transaction, so an oracle without that feed would revert every native-moving execution on every deployed wallet. The check also catches a mistyped or wrong-network address, which has no `isPriced()` to call. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8.
+> **`setPriceOracle` was replaced by a two-phase timelock.** The oracle governs every wallet's spending cap, so repointing it is the single highest-impact action the operator key can take. `proposePriceOracle` records the candidate and starts a 2-day delay; `commitPriceOracle` applies it once the ETA passes; `cancelPriceOracle` withdraws it. `proposePriceOracle` also **rejects an oracle that cannot price native (`address(0)`)**, and **the constructor makes the same check on the initial oracle**. The module meters the native balance delta on every wallet that counts native, so an oracle without that feed would revert every native-moving execution on all of them. The check also catches a mistyped or wrong-network address, which has no `isPriced()` to call. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8.
 
 > **Why `spendingLimitModule` is not a constructor argument.** `SpendingLimitModule`'s own constructor reads `priceOracle()` off the registry — that check is what catches a mis-wired deployment (passing the oracle address where the registry belongs). So the registry must exist before the module can be deployed. Taking the module as a registry constructor argument would make the two mutually undeployable. The deploy script constructs the module against the live registry and then calls `setSpendingLimitModule`; `SHFactory.deployWallet` reverts with `SHFactory_SpendingLimitModuleNotSet` in the window between.
 
@@ -113,14 +131,15 @@ uint48 public pendingPriceOracleEta;
 The fee is a **flat amount of native token, in wei**. `SessionHandler._applyFee` reads it off the registry and sends it — the fee path makes no oracle call:
 
 ```
-SessionHandler._applyFee()
-  ├─ SHRegistry.treasury()
-  └─ SHRegistry.getFee()        // protocolFee, as stored (same storage slot as treasury)
+SessionHandler._applyFee(withKeeperFee)
+  └─ SHRegistry.feeConfig()     // (treasury, protocolFee, keeperFee) — one call, one storage slot
+       → sends protocolFee (+ keeperFee on the executor path) to treasury in ONE transfer
+       → emits ProtocolFeePaid(fee, keeperFee)
 ```
 
 It used to be a USD figure converted at execution time. That cost every session execution a Chainlink read (~18k gas, plus the sequencer check on an L2), and a stale ETH/USD feed halted *all* agent activity. A stored wei amount avoids both.
 
-**Bounds are per chain.** The same wei is a different dollar amount on each chain (ETH vs BNB), so `MIN_PROTOCOL_FEE` and `MAX_PROTOCOL_FEE` are constructor arguments, not constants. `DeploySHProtocol` holds the dollar targets — **$0.005 floor, $0.10 ceiling, $0.015 starting fee** — and converts each to wei through the chain's native Chainlink feed at deploy time (`_usdToNative`). It reads the feed directly, skipping the oracle's staleness check, so a stale testnet feed cannot block a deploy. The constructor rejects a zero floor, a floor above the ceiling, a ceiling past `uint96`, and a starting fee outside the bounds.
+**Bounds are per chain.** The same wei is a different dollar amount on each chain (ETH vs BNB), so `MIN_PROTOCOL_FEE` and `MAX_PROTOCOL_FEE` are constructor arguments, not constants. `DeploySHProtocol` holds the dollar targets — **$0.005 floor, $0.10 ceiling, $0.015 starting fee** — and converts each to wei through the chain's native Chainlink feed at deploy time (`_usdToNative`), then to whole gwei (`_feeBounds`: the floor rounds up, the ceiling down, the starting value down and then up to the floor if needed). It reads the feed directly, skipping the oracle's staleness check, so a stale testnet feed cannot block a deploy. The constructor rejects a zero floor, a floor above the ceiling, a ceiling past `MAX_STORABLE_FEE`, a bound that is not whole gwei, and a starting fee outside the bounds.
 
 What follows from a flat fee:
 
@@ -130,11 +149,20 @@ What follows from a flat fee:
 
 Three more properties worth knowing:
 
-- **Only session-key executions pay.** `execute` charges the fee when `msg.sender != owner()`; owner-initiated calls pay nothing. `executeFromExecutor` always charges.
-- **The fee is outside the spending cap.** `_applyFee` runs *before* `_execute`, and the hook's `preCheck`→`postCheck` window opens inside `_execute` — so the fee never counts against the account's USD cap. This is deliberate: the cap meters what the *user* spends, and a protocol fee is not the user's spend. It does mean the fee is native outflow the cap cannot see, bounded per execution by `MAX_PROTOCOL_FEE` rather than by the cap.
+- **Only session-key and executor executions pay.** `execute` charges the fee when `msg.sender != owner()`; owner-initiated calls pay nothing. `executeFromExecutor` always charges, and adds the keeper fee.
+- **The fee is outside the spending cap.** `_applyFee` runs *before* `_execute`, and the hook's `preCheck`→`postCheck` window opens inside `_execute` — so the fee never counts against the account's USD cap. This is deliberate: the cap meters what the *user* spends, and a protocol fee is not the user's spend. It does mean the fee is native outflow the cap cannot see, bounded per execution by `MAX_PROTOCOL_FEE` (plus `MAX_KEEPER_FEE` on the executor path) rather than by the cap.
 - **A stale ETH/USD feed does not block the fee.** An ERC-20-only session execution never touches the native feed. See [THREAT_MODEL.md](../THREAT_MODEL.md) §3.7.
 
-`totalFeesCollected` on `SHTreasury` sums **wei** collected across different native prices. It is not a dollar total and cannot be converted into one with a spot price after the fact.
+`SHTreasury` keeps no running total, because one would cost every session-key execution about 5,000 gas. Each wallet's `ProtocolFeePaid(fee, keeperFee)` event records what it paid, in **wei** — the only on-chain record of fees, since the treasury's `receive()` logs nothing. It no longer carries the treasury address (always the registry's; dropping the indexed topic saves ~375 gas). Those amounts span different native prices, so summing them does not give a dollar total.
+
+### Keeper fee
+
+A recurring payment is sent by the protocol's **backend** (the keeper), which pays the transaction's gas itself — unlike a session-key UserOp, which pays from the wallet's EntryPoint deposit. The keeper fee pays that back: `executeFromExecutor` calls `_applyFee(true)`, which adds `keeperFee` to the protocol fee in the same transfer to the treasury. The operator then funds the keeper's address from the treasury. `execute` calls `_applyFee(false)` and never pays it.
+
+- **Per-chain dollars.** Gas costs very different amounts per chain, so the keeper fee's starting value and bounds are `NetworkConfig` fields (`keeperFeeUsd`, `minKeeperFeeUsd`, `maxKeeperFeeUsd`), converted to whole gwei like the protocol fee.
+- **Sized from measured gas.** One `run` measured **~103k gas** (a later payment) to **~141k** (the payee's first, which creates their token balance) on local mocks, and ~139k for a native payment, as whole transactions. Real tokens and Chainlink proxies cost more (≈ +20k), each extra watched token adds ≈ 7k, and the L2s add a sequencer read and an L1 data fee — so the HelperConfig figures assume **~200k gas**. See `RecurringPaymentTest.test_gas_*`.
+- **Every executor pays it**, not just `RecurringPaymentModule`. Fine while that is the only executor; a later executor that needs no keeper would still be charged.
+- Like the protocol fee, it is **outside the spending cap** and bounded only by `MAX_KEEPER_FEE`.
 
 > `router` / `setUniswapRouter` were **removed**: which DEX a wallet trades on is a wallet-level choice, not protocol configuration. A wallet trusts only the spenders its deployer passes to `deployWallet` (the app passes the chain's exchange contracts, `constants.get_default_spenders`), and the owner can grant more via `addTrustedSpender`.
 
@@ -161,12 +189,13 @@ constructor();  // no dependencies: deployed first, owns everything deployed aft
 function setRegistry(address registry) external onlyOwner;   // reverts if already set
 
 // Balance management
-receive() external payable;                                                   // totalFeesCollected += msg.value
+receive() external payable;                                                   // accepts fees, records nothing
 function withdraw(address recipient, uint256 amount) external onlyOwner nonReentrant;
 function withdrawAll(address recipient) external onlyOwner nonReentrant;
 
 // Registry pass-through admin (all `registrySet`-guarded)
 function setProtocolFee(uint256 newFee) external onlyOwner;
+function setKeeperFee(uint256 newFee) external onlyOwner;
 function setTreasury(address newTreasury) external onlyOwner;
 function setAgentId(uint256 newId) external onlyOwner;
 function proposePriceOracle(address newOracle) external onlyOwner;
@@ -181,8 +210,9 @@ function removeOracleFeed(address oracle, address token) external onlyOwner;
 function pauseFactory(address factory) external onlyOwner;
 function unpauseFactory(address factory) external onlyOwner;
 
-// Registry-held wallet config (the module lives on the registry, so one call covers every factory)
+// Registry-held wallet config (the modules live on the registry, so one call covers every factory)
 function setSpendingLimitModule(address newModule) external onlyOwner;
+function setRecurringPaymentModule(address newModule) external onlyOwner;
 function setFactory(address newFactory) external onlyOwner;
 
 // One-way migration: hands registry + oracle + factory to a successor owner or multi-sig.
@@ -191,14 +221,13 @@ function setFactory(address newFactory) external onlyOwner;
 function transferProtocol(address newOwner) external onlyOwner;
 
 address public REGISTRY;          // write-once via setRegistry
-uint256 public totalFeesCollected;
 ```
 
 ---
 
 ## `SHFactory.sol`
 
-`SHFactory` is the user-facing entry point for deploying new `SessionHandler` wallets. It deploys a single `SessionHandler` implementation in its constructor, then `deployWallet(...)` creates each user's wallet as an **EIP-1167 minimal-proxy clone** and calls `initialize()` on it — which installs the configured `SpendingLimitModule` as a **hook**, seeds the wallet's spending-cap configuration, and applies the two owner-only grants (session key, trusted spenders) that used to need a follow-up transaction each. ETH sent with the call is forwarded to the new wallet as the initial gas prefund.
+`SHFactory` is the user-facing entry point for deploying new `SessionHandler` wallets. It deploys a single `SessionHandler` implementation in its constructor, then `deployWallet(...)` creates each user's wallet as an **EIP-1167 minimal-proxy clone** and calls `initialize()` on it — which installs the configured `RecurringPaymentModule` as an **executor** and `SpendingLimitModule` as a **hook**, seeds the wallet's spending-cap configuration, and applies the two owner-only grants (session key, trusted spenders) that used to need a follow-up transaction each. ETH sent with the call is forwarded to the new wallet as the initial gas prefund.
 
 **One transaction is enough.** `deployWallet` takes the per-wallet spending-cap config *and* the first passkey (`sessionKeyX`, `sessionKeyY`, `sessionKeyValidUntil`) + `trustedSpenders`, so a wallet is fully usable the moment it is deployed. `(0, 0)` as the key means an owner-only wallet. The seeded key goes through the same internal grant as `addSession`, so a deploy cannot seed a key on terms an owner transaction would refuse. Previously onboarding was three owner-signed transactions (`deployWallet`, then `addSession`, then `addTrustedSpender`); those two functions remain for later re-grants but are no longer part of the deploy path. They cannot be batched through `execute` — see the two guards described under `SessionHandler` — which is why seeding them in `initialize` is the only way to get to one signature.
 
@@ -209,7 +238,7 @@ The nonce is a **per-owner** counter held by the factory, not a caller-supplied 
 - A prediction is only valid for **one factory instance** — the deployer is baked into a CREATE2 address, so redeploying `SHFactory` invalidates every previously shown address.
 - Calling `deployWallet` again simply consumes the next nonce and yields another wallet — one EOA may own several. A salt can never repeat, so there is no collision case and no "already deployed" error. **Enforcing one-wallet-per-user is the caller's job**: read `deployCount(owner)` and refuse when it is non-zero, which is a free view rather than a reverted transaction the user pays for. That check means "does this USER have a wallet" only when the user is `msg.sender` — i.e. when they sign their own deploy. A caller deploying on users' behalf from one shared EOA (as `app/deploy_wallet.py` does) sees a counter covering all its users and must track per-user ownership itself.
 
-The factory stores **no** protocol addresses of its own. EntryPoint, both ERC-8004 registries, and the `SpendingLimitModule` are read off the registry at `deployWallet` time, so correcting any of them is a single registry call rather than a factory redeploy. `SHFactory` itself owns only the clone implementation and the wallet index.
+The factory stores **no** protocol addresses of its own. EntryPoint, both ERC-8004 registries, and both modules are read off the registry at `deployWallet` time, so correcting any of them is a single registry call rather than a factory redeploy. `SHFactory` itself owns only the clone implementation and the wallet index.
 
 ```solidity
 constructor(
@@ -218,19 +247,22 @@ constructor(
 );
 
 /// Deploys a new SessionHandler owned by msg.sender; forwards msg.value as ETH prefund.
-/// dailyLimitUsd (18 decimals, >= 0), windowDuration (seconds, > 0), and watchedTokens (each
-/// must already be priced by the oracle) seed the hook's onInstall config.
+/// dailyLimitUsd (18 decimals, >= 0), windowDuration (seconds, 1 to 2^24 - 1), watchedTokens (each
+/// must already be priced by the oracle) and nativeMetered (whether ETH/BNB counts) seed the
+/// hook's onInstall config.
 /// The passkey (sessionKeyX, sessionKeyY) is authorized until sessionKeyValidUntil ((0, 0) =
 /// owner-only wallet, deadline ignored); every entry in trustedSpenders is granted the
 /// unpriced-approval exemption (may be empty). Both are applied inside initialize(), so no
 /// follow-up owner transaction is needed.
 /// Salted with (msg.sender, deployCount[msg.sender]), which is consumed here — so calling twice
 /// yields two distinct wallets rather than reverting.
-/// Reverts with SHFactory_SpendingLimitModuleNotSet if the registry has no module set yet.
+/// Reverts with SHFactory_SpendingLimitModuleNotSet / SHFactory_RecurringPaymentModuleNotSet
+/// if the registry has either module unset.
 function deployWallet(
     int256 dailyLimitUsd,
     uint256 windowDuration,
     address[] calldata watchedTokens,
+    bool nativeMetered,
     bytes32 sessionKeyX,
     bytes32 sessionKeyY,
     uint48 sessionKeyValidUntil,
@@ -310,7 +342,7 @@ Not delegating is deliberate. The base routes to a validator module named by the
 
 **Deliberate deviation from stock `AccountERC7579Hooked`,** which makes all three `onlyEntryPointOrSelf`. They are *not* reopened the same way:
 
-- `execute` becomes `onlyEntryPointOrSelfOrOwner` — still reachable through the EntryPoint (that is how session keys act at all), with `_guardSessionExecution` restraining non-owner callers.
+- `execute` also accepts the owner directly — still reachable through the EntryPoint (that is how session keys act at all), with `_guardSessionExecution` restraining non-owner callers.
 - `installModule` / `uninstallModule` become plain `onlyOwner`, which is strictly **tighter** than stock: an owner-signed UserOp arrives as `msg.sender == EntryPoint`, not the owner, so these are reachable only by a direct owner call and by **no UserOp at all**. That closes the path where a session key submits a UserOp aimed straight at `installModule` — bypassing `execute`'s guard entirely, since `execute` is never involved — to install a malicious validator or executor and escape the cap.
 
 Session-key management and cap configuration are plain `onlyOwner`. Note that the module also refuses `execute`-routed calls to its own setters for *every* caller, owner included — see `SpendingLimitModule` below.
@@ -337,16 +369,20 @@ struct ProtocolAddresses {
 constructor(ProtocolAddresses memory protocol);
 
 /// Called once by SHFactory on each freshly cloned wallet, for the per-wallet settings.
-/// Installs the module as a HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens),
-/// authorizes the passkey (sessionKeyX, sessionKeyY) unless both are zero, and grants each
-/// cfg.trustedSpenders entry.
+/// Installs the recurring-payment module as an EXECUTOR (no data), then the spending module as a
+/// HOOK with abi.encode(dailyLimitUsd, windowDuration, watchedTokens, nativeMetered), authorizes the
+/// passkey (sessionKeyX, sessionKeyY) unless both are zero, and grants each cfg.trustedSpenders entry.
+/// The executor goes FIRST: OpenZeppelin wraps every module install in the hook, so installing it
+/// after the hook would run a pointless preCheck/postCheck on every deploy.
 struct InitConfig {
     address owner;
     uint64 walletId;
     address spendingLimitModule;
+    address recurringPaymentModule;
     int256 dailyLimitUsd;
     uint256 windowDuration;
     address[] watchedTokens;
+    bool nativeMetered;          // whether ETH/BNB counts toward the limit
     bytes32 sessionKeyX;         // (0, 0) = owner-only wallet (not an error, unlike addSession)
     bytes32 sessionKeyY;
     uint48 sessionKeyValidUntil; // the key's deadline; same rules as addSession (ignored for (0, 0))
@@ -356,7 +392,8 @@ struct InitConfig {
 function initialize(InitConfig calldata cfg) external;
 
 // Execution + module admin (owner escape hatch)
-function execute(bytes32 mode, bytes calldata executionCalldata) public payable override whenNotPaused onlyEntryPointOrSelfOrOwner;
+function execute(bytes32 mode, bytes calldata executionCalldata) public payable override whenNotPaused;   // EntryPoint, the account itself or the owner
+function executeFromExecutor(bytes32 mode, bytes calldata executionCalldata) public payable override;    // installed executors only: guard + protocol fee + keeper fee, then the hooked _execute
 function installModule(uint256 moduleTypeId, address module, bytes calldata initData) public override onlyOwner;
 function uninstallModule(uint256 moduleTypeId, address module, bytes calldata deInitData) public override onlyOwner;
 
@@ -374,8 +411,13 @@ function isSessionActive(bytes32 keyId) public view returns (bool);   // held &&
 // Spending-cap config passthroughs (owner-only; call the module as this account)
 function setDailyLimit(int256 dailyLimitUsd) external onlyOwner;
 function setWindowDuration(uint256 windowDuration) external onlyOwner;
+/// Switches native metering, and moves wrappedNative (WETH/WBNB) on or off the watched list with
+/// it in the same call; address(0) moves the flag only.
+function setNativeMetering(bool metered, address wrappedNative) external onlyOwner;
 function addWatchedToken(address token) external onlyOwner;
 function removeWatchedToken(address token) external onlyOwner;
+function setTokenCap(address token, uint256 limit) external onlyOwner;   // in the token's own units
+function removeTokenCap(address token) external onlyOwner;
 function addTrustedSpender(address spender) external onlyOwner;
 function removeTrustedSpender(address spender) external onlyOwner;
 
@@ -383,6 +425,7 @@ function removeTrustedSpender(address spender) external onlyOwner;
 function getConfig() external view returns (SpendingLimitModule.Config memory);
 function isWatched(address token) external view returns (bool);
 function isTrustedSpender(address spender) external view returns (bool);
+function getTokenCap(address token) external view returns (bool capped, uint256 limit, uint256 remaining);
 function getRemainingBudget() external view returns (int256);          // remaining USD this window
 function getUsdValue(address token, uint256 amount) public view returns (int256);
 
@@ -447,27 +490,32 @@ event AllowedTargetRemoved(address indexed target);
 ```solidity
 struct Config {
     bool installed;              // gates every hook and setter
-    uint48 windowStart;          // timestamp anchoring the current window
-    uint48 windowDuration;       // seconds
-    int256 dailyLimitUsd;        // 18-decimal USD cap per window
-    int256 spentInWindow;        // 18-decimal USD net value spent this window
+    bool nativeMetered;          // whether ETH/BNB balance changes count
+    uint32 windowStart;          // timestamp anchoring the current window
+    uint24 windowDuration;       // seconds, at most 2^24 - 1 (about 194 days)
+    int88 spentInWindow;         // 18-decimal USD net value spent this window
+    int88 dailyLimitUsd;         // 18-decimal USD cap per window
+    uint8 cappedTokenCount;      // cappedTokens.length, so a wallet with no caps pays no extra read
     address[] watchedTokens;     // tokens whose value changes are metered (max 32)
     address[] trustedSpenders;   // spenders approvable even for unpriced tokens (max 16)
+    address[] cappedTokens;      // tokens capped in their own units (max 8)
 }
 ```
 
 **How metering works (net value, not gross outflow):**
 
-- **`preCheck`** rejects any execution that targets the module's own admin surface (see below), rolls the spending window if expired, collects any allowance-granting sub-calls — `approve` and legacy `increaseAllowance` — (rejecting unlimited approvals and unpriced-to-untrusted approvals up front), and snapshots the raw balance of every watched token. **No oracle calls happen here.**
+- **`preCheck`** rejects any execution that targets the module's own admin surface (see below), rolls the spending window if expired, collects any allowance-granting sub-calls — `approve` and legacy `increaseAllowance` / `increaseApproval` — (rejecting unlimited approvals, unpriced-to-untrusted approvals and mainnet SAND's other grant functions up front), and snapshots the raw balance of every watched token the execution could move: all of them, unless every call is a plain send (`transfer` on a watched token reads only that token; empty calldata to an address with no code reads none). It snapshots the native balance only when `nativeMetered` is on, and passes that decision to `postCheck` in `hookData`, so a switch mid-transaction cannot split the two halves. **No oracle calls happen here.**
 - **`postCheck`** does two independent checks:
   1. **Net-value spend.** For each watched token whose balance *changed*, it prices the delta via `SHOracle` and sums the signed differences across the portfolio; any net USD **decrease** is added to `spentInWindow`, reverting `BudgetExceeded` if it crosses `dailyLimitUsd` and emitting `SpendMetered` once the spend stands. A token that didn't move is never priced (so a stale feed on an untouched token can't block a transaction), and a net increase adds nothing, never banks credit for a later transaction, and emits nothing.
   2. **No standing approvals.** Any allowance approved in this transaction must be consumed to **exactly 0** by the end of it, else revert `StandingApprovalNotAllowed`. This closes deferred-pull risk outright rather than size-bounding it.
 
 Because spending *is* the drop in watched-portfolio USD, the module needs no per-venue swap decoder: a value-neutral swap nets ~0, and a bad-rate or sandwiched swap registers its lost value automatically. Both `execute` and `executeFromExecutor` calldata are decoded for approvals; delegatecalls are not decoded (no reliable selector), but the net-value cap still applies to them.
 
+**Limits in a token's own units.** A token can be capped in its own units instead of counting in USD: `setTokenCap(token, limit)`, up to 8 per wallet. A token with no feed can only be capped this way; one with a feed can be either, never both, and `setTokenCap` and `addWatchedToken` each revert `TokenAlreadyMetered` on a token on the other's list. `postCheck` adds the token's balance drop to its spend and reverts `TokenCapExceeded` past the limit, without reading the oracle. It nets only within that token, so selling one uses its limit however fair the rate, and buying one with a metered token charges the USD cap the full amount paid. Each cap is one storage slot (`limit`, `spent`, `windowStart`, `position`); `spent` only counts while `windowStart` matches the account's, so every cap rolls with the window with no loop. A capped token may be anyone's contract, so calls aimed at it may only be `transfer` or a recorded grant (`CallNotAllowedOnCappedToken`), and a failed `balanceOf` reverts the execution until the owner calls `removeTokenCap`, which never calls the token. See THREAT_MODEL §3.15.
+
 **Trusted-spender exemption (unpriced approvals).** An `approve` on a token the oracle can't price normally reverts (`TokenNotPriced`) — *unless* the spender is on the account's `trustedSpenders` list. This is the escape hatch that lets a V2 **LP token** (which has no Chainlink feed) be approved to the router for `removeLiquidity` on BSC, and a token the user added by address be approved to the exchange for a swap or a Uniswap V3 deposit. The no-standing-approval and no-unlimited-approval rules still apply in full to trusted spenders — the exemption only skips the price check. The list starts empty unless the deployer seeds one: `SHFactory.deployWallet`'s `trustedSpenders` argument grants them inside `initialize` (this is how the app grants the chain's exchange contracts, from `constants.get_default_spenders`: SwapRouter02 and the position manager on the Uniswap V3 chains, PancakeSwap's router on BSC). `addTrustedSpender` remains for granting one later.
 
-**Self-guard on the module's admin surface.** `preCheck` reverts `AdminExecution` if any sub-call of the execution targets the module itself with one of its own selectors (the six config setters, `onInstall`, `onUninstall`). It runs *first*, before approvals are collected, so a refused transaction pays almost nothing. It is defence-in-depth that holds even on a host account with no guard of its own — and it deliberately blocks the **owner's** `execute` path too, because by the time `preCheck` runs `msg.sender` is the account whether an owner or a session key drove it, leaving no way to tell them apart. Nothing legitimate is lost: the owner reaches the six setters through `SessionHandler`'s `onlyOwner` passthroughs (a direct call, so no hook runs), and `onInstall`/`onUninstall` through `installModule`/`uninstallModule`, whose outer calldata is not an `execute` selector and so never reaches the check.
+**Self-guard on the module's admin surface.** `preCheck` reverts `AdminExecution` if any sub-call of the execution targets the module itself with one of its own selectors (the nine config setters, `onInstall`, `onUninstall`). It runs *first*, before approvals are collected, so a refused transaction pays almost nothing. It is defence-in-depth that holds even on a host account with no guard of its own — and it deliberately blocks the **owner's** `execute` path too, because by the time `preCheck` runs `msg.sender` is the account whether an owner or a session key drove it, leaving no way to tell them apart. Nothing legitimate is lost: the owner reaches the nine setters through `SessionHandler`'s `onlyOwner` passthroughs (a direct call, so no hook runs), and `onInstall`/`onUninstall` through `installModule`/`uninstallModule`, whose outer calldata is not an `execute` selector and so never reaches the check.
 
 **Where the oracle comes from.** The module stores an immutable `REGISTRY` but resolves the oracle itself from `SHRegistry.priceOracle()` on every valuation, so an oracle bug can be fixed for every already-deployed wallet at once without redeploying the module or migrating any wallet. The trade-off is a trust assumption: the registry owner (`SHTreasury` → the protocol operator) can repoint every wallet's oracle in one transaction — see [THREAT_MODEL.md](../THREAT_MODEL.md) §3.8. Resolution is deliberately per-use rather than cached in a local, so a path that never prices anything (a trusted-spender approval, a watched-token add of `address(0)`) makes no registry read at all; re-reading is cheap after the first, as the registry account and slot stay warm for the rest of the transaction.
 
@@ -475,7 +523,7 @@ Because spending *is* the drop in watched-portfolio USD, the module needs no per
 constructor(address registry);  // SHRegistry address — NOT the oracle; reverts OracleNotSet if it reports none
 
 // IERC7579Module
-function onInstall(bytes calldata data) external;    // decodes (int256 dailyLimitUsd, uint256 windowDuration, address[] watchedTokens)
+function onInstall(bytes calldata data) external;    // decodes (int256 dailyLimitUsd, uint256 windowDuration, address[] watchedTokens, bool nativeMetered)
 function onUninstall(bytes calldata) external;        // wipes all per-account state
 function isModuleType(uint256 moduleTypeId) external pure returns (bool);   // true only for MODULE_TYPE_HOOK (4)
 
@@ -484,22 +532,28 @@ function preCheck(address, uint256, bytes calldata msgData) external returns (by
 function postCheck(bytes calldata hookData) external;
 
 // Config setters (onlyInstalled — the account calls these as itself, via SessionHandler passthroughs)
-function setDailyLimit(int256 dailyLimitUsd) external;   // 0 <= limit <= type(int128).max
-function setWindowDuration(uint256 windowDuration) external;
+function setDailyLimit(int256 dailyLimitUsd) external;   // 0 <= limit <= type(int88).max
+function setWindowDuration(uint256 windowDuration) external;   // 1 <= duration <= type(uint24).max
+function setNativeMetering(bool metered) external;              // flag only; the wallet moves WETH/WBNB with it
 function addWatchedToken(address token) external;
 function removeWatchedToken(address token) external;
+function setTokenCap(address token, uint256 limit) external;   // 0 <= limit <= type(uint104).max
+function removeTokenCap(address token) external;               // never calls the token
 function addTrustedSpender(address spender) external;
 function removeTrustedSpender(address spender) external;
 
-// Per-account state. Field order follows storage packing: the first four fields share ONE slot.
+// Per-account state. Field order follows storage packing: the first seven fields share ONE slot.
 struct Config {
     bool installed;
-    uint48 windowStart;
-    uint48 windowDuration;
-    int128 spentInWindow;      // 18-decimal USD, running total for the current window
-    int128 dailyLimitUsd;      // 18-decimal USD
+    bool nativeMetered;
+    uint32 windowStart;
+    uint24 windowDuration;
+    int88 spentInWindow;       // 18-decimal USD, running total for the current window
+    int88 dailyLimitUsd;       // 18-decimal USD
+    uint8 cappedTokenCount;    // cappedTokens.length
     address[] watchedTokens;
     address[] trustedSpenders;
+    address[] cappedTokens;
 }
 
 // Views (keyed by account)
@@ -507,6 +561,8 @@ function getConfig(address account) external view returns (Config memory);   // 
 function isWatched(address account, address token) external view returns (bool);
 function isTrustedSpender(address account, address spender) external view returns (bool);
 function getRemainingBudget(address account) external view returns (int256);
+function getTokenCap(address account, address token)
+    external view returns (bool capped, uint256 limit, uint256 remaining);   // in the token's own units
 
 address public immutable REGISTRY;   // oracle is read from REGISTRY.priceOracle() per valuation
 
@@ -520,13 +576,70 @@ event TrustedSpenderRemoved(address indexed account, address indexed spender);
 event SpendMetered(address indexed account, int256 netOutflowUsd, int256 spentInWindow);
 ```
 
-**Errors:** `AlreadyInstalled`, `NotInstalled`, `InvalidDailyLimit`, `InvalidWindowDuration`, `TokenNotPriced(token)`, `TooManyWatchedTokens`, `TooManyTrustedSpenders`, `InvalidTrustedSpender`, `UnlimitedApprovalRejected`, `StandingApprovalNotAllowed(token, spender, residual)`, `BudgetExceeded(spentUsd, dailyLimitUsd)`, `AdminExecution`, `OracleNotSet` — each prefixed `SpendingLimitModule_`.
+**Errors:** `AlreadyInstalled`, `NotInstalled`, `InvalidDailyLimit`, `InvalidWindowDuration`, `TokenNotPriced(token)`, `TooManyWatchedTokens`, `TooManyTrustedSpenders`, `InvalidTrustedSpender`, `TooManyCappedTokens`, `InvalidTokenCap`, `TokenAlreadyMetered(token)`, `CallNotAllowedOnCappedToken(token, selector)`, `TokenCapExceeded(token, spent, limit)`, `UnlimitedApprovalRejected`, `UnsupportedApprovalCall(target, selector)`, `StandingApprovalNotAllowed(token, spender, residual)`, `BudgetExceeded(spentUsd, dailyLimitUsd)`, `AdminExecution`, `OracleNotSet` — each prefixed `SpendingLimitModule_`.
 
-**The running total shares a slot with the install flag and the window.** `preCheck` already reads that slot, so `postCheck` reads the total cheaply, a window reset writes the new start and the zeroed total in one store, and writing the total never pays the 20,000-gas cost of filling an empty slot. Both money values are `int128` (~$1.7e20 at 18 decimals); the stored total can never be cut off because `setDailyLimit` keeps the limit inside `int128` and `postCheck` checks the new total against the limit *before* storing it. The per-transaction outflow is still computed at full `int256`. Measured on a session-key token transfer: about −1,900 gas on a normal spend, −4,900 on a spend that starts a new window, and −19,000 on a wallet's first spend. Because the field order follows the packing, read `getConfig()` by field name, never by position — the Python app uses `contracts.read_spending_config`.
+**The limit and the running total share a slot with the install flag and the window.** `preCheck` already reads that slot, so `postCheck` reads both cheaply, a window reset writes the new start and the zeroed total in one store, and writing the total never pays the 20,000-gas cost of filling an empty slot. Both money values are `int88` (about $154.7 million at 18 decimals); the stored total can never be cut off because `setDailyLimit` keeps the limit inside `int88` and `postCheck` checks the new total against the limit before storing it. `windowStart` is `uint32`, so timestamps run until the year 2106, after which every transaction would start a new window. `windowDuration` is `uint24`, a window of up to about 194 days, which made room for the `nativeMetered` byte; `onInstall` and `setWindowDuration` refuse a longer one. The per-transaction outflow is still computed at full `int256`. Because the field order follows the packing, read `getConfig()` by field name, never by position — the Python app uses `contracts.read_spending_config`.
 
-**Native value IS metered.** preCheck snapshots the account's native balance and postCheck prices its net change through the `address(0)` sentinel feed, alongside the watched tokens — so a native send, and the native leg of a swap (e.g. `swapExactETHForTokens`), count against the cap. Gas is excluded: the ERC-4337 prefund leaves the account before preCheck and the refund settles to the EntryPoint deposit after postCheck, never touching the metered delta.
+**Native value is metered when the wallet chooses it.** `nativeMetered` is set at deploy (`deployWallet`'s `nativeMetered`) and switched later by the owner (`SessionHandler.setNativeMetering`). When it is on, preCheck snapshots the account's native balance and postCheck prices its net change through the `address(0)` sentinel feed, alongside the watched tokens — so a native send, and the native leg of a swap (e.g. `swapExactETHForTokens`), count against the cap. When it is off, the native balance is left out **both ways**: a native send is not charged, and native coming in offsets nothing, so selling a counted token for ETH charges its full value (otherwise token → ETH → out would move a counted token free). Nothing reads the native feed then, so a stale ETH/USD feed blocks nothing. Gas is excluded either way: the ERC-4337 prefund leaves the account before preCheck and the refund settles to the EntryPoint deposit after postCheck, never touching the metered delta.
 
-**Deliberate v1 exclusions** (per design, not gaps): Permit2/permit-signature approvals and per-venue rate limits. Any unwatched ERC-20 sits outside the meter — the protection model is "watch the tokens you care about" (native and watched tokens are always metered).
+**WETH/WBNB follow the switch.** Wrapping is a free conversion, so a counted WETH beside uncounted ETH would only be bypassed by unwrapping first, and an uncounted WETH beside counted ETH would be the bypass. `SessionHandler.setNativeMetering(metered, wrappedNative)` moves the wrapped token on or off the watched list in the same call, and the app refuses to add or remove it on its own. The module itself doesn't know which token is the wrapped one; the pairing is the wallet's and the app's.
+
+**A wallet that counts nothing has no limit.** With native off and no watched token, every transfer is outside the meter, and the app allows a limit of 0 there. Adding a watched token or switching native on while the limit is 0 freezes those tokens until a limit is set, so the app asks for a limit first.
+
+**Deliberate v1 exclusions** (per design, not gaps): Permit2/permit-signature approvals and per-venue rate limits. Any unwatched ERC-20, and native when `nativeMetered` is off, sits outside the meter — the protection model is "count the tokens you care about".
+
+---
+
+## `RecurringPaymentModule.sol`
+
+An ERC-7579 **executor** (module type 2) that pays a fixed amount of one token, or the native coin, to one recipient on a fixed interval. The owner approves the schedule **once**; after that no signature is needed per payment. `SHFactory` installs it on **every** wallet (the user's call: about 70k more gas per deploy — three new storage slots plus two calls — and a bug in it would reach every wallet, accepted). It can move nothing until the owner creates a schedule.
+
+```
+keeper (backend) → RecurringPaymentModule.run(account, id)
+                 → SessionHandler.executeFromExecutor(single call)
+                     ├─ _guardSessionExecution   (same guard as a session key, allowlist included)
+                     ├─ _applyFee(true)           (protocol fee + keeper fee → treasury)
+                     └─ _execute → hook preCheck → token.transfer(recipient, amount) → hook postCheck (USD cap)
+```
+
+```solidity
+uint48 public constant MIN_INTERVAL = 1 hours;
+
+struct Schedule {            // three slots
+    address token;           // address(0) = native
+    uint48  nextDue;
+    uint48  end;             // last moment a payment may fall due; 0 = no end
+    address recipient;
+    uint48  interval;
+    uint48  generation;      // the wallet's generation at creation; older = wiped by an uninstall
+    uint256 amount;          // 0 marks an empty slot
+}
+
+// Owner only, calling the module DIRECTLY (msg.sender == account.owner(), owner != account)
+function createSchedule(address account, address token, address recipient, uint256 amount,
+                        uint48 interval, uint48 firstDue, uint48 end) external returns (uint256 id);
+function cancelSchedule(address account, uint256 id) external;
+
+// Anyone (the backend is the keeper)
+function run(address account, uint256 id) external;
+
+function getSchedule(address account, uint256 id) external view returns (Schedule memory, bool live);
+function isDue(address account, uint256 id) external view returns (bool);
+mapping(address => uint256) public scheduleCount;   // ids run 1..scheduleCount, never reused
+mapping(address => uint48)  public generation;      // bumped by onUninstall
+```
+
+**Who can do what — the property it rests on.** Creating and cancelling are owner-only, by the owner's EOA calling the module directly. A session key (passkey) acts *as the wallet*, so anything it routes through `execute` reaches the module with `msg.sender == wallet`, which is never the owner: a key cannot create a schedule that would keep paying after the key expires. A wallet that owns itself is refused for the same reason. This means a schedule needs MetaMask on the dashboard; the assistant and Telegram can only send the user a link. `run` is open to anyone, because the schedule fixes token, recipient, amount and timing — the caller only picks the moment, and only within the due window.
+
+**One payment per `run`, no pile-up.** If periods are missed (paused wallet, no funds, over the cap, keeper down), the next `run` pays **one** instalment and moves `nextDue` to the first point on the schedule's grid (`firstDue + k × interval`) still in the future. Catching up would let a stalled schedule drain a wallet in one burst. When `nextDue` passes `end`, the schedule is deleted after that payment (`RecurringPaymentExecuted(…, nextDue = 0)`).
+
+**Checks-effects-interactions.** `run` moves `nextDue` (or deletes the finished schedule) *before* calling the wallet, so a recipient or token that re-enters `run` during the payment finds nothing due.
+
+**A failed payment changes nothing.** Over the cap, paused, not on the allowlist, not enough for the fee, or a token whose `transfer` returns `false` (`RecurringPayment_TransferFailed`; no return data counts as success, as in SafeERC20): the whole `run` reverts, `nextDue` stays, no fee is charged, and the keeper retries.
+
+**Uninstall wipes everything in O(1).** `onUninstall` bumps the wallet's `generation`; schedules from an older generation are dead. A reinstall starts empty, and ids keep counting.
+
+**Errors** (prefixed `RecurringPayment_`): `NotOwner(account, caller)`, `NotInstalled(account)`, `UnknownSchedule(account, id)`, `NotDue(dueAt)`, `InvalidRecipient`, `InvalidToken`, `InvalidAmount`, `InvalidInterval(interval, min)`, `InvalidEnd(end, firstDue)`, `TransferFailed`.
 
 ---
 
@@ -576,14 +689,15 @@ Orchestrates deployment of all shared infrastructure. Individual `SessionHandler
 
 **Deployment sequence:**
 
-1. Instantiate `HelperConfig`; build parallel `(tokens, priceFeeds, heartbeats)` arrays. Convert the fee's dollar targets (`MIN_PROTOCOL_FEE_USD`, `MAX_PROTOCOL_FEE_USD`, `INITIAL_PROTOCOL_FEE_USD`) to wei through the native feed, `priceFeeds[0]`.
+1. Instantiate `HelperConfig`; build parallel `(tokens, priceFeeds, heartbeats)` arrays. Convert both fees' dollar targets — the protocol fee's constants (`MIN_PROTOCOL_FEE_USD`, `MAX_PROTOCOL_FEE_USD`, `INITIAL_PROTOCOL_FEE_USD`) and the chain's keeper-fee fields — to whole-gwei wei amounts through the native feed, `priceFeeds[0]` (`_feeBounds`).
 2. Deploy `SHTreasury()` — the admin root, deployed **first** so its address can own everything below.
 3. Deploy `SHOracle(address(treasury), config.sequencerUptimeFeed, tokens, priceFeeds, heartbeats)` — born owned by the treasury.
 4. Call `IIdentityRegistry.register(AGENT_URI)` to mint the agent NFT and obtain `agentId`.
-5. Deploy `SHRegistry(address(treasury), initialFee, minFee, maxFee, address(treasury), address(oracle), …, agentId)` — owned by the treasury and paying fees to it.
+5. Deploy `SHRegistry(address(treasury), protocolFeeBounds, keeperFeeBounds, address(treasury), address(oracle), …, agentId)` — owned by the treasury and paying fees to it.
 6. Call `treasury.setRegistry(address(registry))` — write-once, fixing the pairing.
 6b. Deploy `SpendingLimitModule(address(registry))` — wired to the **registry**, from which it resolves the current oracle on every valuation (no interpreter). Must come after the registry: its constructor reads `priceOracle()` off it.
 7. Call `treasury.setSpendingLimitModule(address(module))` — the module could not be a registry constructor argument (see the registry section), so it is registered here.
+7b. Deploy `RecurringPaymentModule()` (no constructor arguments) and call `treasury.setRecurringPaymentModule(address(recurringModule))`.
 8. Deploy `SHFactory(address(treasury), address(registry), GasCeilings(maxOpGasCost, sessionGasBudget))` — owner, registry, and this chain's starting gas ceilings from `HelperConfig`. Every address a wallet needs is read off the registry, so the factory stores none of them. It deploys the `SessionHandler` implementation it clones from internally, with the gas ceilings as that implementation's defaults.
 9. Call `treasury.setFactory(address(factory))` — records the factory on the registry for off-chain discoverability.
 
@@ -637,11 +751,15 @@ function generateUnsignedBatchUserOp(
 
 ## Test Suite
 
-Totals: **299** unit (97 protocol + 78 guard + 54 passkey + 70 admin) + **11** invariants, all local (`forge test --no-match-path "test/fork/*"`), and **14** fork tests per network across 5 networks. All passing.
+Totals: **443** unit (131 protocol + 85 guard + 54 passkey + 70 admin + 42 token cap + 22 native metering + 26 recurring payments + 13 registry fees) + **13** invariants, all local (`forge test --no-match-path "test/fork/*"`), and **22–26** fork tests per network on mainnet, BSC, Arbitrum and Base, plus Sepolia. All passing.
 
-**`test/unit/SHProtocolTest.t.sol` (97 tests)** — deploy/factory config, module lifecycle (install/uninstall/reinstall, `isModuleType` hook-only), config setters (limit/window/watched-token cap, non-owner reverts), passkey management (add/renew, the curve and expiry checks, the cap of five and the sweep of expired keys, remove/remove-all, `getSessions`), **net-value metering** (transfer pricing, inflow-offset within a tx, no-banked-credit across txs, window roll, per-token staleness isolation), **approvals** (unlimited rejected, standing reverts, consumed-in-same-tx passes, partial reverts, approve-then-zero), **trusted spenders** (Option C: unpriced approval allowed when trusted / reverts when untrusted, unlimited still rejected, standing still reverts, remove reinstates the price gate, uninstall clears), plus the harness calldata/approval-classifier tests. Uses a `MockSpender` to consume allowances mid-batch.
+**`test/unit/SHProtocolTest.t.sol` (131 tests)** — deploy/factory config, module lifecycle (install/uninstall/reinstall, `isModuleType` hook-only), config setters (limit/window/watched-token cap, non-owner reverts), passkey management (add/renew, the curve and expiry checks, the cap of five and the sweep of expired keys, remove/remove-all, `getSessions`), **net-value metering** (transfer pricing, inflow-offset within a tx, no-banked-credit across txs, window roll, per-token staleness isolation), **approvals** (unlimited rejected, standing reverts, consumed-in-same-tx passes, partial reverts, approve-then-zero), **trusted spenders** (Option C: unpriced approval allowed when trusted / reverts when untrusted, unlimited still rejected, standing still reverts, remove reinstates the price gate, uninstall clears), plus the harness calldata/approval-classifier tests. Uses a `MockSpender` to consume allowances mid-batch.
 
-**`test/unit/SessionGuardTest.t.sol` (78 tests)** — drives real `EntryPoint.handleOps` end-to-end, every session-key op signed by a soft passkey. A wallet deployed with `deployWallet`'s passkey arguments is driven by that key with no `addSession` call anywhere (`test_deployWallet_seededSessionKeyExecutesImmediately`). Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
+**`test/unit/TokenCapTest.t.sol` (42 tests)** — limits in a token's own units, on a token with a feed and one without: the setters and their refusals, one meter per token, charging (netting within a transaction, a balance drop with no call to the token, the window roll, a cap of 0), buying and selling a capped token, the calls a capped token may receive, and a token whose `balanceOf` fails: it blocks what reads it, can't skip being charged, can always be removed, and doesn't stop a plain send.
+
+**`test/unit/NativeMeteringTest.t.sol` (22 tests)** — the `nativeMetered` flag: the deploy choice lands in the Config slot's second byte; with it off a native send isn't charged, no price is read (so a stale native feed blocks nothing), native coming in offsets nothing (selling a counted token for ETH charges the full amount), watched tokens are still capped and unwrapping WETH is still charged; a wallet that counts nothing works at limit 0, and a counted token freezes there until a limit is set; switching moves WETH with the flag in one call, keeps what was spent, refuses a non-owner and refuses being reached through `execute`; `preCheck` hands its decision to `postCheck`, so a switch between the two can't split them; and a reinstall starts from the new choice.
+
+**`test/unit/SessionGuardTest.t.sol` (85 tests)** — drives real `EntryPoint.handleOps` end-to-end, every session-key op signed by a soft passkey. A wallet deployed with `deployWallet`'s passkey arguments is driven by that key with no `addSession` call anywhere (`test_deployWallet_seededSessionKeyExecutesImmediately`). Session-key UserOps attempting `uninstallModule`, `setDailyLimit`, `addSession`, or a batch smuggling a restricted target all fail with the admin state asserted **unchanged**; direct EntryPoint-pranked calls prove the exact guard errors (`SessionHandler_SessionRestrictedTarget`, `SessionHandler_SessionDelegateCallForbidden`); owner-direct `execute` bypasses the account's guard but is still refused by the module's own (`SpendingLimitModule_AdminExecution`, single and batch); and unknown/removed signers fail validation with `AA24`.
 
 Expiry is proved through the same real `handleOps` path: a key past its deadline fails `AA22 expired or not due` (not `AA24`), is accepted in the second that *equals* the deadline, works again after renewal, and a **removed** key fails `AA24` because it is no longer the wallet's key at all. An owner-signed op still executes a year after the session key lapsed — the owner carries no validity window.
 
@@ -649,11 +767,19 @@ Expiry is proved through the same real `handleOps` path: a key past its deadline
 
 > **Gotcha:** the vendored account-abstraction is EntryPoint **v0.9**, whose `nonReentrant` requires `tx.origin == msg.sender` — tests must submit `handleOps` with a two-arg `vm.prank(bundler, bundler)` (EOA bundler) or it reverts `Reentrancy()`.
 
-**`test/fork/SHForkTestBase.sol` (14 tests, abstract)** + thin per-network instances: **`SHMainnetUniswapV3Test`** (mainnet, WETH→DAI), **`SHSepoliaUniswapV3Test`** (Sepolia, WETH→USDC), **`SHArbitrumUniswapV3Test`** and **`SHBaseUniswapV3Test`** (WETH→USDC, plus the sequencer-gate tests), all swapping through Uniswap V3's SwapRouter02 via **`SHUniswapV3ForkTestBase`**, and **`SHPancakeswapV2Test`** (BSC, USDT→WBNB→LINK multi-hop on PancakeSwap V2). Each suite forks its own chain in `setUp` (`vm.createSelectFork(vm.rpcUrl(...))`, URLs from foundry.toml's `[rpc_endpoints]`). Runs identically against the real router, live Chainlink feeds, and the canonical EntryPoint: wallet deploys with cap config, `deployWallet` seeding the chain's default spenders (`_trustedSpenders()`: SwapRouter02 and the position manager on the V3 networks, PancakeSwap's router on BSC — from Constants.s.sol, as `constants.get_default_spenders` seeds them in the app), each asserted trusted; net-value metering at live prices; budget-exceeded reverts atomically; a real **session-key swap** metered by net portfolio change; standing/unlimited approvals rejected on a real DEX; a session op targeting the module reverts; a revoked key fails validation; and a **liquidity round-trip** (`_liquidityRoundTrip()`, whose body depends on the venue). On BSC it is `addLiquidity → removeLiquidity`, proving the unpriced LP-token approval flows through the trusted router (the router creates the pair where there is no direct pool). On the V3 networks it is a position, every step a session-key UserOp through the real EntryPoint: approve both tokens, `mint`, approve both back to 0; then `decreaseLiquidity` by half and `collect`; then the rest, `collect` and `burn`. It checks the wallet holds the NFT (the position manager mints with a plain `_mint`, so a SessionHandler without `onERC721Received` can), the deposit is metered, no allowance is left, and neither withdrawal is metered — they need no approval, since the wallet owns the position. Metering assertions are computed from actual balance diffs priced through the deployed oracle, so they hold despite testnet pool-ratio divergence.
+**`test/fork/SHForkTestBase.sol` (24 tests, abstract)** + thin per-network instances: **`SHMainnetUniswapV3Test`** (mainnet, WETH→DAI), **`SHSepoliaUniswapV3Test`** (Sepolia, WETH→USDC), **`SHArbitrumUniswapV3Test`** and **`SHBaseUniswapV3Test`** (WETH→USDC, plus the sequencer-gate tests), all swapping through Uniswap V3's SwapRouter02 via **`SHUniswapV3ForkTestBase`**, and **`SHPancakeswapV2Test`** (BSC, USDT→WBNB→LINK multi-hop on PancakeSwap V2). Each suite forks its own chain in `setUp` (`vm.createSelectFork(vm.rpcUrl(...))`, URLs from foundry.toml's `[rpc_endpoints]`). Runs identically against the real router, live Chainlink feeds, and the canonical EntryPoint: wallet deploys with cap config, `deployWallet` seeding the chain's default spenders (`_trustedSpenders()`: SwapRouter02 and the position manager on the V3 networks, PancakeSwap's router on BSC — from Constants.s.sol, as `constants.get_default_spenders` seeds them in the app), each asserted trusted; net-value metering at live prices; budget-exceeded reverts atomically; a real **session-key swap** metered by net portfolio change; standing/unlimited approvals rejected on a real DEX; a session op targeting the module reverts; a revoked key fails validation; on a wallet that doesn't count native, a native send isn't charged and selling a counted token for native at live prices charges its full value; and a **liquidity round-trip** (`_liquidityRoundTrip()`, whose body depends on the venue). On BSC it is `addLiquidity → removeLiquidity`, proving the unpriced LP-token approval flows through the trusted router (the router creates the pair where there is no direct pool). On the V3 networks it is a position, every step a session-key UserOp through the real EntryPoint: approve both tokens, `mint`, approve both back to 0; then `decreaseLiquidity` by half and `collect`; then the rest, `collect` and `burn`. It checks the wallet holds the NFT (the position manager mints with a plain `_mint`, so a SessionHandler without `onERC721Received` can), the deposit is metered, no allowance is left, and neither withdrawal is metered — they need no approval, since the wallet owns the position. Metering assertions are computed from actual balance diffs priced through the deployed oracle, so they hold despite testnet pool-ratio divergence.
 
 **`test/unit/SHAdminTest.t.sol` (70 tests)** — the admin surface: the SHTreasury-rooted ownership graph (direct calls to the registry, oracle or factory revert; everything goes through a treasury passthrough), the two-day oracle timelock, and SHOracle's feed admin.
 
-**`test/invariant/` (11 invariants)** — `SHHandler` fuzzes owner executes (transfers, mint+transfer batches), config changes, non-owner attacks, passkey management (add, renew, remove, remove-all against a ghost list), and time warps, maintaining a **ghost model** that independently replicates the module's roll-then-accumulate net metering. `InvariantSH` asserts, among others: `invariant_meteringMatchesGhostModel` (module `spentInWindow` equals the ghost exactly), spend never negative, config only ever changed by the owner, the hook stays installed, the watched list stays bounded/consistent, remaining-budget consistency, and for passkeys: never more than five, the on-chain list matches the ghost list, a key is listed iff its deadline is set, and every passkey call behaved as modelled.
+> **Gotcha:** `SHAdminTest` sits right at solc's legacy-assembler limit — adding a few tests made it fail with *"Internal compiler error: Tag too large for reserved space"*. New registry tests go in `RegistryFeeTest` instead.
+
+**`test/unit/RecurringPaymentTest.t.sol` (26 tests)** — `RecurringPaymentModule` on a real wallet: only the owner creates or cancels (a stranger, a passkey through `execute` — exact error and through real `handleOps` — and a self-owned wallet are all refused); input checks; a due token payment pays the payee, moves the due date, sends protocol + keeper fee and is metered by the cap; native payments; anyone can run but only once per period; missed periods pay once and land on the grid; the last payment ends the schedule; over the cap, paused, allowlist, no fee money and a false-returning token all revert with the schedule still due; a re-entering recipient is paid exactly once; uninstall wipes and a reinstall starts clean. Plus the gas of one `run` (`-vv`), which sized the keeper fee.
+
+> **Gotcha:** never write `uint256 start = block.timestamp;` before a `vm.warp` — the optimizer treats `TIMESTAMP` as constant within a call and may re-read it after the warp, shifting every expected date. Use a constant start and warp to it.
+
+**`test/unit/RegistryFeeTest.t.sol` (13 tests)** — both fees and all four bounds deployed as whole gwei and in order; the treasury and both fees packed in slot 6 (read with `vm.load`); `feeConfig`; `setKeeperFee` through the treasury, bounds and owner checks; non-whole-gwei fees refused, never rounded; `setRecurringPaymentModule` reaches only wallets deployed afterwards; the keeper fee's zero floor; the constructor's gwei and range rules for both fees.
+
+**`test/invariant/` (13 invariants)** — `SHHandler` fuzzes owner executes (transfers, mint+transfer batches), config changes, non-owner attacks, passkey management (add, renew, remove, remove-all against a ghost list), a token capped in its own units, and time warps, maintaining a **ghost model** that independently replicates the module's roll-then-accumulate net metering. `InvariantSH` asserts, among others: `invariant_meteringMatchesGhostModel` (module `spentInWindow` equals the ghost exactly), spend never negative, config only ever changed by the owner, the hook stays installed, the watched list stays bounded/consistent, remaining-budget consistency, and for passkeys: never more than five, the on-chain list matches the ghost list, a key is listed iff its deadline is set, and every passkey call behaved as modelled.
 
 ---
 

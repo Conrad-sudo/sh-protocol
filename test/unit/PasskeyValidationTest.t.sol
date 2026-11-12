@@ -94,7 +94,7 @@ contract PasskeyValidationTest is Test {
         vm.prank(owner);
         wallet = SessionHandler(
             payable(factory.deployWallet(
-                    DAILY_LIMIT, WINDOW, watched, alice.qx, alice.qy, deadline, new address[](0)
+                    DAILY_LIMIT, WINDOW, watched, true, alice.qx, alice.qy, deadline, new address[](0)
                 ))
         );
 

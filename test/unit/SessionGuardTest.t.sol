@@ -94,7 +94,7 @@ contract SessionGuardTest is Test {
         wallet =
             SessionHandler(
                 payable(factory.deployWallet(
-                        DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0)
+                        DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0)
                     ))
             );
 
@@ -126,7 +126,7 @@ contract SessionGuardTest is Test {
         SessionHandler w = SessionHandler(
             payable(
                 factory.deployWallet(
-                    DAILY_LIMIT, WINDOW, watched, sessionKey.qx, sessionKey.qy, _sessionDeadline(), new address[](0)
+                    DAILY_LIMIT, WINDOW, watched, true, sessionKey.qx, sessionKey.qy, _sessionDeadline(), new address[](0)
                 )
             )
         );
@@ -230,6 +230,41 @@ contract SessionGuardTest is Test {
         assertEq(wallet.getRemainingBudget(), DAILY_LIMIT - expectedUsd, "remaining budget wrong");
     }
 
+    /// @notice With native metering switched off, a passkey's op through the real EntryPoint sends
+    ///         native worth more than the whole limit and nothing is charged: the exposure the owner
+    ///         accepts by switching it off (THREAT_MODEL §3.2). Watched tokens stay capped as before.
+    function test_sessionOp_nativeUnmetered_isFreeAndWatchedTokensStayCapped() public {
+        vm.prank(owner);
+        wallet.setNativeMetering(false, address(0));
+        uint256 amount = 6 ether;
+        assertGt(oracle.getPrice(address(0), amount), DAILY_LIMIT, "test mis-sized: must exceed the limit");
+
+        (PackedUserOperation memory userOp,) = _passkeyOp(sessionKey, kani, amount, "");
+        _handleOps(userOp);
+
+        assertEq(kani.balance, amount, "the native send did not execute");
+        assertEq(wallet.getConfig().spentInWindow, 0, "native was charged while unmetered");
+        assertEq(wallet.getRemainingBudget(), DAILY_LIMIT);
+
+        // A watched token past the limit is still refused. handleOps absorbs the inner revert, so the
+        // proof is that nothing moved.
+        _sendSessionOp(address(usdc), abi.encodeCall(ERC20Mock.transfer, (kani, 6000e6)));
+        assertEq(usdc.balanceOf(kani), 0, "a watched token left past the limit");
+        assertEq(wallet.getConfig().spentInWindow, 0);
+    }
+
+    /// @notice The same op on the wallet as deployed, with native metered, is refused: 6 ETH is over
+    ///         the limit. Without this the test above would pass even if the switch did nothing.
+    function test_sessionOp_nativeMetered_isRefusedPastTheLimit() public {
+        uint256 amount = 6 ether;
+        assertGt(oracle.getPrice(address(0), amount), DAILY_LIMIT, "test mis-sized: must exceed the limit");
+        (PackedUserOperation memory userOp,) = _passkeyOp(sessionKey, kani, amount, "");
+        _handleOps(userOp);
+
+        assertEq(kani.balance, 0, "native left past the limit");
+        assertEq(wallet.getConfig().spentInWindow, 0);
+    }
+
     /// @notice An owner-signed UserOp through the EntryPoint also validates (owner is always an
     ///         authorized signer) and executes external calls fine.
     function test_ownerSignedOp_legitTransfer_succeeds() public {
@@ -293,6 +328,37 @@ contract SessionGuardTest is Test {
         _sendSessionOp(address(module), data);
 
         assertEq(wallet.getConfig().dailyLimitUsd, DAILY_LIMIT, "session key raised its own cap");
+    }
+
+    /// @notice The same for a cap in a token's own units: a session key can neither raise one nor remove
+    ///         one, whether it aims at the module or at the wallet's passthroughs.
+    function test_sessionOp_cannotChangeATokenCap() public {
+        ERC20Mock token = new ERC20Mock("No Feed", "NOF", 18);
+        vm.prank(owner);
+        wallet.setTokenCap(address(token), 1e18);
+
+        _sendSessionOp(address(module), abi.encodeCall(SpendingLimitModule.setTokenCap, (address(token), 1e30)));
+        _sendSessionOp(address(module), abi.encodeCall(SpendingLimitModule.removeTokenCap, (address(token))));
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.setTokenCap, (address(token), 1e30)));
+        _sendSessionOp(address(wallet), abi.encodeCall(SessionHandler.removeTokenCap, (address(token))));
+
+        (bool capped, uint256 limit,) = wallet.getTokenCap(address(token));
+        assertTrue(capped, "session key removed a token cap");
+        assertEq(limit, 1e18, "session key changed a token cap");
+    }
+
+    /// @notice A session key is held to a token's cap like anyone else, and its op fails whole.
+    function test_sessionOp_isHeldToATokenCap() public {
+        ERC20Mock token = new ERC20Mock("No Feed", "NOF", 18);
+        token.mint(address(wallet), 1000e18);
+        vm.prank(owner);
+        wallet.setTokenCap(address(token), 100e18);
+
+        _sendSessionOp(address(token), abi.encodeCall(ERC20Mock.transfer, (makeAddr("anywhere"), 101e18)));
+        assertEq(token.balanceOf(address(wallet)), 1000e18, "session key went past a token cap");
+
+        _sendSessionOp(address(token), abi.encodeCall(ERC20Mock.transfer, (makeAddr("anywhere"), 100e18)));
+        assertEq(token.balanceOf(address(wallet)), 900e18, "session key couldn't spend within a token cap");
     }
 
     /// @notice A session key must not be able to authorize more session keys via a self-call.
@@ -1060,14 +1126,14 @@ contract SessionGuardTest is Test {
         uint256 treasuryBefore = address(treasury).balance;
         uint256 walletBefore = address(wallet).balance;
 
-        vm.expectEmit(true, false, false, true, address(wallet));
-        emit SessionHandler.ProtocolFeePaid(address(treasury), expectedFee);
+        // No keeper fee on the session-key path: the UserOp paid its own gas.
+        vm.expectEmit(address(wallet));
+        emit SessionHandler.ProtocolFeePaid(expectedFee, 0);
         vm.prank(config.entryPoint);
         wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
 
         assertEq(address(treasury).balance, treasuryBefore + expectedFee, "treasury did not receive the fee");
         assertEq(address(wallet).balance, walletBefore - expectedFee, "wallet paid something other than the fee");
-        assertEq(treasury.totalFeesCollected(), expectedFee, "receive() did not tally the fee");
     }
 
     /// @notice A flat wei fee, observed end-to-end: double the ETH price and the same execution
@@ -1109,7 +1175,46 @@ contract SessionGuardTest is Test {
         wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
 
         assertEq(address(treasury).balance, 0, "owner path charged a fee");
-        assertEq(treasury.totalFeesCollected(), 0);
+    }
+
+    /// @dev Whether one execute() by `caller` reads the owner's storage slot.
+    function _executeReadsOwnerSlot(address caller) internal returns (bool) {
+        // OwnableUpgradeable's ERC-7201 slot, where the owner lives.
+        bytes32 ownerSlot = 0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300;
+        vm.record();
+        vm.prank(caller);
+        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
+        (bytes32[] memory reads,) = vm.accesses(address(wallet));
+        for (uint256 i = 0; i < reads.length; i++) {
+            if (reads[i] == ownerSlot) return true;
+        }
+        return false;
+    }
+
+    /// @notice A session-key execution never needs the owner, so it doesn't pay to read that slot.
+    function test_entryPointExecution_readsNoOwnerSlot() public {
+        assertFalse(_executeReadsOwnerSlot(config.entryPoint));
+    }
+
+    /// @notice The direct owner path does read it, which also shows the check above can see the read.
+    function test_ownerExecution_readsTheOwnerSlot() public {
+        assertTrue(_executeReadsOwnerSlot(owner));
+    }
+
+    /// @notice The EntryPoint is compared first, so handing it ownership can't turn every session-key
+    ///         op into an unrestricted owner call.
+    function test_ownerSetToTheEntryPoint_isStillGuarded() public {
+        vm.prank(owner);
+        wallet.transferOwnership(config.entryPoint);
+
+        vm.prank(config.entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(SessionHandler.SessionHandler_SessionRestrictedTarget.selector, address(module))
+        );
+        wallet.execute(
+            bytes32(0),
+            _encodeSingle(address(module), 0, abi.encodeCall(SpendingLimitModule.setDailyLimit, (type(int88).max)))
+        );
     }
 
     /// @notice The fee path makes no oracle call, so a session-key ERC-20 transfer — which moves no
@@ -1597,9 +1702,12 @@ contract SessionGuardTest is Test {
         MockExecutorModule executor = _installExecutor();
         uint256 amount = 1000e6;
         int256 expectedUsd = oracle.getPrice(address(usdc), amount);
-        uint256 expectedFee = registry.getFee();
+        // The executor path adds the keeper fee: the backend, not the wallet's deposit, paid the gas.
+        uint256 expectedFee = registry.getFee() + registry.keeperFee();
         uint256 treasuryBefore = address(treasury).balance;
 
+        vm.expectEmit(address(wallet));
+        emit SessionHandler.ProtocolFeePaid(registry.getFee(), registry.keeperFee());
         executor.callExecute(
             address(wallet), bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount)))
         );

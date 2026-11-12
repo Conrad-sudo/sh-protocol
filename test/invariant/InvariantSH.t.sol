@@ -51,14 +51,23 @@ contract InvariantSH is StdInvariant, Test {
         watched[1] = address(dai);
         vm.prank(config.account);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0))));
 
         vm.deal(address(wallet), 100 ether);
         usdc.mint(address(wallet), 1_000_000e6);
         dai.mint(address(wallet), 1_000_000e18);
 
         handler =
-            new SHHandler(wallet, module, oracle, usdc, dai, MockV3Aggregator(config.usdcUsdPriceFeed), config.account);
+            new SHHandler(
+            wallet,
+            module,
+            oracle,
+            usdc,
+            dai,
+            MockV3Aggregator(config.usdcUsdPriceFeed),
+            MockV3Aggregator(config.ethUsdPriceFeed),
+            config.account
+        );
 
         targetContract(address(handler));
     }
@@ -92,6 +101,7 @@ contract InvariantSH is StdInvariant, Test {
         SpendingLimitModule.Config memory cfg = module.getConfig(address(wallet));
         assertEq(cfg.dailyLimitUsd, handler.ghostLimit(), "dailyLimit changed outside owner path");
         assertEq(uint256(cfg.windowDuration), handler.ghostWindowDuration(), "window changed outside owner path");
+        assertEq(cfg.nativeMetered, handler.ghostNativeMetered(), "native metering changed outside owner path");
     }
 
     /// @notice The spending-cap hook must stay installed and configured — nothing the handler does
@@ -112,6 +122,28 @@ contract InvariantSH is StdInvariant, Test {
         }
         // USDC is never removed by the handler, so it must still be watched (metering stayed live).
         assertTrue(module.isWatched(address(wallet), address(usdc)), "USDC fell off the watched list");
+    }
+
+    /// @notice A cap in a token's own units always matches the independent model of it.
+    function invariant_tokenCapMatchesGhostModel() public view {
+        (bool capped, uint256 limit, uint256 remaining) =
+            module.getTokenCap(address(wallet), address(handler.capToken()));
+        assertEq(capped, handler.ghostCapActive(), "token cap on or off disagrees with the model");
+        assertEq(limit, handler.ghostCapLimit(), "token cap limit disagrees with the model");
+        assertEq(remaining, handler.ghostCapRemaining(), "token cap remaining disagrees with the model");
+    }
+
+    /// @notice The capped list stays within its bound and agrees with its count, and with what getTokenCap
+    ///         reports for each entry.
+    function invariant_cappedListBoundedAndConsistent() public view {
+        SpendingLimitModule.Config memory cfg = module.getConfig(address(wallet));
+        assertLe(cfg.cappedTokens.length, 8, "capped list exceeded MAX_CAPPED_TOKENS");
+        assertEq(cfg.cappedTokenCount, cfg.cappedTokens.length, "count disagrees with the list");
+        for (uint256 i = 0; i < cfg.cappedTokens.length; i++) {
+            (bool capped,,) = module.getTokenCap(address(wallet), cfg.cappedTokens[i]);
+            assertTrue(capped, "list entry has no cap");
+            assertFalse(module.isWatched(address(wallet), cfg.cappedTokens[i]), "token is both capped and watched");
+        }
     }
 
     /// @notice getRemainingBudget must agree with raw config state under the same window-expiry

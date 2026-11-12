@@ -110,6 +110,11 @@ contract HelperConfig is Script {
      *                          wei of its native coin: the most one UserOp may cost.
      * @param sessionGasBudget   Starting SessionHandler.sessionGasBudget, in wei: the most the
      *                          UserOps the owner didn't sign may cost per day, all together.
+     * @param keeperFeeUsd       Starting SHRegistry keeper fee, in USD with 18 decimals: what each
+     *                          recurring payment pays the backend back for sending it. Per chain,
+     *                          because the gas it covers costs very different amounts per chain.
+     * @param minKeeperFeeUsd    Lowest keeper fee the operator may ever set, in USD (18 decimals).
+     * @param maxKeeperFeeUsd    Highest keeper fee the operator may ever set, in USD (18 decimals).
      * @param ethHeartbeat        Chainlink ETH/USD feed heartbeat in seconds (mainnet: 3600)
      * @param usdcHeartbeat       Chainlink USDC/USD feed heartbeat in seconds (mainnet: 82800)
      * @param daiHeartbeat        Chainlink DAI/USD feed heartbeat in seconds (mainnet: 3600)
@@ -212,6 +217,12 @@ contract HelperConfig is Script {
         // See SessionHandler.GasCeilings; the owner can change both on their wallet.
         uint80 maxOpGasCost;
         uint80 sessionGasBudget;
+        // The keeper fee's starting value and bounds, in USD with 18 decimals. DeploySHProtocol
+        // converts them to wei at the chain's native price, as it does the protocol fee. Sized from
+        // the measured gas of one RecurringPaymentModule.run at a busy gas price on this chain.
+        uint256 keeperFeeUsd;
+        uint256 minKeeperFeeUsd;
+        uint256 maxKeeperFeeUsd;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -376,7 +387,12 @@ contract HelperConfig is Script {
             cakeHeartbeat: HEARTBEAT_72H,
             // Gas ceilings (a testnet: generous, nothing real at stake).
             maxOpGasCost: 0.1 ether,
-            sessionGasBudget: 0.5 ether
+            sessionGasBudget: 0.5 ether,
+            // Keeper fee, USD with 18 decimals. A testnet: a low start so test wallets last, and
+            // mainnet's ceiling.
+            keeperFeeUsd: 0.1e18,
+            minKeeperFeeUsd: 0,
+            maxKeeperFeeUsd: 10e18
         });
     }
 
@@ -466,7 +482,12 @@ contract HelperConfig is Script {
             cakeHeartbeat: HEARTBEAT_24H,
             // Gas ceilings (a ~600k-gas swap at ~80 gwei per op; a busy day's worth of ops).
             maxOpGasCost: 0.05 ether,
-            sessionGasBudget: 0.25 ether
+            sessionGasBudget: 0.25 ether,
+            // Keeper fee, USD with 18 decimals. One run is ~200k gas: $1 covers ~1.4 gwei at $3,500/ETH,
+            // the ceiling a busy ~14 gwei.
+            keeperFeeUsd: 1e18,
+            minKeeperFeeUsd: 0.05e18,
+            maxKeeperFeeUsd: 10e18
         });
     }
 
@@ -555,7 +576,12 @@ contract HelperConfig is Script {
             cakeHeartbeat: HEARTBEAT_1H, // BSC CAKE/USD feed heartbeat is 1 min; 1h gives a safety buffer
             // Gas ceilings (BNB, at gas prices of a few gwei at most).
             maxOpGasCost: 0.01 ether,
-            sessionGasBudget: 0.05 ether
+            sessionGasBudget: 0.05 ether,
+            // Keeper fee, USD with 18 decimals. One run is ~200k gas at 0.1-3 gwei: a few cents, with the
+            // ceiling well past a spike.
+            keeperFeeUsd: 0.05e18,
+            minKeeperFeeUsd: 0.005e18,
+            maxKeeperFeeUsd: 1e18
         });
     }
 
@@ -658,7 +684,12 @@ contract HelperConfig is Script {
             cakeHeartbeat: HEARTBEAT_1H,
             // Gas ceilings (an L2: a typical op costs a few hundredths of a cent).
             maxOpGasCost: 0.002 ether,
-            sessionGasBudget: 0.02 ether
+            sessionGasBudget: 0.02 ether,
+            // Keeper fee, USD with 18 decimals. An L2: ~200k gas plus the L1 data fee is a few cents at
+            // most.
+            keeperFeeUsd: 0.03e18,
+            minKeeperFeeUsd: 0.002e18,
+            maxKeeperFeeUsd: 1e18
         });
     }
 
@@ -761,7 +792,12 @@ contract HelperConfig is Script {
             cakeHeartbeat: HEARTBEAT_24H,
             // Gas ceilings (an L2: a typical op costs a few hundredths of a cent, L1 fee included).
             maxOpGasCost: 0.002 ether,
-            sessionGasBudget: 0.02 ether
+            sessionGasBudget: 0.02 ether,
+            // Keeper fee, USD with 18 decimals. An L2: ~200k gas plus the L1 data fee is a few cents at
+            // most.
+            keeperFeeUsd: 0.03e18,
+            minKeeperFeeUsd: 0.002e18,
+            maxKeeperFeeUsd: 1e18
         });
     }
 
@@ -922,7 +958,11 @@ contract HelperConfig is Script {
                 cakeHeartbeat: HEARTBEAT_1H,
                 // Gas ceilings (local: generous, nothing real at stake).
                 maxOpGasCost: 0.1 ether,
-                sessionGasBudget: 0.5 ether
+                sessionGasBudget: 0.5 ether,
+                // Keeper fee, USD with 18 decimals (local: nothing real at stake).
+                keeperFeeUsd: 0.05e18,
+                minKeeperFeeUsd: 0,
+                maxKeeperFeeUsd: 1e18
             });
             return sLocalNetworkConfig;
         }

@@ -62,7 +62,7 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  *      three overrides below reopen a direct-owner path so the owner never has to submit a UserOp for
  *      their own admin actions, and needs no second "owner validator" module. They do NOT all reopen
  *      it the same way:
- *        - {execute} becomes onlyEntryPointOrSelfOrOwner: still reachable through the EntryPoint (that
+ *        - {execute} also accepts the owner directly: still reachable through the EntryPoint (that
  *          is how session keys act at all), with {_guardSessionExecution} restraining non-owner callers.
  *        - {installModule} / {uninstallModule} become onlyOwner, which is strictly TIGHTER than stock.
  *          An owner-signed UserOp arrives as msg.sender == EntryPoint, not the owner, so these are
@@ -167,11 +167,15 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Emitted when a target is removed from the session-key allowlist.
     event AllowedTargetRemoved(address indexed target);
 
-    /// @notice Emitted when a session-key execution pays the protocol fee. Owner-initiated executions
-    ///         pay no fee and emit nothing.
-    /// @param treasury The registry-configured recipient at the time of payment.
-    /// @param fee      The amount paid in wei: the registry's flat fee at the time of payment.
-    event ProtocolFeePaid(address indexed treasury, uint256 fee);
+    /// @notice Emitted when a session-key or executor-module execution pays its fee to the registry's
+    ///         treasury. Owner-initiated executions pay no fee and emit nothing.
+    /// @dev The treasury is not logged: it is always the registry's, so an indexer reads it there. This
+    ///      event is the only on-chain record of fees -- the treasury keeps no running total and its
+    ///      receive() logs nothing.
+    /// @param fee       The protocol fee paid, in wei: the registry's flat fee at the time of payment.
+    /// @param keeperFee The keeper fee paid on top, in wei. Non-zero only on the executor path
+    ///                  ({executeFromExecutor}), and only while the registry's keeper fee is.
+    event ProtocolFeePaid(uint256 fee, uint256 keeperFee);
 
     /*//////////////////////////////////////////////////////////////
                              STATE VARIABLES
@@ -382,9 +386,12 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *                            who signs the deploy owns the wallet.
      * @param walletId            Sequential id assigned by the factory. Bookkeeping only.
      * @param spendingLimitModule SpendingLimitModule to install as MODULE_TYPE_HOOK.
+     * @param recurringPaymentModule RecurringPaymentModule to install as MODULE_TYPE_EXECUTOR.
      * @param dailyLimitUsd       Max USD (18 decimals) spendable per window. Must be >= 0.
      * @param windowDuration      Spending-window length in seconds. Must be > 0.
      * @param watchedTokens       Tokens to meter. Each must already be priced by the oracle.
+     * @param nativeMetered       Whether native ETH/BNB counts toward the USD cap. The owner can change
+     *                            it later with {setNativeMetering}.
      * @param sessionKeyX         X coordinate of the first passkey to authorize. With `sessionKeyY`
      *                            both zero, the wallet starts owner-only and no key is granted.
      * @param sessionKeyY         Y coordinate of that passkey's P-256 public key.
@@ -398,9 +405,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         address owner;
         uint64 walletId;
         address spendingLimitModule;
+        address recurringPaymentModule;
         int256 dailyLimitUsd;
         uint256 windowDuration;
         address[] watchedTokens;
+        bool nativeMetered;
         bytes32 sessionKeyX;
         bytes32 sessionKeyY;
         uint48 sessionKeyValidUntil;
@@ -425,14 +434,22 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         // forge-lint: disable-next-line(unsafe-typecast)
         sessionGasBudget = uint80(DEFAULT_SESSION_GAS_BUDGET);
 
+        // Install the recurring-payment executor, which takes no install data. Every wallet gets it,
+        // but it can move nothing until the OWNER creates a schedule on the module, and every payment
+        // it sends comes back through {executeFromExecutor}: the guard, the fee and the spending cap
+        // all apply. The owner can uninstall it like any module.
+        // BEFORE the hook on purpose: OpenZeppelin wraps every module install in the hook, so
+        // installing it after would run a full preCheck/postCheck on this deploy for nothing.
+        _installModule(MODULE_TYPE_EXECUTOR, cfg.recurringPaymentModule, "");
+
         // Install the spending-limit hook. Its onInstall
-        // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens) tuple, so the config
-        // must be non-empty and valid: windowDuration > 0, dailyLimitUsd >= 0, and every watched
-        // token already priced by the oracle.
+        // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens, nativeMetered) tuple, so
+        // the config must be non-empty and valid: windowDuration > 0, dailyLimitUsd >= 0, and every
+        // watched token already priced by the oracle.
         _installModule(
             MODULE_TYPE_HOOK,
             cfg.spendingLimitModule,
-            abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens)
+            abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens, cfg.nativeMetered)
         );
 
         // Authorize the wallet's first passkey, if one was supplied. Routed through the SAME internal
@@ -469,16 +486,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
                      OWNER DIRECT-CALL ESCAPE HATCH
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Allows the EntryPoint, the account itself (self-call), or the owner directly.
-    modifier onlyEntryPointOrSelfOrOwner() {
-        _onlyEntryPointOrSelfOrOwner();
-        _;
-    }
-
-    function _onlyEntryPointOrSelfOrOwner() internal view {
-        if (msg.sender != owner()) _checkEntryPointOrSelf();
-    }
-
     /**
      * @notice Executes on behalf of the account. Callable by the EntryPoint, the account itself
      *         (via an installed executor), or directly by the owner without a UserOp.
@@ -486,21 +493,20 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      the account's USD spending cap around whatever runs here. For non-owner (session-key)
      *      executions, {_guardSessionExecution} additionally blocks any sub-call to the account's own
      *      admin surface, so a session key cannot uninstall the hook or raise the cap to escape it.
+     * @dev Anyone else reverts with {Account-AccountUnauthorized}. The EntryPoint is compared before the
+     *      owner so a passkey-signed op, which never needs the owner, doesn't pay to read that slot. It
+     *      also means an owner set to the EntryPoint or the account itself stays restricted.
      */
-    function execute(bytes32 mode, bytes calldata executionCalldata)
-        public
-        payable
-        override
-        whenNotPaused
-        onlyEntryPointOrSelfOrOwner
-    {
+    function execute(bytes32 mode, bytes calldata executionCalldata) public payable override whenNotPaused {
         Mode execMode = Mode.wrap(mode);
-        // Owner-initiated calls are unrestricted; any other path (a session-key UserOp via the
-        // EntryPoint, or a self-call) must not be able to reach the account's own admin surface.
-        if (msg.sender != owner()) {
+        // A session-key UserOp via the EntryPoint, or a self-call, must not be able to reach the
+        // account's own admin surface. Owner-initiated calls are unrestricted.
+        if (msg.sender == ENTRY_POINT || msg.sender == address(this)) {
             _guardSessionExecution(execMode, executionCalldata);
 
-            _applyFee();
+            _applyFee(false);
+        } else if (msg.sender != owner()) {
+            revert AccountUnauthorized(msg.sender);
         }
         _execute(execMode, executionCalldata);
     }
@@ -552,6 +558,24 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         SH_MODULE.setWindowDuration(windowDuration);
     }
 
+    /// @notice Turns metering of the native asset (ETH, BNB) on or off, and moves its wrapped form
+    ///         (WETH, WBNB) with it: `wrappedNative` joins the watched list when metering goes on and
+    ///         leaves it when metering goes off. Forwards to SH_MODULE.setNativeMetering, then to
+    ///         addWatchedToken or removeWatchedToken.
+    /// @dev One owner signature for both, because the two belong together: with native metered and
+    ///      the wrapped token not, a wrap is charged as a spend; the other way round, an unwrap is.
+    ///      Admin calls can't be batched through `execute` (see above), so the pairing has to live
+    ///      here. The module itself keeps them independent and knows no wrapped-token address, so the
+    ///      caller names it; address(0) leaves the watched list alone.
+    /// @param metered       True to count native value toward the USD cap; false to leave it out.
+    /// @param wrappedNative The chain's wrapped native token, or address(0) to change the flag only.
+    function setNativeMetering(bool metered, address wrappedNative) external onlyOwner {
+        SH_MODULE.setNativeMetering(metered);
+        if (wrappedNative == address(0)) return;
+        if (metered) SH_MODULE.addWatchedToken(wrappedNative);
+        else SH_MODULE.removeWatchedToken(wrappedNative);
+    }
+
     /// @notice Adds a token to the account's watched (value-metered) list. Forwards to SH_MODULE.addWatchedToken.
     function addWatchedToken(address token) external onlyOwner {
         SH_MODULE.addWatchedToken(token);
@@ -560,6 +584,21 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Removes a token from the account's watched list. Forwards to SH_MODULE.removeWatchedToken.
     function removeWatchedToken(address token) external onlyOwner {
         SH_MODULE.removeWatchedToken(token);
+    }
+
+    /// @notice Caps a token in its own units, or changes its cap. Forwards to SH_MODULE.setTokenCap.
+    function setTokenCap(address token, uint256 limit) external onlyOwner {
+        SH_MODULE.setTokenCap(token, limit);
+    }
+
+    /// @notice Removes a token's cap. Forwards to SH_MODULE.removeTokenCap.
+    function removeTokenCap(address token) external onlyOwner {
+        SH_MODULE.removeTokenCap(token);
+    }
+
+    /// @notice Returns a token's cap and what is left of it in the current window, in its own units.
+    function getTokenCap(address token) external view returns (bool capped, uint256 limit, uint256 remaining) {
+        return SH_MODULE.getTokenCap(address(this), token);
     }
 
     /// @notice Returns the account's full spending-limit config from the module.
@@ -1188,9 +1227,12 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      EntryPoint is on the denylist because `withdrawTo` moves the account's 4337 deposit without
      *      changing `account.balance`, so the hook would meter a $0 spend. See {_guardSessionExecution}.
      * @dev An address with no code passes the allowlist even when it is not listed. A call to it only
-     *      moves native value, which the hook meters like any other outflow; no code runs, so nothing
-     *      can record a debt against the account -- the thing the allowlist exists to stop
-     *      (THREAT_MODEL §3.13). Without this, every contact sent ETH would need an entry of its own.
+     *      moves native value; no code runs, so nothing can record a debt against the account -- the
+     *      thing the allowlist exists to stop (THREAT_MODEL §3.13). Without this, every contact sent
+     *      ETH would need an entry of its own. The hook meters that value like any other outflow only
+     *      while the owner has native metering on. With it off (the owner's choice, see
+     *      {setNativeMetering}) native sent to a plain address is bounded by neither the cap nor this
+     *      list.
      *      Any code at all counts as a contract: an EIP-7702 delegated EOA (its 23-byte designator) and
      *      Arbitrum's system contracts (a one-byte `0xfe` placeholder) are both checked against the
      *      list. Plain precompiles hold no code and pass, but they only compute.
@@ -1213,28 +1255,34 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     }
 
     /**
-     * @dev Pays the protocol fee for one session-key execution. Both the recipient and the amount are
+     * @dev Pays the fee for one session-key or executor execution. The recipient and both amounts are
      *      resolved from the registry per call, never stored here, so a fee or treasury change lands
      *      on every deployed wallet at once.
-     * @dev The amount is a flat wei figure read straight off the registry, with no oracle call, so
+     * @dev The amounts are flat wei figures read straight off the registry, with no oracle call, so
      *      an ERC-20-only execution never touches the native feed and a stale ETH/USD feed does not
-     *      block fee collection. {SHRegistry} packs the fee beside the treasury address, so the two
-     *      calls below cost one storage read between them.
+     *      block fee collection. {SHRegistry-feeConfig} returns the treasury and both fees from one
+     *      packed slot, in one call.
+     * @dev The keeper fee is added only on the executor path: there the protocol's backend sent the
+     *      transaction and paid its gas, and the keeper fee pays that back. A session-key UserOp pays
+     *      its own gas from the wallet's EntryPoint deposit, so it owes no keeper fee.
      * @dev Called BEFORE {_execute}, so the transfer lands outside the hook's preCheck→postCheck
      *      window and is NOT charged against the account's USD spending cap. That is intentional —
      *      the cap meters what the user spends, and a protocol fee is not the user's spend. It does
-     *      mean the fee is native outflow the cap never sees, bounded by {SHRegistry-MAX_PROTOCOL_FEE}
-     *      per execution rather than by the cap.
+     *      mean the fee is native outflow the cap never sees, bounded per execution by
+     *      {SHRegistry-MAX_PROTOCOL_FEE} plus, on the executor path, {SHRegistry-MAX_KEEPER_FEE},
+     *      rather than by the cap.
+     * @param withKeeperFee True on the executor path, to add the registry's keeper fee.
      */
-    function _applyFee() internal {
-        address treasury = REGISTRY.treasury();
-        uint256 fee = REGISTRY.getFee();
-        if (address(this).balance < fee) revert SessionHandler_NotEnoughBalance();
+    function _applyFee(bool withKeeperFee) internal {
+        (address treasury, uint256 fee, uint256 keeperFee) = REGISTRY.feeConfig();
+        if (!withKeeperFee) keeperFee = 0;
+        uint256 total = fee + keeperFee;
+        if (address(this).balance < total) revert SessionHandler_NotEnoughBalance();
         // The recipient is the registry's treasury, set by the protocol's admin, never by the caller.
         // slither-disable-next-line arbitrary-send-eth
-        (bool success,) = treasury.call{value: fee}("");
+        (bool success,) = treasury.call{value: total}("");
         if (!success) revert SessionHandler_TransferFailed();
-        emit ProtocolFeePaid(treasury, fee);
+        emit ProtocolFeePaid(fee, keeperFee);
     }
 
     /**
@@ -1253,8 +1301,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      intents) had no reason to expect a weaker boundary than a session key gets.
      *
      *      No owner branch, unlike {execute}: an executor module is never the owner, which is also why
-     *      {_applyFee} is unconditional here. Guard runs BEFORE the fee so a rejected call is never
-     *      charged.
+     *      {_applyFee} is unconditional here. It adds the registry's keeper fee on this path, since an
+     *      executor's transaction is sent, and its gas paid, by the protocol's backend rather than
+     *      through this wallet's EntryPoint deposit. Guard runs BEFORE the fee so a rejected call is
+     *      never charged.
+     * @dev Every wallet has RecurringPaymentModule installed here from {initialize}. It calls this
+     *      only for a schedule the OWNER created directly on the module, never for one a session key
+     *      could set up -- see that module.
      * @param mode              ERC-7579 execution mode (single / batch / delegatecall).
      * @param executionCalldata The encoded execution, shaped by the mode's CallType.
      * @return returnData       Per-sub-call return data from {_execute}.
@@ -1270,7 +1323,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         Mode execMode = Mode.wrap(mode);
         _guardSessionExecution(execMode, executionCalldata);
 
-        _applyFee();
+        _applyFee(true);
 
         return _execute(execMode, executionCalldata);
     }

@@ -71,7 +71,7 @@ contract SHAdminTest is Test {
         watched[0] = config.usdc;
         vm.prank(owner);
         wallet =
-            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, bytes32(0), bytes32(0), 0, new address[](0))));
+            SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0))));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -270,9 +270,8 @@ contract SHAdminTest is Test {
     function _registryOwnedBy(address admin) internal returns (SHRegistry) {
         return new SHRegistry(
             admin,
-            registry.protocolFee(),
-            registry.MIN_PROTOCOL_FEE(),
-            registry.MAX_PROTOCOL_FEE(),
+            SHRegistry.FeeBounds(registry.protocolFee(), registry.MIN_PROTOCOL_FEE(), registry.MAX_PROTOCOL_FEE()),
+            _deployedKeeperFeeBounds(),
             admin,
             address(oracle),
             config.reputationRegistry,
@@ -282,8 +281,8 @@ contract SHAdminTest is Test {
         );
     }
 
-    function test_treasury_receiveCountsEveryFee() public {
-        uint256 before = treasury.totalFeesCollected();
+    function test_treasury_acceptsPlainEth() public {
+        uint256 before = address(treasury).balance;
         vm.deal(rando, 3 ether);
         vm.startPrank(rando);
         (bool first,) = address(treasury).call{value: 1 ether}("");
@@ -291,7 +290,6 @@ contract SHAdminTest is Test {
         vm.stopPrank();
 
         assertTrue(first && second, "the treasury accepts plain ETH");
-        assertEq(treasury.totalFeesCollected(), before + 3 ether);
         assertEq(address(treasury).balance, before + 3 ether);
     }
 
@@ -723,12 +721,13 @@ contract SHAdminTest is Test {
         uint256 minFee = registry.MIN_PROTOCOL_FEE(); // read before expectRevert, or it latches here
         uint256 maxFee = registry.MAX_PROTOCOL_FEE();
 
+        SHRegistry.FeeBounds memory keeperBounds = _deployedKeeperFeeBounds();
+
         vm.expectRevert(SHRegistry.SHRegistry_InvalidPriceOracle.selector);
         new SHRegistry(
             address(treasury),
-            minFee,
-            minFee,
-            maxFee,
+            SHRegistry.FeeBounds(minFee, minFee, maxFee),
+            keeperBounds,
             address(treasury),
             address(noNative),
             config.reputationRegistry,
@@ -744,13 +743,13 @@ contract SHAdminTest is Test {
         uint256 minFee = registry.MIN_PROTOCOL_FEE(); // read before expectRevert, or it latches here
         uint256 maxFee = registry.MAX_PROTOCOL_FEE();
         address notAnOracle = makeAddr("notAnOracle");
+        SHRegistry.FeeBounds memory keeperBounds = _deployedKeeperFeeBounds();
 
         vm.expectRevert();
         new SHRegistry(
             address(treasury),
-            minFee,
-            minFee,
-            maxFee,
+            SHRegistry.FeeBounds(minFee, minFee, maxFee),
+            keeperBounds,
             address(treasury),
             notAnOracle,
             config.reputationRegistry,
@@ -762,7 +761,8 @@ contract SHAdminTest is Test {
 
     /// @dev The bounds arrive from the deployer, so the registry checks them: a zero floor would
     ///      allow a zero-value fee transfer, an inverted pair leaves no fee settable, and a ceiling
-    ///      past uint96 would truncate when stored in protocolFee.
+    ///      past MAX_STORABLE_FEE would truncate in the uint48-gwei slot. The gwei rules are tested in
+    ///      RegistryFeeTest (this file sits near solc's legacy size limit).
     function test_constructor_rejectsUnusableFeeBounds() public {
         vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
         _registryWithFeeBounds(0, 0, 1e14);
@@ -770,9 +770,9 @@ contract SHAdminTest is Test {
         vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
         _registryWithFeeBounds(2e14, 2e14, 1e14);
 
-        uint256 pastUint96 = uint256(type(uint96).max) + 1;
+        uint256 pastStorable = registry.MAX_STORABLE_FEE() + 1 gwei;
         vm.expectRevert(SHRegistry.SHRegistry_InvalidFeeBounds.selector);
-        _registryWithFeeBounds(1e14, 1e14, pastUint96);
+        _registryWithFeeBounds(1e14, 1e14, pastStorable);
     }
 
     /// @dev The starting fee must sit inside the bounds it is deployed with, both ends inclusive.
@@ -793,11 +793,12 @@ contract SHAdminTest is Test {
         internal
         returns (SHRegistry)
     {
+        // Fixed keeper bounds, not read off the registry: callers put expectRevert right before
+        // this helper, and a registry read would be the call the expectation latches onto.
         return new SHRegistry(
             address(treasury),
-            initialFee,
-            minFee,
-            maxFee,
+            SHRegistry.FeeBounds(initialFee, minFee, maxFee),
+            SHRegistry.FeeBounds(0, 0, 1e15),
             address(treasury),
             address(oracle),
             config.reputationRegistry,
@@ -805,6 +806,12 @@ contract SHAdminTest is Test {
             config.entryPoint,
             0
         );
+    }
+
+    /// @dev The deployed registry's keeper fee and bounds, for tests that build a registry and only
+    ///      care about the protocol fee.
+    function _deployedKeeperFeeBounds() internal view returns (SHRegistry.FeeBounds memory) {
+        return SHRegistry.FeeBounds(registry.keeperFee(), registry.MIN_KEEPER_FEE(), registry.MAX_KEEPER_FEE());
     }
 
     /*//////////////////////////////////////////////////////////////

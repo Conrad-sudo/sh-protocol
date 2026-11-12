@@ -42,6 +42,7 @@ contract SHHandler is Test {
     ERC20Mock public usdc;
     ERC20Mock public dai;
     MockV3Aggregator public usdcFeed;
+    MockV3Aggregator public nativeFeed;
     address public owner;
     address public sink = makeAddr("sink");
 
@@ -50,6 +51,16 @@ contract SHHandler is Test {
     uint48 public ghostWindowStart;
     int256 public ghostLimit;
     uint256 public ghostWindowDuration;
+    /// @dev Whether native counts toward the cap; mirrors the owner's writes like the two above.
+    bool public ghostNativeMetered;
+
+    /// @dev A token with no price feed, capped in its own units while `ghostCapActive`.
+    ERC20Mock public capToken;
+    bool public ghostCapActive;
+    uint256 public ghostCapLimit;
+    uint256 public ghostCapSpent;
+    /// @dev The ghost window `ghostCapSpent` was charged in; any other window means zero spent.
+    uint48 public ghostCapWindowStart;
 
     /// @dev The passkeys the handler draws from. More than the cap of five, so the cap can be hit.
     uint256 public constant POOL_SIZE = 8;
@@ -73,6 +84,7 @@ contract SHHandler is Test {
         ERC20Mock _usdc,
         ERC20Mock _dai,
         MockV3Aggregator _usdcFeed,
+        MockV3Aggregator _nativeFeed,
         address _owner
     ) {
         wallet = _wallet;
@@ -81,6 +93,7 @@ contract SHHandler is Test {
         usdc = _usdc;
         dai = _dai;
         usdcFeed = _usdcFeed;
+        nativeFeed = _nativeFeed;
         owner = _owner;
 
         SpendingLimitModule.Config memory cfg = module.getConfig(address(wallet));
@@ -88,6 +101,10 @@ contract SHHandler is Test {
         ghostWindowStart = cfg.windowStart;
         ghostLimit = cfg.dailyLimitUsd;
         ghostWindowDuration = cfg.windowDuration;
+        ghostNativeMetered = cfg.nativeMetered;
+
+        capToken = new ERC20Mock("Capped", "CAP", 18);
+        capToken.mint(address(_wallet), 1_000_000e18);
 
         for (uint256 i = 0; i < POOL_SIZE; i++) {
             _pool.push(PasskeyHelper.create(string.concat("handler passkey ", vm.toString(i))));
@@ -152,7 +169,7 @@ contract SHHandler is Test {
 
     /// @dev Owner reconfigures the cap; ghost mirrors only successful writes.
     function setDailyLimit(int256 newLimit) public {
-        newLimit = bound(newLimit, 0, int256(1e30));
+        newLimit = bound(newLimit, 0, type(int88).max);
         vm.prank(owner);
         try wallet.setDailyLimit(newLimit) {
             ghostLimit = newLimit;
@@ -168,6 +185,33 @@ contract SHHandler is Test {
         } catch {}
     }
 
+    /// @dev Owner switches native metering; ghost mirrors only successful writes. The watched list is
+    ///      left alone (address(0)), so USDC metering is undisturbed.
+    function setNativeMetering(bool metered) public {
+        vm.prank(owner);
+        try wallet.setNativeMetering(metered, address(0)) {
+            ghostNativeMetered = metered;
+        } catch {}
+    }
+
+    /// @dev Owner-driven native send to a plain address. Metered, it is priced and charged like any
+    ///      outflow and may be refused (budget, or a feed gone stale). Unmetered, nothing is priced,
+    ///      so nothing may refuse it and the tally must not move: only a window roll can change it.
+    function nativeOut(uint256 amount) public {
+        amount = bound(amount, 0, address(wallet).balance);
+        (int256 base, uint48 startAfter) = _ghostBaseAfterRoll();
+        bool priced = ghostNativeMetered && amount != 0;
+        int256 outUsd = priced ? oracle.getPrice(address(0), amount) : int256(0);
+
+        vm.prank(owner);
+        try wallet.execute(bytes32(0), abi.encodePacked(sink, amount, "")) {
+            ghostSpent = base + outUsd;
+            ghostWindowStart = startAfter;
+        } catch {
+            if (!priced) _flag("a native send that is not priced was refused");
+        }
+    }
+
     /// @dev Toggles DAI's watch status (USDC deliberately stays watched forever — see contract dev note).
     function toggleDaiWatched(bool add) public {
         vm.prank(owner);
@@ -178,6 +222,65 @@ contract SHHandler is Test {
         }
     }
 
+    /// @dev Owner caps the token in its own units, or changes the cap. What was spent stays.
+    function setTokenCap(uint256 limit) public {
+        limit = bound(limit, 0, 10_000e18);
+        vm.prank(owner);
+        try wallet.setTokenCap(address(capToken), limit) {
+            ghostCapActive = true;
+            ghostCapLimit = limit;
+        } catch {
+            _flag("setTokenCap reverted on a valid cap");
+        }
+    }
+
+    /// @dev Owner removes the cap, which forgets what was spent.
+    function removeTokenCap() public {
+        vm.prank(owner);
+        wallet.removeTokenCap(address(capToken));
+        ghostCapActive = false;
+        ghostCapLimit = 0;
+        ghostCapSpent = 0;
+    }
+
+    /// @dev Sends the capped token out, and works out beforehand whether that must land. A wrong answer
+    ///      either way is flagged, so a send past the cap can't land and a send within it can't fail.
+    function capTokenOut(uint256 amount) public {
+        amount = bound(amount, 0, 2_000e18);
+        (int256 base, uint48 startAfter) = _ghostBaseAfterRoll();
+        uint256 spentBefore = ghostCapWindowStart == startAfter ? ghostCapSpent : 0;
+        bool mustLand = !ghostCapActive || amount == 0 || spentBefore + amount <= ghostCapLimit;
+
+        bytes memory payload =
+            abi.encodePacked(address(capToken), uint256(0), abi.encodeCall(ERC20Mock.transfer, (sink, amount)));
+        vm.prank(owner);
+        try wallet.execute(bytes32(0), payload) {
+            if (!mustLand) _flag("a send went past a token cap");
+            ghostSpent = base;
+            ghostWindowStart = startAfter;
+            if (ghostCapActive && amount != 0) {
+                ghostCapSpent = spentBefore + amount;
+                ghostCapWindowStart = startAfter;
+            }
+        } catch {
+            if (mustLand) _flag("a send within a token cap reverted");
+        }
+    }
+
+    /// @dev The capped token arrives from outside any execution: it must change nothing.
+    function capTokenIn(uint256 amount) public {
+        amount = bound(amount, 0, 2_000e18);
+        capToken.mint(address(wallet), amount);
+    }
+
+    /// @dev What getTokenCap should report as left, under the module's window rule.
+    function ghostCapRemaining() external view returns (uint256) {
+        if (!ghostCapActive) return 0;
+        bool expired = block.timestamp >= uint256(ghostWindowStart) + ghostWindowDuration;
+        uint256 spent = expired || ghostCapWindowStart != ghostWindowStart ? 0 : ghostCapSpent;
+        return spent >= ghostCapLimit ? 0 : ghostCapLimit - spent;
+    }
+
     /// @dev A non-owner tries to change the cap; must never succeed (ghost intentionally NOT updated,
     ///      so if it ever lands the config-consistency invariant breaks).
     function nonOwnerSetLimit(address caller, int256 newLimit) public {
@@ -186,6 +289,16 @@ contract SHHandler is Test {
         try wallet.setDailyLimit(newLimit) {} catch {}
         vm.prank(caller);
         try module.setDailyLimit(newLimit) {} catch {}
+    }
+
+    /// @dev A non-owner tries to switch native metering, on the wallet and on the module; must never
+    ///      succeed (ghost NOT updated, so a write that lands breaks the config invariant).
+    function nonOwnerSetNativeMetering(address caller, bool metered) public {
+        if (caller == owner || caller == address(wallet)) return;
+        vm.prank(caller);
+        try wallet.setNativeMetering(metered, address(0)) {} catch {}
+        vm.prank(caller);
+        try module.setNativeMetering(metered) {} catch {}
     }
 
     /// @dev Owner grants (or renews) one of the pool's passkeys. The model decides first whether that
@@ -269,12 +382,13 @@ contract SHHandler is Test {
         } catch {}
     }
 
-    /// @dev Advances time (possibly past the window) and refreshes the USDC feed so metering keeps
+    /// @dev Advances time (possibly past the window) and refreshes the USDC and native feeds so metering keeps
     ///      working after the jump; the window-roll logic is what's under test, not feed staleness.
     function warpTime(uint256 secondsForward) public {
         secondsForward = bound(secondsForward, 1, 3 days);
         vm.warp(block.timestamp + secondsForward);
         usdcFeed.updateAnswer(usdcFeed.latestAnswer());
+        nativeFeed.updateAnswer(nativeFeed.latestAnswer());
     }
 
     /*//////////////////////////////////////////////////////////////

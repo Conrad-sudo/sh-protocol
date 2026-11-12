@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {VmSafe} from "forge-std/Vm.sol";
 import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/PackedUserOperation.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
@@ -13,6 +14,7 @@ import {IUniswapV2Factory} from "lib/v2-core/contracts/interfaces/IUniswapV2Fact
 import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.sol";
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
+import {RecurringPaymentModule} from "../../src/RecurringPaymentModule.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
 import {SHRegistry} from "../../src/SHRegistry.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
@@ -98,6 +100,9 @@ abstract contract SHForkTestBase is Test {
         return 0.01 ether;
     }
 
+    /// @dev This chain's listed tokens that really have increaseApproval. None by default.
+    function _tokensWithIncreaseApproval() internal view virtual returns (address[] memory tokens) {}
+
     function _tokenIn() internal view returns (IERC20) {
         return IERC20(_swapPath()[0]);
     }
@@ -145,7 +150,7 @@ abstract contract SHForkTestBase is Test {
         vm.prank(owner);
         wallet = SessionHandler(
             payable(factory.deployWallet(
-                    DAILY_LIMIT, WINDOW, watched, sessionKey.qx, sessionKey.qy, _sessionDeadline(), trustedSpenders
+                    DAILY_LIMIT, WINDOW, watched, true, sessionKey.qx, sessionKey.qy, _sessionDeadline(), trustedSpenders
                 ))
         );
 
@@ -305,6 +310,43 @@ abstract contract SHForkTestBase is Test {
         }
     }
 
+    /// @dev SpendingLimitModule._isPlainSend reads only the sent token on the strength of this: a
+    ///      priced token's `transfer` runs no outside code, so it can move nothing but itself. A new
+    ///      token failing here must not stay priced without changing that function. Both ends have
+    ///      code because a token that treats contracts differently would only show it then.
+    function test_everyConfiguredToken_transferCallsNothingOutside() public {
+        address[22] memory configured = configuredTokens(config);
+        address sender = makeAddr("contractSender");
+        address recipient = makeAddr("contractRecipient");
+        vm.etch(sender, hex"00");
+        vm.etch(recipient, hex"00");
+        for (uint256 i = 0; i < configured.length; i++) {
+            address token = configured[i];
+            if (token == address(0)) continue;
+            uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
+            deal(token, sender, oneToken);
+
+            vm.startStateDiffRecording();
+            vm.prank(sender);
+            // Low-level: some of these (mainnet USDT, BNB) return nothing from transfer.
+            (bool ok,) = token.call(abi.encodeCall(IERC20.transfer, (recipient, oneToken)));
+            VmSafe.AccountAccess[] memory accesses = vm.stopAndReturnStateDiff();
+
+            assertTrue(ok, vm.toString(token));
+            for (uint256 j = 0; j < accesses.length; j++) {
+                assertTrue(accesses[j].account != recipient, string.concat("recipient touched by ", vm.toString(token)));
+                // A proxy may read its beacon and delegatecall its implementation; those run as the token.
+                bool changesState = accesses[j].kind == VmSafe.AccountAccessKind.Call
+                    || accesses[j].kind == VmSafe.AccountAccessKind.CallCode
+                    || accesses[j].kind == VmSafe.AccountAccessKind.Create;
+                assertFalse(
+                    changesState && accesses[j].account != token,
+                    string.concat("outside call from ", vm.toString(token))
+                );
+            }
+        }
+    }
+
     /// @dev Every token this chain's config names gets a live price. The unit suite proves each one
     ///      reaches the oracle, but only against mocks; this is where a feed Chainlink has shut down
     ///      shows up (a proxy whose aggregator is address(0) reverts on every read). A token with a
@@ -349,6 +391,37 @@ abstract contract SHForkTestBase is Test {
         assertEq(_tokenIn().balanceOf(sink), amount);
         assertEq(_spentInWindow(), expectedUsd);
         assertEq(wallet.getRemainingBudget(), DAILY_LIMIT - expectedUsd);
+    }
+
+    /// @notice A recurring payment of a real token: the keeper's run() pays the payee, the hook charges
+    ///         the cap at the oracle's price, and the treasury gets the protocol fee plus the keeper
+    ///         fee. A second run in the same period pays nothing.
+    function test_recurringPayment_paysARealTokenThroughTheHook() public {
+        RecurringPaymentModule recurring = RecurringPaymentModule(feeRegistry.recurringPaymentModule());
+        assertTrue(wallet.isModuleInstalled(2, address(recurring), ""), "wallet deployed without the executor");
+        uint256 amount = _swapAmount();
+        int256 expectedUsd = oracle.getPrice(address(_tokenIn()), amount);
+
+        vm.prank(owner);
+        uint256 id = recurring.createSchedule(address(wallet), address(_tokenIn()), sink, amount, 30 days, 0, 0);
+
+        uint256 sinkBefore = _tokenIn().balanceOf(sink);
+        uint256 treasuryBefore = address(treasury).balance;
+        vm.prank(makeAddr("keeper"));
+        recurring.run(address(wallet), id);
+
+        assertEq(_tokenIn().balanceOf(sink), sinkBefore + amount, "payee not paid");
+        assertEq(_spentInWindow(), expectedUsd, "not metered at the oracle price");
+        assertEq(
+            address(treasury).balance,
+            treasuryBefore + feeRegistry.getFee() + feeRegistry.keeperFee(),
+            "treasury did not get both fees"
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(RecurringPaymentModule.RecurringPayment_NotDue.selector, block.timestamp + 30 days)
+        );
+        recurring.run(address(wallet), id);
     }
 
     function test_budgetExceeded_revertsOnFork() public {
@@ -469,6 +542,53 @@ abstract contract SHForkTestBase is Test {
         assertEq(_spentInWindow(), expected, "native inflow not credited against token outflow");
     }
 
+    /// @notice The same sale on a wallet with native metering OFF is charged the FULL value sold: the
+    ///         native that comes back offsets nothing. This is what stops a watched token being turned
+    ///         into native at no charge and the native then sent out unmetered.
+    function test_nativeUnmetered_sellingForNativeChargesTheFullAmount() public {
+        vm.prank(owner);
+        wallet.setNativeMetering(false, address(0));
+
+        IERC20 tokenSold = _tokenOut(); // watched; sold for native
+        uint256 amtSold = 10 ** IERC20Metadata(address(tokenSold)).decimals();
+        deal(address(tokenSold), address(wallet), amtSold * 1000);
+
+        uint256 ethBefore = address(wallet).balance;
+        uint256 soldBalBefore = tokenSold.balanceOf(address(wallet));
+
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(tokenSold), 0, abi.encodeCall(IERC20.approve, (swapRouter, amtSold)));
+        execs[1] = Execution(swapRouter, 0, _nativeOutSwapCalldata(address(tokenSold), amtSold));
+        vm.prank(owner);
+        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
+
+        uint256 sold = soldBalBefore - tokenSold.balanceOf(address(wallet));
+        assertGt(address(wallet).balance, ethBefore, "no native received");
+        assertEq(_spentInWindow(), oracle.getPrice(address(tokenSold), sold), "a native inflow earned credit");
+    }
+
+    /// @notice With native metering OFF, native spent by a session key is not charged: neither a
+    ///         native-in swap on the real router through the real EntryPoint, nor a plain send. The
+    ///         watched token bought is an inflow, which never adds to the tally.
+    function test_nativeUnmetered_nativeSpendIsNotCharged() public {
+        vm.prank(owner);
+        wallet.setNativeMetering(false, address(0));
+
+        uint256 ethIn = _nativeSwapValue();
+        uint256 outBefore = _tokenOut().balanceOf(address(wallet));
+        PackedUserOperation memory userOp = _sessionOp(swapRouter, ethIn, _nativeInSwapCalldata(ethIn));
+        _handleOps(userOp);
+
+        assertGt(_tokenOut().balanceOf(address(wallet)) - outBefore, 0, "native swap produced no output");
+        assertEq(_spentInWindow(), 0, "native was charged while unmetered");
+
+        vm.prank(owner);
+        wallet.execute(bytes32(0), abi.encodePacked(sink, uint256(1 ether), bytes("")));
+        assertEq(sink.balance, 1 ether);
+        assertEq(_spentInWindow(), 0);
+        assertEq(wallet.getRemainingBudget(), DAILY_LIMIT);
+    }
+
     /// @notice An approval sized above what the swap consumes leaves a residual, and the whole
     ///         transaction must revert with exactly that residual reported.
     function test_standingApprovalAfterSwap_reverts() public {
@@ -495,6 +615,185 @@ abstract contract SHForkTestBase is Test {
                 address(_tokenIn()), uint256(0), abi.encodeCall(IERC20.approve, (swapRouter, type(uint256).max))
             )
         );
+    }
+
+    /// @notice No function on any token this chain lists may leave a spender able to pull the wallet's
+    ///         tokens once the transaction is over: such a pull happens outside any wallet execution,
+    ///         so the hook never sees it and the cap never counts it.
+    /// @dev The list is every allowance-granting function found on the listed tokens by reading their
+    ///      bytecode, proxies followed (2026-11-05). Signatures are spelled out rather than taken from
+    ///      IERC20Extended, so a typo there fails here. Tokens without a function just revert, which
+    ///      passes. Every standing allowance is collected before failing, so one run names them all.
+    ///      A token added to the oracle needs its functions checked the same way (add-network skill).
+    function test_everyConfiguredToken_noCallLeavesAStandingAllowance() public {
+        address spender = makeAddr("standingSpender");
+        uint256 amount = 1e18;
+        // Sandbox's call-forwarding functions require the data's first argument to be the caller, and
+        // the data to be at least two words long.
+        bytes memory forwarded = abi.encodeWithSelector(bytes4(0xdeadbeef), address(wallet), uint256(0));
+
+        bytes[] memory grants = new bytes[](7);
+        grants[0] = abi.encodeWithSignature("approve(address,uint256)", spender, amount);
+        grants[1] = abi.encodeWithSignature("increaseAllowance(address,uint256)", spender, amount);
+        grants[2] = abi.encodeWithSignature("increaseApproval(address,uint256)", spender, amount);
+        grants[3] = abi.encodeWithSignature("approveFor(address,address,uint256)", address(wallet), spender, amount);
+        grants[4] =
+            abi.encodeWithSignature("addAllowanceIfNeeded(address,address,uint256)", address(wallet), spender, amount);
+        grants[5] = abi.encodeWithSignature("approveAndCall(address,uint256,bytes)", spender, amount, forwarded);
+        grants[6] = abi.encodeWithSignature("paidCall(address,uint256,bytes)", spender, amount, forwarded);
+
+        string memory standing;
+        address[22] memory configured = configuredTokens(config);
+        for (uint256 i = 0; i < configured.length; i++) {
+            address token = configured[i];
+            if (token == address(0)) continue;
+            for (uint256 j = 0; j < grants.length; j++) {
+                // Each call starts clean, or one standing allowance would blame every call after it.
+                uint256 clean = vm.snapshotState();
+                vm.prank(owner);
+                try wallet.execute(bytes32(0), abi.encodePacked(token, uint256(0), grants[j])) {} catch {}
+                if (IERC20(token).allowance(address(wallet), spender) != 0) {
+                    standing = string.concat(standing, " ", IERC20Metadata(token).symbol(), ":", vm.toString(j));
+                }
+                vm.revertToState(clean);
+            }
+        }
+        assertEq(bytes(standing).length, 0, string.concat("token:grant index left standing:", standing));
+    }
+
+    /// @notice The tokens that really have increaseApproval hit the standing-approval rule, exact residual
+    ///         and all, so the test above can't pass just because a token lacks the function.
+    function test_increaseApproval_onRealTokens_revertsAsStanding() public {
+        address spender = makeAddr("standingSpender");
+        address[] memory tokens = _tokensWithIncreaseApproval();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            vm.prank(owner);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    SpendingLimitModule.SpendingLimitModule_StandingApprovalNotAllowed.selector,
+                    tokens[i],
+                    spender,
+                    uint256(1e18)
+                )
+            );
+            wallet.execute(
+                bytes32(0),
+                abi.encodePacked(
+                    tokens[i],
+                    uint256(0),
+                    abi.encodeWithSignature("increaseApproval(address,uint256)", spender, uint256(1e18))
+                )
+            );
+        }
+    }
+
+    /// @notice The same refusal for a session key on the real EntryPoint. The op lands and its inner
+    ///         call fails, so the allowance is what shows whether it worked.
+    function test_sessionOp_increaseApprovalLeavesNoAllowance() public {
+        address spender = makeAddr("standingSpender");
+        _handleOps(
+            _sessionOp(config.link, 0, abi.encodeWithSignature("increaseApproval(address,uint256)", spender, 1e18))
+        );
+        assertEq(IERC20(config.link).allowance(address(wallet), spender), 0, "allowance left standing");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                  TOKEN CAPS, ON REAL TOKENS AND POOLS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Moves `token` from the USD limit to a cap in its own units, as an owner would.
+    function _capInItsOwnUnits(address token, uint256 limit) internal {
+        vm.startPrank(owner);
+        wallet.removeWatchedToken(token);
+        wallet.setTokenCap(token, limit);
+        vm.stopPrank();
+    }
+
+    function _capRemaining(address token) internal view returns (uint256 remaining) {
+        (,, remaining) = wallet.getTokenCap(token);
+    }
+
+    /// @notice Buying a token capped in its own units on the real pool: the full amount paid counts
+    ///         against the USD limit, since the token coming in isn't valued, and its own cap is untouched.
+    function test_tokenCap_buyingACappedToken_chargesTheUsdLimitInFull() public {
+        address capped = address(_tokenOut());
+        _capInItsOwnUnits(capped, 1);
+        uint256 amountIn = _swapAmount();
+        uint256 balanceBefore = IERC20(capped).balanceOf(address(wallet));
+
+        vm.prank(owner);
+        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)));
+
+        assertGt(IERC20(capped).balanceOf(address(wallet)), balanceBefore, "the swap bought nothing");
+        assertEq(_spentInWindow(), oracle.getPrice(address(_tokenIn()), amountIn), "not charged in full");
+        assertEq(_capRemaining(capped), 1, "buying used the token's own cap");
+    }
+
+    /// @notice Selling a capped token on the real pool charges its cap by the amount sold and leaves the
+    ///         USD limit alone. Past the cap, the whole trade reverts.
+    function test_tokenCap_sellingACappedToken_chargesItsOwnCapOnly() public {
+        address capped = address(_tokenOut());
+        uint256 oneToken = 10 ** IERC20Metadata(capped).decimals();
+        _capInItsOwnUnits(capped, oneToken * 3 / 2);
+        deal(capped, address(wallet), oneToken * 10);
+        uint256 nativeBefore = address(wallet).balance;
+
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(capped, 0, abi.encodeCall(IERC20.approve, (swapRouter, oneToken)));
+        execs[1] = Execution(swapRouter, 0, _nativeOutSwapCalldata(capped, oneToken));
+        vm.prank(owner);
+        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
+
+        assertGt(address(wallet).balance, nativeBefore, "the swap paid no native");
+        assertEq(_capRemaining(capped), oneToken / 2);
+        assertEq(_spentInWindow(), 0, "selling charged the USD limit");
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_TokenCapExceeded.selector,
+                capped,
+                oneToken * 2,
+                oneToken * 3 / 2
+            )
+        );
+        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(execs));
+    }
+
+    /// @notice A session key on the real EntryPoint is held to the cap on a real token, and a fresh window
+    ///         gives the cap back. LINK stands in for any token with a feed the owner chose to cap this way.
+    function test_tokenCap_sessionKeyIsHeldToItOnRealLink() public {
+        address link = config.link;
+        uint256 limit = 100e18;
+        _capInItsOwnUnits(link, limit);
+        deal(link, address(wallet), 1000e18);
+
+        _handleOps(_sessionOp(link, 0, abi.encodeCall(IERC20.transfer, (sink, limit + 1))));
+        assertEq(IERC20(link).balanceOf(address(wallet)), 1000e18, "went past the cap");
+
+        _handleOps(_sessionOp(link, 0, abi.encodeCall(IERC20.transfer, (sink, limit))));
+        assertEq(IERC20(link).balanceOf(sink), limit, "couldn't spend up to the cap");
+        assertEq(_capRemaining(link), 0);
+        assertEq(_spentInWindow(), 0, "a capped token charged the USD limit");
+
+        vm.warp(block.timestamp + WINDOW);
+        assertEq(_capRemaining(link), limit, "a fresh window didn't give the cap back");
+    }
+
+    /// @notice LINK has transferAndCall and more besides. Capped in its own units, only transfer and the
+    ///         known grants may be aimed at it, whatever the real token offers.
+    function test_tokenCap_refusesOtherCallsOnRealLink() public {
+        address link = config.link;
+        _capInItsOwnUnits(link, 100e18);
+        bytes memory call = abi.encodeWithSignature("transferAndCall(address,uint256,bytes)", sink, 1e18, bytes(""));
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SpendingLimitModule.SpendingLimitModule_CallNotAllowedOnCappedToken.selector, link, bytes4(call)
+            )
+        );
+        wallet.execute(bytes32(0), abi.encodePacked(link, uint256(0), call));
     }
 
     /*//////////////////////////////////////////////////////////////

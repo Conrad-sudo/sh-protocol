@@ -12,6 +12,8 @@ contract SHFactory is Ownable, Pausable {
     error SHFactory_FundTransferFailed();
     /// @dev Thrown by deployWallet when no SpendingLimitModule has been configured yet.
     error SHFactory_SpendingLimitModuleNotSet();
+    /// @dev Thrown by deployWallet when no RecurringPaymentModule has been configured yet.
+    error SHFactory_RecurringPaymentModuleNotSet();
 
     /// @notice The SHRegistry this factory's wallets are wired to. Its EntryPoint and ERC-8004
     ///         registries are baked into {IMPLEMENTATION} at construction; its SpendingLimitModule is
@@ -109,8 +111,8 @@ contract SHFactory is Ownable, Pausable {
     }
 
     /// @notice Deploys a SessionHandler (ERC-7579 account) with spendingLimitModule installed as a
-    ///         hook, seeded with the caller's spending-cap config and first passkey. Reverts if the
-    ///         module isn't set.
+    ///         hook and recurringPaymentModule installed as an executor, seeded with the caller's
+    ///         spending-cap config and first passkey. Reverts if either module isn't set.
     /// @dev Deployed with CREATE2 at a salt derived from (msg.sender, that owner's {deployCount}),
     ///      so the address is known before the transaction is signed -- see {predictWalletAddress}.
     ///      The counter is consumed here, so calling this twice yields two distinct wallets and a
@@ -133,6 +135,8 @@ contract SHFactory is Ownable, Pausable {
     /// @param dailyLimitUsd   Max USD (18 decimals) the wallet may spend per window. Must be >= 0.
     /// @param windowDuration  Spending-window length in seconds. Must be > 0.
     /// @param watchedTokens   Tokens to meter; each must already be priced by the oracle.
+    /// @param nativeMetered   Whether native ETH/BNB counts toward the USD cap. False leaves native
+    ///        outside it; with no watched tokens either, the cap meters nothing until the owner adds some.
     /// @param sessionKeyX     X coordinate of the first passkey's P-256 public key. With
     ///        `sessionKeyY`, both zero, the wallet is owner-only and no passkey is authorized.
     /// @param sessionKeyY     Y coordinate of that public key.
@@ -143,6 +147,7 @@ contract SHFactory is Ownable, Pausable {
         int256 dailyLimitUsd,
         uint256 windowDuration,
         address[] calldata watchedTokens,
+        bool nativeMetered,
         bytes32 sessionKeyX,
         bytes32 sessionKeyY,
         uint48 sessionKeyValidUntil,
@@ -150,6 +155,8 @@ contract SHFactory is Ownable, Pausable {
     ) external payable whenNotPaused returns (address) {
         address module = REGISTRY.spendingLimitModule();
         if (module == address(0)) revert SHFactory_SpendingLimitModuleNotSet();
+        address recurringModule = REGISTRY.recurringPaymentModule();
+        if (recurringModule == address(0)) revert SHFactory_RecurringPaymentModuleNotSet();
 
         bytes32 salt = _salt(msg.sender, deployCount[msg.sender]++);
 
@@ -158,7 +165,7 @@ contract SHFactory is Ownable, Pausable {
 
         // Bookkeeping BEFORE the external initialize() call (checks-effects-interactions). The
         // wallet's own address is fixed by CREATE2, so writing it early is safe. This matters
-        // because initialize() calls the registry-configured module, which the operator can change:
+        // because initialize() calls the registry-configured modules, which the operator can change:
         // a module that re-entered deployWallet would otherwise read a stale totalWallets and give
         // two wallets the same walletId, losing one from `wallets` and leaving the counter short.
         // No such module exists today; this removes the dependency on that staying true.
@@ -171,9 +178,11 @@ contract SHFactory is Ownable, Pausable {
                     owner: msg.sender,
                     walletId: walletId,
                     spendingLimitModule: module,
+                    recurringPaymentModule: recurringModule,
                     dailyLimitUsd: dailyLimitUsd,
                     windowDuration: windowDuration,
                     watchedTokens: watchedTokens,
+                    nativeMetered: nativeMetered,
                     sessionKeyX: sessionKeyX,
                     sessionKeyY: sessionKeyY,
                     sessionKeyValidUntil: sessionKeyValidUntil,

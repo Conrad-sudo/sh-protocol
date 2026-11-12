@@ -10,14 +10,15 @@ import {SHOracle} from "./SHOracle.sol";
  * @title SHRegistry
  * @author Conrad Japhet
  * @notice Central configuration registry for the SessionHandler Protocol. Stores the
- *         protocol fee, treasury address, price oracle, and agent identity used across all
- *         deployed SessionHandler wallets.
- * @dev SessionHandler wallets read the MUTABLE parameters here (fee, treasury, price oracle, agent
+ *         protocol fee, keeper fee, treasury address, price oracle, and agent identity used across
+ *         all deployed SessionHandler wallets.
+ * @dev SessionHandler wallets read the MUTABLE parameters here (fees, treasury, price oracle, agent
  *      id) at execution time rather than storing them, so an update propagates instantly to every
  *      deployed wallet without redeployment. Two kinds of address do not work that way: the
  *      EntryPoint and both ERC-8004 registries are immutable here and baked into the SessionHandler
- *      implementation by SHFactory, and the SpendingLimitModule is copied into each wallet when it is
- *      deployed, so changing it only affects wallets deployed afterwards.
+ *      implementation by SHFactory, and the two modules (SpendingLimitModule, RecurringPaymentModule)
+ *      are installed into each wallet when it is deployed, so changing either only affects wallets
+ *      deployed afterwards.
  *
  *      The protocol fee is a flat amount of native token, in wei, and is charged as stored — no
  *      oracle read on the fee path. That keeps a session execution from paying for a Chainlink read
@@ -34,18 +35,32 @@ import {SHOracle} from "./SHOracle.sol";
  *      targets through each chain's native price at deploy time. They are immutable, and so drift
  *      in dollar terms as the native price moves; the gap between them is what leaves the operator
  *      room to keep the fee where it wants within them.
+ *
+ *      The KEEPER fee is a second flat amount, charged on top of the protocol fee only when an
+ *      executor module (RecurringPaymentModule) runs a payment. The protocol's own backend sends that
+ *      transaction and pays its gas, and the keeper fee pays it back through the treasury. It has its
+ *      own immutable bounds, [MIN_KEEPER_FEE, MAX_KEEPER_FEE], and unlike the protocol fee its floor
+ *      may be zero: it is never transferred on its own.
+ *
+ *      Both fees are stored in GWEI, as uint48s, so they share one slot with {treasury}: the wallet's
+ *      fee path reads all three in one storage read via {feeConfig}. Everything outside the contract
+ *      stays in wei -- the setters take wei, the getters return wei -- and a fee must be a whole number
+ *      of gwei. That costs no useful precision: a $0.01 fee is thousands of gwei on every chain.
  */
 contract SHRegistry is Ownable {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Thrown when a proposed protocolFee falls outside [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE].
+    /// @dev Thrown when a proposed fee falls outside its bounds: [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE]
+    ///      for the protocol fee, [MIN_KEEPER_FEE, MAX_KEEPER_FEE] for the keeper fee.
     error SHRegistry_FeeNotInRange();
-    /// @dev Thrown at construction when the fee bounds are unusable: a zero floor (which would allow
-    ///      a zero-value fee transfer), a floor above the ceiling, or a ceiling past uint96, the
-    ///      width {protocolFee} is stored in.
+    /// @dev Thrown at construction when a pair of fee bounds is unusable: a floor above the ceiling, a
+    ///      ceiling past {MAX_STORABLE_FEE}, a bound that is not a whole number of gwei, or -- for the
+    ///      protocol fee only -- a zero floor, which would allow a zero-value fee transfer.
     error SHRegistry_InvalidFeeBounds();
+    /// @dev Thrown when a fee is not a whole number of gwei, the unit fees are stored in.
+    error SHRegistry_FeeNotWholeGwei(uint256 fee);
     /// @dev Thrown when address(0) is passed as the treasury address.
     error SHRegistry_InvalidTreasury();
     /// @dev Thrown when address(0) is passed as the price oracle address.
@@ -59,6 +74,8 @@ contract SHRegistry is Ownable {
     error SHRegistry_InvalidFactory();
     /// @dev Thrown when address(0) is passed as the SpendingLimitModule address.
     error SHRegistry_InvalidSpendingLimitModule();
+    /// @dev Thrown when address(0) is passed as the RecurringPaymentModule address.
+    error SHRegistry_InvalidRecurringPaymentModule();
     /// @dev Thrown when address(0) is passed as the ERC-8004 Identity Registry address.
     error SHRegistry_InvalidIdentityRegistry();
     /// @dev Thrown when address(0) is passed as the Reputation Registry address.
@@ -80,6 +97,18 @@ contract SHRegistry is Ownable {
     /// @notice Minimum protocol fee that can ever be set, in wei. Guarantees SessionHandler's fee
     ///         transfer is never a zero-value call, so the fee path always records value.
     uint256 public immutable MIN_PROTOCOL_FEE;
+
+    /// @notice Maximum keeper fee that can ever be set, in wei. Immutable for the same reason as
+    ///         {MAX_PROTOCOL_FEE}: no owner action, including a compromised key, can raise it.
+    uint256 public immutable MAX_KEEPER_FEE;
+
+    /// @notice Minimum keeper fee that can ever be set, in wei. May be zero: the keeper fee is only
+    ///         ever added to the protocol fee, which is never zero, so no zero-value transfer results.
+    uint256 public immutable MIN_KEEPER_FEE;
+
+    /// @notice Largest fee the gwei storage can hold, in wei: type(uint48).max gwei, about 281,000
+    ///         ETH. Both fee ceilings must fit under it.
+    uint256 public constant MAX_STORABLE_FEE = uint256(type(uint48).max) * 1 gwei;
 
     /// @notice Delay between proposing an oracle change and being able to commit it.
     /// @dev The oracle governs every wallet's spending cap, so a repoint is the single highest-impact
@@ -117,13 +146,24 @@ contract SHRegistry is Ownable {
     ///      they were initialized with, since SessionHandler copies it into its own storage.
     address public spendingLimitModule;
 
+    /// @notice RecurringPaymentModule installed as an EXECUTOR on every SessionHandler deployed from
+    ///         here on.
+    /// @dev Settable, like {spendingLimitModule}, and with the same reach: changing it only affects
+    ///      wallets deployed afterwards, since each wallet installs the module current at its deploy.
+    ///      SHFactory.deployWallet reverts while it is unset. An executor can MOVE the wallet's funds
+    ///      (within the guard and the spending cap), where a hook can only refuse, so this setter is
+    ///      the more sensitive of the two: whoever controls it chooses the executor new wallets get.
+    address public recurringPaymentModule;
+
     /// @notice Address that receives protocol fees collected by SessionHandler wallets.
     address public treasury;
-    /// @notice Fee in wei charged on every session-key execution across all wallets.
-    /// @dev uint96 so it shares a slot with {treasury}: SessionHandler's fee path reads both on every
-    ///      session-key execution, and packed they cost one storage read instead of two. The value is
-    ///      bounded by {MAX_PROTOCOL_FEE}, which the constructor caps at uint96's maximum.
-    uint96 public protocolFee;
+    /// @dev The protocol fee, in GWEI. Read through {protocolFee}, {getFee} or {feeConfig}, which all
+    ///      return wei. uint48 so it and {_keeperFeeGwei} share a slot with {treasury}: SessionHandler's
+    ///      fee path reads all three on every execution that pays a fee, in one storage read.
+    uint48 private _protocolFeeGwei;
+    /// @dev The keeper fee, in GWEI, charged on top of the protocol fee when an executor module runs a
+    ///      payment. Read through {keeperFee} or {feeConfig}, which return wei.
+    uint48 private _keeperFeeGwei;
 
     /// @notice The SHFactory that deploys SessionHandler wallets against this registry.
     /// @dev Recorded for off-chain discoverability — no contract here reads it. Set after deployment
@@ -185,6 +225,35 @@ contract SHRegistry is Ownable {
     /// @param newModule The new module.
     event SpendingLimitModuleUpdated(address indexed oldModule, address indexed newModule);
 
+    /// @notice Emitted when the keeper fee is updated.
+    /// @param oldFee The previous fee, in wei.
+    /// @param newFee The new fee, in wei.
+    event KeeperFeeUpdated(uint256 oldFee, uint256 newFee);
+
+    /// @notice Emitted when the RecurringPaymentModule for future wallet deployments changes.
+    /// @param oldModule The previous module.
+    /// @param newModule The new module.
+    event RecurringPaymentModuleUpdated(address indexed oldModule, address indexed newModule);
+
+    /*//////////////////////////////////////////////////////////////
+                                  TYPES
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice A fee's starting value and the bounds it may ever be set within, all in wei and each a
+     *         whole number of gwei. A struct so the constructor names every figure and stays clear of
+     *         the stack limit.
+     * @param initial Starting fee. Must be within [min, max].
+     * @param min     Lowest fee the owner may ever set.
+     * @param max     Highest fee the owner may ever set. Must be at least `min` and at most
+     *                {MAX_STORABLE_FEE}.
+     */
+    struct FeeBounds {
+        uint256 initial;
+        uint256 min;
+        uint256 max;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -198,18 +267,17 @@ contract SHRegistry is Ownable {
      * @dev The SpendingLimitModule is deliberately NOT taken here — see {spendingLimitModule} for
      *      why it cannot be (the module's own constructor reads this registry, so the registry must
      *      exist first). The deploy script sets it right after; SHFactory refuses to deploy wallets
-     *      until it is set.
+     *      until it is set. The RecurringPaymentModule is set the same way, for symmetry: both modules
+     *      a wallet installs come from the same kind of setter.
      * @dev Rejects an initial oracle that cannot price native, the same check {proposePriceOracle}
      *      makes on a replacement. SpendingLimitModule meters the account's native balance delta, so
      *      an oracle without it would revert every native-moving execution on every deployed wallet;
      *      it is caught at construction rather than at the first user transaction. It also rejects
      *      any address with no isPriced() to call, catching a wrong-network or mistyped oracle address.
      * @param initialOwner       Address that will own this registry — the SHTreasury.
-     * @param initialFee         Starting protocol fee, in wei. Must be within
-     *        [minProtocolFee, maxProtocolFee].
-     * @param minProtocolFee     Lowest fee the owner may ever set, in wei. Must be non-zero.
-     * @param maxProtocolFee     Highest fee the owner may ever set, in wei. Must be at least
-     *        `minProtocolFee` and fit in a uint96.
+     * @param protocolFeeBounds  Starting protocol fee and its bounds. See {FeeBounds}; `min` must be
+     *        non-zero.
+     * @param keeperFeeBounds    Starting keeper fee and its bounds. See {FeeBounds}; `min` may be zero.
      * @param initialTreasury    Address that will receive protocol fees. Must not be address(0).
      * @param initialOracle      Address of the deployed SHOracle. Must not be address(0), and must be
      *        able to price native — see the native-feed check below.
@@ -221,9 +289,8 @@ contract SHRegistry is Ownable {
      */
     constructor(
         address initialOwner,
-        uint256 initialFee,
-        uint256 minProtocolFee,
-        uint256 maxProtocolFee,
+        FeeBounds memory protocolFeeBounds,
+        FeeBounds memory keeperFeeBounds,
         address initialTreasury,
         address initialOracle,
         address reputationRegistry,
@@ -231,12 +298,9 @@ contract SHRegistry is Ownable {
         address entryPointAddress,
         uint256 initialAgentId
     ) Ownable(initialOwner) {
-        if (minProtocolFee == 0 || minProtocolFee > maxProtocolFee || maxProtocolFee > type(uint96).max) {
-            revert SHRegistry_InvalidFeeBounds();
-        }
-        if (initialFee > maxProtocolFee || initialFee < minProtocolFee) {
-            revert SHRegistry_FeeNotInRange();
-        }
+        if (protocolFeeBounds.min == 0) revert SHRegistry_InvalidFeeBounds();
+        _checkFeeBounds(protocolFeeBounds);
+        _checkFeeBounds(keeperFeeBounds);
         if (initialTreasury == address(0)) revert SHRegistry_InvalidTreasury();
         if (initialOracle == address(0)) revert SHRegistry_InvalidPriceOracle();
         if (!SHOracle(initialOracle).isPriced(address(0))) revert SHRegistry_InvalidPriceOracle();
@@ -246,11 +310,12 @@ contract SHRegistry is Ownable {
         IDENTITY_REGISTRY = identityRegistry;
         REPUTATION_REGISTRY = reputationRegistry;
         ENTRY_POINT = entryPointAddress;
-        MIN_PROTOCOL_FEE = minProtocolFee;
-        MAX_PROTOCOL_FEE = maxProtocolFee;
-        // Safe: range-checked above, and the ceiling was checked to fit uint96.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        protocolFee = uint96(initialFee);
+        MIN_PROTOCOL_FEE = protocolFeeBounds.min;
+        MAX_PROTOCOL_FEE = protocolFeeBounds.max;
+        MIN_KEEPER_FEE = keeperFeeBounds.min;
+        MAX_KEEPER_FEE = keeperFeeBounds.max;
+        _protocolFeeGwei = _toGwei(protocolFeeBounds.initial);
+        _keeperFeeGwei = _toGwei(keeperFeeBounds.initial);
         treasury = initialTreasury;
         priceOracle = initialOracle;
         agentId = initialAgentId;
@@ -265,16 +330,29 @@ contract SHRegistry is Ownable {
      * @dev Takes effect protocol-wide on the next execution — wallets read the fee from here rather
      *      than storing it. The value is wei, so its dollar value moves with the native price; this is
      *      how the operator brings it back in line.
-     * @param newFee The new fee, in wei. Must be within
-     *        [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE].
+     * @param newFee The new fee, in wei. Must be within [MIN_PROTOCOL_FEE, MAX_PROTOCOL_FEE] and a
+     *        whole number of gwei.
      */
     function setProtocolFee(uint256 newFee) external onlyOwner {
         if (newFee > MAX_PROTOCOL_FEE || newFee < MIN_PROTOCOL_FEE) revert SHRegistry_FeeNotInRange();
-        uint256 oldFee = protocolFee;
-        // Safe: range-checked above, and the constructor capped MAX_PROTOCOL_FEE at uint96.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        protocolFee = uint96(newFee);
+        uint256 oldFee = protocolFee();
+        _protocolFeeGwei = _toGwei(newFee);
         emit ProtocolFeeUpdated(oldFee, newFee);
+    }
+
+    /**
+     * @notice Updates the keeper fee charged, on top of the protocol fee, each time an executor module
+     *         runs a payment. Only callable by the owner.
+     * @dev Takes effect protocol-wide on the next executor run, like {setProtocolFee}. The keeper's
+     *      cost is gas, which differs per chain and over time; this is how the operator follows it.
+     * @param newFee The new fee, in wei. Must be within [MIN_KEEPER_FEE, MAX_KEEPER_FEE] and a whole
+     *        number of gwei.
+     */
+    function setKeeperFee(uint256 newFee) external onlyOwner {
+        if (newFee > MAX_KEEPER_FEE || newFee < MIN_KEEPER_FEE) revert SHRegistry_FeeNotInRange();
+        uint256 oldFee = keeperFee();
+        _keeperFeeGwei = _toGwei(newFee);
+        emit KeeperFeeUpdated(oldFee, newFee);
     }
 
     /**
@@ -316,6 +394,22 @@ contract SHRegistry is Ownable {
         address oldModule = spendingLimitModule;
         spendingLimitModule = newModule;
         emit SpendingLimitModuleUpdated(oldModule, newModule);
+    }
+
+    /**
+     * @notice Sets the RecurringPaymentModule installed as an executor on wallets deployed from this
+     *         point on. Only callable by the owner.
+     * @dev Does NOT touch wallets already deployed: each keeps the executor it installed at deploy,
+     *      and only its owner can uninstall it. See {recurringPaymentModule} for why this is the more
+     *      sensitive of the two module setters.
+     * @param newModule The deployed RecurringPaymentModule address. Must not be address(0); to halt
+     *        deployments, pause the factory instead.
+     */
+    function setRecurringPaymentModule(address newModule) external onlyOwner {
+        if (newModule == address(0)) revert SHRegistry_InvalidRecurringPaymentModule();
+        address oldModule = recurringPaymentModule;
+        recurringPaymentModule = newModule;
+        emit RecurringPaymentModuleUpdated(oldModule, newModule);
     }
 
     /**
@@ -387,11 +481,59 @@ contract SHRegistry is Ownable {
 
     /**
      * @notice The protocol fee for one session-key execution, in wei.
-     * @dev What SessionHandler transfers to the treasury. Read per call, so a {setProtocolFee} lands on
-     *      every wallet at once. Makes no oracle call, so it cannot revert on a stale feed.
+     * @dev Same value as {protocolFee}; kept because the app's quotes read it by this name. Makes no
+     *      oracle call, so it cannot revert on a stale feed.
      * @return The fee in wei.
      */
     function getFee() external view returns (uint256) {
-        return protocolFee;
+        return protocolFee();
+    }
+
+    /// @notice The protocol fee for one session-key execution, in wei.
+    function protocolFee() public view returns (uint256) {
+        return uint256(_protocolFeeGwei) * 1 gwei;
+    }
+
+    /// @notice The keeper fee added to the protocol fee when an executor module runs a payment, in wei.
+    function keeperFee() public view returns (uint256) {
+        return uint256(_keeperFeeGwei) * 1 gwei;
+    }
+
+    /**
+     * @notice Everything SessionHandler's fee path needs, in one call and one storage read.
+     * @dev The three values share a slot. Read per call, so a fee or treasury change lands on every
+     *      wallet at once.
+     * @return feeRecipient The treasury the fees are sent to.
+     * @return protocolFee_  The protocol fee, in wei.
+     * @return keeperFee_    The keeper fee, in wei. A wallet adds it only on the executor path.
+     */
+    function feeConfig() external view returns (address feeRecipient, uint256 protocolFee_, uint256 keeperFee_) {
+        return (treasury, uint256(_protocolFeeGwei) * 1 gwei, uint256(_keeperFeeGwei) * 1 gwei);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                INTERNAL
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Reverts unless `bounds` is usable: min <= initial <= max <= {MAX_STORABLE_FEE}, and both
+    ///      bounds whole gwei (`initial` is checked for that when it is stored). The protocol fee's
+    ///      non-zero floor is checked by the caller.
+    function _checkFeeBounds(FeeBounds memory bounds) private pure {
+        if (
+            bounds.min > bounds.max || bounds.max > MAX_STORABLE_FEE || bounds.min % 1 gwei != 0
+                || bounds.max % 1 gwei != 0
+        ) {
+            revert SHRegistry_InvalidFeeBounds();
+        }
+        if (bounds.initial > bounds.max || bounds.initial < bounds.min) revert SHRegistry_FeeNotInRange();
+    }
+
+    /// @dev Converts a wei fee to the gwei it is stored in. Callers range-check first, against a
+    ///      ceiling no higher than {MAX_STORABLE_FEE}, so the result always fits a uint48.
+    function _toGwei(uint256 fee) private pure returns (uint48) {
+        if (fee % 1 gwei != 0) revert SHRegistry_FeeNotWholeGwei(fee);
+        // Safe: fee <= MAX_STORABLE_FEE = type(uint48).max gwei, checked by every caller's range check.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint48(fee / 1 gwei);
     }
 }
