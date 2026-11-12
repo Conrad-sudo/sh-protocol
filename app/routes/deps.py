@@ -3,6 +3,7 @@ What every router shares: the rate limiter, resolving the chain a request names,
 caller's wallet, and turning a failed transaction or a revert into a message a user can act on.
 """
 import logging
+import time
 
 from dotenv import load_dotenv
 from eth_utils import to_hex
@@ -37,10 +38,28 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 
 
-# How long a granted session key lasts when the client sends no ttl (30 days). SessionHandler caps
-# any grant at its own MAX_SESSION_TTL; this is the shorter figure the app actually asks for, so a
-# key nobody renews dies on its own. Renewal is one owner-signed transaction.
-DEFAULT_SESSION_TTL_SECS = 30 * 86_400
+# How long a passkey's approval lasts when the client sends no ttl: 90 days, which is also what the
+# site asks for and the longest SessionHandler allows (its MAX_SESSION_TTL). A key nobody renews
+# still dies on its own. Renewal is one owner-signed transaction.
+DEFAULT_SESSION_TTL_SECS = 90 * 86_400
+
+
+def session_deadline(w3: Web3, ttl_secs: int) -> int:
+    """
+    The Unix second a passkey approved now, for `ttl_secs`, runs out at.
+
+    Counted from the EARLIER of this server's clock and the chain's latest block. The wallet refuses
+    a deadline more than MAX_SESSION_TTL past the block the approval lands in (SessionTtlTooLong),
+    and the site asks for exactly that maximum. A block's timestamp trails the server's clock -- by
+    a slot on a live chain, by far more on a fork left idle -- so a deadline counted from the clock
+    alone sits past the ceiling when the transaction is simulated, and the approval is refused.
+    Counted from the block it sits exactly on the ceiling there, and any later block only leaves
+    more room.
+
+    @param w3        A Web3 bound to the chain the approval is for.
+    @param ttl_secs  How long the approval should last.
+    """
+    return min(int(time.time()), w3.eth.get_block("latest")["timestamp"]) + ttl_secs
 
 
 # SpendingLimitModule's cap is an 18-decimal USD value. The API takes whole dollars and scales here,

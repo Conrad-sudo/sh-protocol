@@ -4,7 +4,7 @@ What this server offers, public and RPC-free: the chains it serves and the token
 from fastapi import APIRouter, HTTPException, status
 
 from constants import (
-    get_always_counted_ticker,
+    get_follows_native_ticker,
     get_default_spenders,
     get_exchange,
     get_native_asset_ticker,
@@ -82,14 +82,15 @@ def list_tokens(chain_id: int):
     Deliberately does NOT go through _resolve_chain: listing tokens needs no RPC, and a fork shares
     its parent's token table, so the fork/live distinction cannot change the answer.
 
-    `always_counted` marks the wrapped native token (WETH, WBNB): every new wallet counts it, like
-    the native asset it wraps, so the picker shows it ticked and locked (see /api/deploy).
+    `follows_native` marks the wrapped native token (WETH, WBNB): it counts toward the limit exactly
+    when the native asset does, so the picker doesn't offer it. The deploy screen's one switch for
+    the native asset covers both (DeployRequest.count_native, see /api/deploy).
 
-    @return  {"chain_id", "tokens": [{"ticker", "address", "always_counted"}, ...]}.
+    @return  {"chain_id", "tokens": [{"ticker", "address", "follows_native"}, ...]}.
     """
     try:
         tokens = get_supported_tokens_by_chain_id(chain_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    always = get_always_counted_ticker(chain_id)
-    return {"chain_id": chain_id, "tokens": [{**t, "always_counted": t["ticker"] == always} for t in tokens]}
+    follower = get_follows_native_ticker(chain_id)
+    return {"chain_id": chain_id, "tokens": [{**t, "follows_native": t["ticker"] == follower} for t in tokens]}

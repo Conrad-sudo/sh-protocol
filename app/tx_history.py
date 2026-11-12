@@ -274,6 +274,17 @@ def describe_wallet_tx(w3: Web3, user_id: int, chain_id: int, wallet, tx) -> str
         return f"Count {_token(w3, user_id, chain_id, args['token'])[0]} toward the limit"
     if name == "removeWatchedToken":
         return f"Stop counting {_token(w3, user_id, chain_id, args['token'])[0]} toward the limit"
+    if name == "setNativeMetering":
+        # The wrapped token moves with it (see the wallet's setNativeMetering), so one line names both.
+        wrapped = args["wrappedNative"]
+        both = native if int(wrapped, 16) == 0 else f"{native} and {_token(w3, user_id, chain_id, wrapped)[0]}"
+        return f"Count {both} toward the limit" if args["metered"] else f"Stop counting {both} toward the limit"
+    if name == "setTokenCap":
+        ticker, decimals = _token(w3, user_id, chain_id, args["token"])
+        amount = _amount(args["limit"], decimals) if decimals is not None else f"{args['limit']} base units"
+        return f"Limit {ticker} to {amount} per period"
+    if name == "removeTokenCap":
+        return f"Remove the limit on {_token(w3, user_id, chain_id, args['token'])[0]}"
     if name == "setDailyLimit":
         return f"Set the spending limit to {_usd(args['dailyLimitUsd'])}"
     if name == "setWindowDuration":
@@ -373,6 +384,12 @@ def _who(user_id: int, address: str) -> str:
     if user and user.get("owner_addr") and Web3.to_checksum_address(user["owner_addr"]) == address:
         return "your owner address"
     return _short(address)
+
+
+# For recurring.py, which words schedules the way this module words transactions.
+token_label = _token
+recipient_label = _who
+amount_text = _amount
 
 
 def _spender(chain_id: int, address: str) -> str:

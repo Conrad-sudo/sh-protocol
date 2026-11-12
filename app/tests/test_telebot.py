@@ -1159,6 +1159,27 @@ def test_read_commands():
         check("/limit: what's left, per what, and when the devices' approval runs out",
               replies == [f"<b>Base</b>\n\nSpending limit: $80.00 left of $100.00 per day.\n"
                           f"Your devices' approval runs out on {until.day} {until:%b %Y}."], str(replies))
+        status["token_limits"] = [{"token": "LINK", "limit": 150.0, "remaining": 50.0}]
+        replies, _ = run(telebot.limit_cmd, 8001)
+        check("/limit: a token's own limit gets its own line", "LINK limit: 50 left of 150 per day." in replies[0], str(replies))
+        # A wallet that counts nothing has no USD limit, whatever figure is stored (0 if the owner
+        # skipped it at deploy): say so, never "$0.00 left of $0.00". A token's own limit still shows.
+        status.update(limit_applies=False, daily_limit_usd=0.0, remaining_usd=0.0)
+        replies, _ = run(telebot.limit_cmd, 8001)
+        check("/limit: with nothing counted, it says there is no limit",
+              "Spending limit: none. Nothing counts toward one on this wallet." in replies[0]
+              and "$0.00" not in replies[0], str(replies))
+        check("...and a token's own limit is still listed", "LINK limit: 50 left of 150 per day." in replies[0], str(replies))
+        # Spent down while things still counted, then everything was switched off: nothing to warn of.
+        spent_down = {**status, "daily_limit_usd": 100.0, "remaining_usd": 1.0}
+        check("...with no low-budget warning for a limit that binds nothing",
+              telebot.wallet_warnings(spent_down, "Base", int(time.time())) == [],
+              str(telebot.wallet_warnings(spent_down, "Base", int(time.time()))))
+        check("...which the same figures do warn of once something counts again",
+              any("Low spending budget" in w for w in
+                  telebot.wallet_warnings({**spent_down, "limit_applies": True}, "Base", int(time.time()))))
+        status.update(limit_applies=True, daily_limit_usd=100.0, remaining_usd=80.0)
+        del status["token_limits"]
         status.update(paused=True, session_expires_at=int(time.time()) + 86_400 + 600)
         replies, _ = run(telebot.limit_cmd, 8001)
         check("a pause, and a key running out soon, get their warnings instead",
@@ -1167,8 +1188,8 @@ def test_read_commands():
         status.update(session_active=False)
         replies, _ = run(telebot.limit_cmd, 8001)
         check("no device approved says so", "None of your devices is approved" in replies[0], str(replies))
-        check("windows read naturally", [telebot._window(h) for h in (24, 168, 1, 12, 36)]
-              == ["per day", "per 7 days", "per hour", "per 12 hours", "per 36 hours"])
+        check("windows read naturally", [telebot._window(h) for h in (24, 168, 1, 12, 36, 720)]
+              == ["per day", "per 7 days", "per hour", "per 12 hours", "per 36 hours", "per 30 days"])
 
         now = int(time.time())
         db.add_transaction(user, BASE, WALLET, "assistant", "Transfer 10 USDC to 0xabc", "confirmed",

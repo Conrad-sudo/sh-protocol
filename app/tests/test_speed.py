@@ -15,7 +15,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from checks import check, finish   # first: it puts app/ on sys.path for the imports below
+from checks import check, finish, set_everywhere   # first: it puts app/ on sys.path for the imports below
 
 from langchain_core.tools import ToolException   # noqa: E402
 from web3.providers.rpc import HTTPProvider       # noqa: E402
@@ -107,8 +107,10 @@ class FakeWallet:
     """
 
     def __init__(self, watched=(), paused=False, active=True, valid_for=10**6, remaining=100, broken=(),
-                 native=10 * WEI):
+                 native=10 * WEI, native_metered=True):
         self.watched, self.broken = set(watched), set(broken)
+        # Whether the wallet counts the native asset (Config.nativeMetered), and how often that was read.
+        self.native_metered, self.config_reads = native_metered, 0
         self.state = {"paused": paused, "active": active, "valid_until": int(time.time()) + valid_for,
                       "remaining": remaining * WEI}
         self.functions = self
@@ -133,6 +135,9 @@ class FakeWallet:
     def isWatched(self, address):
         return self._call(address in self.watched)
 
+    def getTokenCap(self, address):
+        return self._call((False, 0, 0))
+
     def getUsdValue(self, address, amount):
         def read():
             if address in self.broken:
@@ -153,8 +158,22 @@ def leg(token, amount, direction, address=None, decimals=18, unlisted=False, bal
     return tools.common._Leg(token, amount, direction, address or tools.common.ETH_SENTINEL, contract, unlisted, token.upper())
 
 
+def _fake_config(wallet: FakeWallet) -> dict:
+    """read_spending_config for a FakeWallet: the one field the wallet checks take from it."""
+    wallet.config_reads += 1
+    return {"nativeMetered": wallet.native_metered}
+
+
 def test_wallet_checks():
     print("\n[3] the wallet checks every transaction tool now runs itself")
+    original_config = set_everywhere(tools, "read_spending_config", _fake_config)
+    try:
+        _test_wallet_checks()
+    finally:
+        set_everywhere(tools, "read_spending_config", original_config)
+
+
+def _test_wallet_checks():
     S, R = tools.common.SENT, tools.common.RECEIVED
     usdc = lambda amount, d: leg("usdc", amount, d, USDC, 6)   # noqa: E731
     weth = lambda amount, d: leg("weth", amount, d, WETH, 18)  # noqa: E731
@@ -204,6 +223,35 @@ def test_wallet_checks():
     out = tools.checks._wallet_checks(FakeWallet(native=WEI // 100), [leg("eth", 0.01, S)])
     check("exactly the balance is enough (the fees are the quote's to check)", out["enough_balance"] is True,
           str(out))
+
+    # The owner may leave the native asset out of the limit. Then it is out both ways.
+    off = lambda **kw: FakeWallet(native_metered=False, **kw)   # noqa: E731
+    out = tools.checks._wallet_checks(off(remaining=10), [leg("eth", 0.01, S)])
+    check("native not counted: a send charges nothing, whatever is left of the limit",
+          out["charged_usd"] == 0 and out["within_budget"], str(out))
+    check("...and its value is still shown", out["usd_value"] == 20, str(out))
+    out = tools.checks._wallet_checks(off(remaining=0), [leg("eth", 5, S)])
+    check("...even with nothing left at all", out["charged_usd"] == 0 and out["within_budget"], str(out))
+    out = tools.checks._wallet_checks(off(watched={USDC}), [usdc(40, S), leg("eth", 0.02, R)])
+    check("...and selling a counted token for it charges the FULL amount: what comes back offsets nothing",
+          out["charged_usd"] == 40, str(out))
+    out = tools.checks._wallet_checks(FakeWallet(watched={USDC}), [usdc(40, S), leg("eth", 0.02, R)])
+    check("counted, the same sale nets to nothing", out["charged_usd"] == 0, str(out))
+    out = tools.checks._wallet_checks(off(), [leg("eth", 0.01, S), weth(0.01, R)])
+    check("neither it nor WETH counted: a wrap charges nothing", out["charged_usd"] == 0, str(out))
+    out = tools.checks._wallet_checks(off(native=WEI // 100), [leg("eth", 0.02, S)])
+    check("not counting it doesn't stop the balance check", out["enough_balance"] is False, str(out))
+    broken_native = off(broken={tools.common.ETH_SENTINEL})
+    out = tools.checks._wallet_checks(broken_native, [leg("eth", 0.01, S)])
+    check("...and its price failing no longer fails the checks: it is only shown",
+          out["usd_value"] is None and out["charged_usd"] == 0 and "usd_value_unavailable" in out, str(out))
+
+    wallet = FakeWallet(watched={USDC})
+    tools.checks._wallet_checks(wallet, [usdc(10, S)])
+    check("whether the native asset counts isn't read for a transaction that moves none", wallet.config_reads == 0,
+          str(wallet.config_reads))
+    tools.checks._wallet_checks(wallet, [leg("eth", 0.01, S), usdc(19, R)])
+    check("...and is read once for one that does", wallet.config_reads == 1, str(wallet.config_reads))
 
 
 def test_quote_refusals():

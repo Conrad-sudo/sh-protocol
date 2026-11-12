@@ -85,7 +85,8 @@ def read_spending_config(wallet: Contract) -> dict:
 
     @param wallet  A SessionHandler Contract (its getConfig() takes no arguments).
     @return        {"installed", "windowStart", "windowDuration", "spentInWindow",
-                    "dailyLimitUsd", "watchedTokens", "trustedSpenders"}.
+                    "dailyLimitUsd", "cappedTokenCount", "watchedTokens", "trustedSpenders",
+                    "cappedTokens"}.
     """
     fn = wallet.functions.getConfig
     names = [c["name"] for c in fn.abi["outputs"][0]["components"]]

@@ -449,6 +449,7 @@ def test_owner_actions_are_guarded():
         "/api/wallet/unpause/prepare": {"chain_id": 31337},
         "/api/wallet/withdraw/prepare": {"chain_id": 31337, "token": "eth", "amount": "1", "to": "0x000000000000000000000000000000000000dEaD"},
         "/api/wallet/watched-tokens/prepare": {"chain_id": 31337, "token": "usdc", "action": "add"},
+        "/api/wallet/native-metering/prepare": {"chain_id": 31337, "metered": False},
         "/api/wallet/daily-limit/prepare": {"chain_id": 31337, "daily_limit_usd": 500},
         "/api/wallet/window-duration/prepare": {"chain_id": 31337, "window_secs": 86400},
         "/api/wallet/session/prepare": {"chain_id": 31337, "action": "remove"},
@@ -488,7 +489,9 @@ def test_owner_actions_are_guarded():
     bad = {
         "a negative daily limit": ("/api/wallet/daily-limit/prepare", {"chain_id": 31337, "daily_limit_usd": -1}),
         "a zero window": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 0}),
-        "a window past the uint48 ceiling": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 281_474_976_710_656}),
+        "a daily limit past the int88 ceiling": ("/api/wallet/daily-limit/prepare", {"chain_id": 31337, "daily_limit_usd": 154_742_505}),
+        "a window past the uint24 ceiling": ("/api/wallet/window-duration/prepare", {"chain_id": 31337, "window_secs": 16_777_216}),
+        "a native-metering request that doesn't say which way": ("/api/wallet/native-metering/prepare", {"chain_id": 31337}),
         "a zero gas ceiling": ("/api/wallet/max-op-gas-cost/prepare", {"chain_id": 31337, "max_cost_eth": "0"}),
         "a zero gas budget": ("/api/wallet/session-gas-budget/prepare", {"chain_id": 31337, "budget_eth": "0"}),
         "an invalid session action": ("/api/wallet/session/prepare", {"chain_id": 31337, "action": "steal"}),
@@ -506,6 +509,12 @@ def test_owner_actions_are_guarded():
     # reach the owner check (403 here) rather than being rejected by the schema.
     r = c.post("/api/wallet/daily-limit/prepare", headers=headers, json={"chain_id": 31337, "daily_limit_usd": 0})
     check("a zero daily limit is accepted by the schema", r.status_code == 403, str(r.status_code))
+
+    # The longest period the wallet holds (a uint24 of seconds, about 194 days), and the month the
+    # site offers, both get past the schema.
+    for label, secs in {"the longest period the wallet holds": 16_777_215, "a 30-day period": 2_592_000}.items():
+        r = c.post("/api/wallet/window-duration/prepare", headers=headers, json={"chain_id": 31337, "window_secs": secs})
+        check(f"{label} is accepted by the schema", r.status_code == 403, str(r.status_code))
 
 
 def test_default_spenders_cannot_be_removed():
@@ -593,6 +602,15 @@ def test_allowlist_requests_are_checked():
           "daily gas budget" in explained and "0.6" in explained and "0.5" in explained, explained)
     check("...and when it refills", "refills" in explained, explained)
 
+    # ...and when a token would go past the limit the owner set on it in its own units.
+    data = keccak(text="SpendingLimitModule_TokenCapExceeded(address,uint256,uint256)")[:4] + abi_encode(
+        ["address", "uint256", "uint256"], [target, 200, 150]
+    )
+    explained = describe_revert_data(data)
+    check("a token going past its own limit is explained, with both figures",
+          target in explained and "200" in explained and "150" in explained, explained)
+    check("...and what happens next", "resets" in explained and "Controls" in explained, explained)
+
 
 def test_allowlist_suggests_what_the_assistant_trades_through():
     """
@@ -665,8 +683,8 @@ def test_allowlist_suggests_what_the_assistant_trades_through():
         set_everywhere(api, "_load_wallet_for_chain", original[1])
 
 
-def test_wrapped_native_always_counts():
-    print("\n[7c] WETH/WBNB always count: flagged in the token list, never removable through the app")
+def test_wrapped_native_follows_the_native_asset():
+    print("\n[7c] WETH/WBNB count exactly when the native asset does: flagged, and never moved on their own")
     db.get_db().execute(
         "INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?), (?, ?, ?)",
         (11155111, "weth", "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
@@ -674,19 +692,90 @@ def test_wrapped_native_always_counts():
     )
     db.get_db().commit()
     c = make_client()
-    tokens = {t["ticker"]: t["always_counted"] for t in c.get("/api/tokens?chain_id=11155111").json()["tokens"]}
-    check("WETH is flagged as always counted", tokens.get("weth") is True, str(tokens))
+    tokens = {t["ticker"]: t["follows_native"] for t in c.get("/api/tokens?chain_id=11155111").json()["tokens"]}
+    check("WETH is flagged as following the native asset", tokens.get("weth") is True, str(tokens))
     check("other tokens are not", tokens.get("usdc") is False, str(tokens))
 
     _, headers, _ = sign_in(c)
     # Upper case on purpose: the ticker comparison must not depend on how it is written.
-    r = c.post(
-        "/api/wallet/watched-tokens/prepare",
-        headers=headers,
-        json={"chain_id": 11155111, "token": "WETH", "action": "remove"},
-    )
-    check("removing WETH -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
-    check("the refusal says why", "always counts" in r.json().get("detail", ""), r.text[:160])
+    for action in ("remove", "add"):
+        r = c.post(
+            "/api/wallet/watched-tokens/prepare",
+            headers=headers,
+            json={"chain_id": 11155111, "token": "WETH", "action": action},
+        )
+        check(f"{action} WETH on its own -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+        detail = r.json().get("detail", "")
+        check("the refusal says it goes with ETH", "exactly when ETH does" in detail, r.text[:160])
+        check("...and points at the switch", "Switch ETH on or off" in detail, r.text[:160])
+
+
+def test_deploy_needs_a_limit_only_when_something_counts():
+    print("\n[7f] deploy: a limit is required exactly when something counts toward it")
+    c = make_client()
+    _, headers, acct = sign_in(c)
+    weth = {"ticker": "weth", "address": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"}
+    usdc = {"ticker": "usdc", "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"}
+
+    def deploy(**body):
+        return c.post("/api/deploy", headers=headers,
+                      json={"chain_id": 11155111, "deployer": acct.address, **body})
+
+    def refused_for_the_limit(r) -> bool:
+        return r.status_code == 400 and "spending limit" in r.text
+
+    r = deploy(daily_limit_usd=0, count_native=True)
+    check("no limit while the native asset counts -> 400", refused_for_the_limit(r), f"{r.status_code} {r.text[:160]}")
+    r = deploy(daily_limit_usd=0, watched_tokens=[usdc])
+    check("no limit while a token counts -> 400", refused_for_the_limit(r), f"{r.status_code} {r.text[:160]}")
+    r = deploy(daily_limit_usd=0, count_native=True, watched_tokens=[usdc])
+    check("no limit while both count -> 400", refused_for_the_limit(r), f"{r.status_code} {r.text[:160]}")
+
+    # Past the rule, each of these goes on to dial the chain, which this offline test has none of:
+    # whatever that answers, it is not the limit refusal.
+    r = deploy(daily_limit_usd=0)
+    check("no limit with nothing counted is not refused for the limit", not refused_for_the_limit(r),
+          f"{r.status_code} {r.text[:160]}")
+    # The wrapped token counts only with the native asset, so listing it alone counts nothing.
+    r = deploy(daily_limit_usd=0, watched_tokens=[weth])
+    check("...nor is one that lists only WETH, which is dropped", not refused_for_the_limit(r),
+          f"{r.status_code} {r.text[:160]}")
+    r = deploy(daily_limit_usd=100, count_native=True, watched_tokens=[usdc])
+    check("a limit with things counted is not refused for the limit", not refused_for_the_limit(r),
+          f"{r.status_code} {r.text[:160]}")
+
+    r = deploy()
+    check("the limit must be stated, even as 0 -> 422", r.status_code == 422, f"{r.status_code} {r.text[:120]}")
+    r = deploy(daily_limit_usd=-1)
+    check("a negative limit -> 422", r.status_code == 422, f"{r.status_code} {r.text[:120]}")
+
+
+def test_passkey_deadline_counts_from_the_chains_clock():
+    print("\n[7g] a passkey's deadline: 90 days by default, counted from the chain's clock when that is behind")
+    from types import SimpleNamespace
+    from constants import MAX_SESSION_TTL_SECS
+
+    check("the default approval is the longest the wallet allows, 90 days",
+          routes.deps.DEFAULT_SESSION_TTL_SECS == MAX_SESSION_TTL_SECS == 90 * 86_400,
+          str(routes.deps.DEFAULT_SESSION_TTL_SECS))
+
+    def chain_at(timestamp: int):
+        return SimpleNamespace(eth=SimpleNamespace(get_block=lambda _which: {"timestamp": timestamp}))
+
+    ttl = MAX_SESSION_TTL_SECS
+    now = int(time.time())
+    # The wallet refuses validUntil > block.timestamp + MAX_SESSION_TTL. A block's time trails the
+    # server's, so now + 90 days would be past the ceiling in the block the grant is simulated on.
+    behind = now - 3_600
+    deadline = routes.deps.session_deadline(chain_at(behind), ttl)
+    check("chain an hour behind: the deadline sits exactly on the wallet's ceiling there",
+          deadline == behind + ttl, f"{deadline} vs {behind + ttl}")
+    check("...which the server's clock alone would have overshot", now + ttl > behind + ttl)
+    # A chain running ahead (a fork a test moved forward) leaves the server's clock the earlier one.
+    ahead = now + 3_600
+    deadline = routes.deps.session_deadline(chain_at(ahead), ttl)
+    check("chain an hour ahead: counted from the server's clock, still inside the ceiling",
+          now + ttl <= deadline <= now + ttl + 5 and deadline <= ahead + ttl, str(deadline - now - ttl))
 
 
 def test_wallet_state_read_is_guarded():
@@ -1253,7 +1342,9 @@ if __name__ == "__main__":
         test_default_spenders_cannot_be_removed()
         test_allowlist_requests_are_checked()
         test_allowlist_suggests_what_the_assistant_trades_through()
-        test_wrapped_native_always_counts()
+        test_wrapped_native_follows_the_native_asset()
+        test_deploy_needs_a_limit_only_when_something_counts()
+        test_passkey_deadline_counts_from_the_chains_clock()
         test_wallet_state_read_is_guarded()
         test_contacts_are_web_only_and_per_account()
         test_contacts_can_be_found_by_ens_name()

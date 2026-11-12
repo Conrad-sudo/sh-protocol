@@ -36,6 +36,7 @@ from tools.common import (
     _addresses_to_tickers,
     _resolve_contact,
     _token_address,
+    _token_label,
     _unlisted_label,
 )
 from userop import read_sessions
@@ -82,8 +83,9 @@ def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
     Reports the wallet's spending limit, the user's passkeys approved on it, and whether the wallet
     is paused.
 
-    The wallet has ONE USD spending limit per window, shared by every token (there are no per-token
-    limits). The user confirms every transaction with a passkey on one of their devices (Face ID,
+    The wallet has ONE USD spending limit per window, shared by every token it counts. The owner can
+    also give a single token a limit in its own units instead of counting it in USD; those are listed
+    in `token_limits`. The user confirms every transaction with a passkey on one of their devices (Face ID,
     fingerprint or PIN); up to five devices can be approved on a wallet, each until a set time --
     30 days after it was approved by default, 90 at most -- and only the owner can approve or renew
     one, in the web app (Controls → Devices). Use this when the user asks about their limit, what
@@ -101,13 +103,21 @@ def get_wallet_status(runtime: ToolRuntime[AgentContext]) -> dict:
           - passkeys (int): how many passkeys are approved on the wallet right now.
           - session_expires_at (int): when the last approval runs out, in Unix seconds; 0 if none.
           - session_expires_in_secs (int): how long that is from now; 0 once it has run out.
+          - limit_applies (bool): whether anything counts toward the USD spending limit. False
+            means the owner counts neither the native asset nor any token, so the wallet has NO
+            USD spending limit: say that, and never read daily_limit_usd or remaining_usd out as
+            "$0 left". Limits on single tokens (token_limits) still apply.
           - daily_limit_usd (float): the spending limit per window, in USD.
           - spent_usd (float): what has counted toward it in the current window, in USD.
           - remaining_usd (float): what is left of it, in USD. 0 when the owner has lowered the
             limit below what was already spent.
           - window_hours (float): the window's length, in hours.
-          - watched_tokens (list): the ERC20 tickers that count toward the limit. The native asset
-            (ETH/BNB) ALWAYS counts too and is not on this list; other tokens don't count.
+          - native_counts (bool): whether the native asset (ETH/BNB) counts toward the limit. The
+            owner chooses; it is not on the list below either way.
+          - watched_tokens (list): the ERC20 tickers that count toward the limit. Other tokens
+            don't count.
+          - token_limits (list): tokens with a limit in their own units per window instead, each as
+            {"token", "limit", "remaining"} in whole tokens. Only what leaves the wallet uses it.
           - allowlist_enabled (bool): whether the owner has limited the assistant to a list of
             contracts (web app, Controls → Advanced). While it is on, a transaction that calls a
             contract not on the list is refused; sending to a plain wallet address is not affected.
@@ -137,6 +147,7 @@ def _get_wallet_status(user_id: int) -> dict:
         "allowlist": wallet.sessionAllowlistEnabled().call,
     })
     cfg = reads["config"]
+    watched = _addresses_to_tickers(user_id, cfg["watchedTokens"])
     now = int(time.time())
     # Any approved passkey can confirm a transaction, so the wallet takes one until the last of them
     # runs out.
@@ -149,14 +160,43 @@ def _get_wallet_status(user_id: int) -> dict:
         "passkeys": len(active),
         "session_expires_at": expires_at,
         "session_expires_in_secs": max(expires_at - now, 0),
+        # Nothing counted means the USD limit binds nothing, whatever its figure (a wallet deployed
+        # with no limit has 0 there).
+        "limit_applies": bool(cfg["nativeMetered"] or cfg["watchedTokens"]),
         "daily_limit_usd": cfg["dailyLimitUsd"] / WEI_PER_ETH,
         "spent_usd": cfg["spentInWindow"] / WEI_PER_ETH,
         # Below zero when the owner lowered the limit under what was already spent: nothing is left.
         "remaining_usd": max(reads["remaining"], 0) / WEI_PER_ETH,
         "window_hours": cfg["windowDuration"] / 3600,
-        "watched_tokens": _addresses_to_tickers(user_id, cfg["watchedTokens"]),
+        "native_counts": cfg["nativeMetered"],
+        "watched_tokens": watched,
+        "token_limits": _token_limits(user_id, session_handler, cfg["cappedTokens"]),
         "allowlist_enabled": reads["allowlist"],
     }
+
+
+def _token_limits(user_id: int, session_handler, capped: list[str]) -> list[dict]:
+    """
+    Each token the owner limited in its own units, with what is left this window.
+
+    Decimals that can't be read leave a token out of the list rather than failing the whole status:
+    the wallet would refuse most transactions while that token is broken, and the status is how the
+    user finds out what else is going on.
+
+    @param capped  The wallet's cappedTokens, as read from the chain.
+    """
+    names = {address: _token_label(user_id, address) for address in capped}
+    erc20s = {address: load_ierc20(user_id=user_id, token=address) for address in capped}
+    caps = read_all({address: session_handler.functions.getTokenCap(address).call for address in capped})
+    limits = []
+    for address in capped:
+        try:
+            scale = 10 ** erc20s[address].functions.decimals().call()
+        except Exception:  # noqa: BLE001 -- a broken token: see above
+            continue
+        _, limit, remaining = caps[address]
+        limits.append({"token": names[address], "limit": limit / scale, "remaining": remaining / scale})
+    return limits
 
 
 # There is NO save_contact or delete_contact tool, and adding either back would reopen a hole rather

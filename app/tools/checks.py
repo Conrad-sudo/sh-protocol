@@ -15,6 +15,7 @@ from constants import (
 )
 from contracts import (
     load_session_handler,
+    read_spending_config,
 )
 from parallel import read_all, start_read
 from tools.common import (
@@ -43,10 +44,12 @@ def _wallet_checks(wallet: Contract, legs: list[_Leg]) -> dict:
     quote knows them -- _check_native_headroom covers that half.
 
     The limit is charged the way SpendingLimitModule.postCheck meters it: the USD value that leaves
-    the wallet minus the value that comes back, counting only the native asset and ERC20s on the
-    watched list, and nothing for a net increase. So a wrap of ETH into a watched WETH costs
-    nothing, a swap into a watched token costs roughly its fees and price impact, and adding
-    liquidity counts both tokens deposited (the LP token that comes back has no price).
+    the wallet minus the value that comes back, counting only ERC20s on the watched list and, if the
+    owner has it counted, the native asset; and nothing for a net increase. So with both counted a
+    wrap of ETH into WETH costs nothing, a swap into a watched token costs roughly its fees and
+    price impact, and adding liquidity counts both tokens deposited (the LP token that comes back
+    has no price). With the native asset NOT counted it is left out both ways: sending it costs
+    nothing, and selling a counted token for it costs the full amount sold.
 
     @param wallet       The SessionHandler contract.
     @param legs         From _resolve_legs. Empty for a transaction that moves nothing countable.
@@ -57,12 +60,15 @@ def _wallet_checks(wallet: Contract, legs: list[_Leg]) -> dict:
     first = _read_wallet_and_legs(wallet, legs)
     decimals = [18 if leg.erc20 is None else first[f"decimals{i}"] for i, leg in enumerate(legs)]
     short = _shortfalls(legs, first, decimals)
+    over_token_limits = _over_token_limits(legs, first, decimals)
     session_active, seconds_left, expiring_imminently = _session_state(first)
 
-    # Round two: the prices. A token is priced when the limit counts it -- the native asset always,
-    # an ERC20 while it is watched -- and, when it leaves the wallet, to show what it is worth. A
-    # token the user added is never priced: it has no feed.
-    counted = [leg.erc20 is None or first[f"watched{i}"] for i, leg in enumerate(legs)]
+    # Round two: the prices. A token is priced when the limit counts it -- the native asset while
+    # the owner has it counted, an ERC20 while it is watched -- and, when it leaves the wallet, to
+    # show what it is worth. A token the user added is never priced: it has no feed.
+    counted = [
+        first["native_metered"] if leg.erc20 is None else first[f"watched{i}"] for i, leg in enumerate(legs)
+    ]
     usd, unavailable = _usd_values(wallet.functions, legs, decimals, counted)
     charged, usd_value = _limit_charge(legs, usd, counted)
     remaining = first["remaining"]
@@ -74,12 +80,15 @@ def _wallet_checks(wallet: Contract, legs: list[_Leg]) -> dict:
         "expiring_imminently": expiring_imminently,
         "enough_balance": not short,
         "within_budget": charged <= remaining,
+        "within_token_limits": not over_token_limits,
         "usd_value": usd_value / WEI_PER_ETH if usd_value is not None else None,
         "charged_usd": charged / WEI_PER_ETH,
         "remaining_usd": remaining / WEI_PER_ETH,
     }
     if short:
         result["balance_short"] = " ".join(short)
+    if over_token_limits:
+        result["token_limit_short"] = " ".join(over_token_limits)
     if unavailable:
         result["usd_value_unavailable"] = (
             f"Price data for {', '.join(t.upper() for t in unavailable)} is unavailable right now, "
@@ -93,7 +102,8 @@ def _read_wallet_and_legs(wallet: Contract, legs: list[_Leg]) -> dict:
     """
     _wallet_checks' first round of reads, all at once: the wallet's pause, the passkeys it approves
     (getSessions) and its remaining budget, and for each leg its watched flag and decimals (an
-    ERC-20's) and, when it is sent, the wallet's balance of it.
+    ERC-20's) and, when it is sent, the wallet's balance of it and the limit on it in its own units.
+    Whether the native asset counts is read only when a leg is the native asset.
     """
     functions = wallet.functions
     reads = {
@@ -101,6 +111,9 @@ def _read_wallet_and_legs(wallet: Contract, legs: list[_Leg]) -> dict:
         "sessions": lambda: read_sessions(wallet),
         "remaining": functions.getRemainingBudget().call,
     }
+    if any(leg.erc20 is None for leg in legs):
+        # By field name, never position: see contracts.read_spending_config.
+        reads["native_metered"] = lambda: read_spending_config(wallet)["nativeMetered"]
     for i, leg in enumerate(legs):
         if leg.erc20 is not None:
             reads[f"watched{i}"] = functions.isWatched(leg.address).call
@@ -111,6 +124,8 @@ def _read_wallet_and_legs(wallet: Contract, legs: list[_Leg]) -> dict:
                 if leg.erc20 is None
                 else leg.erc20.functions.balanceOf(wallet.address).call
             )
+            if leg.erc20 is not None:
+                reads[f"cap{i}"] = functions.getTokenCap(leg.address).call
     return read_all(reads)
 
 
@@ -124,6 +139,27 @@ def _shortfalls(legs: list[_Leg], first: dict, decimals: list[int]) -> list[str]
                 f"{_whole(first[f'balance{i}'] / 10 ** decimals[i])}, and this needs {_whole(leg.amount)}."
             )
     return short
+
+
+def _over_token_limits(legs: list[_Leg], first: dict, decimals: list[int]) -> list[str]:
+    """
+    One sentence for each leg the wallet would send past the limit the owner set on that token in its
+    own units. Only what is sent counts: buying a token doesn't use its limit, and a limit is charged
+    on the balance drop whatever the price was.
+    """
+    over = []
+    for i, leg in enumerate(legs):
+        if leg.direction != SENT or leg.erc20 is None:
+            continue
+        capped, limit, remaining = first[f"cap{i}"]
+        if capped and _to_base_units(leg.amount, decimals[i]) > remaining:
+            name = leg.label or leg.token
+            scale = 10 ** decimals[i]
+            over.append(
+                f"This would use {_whole(leg.amount)} {name}, but only {_whole(remaining / scale)} of the "
+                f"{_whole(limit / scale)} {name} limit the owner set is left in this period."
+            )
+    return over
 
 
 def _session_state(first: dict) -> tuple[bool, int, bool]:
@@ -195,7 +231,7 @@ def _enforce_wallet_checks(checks: dict, priced: bool) -> dict:
                    only the pause and the key are checked, and no USD figures are returned.
     @raises ToolException  If the wallet is paused, no passkey is approved on it (or every approval
                            is about to run out), it doesn't hold what the transaction sends, or the
-                           transaction would go over the spending limit.
+                           transaction would go over the spending limit or a token's own limit.
     """
     renew = (
         "The owner can approve or renew a passkey with one transaction from their own wallet in the "
@@ -219,6 +255,11 @@ def _enforce_wallet_checks(checks: dict, priced: bool) -> dict:
     # Before the limit: with too little to send, what the limit would count is beside the point.
     if not checks.get("enough_balance", True):
         raise ToolException(f"{checks['balance_short']} Nothing was sent.")
+    if not checks.get("within_token_limits", True):
+        raise ToolException(
+            f"{checks['token_limit_short']} Nothing was sent. The owner can change that limit in the web "
+            f"app (Controls), or the user can wait for the period to roll over."
+        )
     figures = {"session_expires_in_secs": checks["session_expires_in_secs"]}
     if not priced:
         return figures
@@ -258,9 +299,11 @@ def preflight_check(
     ETH today?", "how much of my limit would this use?" -- where nothing should be quoted.
 
     The budget check charges what the wallet's spending cap will actually charge: the value that
-    leaves the wallet minus the value that comes back, counting only metered tokens (the native
-    asset, and ERC20s on the watched list). So a wrap of ETH into a watched WETH costs nothing, and
-    a swap into a watched token costs roughly its fees and price impact.
+    leaves the wallet minus the value that comes back, counting only what the owner has counted
+    (ERC20s on the watched list, and the native asset if get_wallet_status says native_counts). So
+    a swap into a watched token costs roughly its fees and price impact, and with the native asset
+    counted a wrap costs nothing. With it not counted, sending the native asset costs nothing and
+    selling a counted token for it costs the full amount sold.
 
     Args:
         token: The ticker of the token leaving the wallet (e.g. "usdc"), or "eth"/"bnb" for the
@@ -283,6 +326,8 @@ def preflight_check(
             "balance_short" says what it holds. Fees come on top, in the native asset, so sending
             nearly all of the native asset can still fail.
           - "within_budget" (bool): True if `charged_usd` fits the remaining USD budget.
+          - "within_token_limits" (bool): True unless this would send a token past the limit the
+            owner set on it in its own units. When False, "token_limit_short" says what is left.
           - "usd_value" (float | None): The USD value of `amount` of `token` at the current price.
             None for a token the user added themselves: Mitfah has no price for it, so never state
             or estimate one. Also None, with "usd_value_unavailable" saying why, when the price of
@@ -293,7 +338,7 @@ def preflight_check(
             charges the full amount paid, since what comes back has no price.
           - "remaining_usd" (float): The budget left in the current window.
         The transaction would go through only if "is_paused" is False and "session_active",
-        "enough_balance" and "within_budget" are all True.
+        "enough_balance", "within_budget" and "within_token_limits" are all True.
     """
     user_id = runtime.context.user_id
     print("Running preflight_check")

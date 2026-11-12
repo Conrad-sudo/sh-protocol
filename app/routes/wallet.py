@@ -13,7 +13,7 @@ from web3.exceptions import ABIFunctionNotFound, ContractLogicError
 
 from auth import get_current_user
 from constants import (
-    get_always_counted_ticker,
+    get_follows_native_ticker,
     get_native_asset_ticker,
     get_router,
 )
@@ -98,14 +98,14 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
 
     Two eth_calls per listed token (decimals + balanceOf). Tokens added by address cost one: their
     decimals were read and stored when they were added. `custom` marks those -- they have no price
-    and never count toward the cap. `always_counted` marks the wrapped native token (WETH, WBNB),
-    which stays on the dashboard.
+    and never count toward the cap. `follows_native` marks the wrapped native token (WETH, WBNB),
+    which counts exactly when the native asset does and can't be counted or stopped on its own.
 
     The lists come from the database first, on this thread (see parallel.py); then every read goes
     out at once, and the LP rows' own reads run while they are answered. So the wait is about one
     round trip, not two per token.
     """
-    always = get_always_counted_ticker(chain_id)
+    follower = get_follows_native_ticker(chain_id)
     listed = get_dashboard_tokens(user_id, chain_id)
     added = get_custom_tokens(user_id, chain_id)
 
@@ -146,7 +146,7 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
             "address": token["address"],
             "native": False,
             "custom": False,
-            "always_counted": token["ticker"] == always,
+            "follows_native": token["ticker"] == follower,
         }
         try:
             decimals, raw = decimals_read.result(), balance_read.result()
@@ -164,7 +164,7 @@ def _token_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list
             "address": token["address"],
             "native": False,
             "custom": True,
-            "always_counted": False,
+            "follows_native": False,
             "name": token["name"],
         }
         try:
@@ -283,7 +283,7 @@ def _lp_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[di
             "address": pool["pair"],
             "native": False,
             "custom": False,
-            "always_counted": False,
+            "follows_native": False,
             "lp": True,
         }
         try:
@@ -308,22 +308,58 @@ def _lp_balances(w3: Web3, user_id: int, chain_id: int, account: str) -> list[di
 
 def _show_counted_tokens(user_id: int, chain_id: int, watched: list[str]):
     """
-    Puts every token the limit covers on the dashboard. Run on every wallet read, so it covers the
-    deploy's picks, tokens counted later in Controls (or on chain directly), and wallets made before
-    the dashboard list existed. The wrapped native token goes on too: it always counts, even on an
-    older wallet that doesn't count it yet. A watched address Mitfah doesn't list is skipped -- it
+    Puts every token a limit covers on the dashboard. Run on every wallet read, so it covers the
+    deploy's picks, tokens counted or capped later in Controls (or on chain directly), and wallets
+    made before the dashboard list existed. The wrapped native token is among them while the native
+    asset counts, because the wallet then watches it. An address Mitfah doesn't list is skipped -- it
     has no ticker to show (Controls shows it by address).
 
-    @param watched  The wallet's watchedTokens, as read from the chain.
+    @param watched  The wallet's watchedTokens and cappedTokens, as read from the chain.
     """
     tickers = _ticker_map(chain_id)
-    always = get_always_counted_ticker(chain_id)
-    add_dashboard_tokens(
-        user_id,
-        chain_id,
-        [tickers[a.lower()] for a in watched if a.lower() in tickers]
-        + ([always] if always in tickers.values() else []),
-    )
+    add_dashboard_tokens(user_id, chain_id, [tickers[a.lower()] for a in watched if a.lower() in tickers])
+
+
+def _token_caps(w3: Web3, wallet: Contract, capped: list[str], balances: list[dict], tickers: dict) -> list[dict]:
+    """
+    Every token the wallet caps in its own units, with what is left of its limit this period.
+
+    The balance rows already name a token the dashboard shows and know its decimals. A token capped
+    on chain directly may not be one of them: its decimals are read, and left None if it doesn't
+    answer, so a broken token still shows with its raw figures and can be removed.
+
+    @param capped    The wallet's cappedTokens, as read from the chain.
+    @param balances  The rows _token_balances returned.
+    @param tickers   Lowercase address -> ticker for the tokens Mitfah lists.
+    @return          [{"ticker", "address", "decimals", "limit_raw", "remaining_raw"}]. Raw figures are
+                     strings, like a balance's.
+    """
+    rows = {row["address"].lower(): row for row in balances if row.get("address")}
+
+    def decimals_of(address: str) -> int | None:
+        known = rows.get(address.lower(), {}).get("decimals")
+        if known is not None:
+            return known
+        try:
+            return w3.eth.contract(address=address, abi=ERC20_ABI).functions.decimals().call()
+        except Exception:  # noqa: BLE001 -- shown in raw figures instead
+            return None
+
+    reads = read_all({
+        **{f"cap:{a}": wallet.functions.getTokenCap(a).call for a in capped},
+        **{f"decimals:{a}": (lambda address=a: decimals_of(address)) for a in capped},
+    })
+    caps = []
+    for address in capped:
+        _, limit, remaining = reads[f"cap:{address}"]
+        caps.append({
+            "ticker": rows.get(address.lower(), {}).get("ticker") or tickers.get(address.lower()),
+            "address": w3.to_checksum_address(address),
+            "decimals": reads[f"decimals:{address}"],
+            "limit_raw": str(limit),
+            "remaining_raw": str(remaining),
+        })
+    return caps
 
 
 @router.get("/api/wallet/{chain_id}")
@@ -396,13 +432,14 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
     })
     cfg = state["cfg"]
     tickers = _ticker_map(chain_id)
-    _show_counted_tokens(user_id, chain_id, cfg["watchedTokens"])
+    _show_counted_tokens(user_id, chain_id, cfg["watchedTokens"] + cfg["cappedTokens"])
 
     on_chain_owner = state["owner"]
     bound_owner = get_user_by_id(user_id)["owner_addr"]
 
     # The second round: every balance at once.
     balances = _token_balances(w3, user_id, chain_id, wallet.address)
+    token_caps = _token_caps(w3, wallet, cfg["cappedTokens"], balances, tickers)
 
     return {
         "chain_id": chain_id,
@@ -420,12 +457,18 @@ def get_wallet_state(chain_id: int, user_id: int = Depends(get_current_user)):
             "remaining_usd": state["remaining"] / USD_DECIMALS,
             "window_hours": cfg["windowDuration"] / 3600,
             "window_start": cfg["windowStart"],
-            # Watched ERC20s are what the cap meters. The native asset is ALWAYS metered and is
-            # deliberately absent here -- see SpendingLimitModule. Unknown addresses fall back to
-            # the raw address rather than being dropped.
+            # Whether the native asset counts toward the limit: the owner's choice, made at deploy
+            # and switched in Controls (the wallet's setNativeMetering). Its wrapped form is on the
+            # watched list exactly when this is true, unless the owner split them on chain directly.
+            "native_metered": cfg["nativeMetered"],
+            # Watched ERC20s are what the cap meters, with the native asset when native_metered
+            # says so (it has no address, so it is never on this list). Unknown addresses fall back
+            # to the raw address rather than being dropped.
             "watched_tokens": [
                 {"ticker": tickers.get(a.lower()), "address": w3.to_checksum_address(a)} for a in cfg["watchedTokens"]
             ],
+            # Tokens with a limit in their own units instead of in USD. See _token_caps.
+            "token_caps": token_caps,
         },
         # The passkeys the wallet approves, read off the chain, named from the account's own
         # registrations (userop.session_block).

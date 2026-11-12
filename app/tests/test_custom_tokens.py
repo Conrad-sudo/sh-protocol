@@ -3,7 +3,9 @@ Offline checks for tokens a user adds by address (custom tokens): the add-a-toke
 routes, how the assistant's tools resolve and price them, and that those tools refuse any token
 that is neither listed nor added, and any slippage over 12%. Also the dashboard list: which listed
 tokens show, adding one by address, that one still counted can't be removed, and the LP tokens of
-the pools the assistant deposited into (which the contract allowlist suggests too).
+the pools the assistant deposited into (which the contract allowlist suggests too). And limits in a
+token's own units, for a token added by address or a listed one: what a quote does, what it says,
+and which tokens can have one.
 
 Everything runs against a throwaway database and a FAKE chain -- a dict of contracts answering raw
 eth_calls -- so it is safe to run anywhere. The real on-chain journey (deploy a token, add it, have
@@ -277,6 +279,9 @@ def test_api_routes():
 
     set_everywhere(api, "_resolve_chain", lambda chain_id: (FAKE_W3, NETWORK))
     set_everywhere(api, "_load_wallet_for_chain", fake_load)
+    original_config = set_everywhere(
+        api, "read_spending_config", lambda _wallet: {"watchedTokens": [], "cappedTokens": []}
+    )
     try:
         c, headers, uid = _client_for()
         body = {"chain_id": CHAIN, "address": PEPE}
@@ -312,6 +317,7 @@ def test_api_routes():
     finally:
         set_everywhere(api, "_resolve_chain", original_resolve)
         set_everywhere(api, "_load_wallet_for_chain", original_load)
+        set_everywhere(api, "read_spending_config", original_config)
 
 
 class FakeFunctions:
@@ -320,12 +326,17 @@ class FakeFunctions:
     def __init__(self, watched: set[str]):
         self.watched = watched
         self.priced = []
+        self.caps = {}   # token address -> (limit, what is left), in base units
 
     def _call(self, value):
         return SimpleNamespace(call=lambda *a, **k: value)
 
     def isWatched(self, address):
         return self._call(address in self.watched)
+
+    def getTokenCap(self, address):
+        limit, left = self.caps.get(address, (0, 0))
+        return self._call((address in self.caps, limit, left))
 
     def getUsdValue(self, address, amount):
         if address not in (USDC, USDT, WETH, tools.common.ETH_SENTINEL):
@@ -355,8 +366,12 @@ class FakeToken:
 
 
 def _with_tool_fakes(uid: int, watched: set[str], chain: int = CHAIN, network: str = NETWORK):
-    """Points the tools at the fake chain for `uid`, acting on `chain`. Returns the fake SessionHandler's functions."""
+    """
+    Points the tools at the fake chain for `uid`, acting on `chain`. Returns the fake SessionHandler's
+    functions. The wallet counts the native asset until a test sets `functions.native_metered` False.
+    """
     functions = FakeFunctions(watched)
+    functions.native_metered = True
     handler = SimpleNamespace(
         functions=functions, address=WALLET,
         w3=SimpleNamespace(eth=SimpleNamespace(get_balance=lambda _address: 10**30)),
@@ -364,6 +379,7 @@ def _with_tool_fakes(uid: int, watched: set[str], chain: int = CHAIN, network: s
     decimals = {USDC: 6, USDT: 6, WETH: 18}
     set_everywhere(tools, "load_network_config", lambda _uid: (None, chain, network))
     set_everywhere(tools, "load_session_handler", lambda _uid: handler)
+    set_everywhere(tools, "read_spending_config", lambda _wallet: {"nativeMetered": functions.native_metered})
     set_everywhere(tools, "load_ierc20", lambda user_id, token: FakeToken(
         a := db.resolve_token(user_id, chain, token), decimals.get(a, 18)
     ))
@@ -422,6 +438,222 @@ def test_tools_price_and_note_custom_tokens():
     check("selling it costs nothing", "selling it costs nothing" in note, note)
     check("listed-only swaps get no note", tools.common._limit_note(uid, "usdc", "weth") == "")
     check("native sends get no note", tools.common._limit_note(uid, "eth") == "")
+
+    # The owner's choice: the native asset left out of the limit. Out both ways.
+    functions.native_metered = False
+    pre = tools.checks.preflight_check.func(runtime, "eth", 0.1)
+    check("ETH not counted: sending it charges nothing", pre["charged_usd"] == 0 and pre["within_budget"], str(pre))
+    check("…though its USD value is still shown", pre["usd_value"] == 200, str(pre))
+    pre = tools.checks.preflight_check.func(runtime, "eth", 0.1, "pepe", 1000)
+    check("…and so does buying with it", pre["charged_usd"] == 0 and pre["within_budget"], str(pre))
+    pre = tools.checks.preflight_check.func(runtime, "usdc", 60, "eth", 0.03)
+    check("…while selling counted USDC for it charges the full $60: the ETH back offsets nothing",
+          pre["charged_usd"] == 60, str(pre))
+    note = tools.common._limit_note(uid, "eth", "pepe")
+    check("buying a custom token with uncounted ETH: neither counts, and it says why",
+          note.startswith("Neither ETH nor PEPE") and "ETH doesn't count on this wallet" in note, note)
+    functions.native_metered = True
+    pre = tools.checks.preflight_check.func(runtime, "usdc", 60, "eth", 0.03)
+    check("counted again, the ETH back offsets the USDC sold", pre["charged_usd"] == 0, str(pre))
+
+
+def test_token_limits():
+    print("\n[5b] a limit in a token's own units: the quote's check, its note and the status")
+    uid = db.create_user()
+    db.save_user_network(uid, NETWORK)
+    db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+    functions = _with_tool_fakes(uid, watched={USDC, WETH})
+    functions.caps[PEPE] = (1000 * 10**18, 400 * 10**18)   # no feed, so this is the only limit it can have
+    functions.caps[USDT] = (150 * 10**6, 50 * 10**6)       # has a feed, and the owner chose this instead
+    runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
+    preflight = tools.checks.preflight_check.func
+
+    pre = preflight(runtime, "pepe", 400)
+    check("sending all that is left passes", pre["within_token_limits"], str(pre))
+    check("…and costs the USD limit nothing", pre["charged_usd"] == 0 and pre["within_budget"], str(pre))
+
+    pre = preflight(runtime, "pepe", 400.5)
+    check("one unit more doesn't", not pre["within_token_limits"], str(pre))
+    check("…and says what is left", "only 400 of the 1,000 PEPE limit" in pre["token_limit_short"], str(pre))
+    try:
+        tools.checks._enforce_wallet_checks(pre, priced=True)
+        refused = ""
+    except ToolException as e:
+        refused = str(e)
+    check("a quote past the limit is refused", "Nothing was sent" in refused and "Controls" in refused, refused)
+    try:
+        tools.checks._enforce_wallet_checks(pre, priced=False)
+        refused = ""
+    except ToolException as e:
+        refused = str(e)
+    check("…even when the transaction moves nothing the USD limit could count", "Nothing was sent" in refused, refused)
+
+    pre = preflight(runtime, "usdc", 60, "usdt", 1000)
+    check("buying a limited token doesn't use its limit", pre["within_token_limits"], str(pre))
+    check("…and counts the full amount paid in USD", pre["charged_usd"] == 60, str(pre))
+
+    pre = preflight(runtime, "usdt", 50, "eth", 0.1)
+    check("selling one up to its limit passes", pre["within_token_limits"], str(pre))
+    check("…and what comes back charges nothing", pre["charged_usd"] == 0, str(pre))
+    pre = preflight(runtime, "usdt", 60, "usdc", 60)
+    check("selling one past its limit doesn't", not pre["within_token_limits"], str(pre))
+
+    pre = preflight(runtime, "weth", 1)
+    check("a token with no limit of its own isn't held to one", pre["within_token_limits"], str(pre))
+
+    note = tools.common._limit_note(uid, "pepe")
+    check("a transfer's note gives the limit", note.startswith("Sending PEPE uses the limit") and "400 of 1,000" in note, note)
+    note = tools.common._limit_note(uid, "usdt")
+    check("…for a listed token too", note.startswith("Sending USDT uses the limit") and "50 of 150" in note, note)
+    note = tools.common._limit_note(uid, "usdt", "eth")
+    check("selling one says it uses the limit, not the USD one",
+          note.startswith("Selling USDT") and "not the USD spending limit" in note, note)
+    for payer in ("usdc", "eth"):
+        note = tools.common._limit_note(uid, payer, "usdt")
+        check(f"buying one with {payer.upper()}: the full amount counts", "full amount" in note and "limit of its own" in note, note)
+    functions.watched.discard(USDC)
+    note = tools.common._limit_note(uid, "usdc", "usdt")
+    check("buying one with a token that doesn't count: neither counts", note.startswith("Neither USDC nor USDT") and "doesn't use" in note, note)
+    functions.watched.add(USDC)
+    del functions.caps[PEPE]
+    note = tools.common._limit_note(uid, "pepe", "usdt")
+    check("buying one with a token with no price: neither counts", note.startswith("Neither PEPE nor USDT") and "doesn't use" in note, note)
+    note = tools.common._limit_note(uid, "pepe")
+    check("with its limit gone, a token with no price is back to not being covered", "PEPE isn't covered" in note, note)
+    check("listed tokens with no limit still get no note", tools.common._limit_note(uid, "usdc", "weth") == "")
+    functions.caps[PEPE] = (1000 * 10**18, 400 * 10**18)
+
+    handler = tools.common.load_session_handler(uid)
+    limits = tools.wallet_reads._token_limits(uid, handler, [USDT, PEPE])
+    check("the status lists them in whole tokens, by name", limits == [
+        {"token": "USDT", "limit": 150.0, "remaining": 50.0},
+        {"token": "PEPE", "limit": 1000.0, "remaining": 400.0},
+    ], str(limits))
+
+    def broken(user_id, token):
+        address = db.resolve_token(user_id, CHAIN, token)
+        if address != PEPE:
+            return FakeToken(address, 6)
+        return SimpleNamespace(address=address, functions=SimpleNamespace(
+            decimals=lambda: SimpleNamespace(call=lambda: (_ for _ in ()).throw(RuntimeError("no answer")))
+        ))
+
+    original = set_everywhere(tools, "load_ierc20", broken)
+    try:
+        limits = tools.wallet_reads._token_limits(uid, handler, [USDT, PEPE])
+    finally:
+        set_everywhere(tools, "load_ierc20", original)
+    check("a token that can't be read doesn't fail the status", [t["token"] for t in limits] == ["USDT"], str(limits))
+
+
+def test_token_cap_route():
+    print("\n[5c] the owner's limit on a token: which tokens can have one, and what gets signed")
+    reads = {"decimals": 0}
+    decimals = {USDT: 6, PEPE: 18}
+
+    def contract(address, abi):
+        def read():
+            reads["decimals"] += 1
+            if address not in decimals:
+                raise ValueError("not a token")
+            return decimals[address]
+        return SimpleNamespace(functions=SimpleNamespace(decimals=lambda: SimpleNamespace(call=read)))
+
+    w3 = SimpleNamespace(eth=SimpleNamespace(contract=contract), to_checksum_address=Web3.to_checksum_address)
+    wallet = SimpleNamespace(address=WALLET, functions=SimpleNamespace(
+        setTokenCap=lambda token, limit: ("setTokenCap", token, limit),
+        removeTokenCap=lambda token: ("removeTokenCap", token),
+        setNativeMetering=lambda metered, wrapped: ("setNativeMetering", metered, wrapped),
+    ))
+    originals = {
+        name: set_everywhere(api, name, value) for name, value in {
+            "_resolve_chain": lambda _chain: (w3, NETWORK),
+            "_load_wallet_for_chain": lambda _w3, _user, _chain: wallet,
+            "_require_owner": lambda _user: WALLET,
+            "_prepare_owner_tx": lambda _w3, _owner, fn, _chain: {"tx": list(fn)},
+        }.items()
+    }
+    try:
+        c, headers, uid = _client_for()
+        db.save_wallet_address(uid, CHAIN, WALLET)
+        db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+
+        def post(**body):
+            return c.post("/api/wallet/token-caps/prepare", json={"chain_id": CHAIN, **body}, headers=headers)
+
+        r = post(token="usdt", action="set", limit="150.5")
+        check("a listed token, by ticker, scaled by its decimals",
+              r.status_code == 200 and r.json()["tx"] == ["setTokenCap", USDT, 150_500_000]
+              and r.json()["limit_base_units"] == "150500000", f"{r.status_code} {r.text[:200]}")
+        r = post(token=PEPE, action="set", limit="1000")
+        check("a token with no price, by address",
+              r.status_code == 200 and r.json()["tx"] == ["setTokenCap", PEPE, 1000 * 10**18], f"{r.status_code} {r.text[:200]}")
+        r = post(token="pepe", action="set", limit="0")
+        check("a limit of 0 is allowed", r.status_code == 200 and r.json()["tx"] == ["setTokenCap", PEPE, 0], r.text[:200])
+
+        check("a set with no limit -> 400", post(token="usdt", action="set").status_code == 400)
+        check("a negative limit -> 422", post(token="usdt", action="set", limit="-1").status_code == 422)
+        check("an unknown action -> 422", post(token="usdt", action="watch", limit="1").status_code == 422)
+        check("an unknown ticker -> 400", post(token="nope", action="set", limit="1").status_code == 400)
+
+        reads["decimals"] = 0
+        for token, why in (("eth", "the generic native name"), ("ETH", "the chain's own ticker"), ("weth", "the wrapped ticker"), (WETH, "the wrapped address")):
+            r = post(token=token, action="set", limit="1")
+            check(f"USD-only: {why} -> 400", r.status_code == 400 and "counts in USD or not at all" in r.json()["detail"], r.text[:200])
+        check("…refused without asking the chain", reads["decimals"] == 0, str(reads))
+
+        reads["decimals"] = 0
+        r = post(token=PEPE, action="remove")
+        check("removing builds the right call", r.status_code == 200 and r.json()["tx"] == ["removeTokenCap", PEPE], r.text[:200])
+        check("…and never reads the token: a broken one must always be removable", reads["decimals"] == 0, str(reads))
+        r = post(token="usdt", action="remove")
+        check("…by ticker too", r.status_code == 200 and r.json()["tx"] == ["removeTokenCap", USDT], r.text[:200])
+
+        # Whether the native asset counts: one call that names the wrapped token, so both move together.
+        def switch(**body):
+            return c.post("/api/wallet/native-metering/prepare", json=body, headers=headers)
+
+        for metered in (True, False):
+            r = switch(chain_id=CHAIN, metered=metered)
+            check(f"native metering {'on' if metered else 'off'} names WETH to move with it",
+                  r.status_code == 200 and r.json()["tx"] == ["setNativeMetering", metered, WETH]
+                  and r.json()["metered"] is metered and r.json()["wrapped_token"] == WETH,
+                  f"{r.status_code} {r.text[:200]}")
+        check("a request that doesn't say which way -> 422", switch(chain_id=CHAIN).status_code == 422)
+        # Celo's native asset is itself its ERC-20, so there is no wrapped token to move.
+        r = switch(chain_id=42220, metered=True)
+        check("where nothing follows the native asset, only the flag changes",
+              r.status_code == 200 and r.json()["tx"] == ["setNativeMetering", True, tools.common.ETH_SENTINEL]
+              and r.json()["wrapped_token"] is None, f"{r.status_code} {r.text[:200]}")
+    finally:
+        for name, value in originals.items():
+            set_everywhere(api, name, value)
+
+
+def test_wallet_read_token_caps():
+    print("\n[5d] the wallet read reports each limit, even for a token that no longer answers")
+    unknown = _addr(0xBAD)
+
+    def contract(address, abi):
+        return SimpleNamespace(functions=SimpleNamespace(
+            decimals=lambda: SimpleNamespace(call=lambda: (_ for _ in ()).throw(ValueError("no answer")))
+        ))
+
+    wallet = SimpleNamespace(functions=SimpleNamespace(
+        getTokenCap=lambda token: SimpleNamespace(call=lambda: (True, 150 * 10**6, 50 * 10**6))
+    ))
+    w3 = SimpleNamespace(eth=SimpleNamespace(contract=contract), to_checksum_address=Web3.to_checksum_address)
+    balances = [
+        {"ticker": "eth", "address": None, "decimals": 18},
+        {"ticker": "usdt", "address": USDT, "decimals": 6},
+    ]
+    caps = routes.wallet._token_caps(w3, wallet, [USDT, unknown], balances, {USDT.lower(): "usdt"})
+    check("a token the dashboard shows is named, with its decimals", caps[0] == {
+        "ticker": "usdt", "address": USDT, "decimals": 6, "limit_raw": str(150 * 10**6), "remaining_raw": str(50 * 10**6),
+    }, str(caps[0]))
+    check("one that doesn't answer is still listed, so it can be removed",
+          caps[1]["address"] == unknown and caps[1]["ticker"] is None and caps[1]["decimals"] is None, str(caps[1]))
+    check("no limits, no reads", routes.wallet._token_caps(w3, wallet, [], balances, {}) == [])
 
 
 class _Reached(Exception):
@@ -706,7 +938,12 @@ def test_dashboard_tokens():
     check("removing again reports nothing to remove", db.remove_dashboard_token(uid, CHAIN, "usdt") is False)
 
     routes.wallet._show_counted_tokens(uid, CHAIN, [USDT.lower(), _addr(0xFEED)])
-    check("counted tokens and WETH are copied onto the dashboard, unlisted addresses skipped",
+    check("counted tokens are copied onto the dashboard, unlisted addresses skipped",
+          [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdc", "usdt"],
+          str(db.get_dashboard_tokens(uid, CHAIN)))
+    # WETH counts only while the native asset does, and the wallet then watches it like any other.
+    routes.wallet._show_counted_tokens(uid, CHAIN, [WETH])
+    check("WETH joins once the wallet counts it, not before",
           [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdc", "usdt", "weth"],
           str(db.get_dashboard_tokens(uid, CHAIN)))
 
@@ -731,9 +968,12 @@ def test_dashboard_api():
     print("\n[4c] the API adds a listed token to the dashboard and removes it only once it stops counting")
     original = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain, routes.added_tokens.read_spending_config
     watched: list[str] = []
+    capped: list[str] = []
     set_everywhere(api, "_resolve_chain", lambda chain_id: (FAKE_W3, NETWORK))
     set_everywhere(api, "_load_wallet_for_chain", lambda _w3, user_id, chain_id: SimpleNamespace(address=db.get_wallet_address(user_id, chain_id)))
-    set_everywhere(api, "read_spending_config", lambda _wallet: {"watchedTokens": list(watched)})
+    set_everywhere(
+        api, "read_spending_config", lambda _wallet: {"watchedTokens": list(watched), "cappedTokens": list(capped)}
+    )
     try:
         c, headers, uid = _client_for()
         db.save_wallet_address(uid, CHAIN, WALLET)
@@ -752,15 +992,38 @@ def test_dashboard_api():
         check("…and it stays", [t["ticker"] for t in db.get_dashboard_tokens(uid, CHAIN)] == ["usdt"])
 
         watched.clear()
+        capped.append(USDT)
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT}", headers=headers)
+        check("removing it while it has a limit of its own -> 409", r.status_code == 409, f"{r.status_code} {r.text[:160]}")
+        check("…saying to remove that first", "Remove that first" in r.json().get("detail", ""), r.text[:200])
+        capped.clear()
+
+        db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
+        capped.append(PEPE)
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{PEPE}", headers=headers)
+        check("an added token with a limit of its own stays too -> 409", r.status_code == 409,
+              f"{r.status_code} {r.text[:160]}")
+        check("…and it is still listed", len(db.get_custom_tokens(uid, CHAIN)) == 1)
+        capped.clear()
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{PEPE}", headers=headers)
+        check("…until the limit comes off", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
+
         r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT.lower()}", headers=headers)
         check("once it no longer counts it can be removed", r.status_code == 200, f"{r.status_code} {r.text[:160]}")
         check("it is gone", db.get_dashboard_tokens(uid, CHAIN) == [])
         r = c.delete(f"/api/tokens/custom/{CHAIN}/{USDT}", headers=headers)
         check("removing it again -> 404", r.status_code == 404, str(r.status_code))
 
+        # WETH counts exactly while the native asset does. While it counts it stays, and the way
+        # to stop it is the native asset's switch; once it doesn't, it comes off like any token.
         db.add_dashboard_tokens(uid, CHAIN, ["weth"])
+        watched.append(WETH)
         r = c.delete(f"/api/tokens/custom/{CHAIN}/{WETH}", headers=headers)
-        check("WETH can't be removed -> 400", r.status_code == 400 and "always counts" in r.json()["detail"], r.text[:200])
+        check("WETH can't be removed while it counts -> 409", r.status_code == 409, f"{r.status_code} {r.text[:200]}")
+        check("…saying to stop counting ETH first", "Stop counting ETH first" in r.json().get("detail", ""), r.text[:200])
+        watched.clear()
+        r = c.delete(f"/api/tokens/custom/{CHAIN}/{WETH}", headers=headers)
+        check("once ETH no longer counts, WETH can be removed", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
     finally:
         set_everywhere(api, "_resolve_chain", original[0])
         set_everywhere(api, "_load_wallet_for_chain", original[1])
@@ -784,8 +1047,8 @@ def test_dashboard_balances():
     check("native first, then the dashboard's listed tokens, then added ones",
           [r["ticker"] for r in rows] == ["eth", "usdc", "weth", "pepe"], str([r["ticker"] for r in rows]))
     check("USDT isn't shown: it isn't on this dashboard", all(r["ticker"] != "usdt" for r in rows))
-    check("WETH is marked always counted, and only WETH",
-          [r["ticker"] for r in rows if r.get("always_counted")] == ["weth"], str(rows))
+    check("WETH is marked as following the native asset, and only WETH",
+          [r["ticker"] for r in rows if r.get("follows_native")] == ["weth"], str(rows))
     check("balances are read", next(r for r in rows if r["ticker"] == "usdc")["raw"] == str(7 * 10**6), str(rows))
 
 
@@ -824,7 +1087,8 @@ def test_wallet_read():
     db.add_dashboard_tokens(uid, CHAIN, ["usdc", "usdt"])
     db.save_custom_token(uid, CHAIN, PEPE, "pepe", "Pepe", 18)
     owner = db.get_user_by_id(uid)["owner_addr"]
-    # WETH joins the dashboard on its own: it always counts (_show_counted_tokens).
+    # WETH joins the dashboard on its own: this wallet counts the native asset, so it watches WETH
+    # too (_show_counted_tokens).
     balances = {USDC: 7 * 10**6, USDT: ContractLogicError("execution reverted"), WETH: 0, PEPE: 5 * 10**18}
 
     def contract(address, abi):
@@ -852,8 +1116,9 @@ def test_wallet_read():
            for name in ("sessionGasBudget", "sessionGasRemaining", "sessionGasWindowStart")},
     }))
     serving = {"wallet": wallet}
-    config = {"installed": True, "windowStart": 1, "windowDuration": 86_400, "spentInWindow": 10 * 10**18,
-              "dailyLimitUsd": 50 * 10**18, "watchedTokens": [USDC], "trustedSpenders": []}
+    config = {"installed": True, "nativeMetered": True, "windowStart": 1, "windowDuration": 86_400,
+              "spentInWindow": 10 * 10**18, "dailyLimitUsd": 50 * 10**18, "watchedTokens": [WETH, USDC],
+              "trustedSpenders": [], "cappedTokens": []}
     w3 = SimpleNamespace(eth=SimpleNamespace(get_balance=lambda _a: slow(10**18).call(), contract=contract),
                          to_checksum_address=Web3.to_checksum_address)
     original = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain, routes.added_tokens.read_spending_config
@@ -875,6 +1140,7 @@ def test_wallet_read():
     check("the wallet's own state comes through",
           body.get("is_owner") is True and body.get("paused") is False
           and body.get("spending", {}).get("remaining_usd") == 40 and body.get("spending", {}).get("spent_usd") == 10
+          and body.get("spending", {}).get("native_metered") is True
           and body.get("limits") == {
               "max_op_gas_cost_wei": str(10**17),
               # 0.02 of the 0.05 used, so it refills a day after the window began.
@@ -958,7 +1224,7 @@ def test_lp_balances():
           [r["ticker"] for r in rows] == ["eth", "pepe", "eth/usdc lp"], str([r["ticker"] for r in rows]))
     lp = rows[-1]
     check("the row is the pool's own token, marked lp, never custom or counted",
-          lp["address"] == eth_pool and lp["lp"] and not lp["custom"] and not lp["always_counted"], str(lp))
+          lp["address"] == eth_pool and lp["lp"] and not lp["custom"] and not lp["follows_native"], str(lp))
     check("...with the wallet's LP balance", lp["raw"] == str(10 * 10**18) and lp["decimals"] == 18, str(lp))
     check("...and what that holds: a tenth of each reserve, the native asset's side first",
           lp["underlying"] == [{"ticker": "eth", "decimals": 18, "raw": str(40 * 10**18)},
@@ -1137,6 +1403,9 @@ if __name__ == "__main__":
         test_lp_balances()
         test_allowlist_suggests_pools()
         test_tools_price_and_note_custom_tokens()
+        test_token_limits()
+        test_token_cap_route()
+        test_wallet_read_token_caps()
         test_ierc20_cache_follows_the_address()
         test_tools_only_reach_tokens_the_owner_chose()
         test_action_line_drops_approvals()

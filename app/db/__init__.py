@@ -16,6 +16,7 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   users         accounts and their linked Telegram chat
   signin        refresh tokens and the single-use sign-in nonces
   transactions  the History tab's records
+  recurring     recurring payments: the schedules on each wallet's RecurringPaymentModule
   feedback      what users tell the team about the app (the bot's /feedback)
 """
 import json
@@ -105,6 +106,15 @@ from db.contacts import (  # noqa: E402 -- after get_db, which these modules imp
 from db.feedback import (  # noqa: E402 -- after get_db, which these modules import
     add_feedback,
     count_feedback_since,
+)
+from db.recurring import (  # noqa: E402 -- after get_db, which these modules import
+    get_due_schedules,
+    get_schedule,
+    get_schedules,
+    get_wallets_on_chain,
+    record_failure,
+    record_payment,
+    upsert_schedule,
 )
 from db.schema import (  # noqa: E402 -- after get_db, which these modules import
     MIGRATIONS,

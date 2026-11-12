@@ -33,10 +33,11 @@ DEFAULT_DAILY_LIMIT_USD = 50_000 * 10**18
 # Spending-window length in seconds (24h — the cap refills each window).
 DEFAULT_WINDOW_SECS = 86_400
 
-# How long a freshly granted session key stays valid, in seconds (30 days). The contract caps any
-# grant at SessionHandler.MAX_SESSION_TTL (90 days); this is the shorter default the app actually
-# asks for, so a key that quietly stops being used dies on its own rather than outliving its
-# purpose. Renewal is one owner-signed addSession, so the cost of a short life is friction only.
+# How long a session key this harness grants stays valid, in seconds (30 days). The contract caps
+# any grant at SessionHandler.MAX_SESSION_TTL (90 days), which is what the site asks for
+# (routes/deps.DEFAULT_SESSION_TTL_SECS). The harness keeps a shorter figure of its own: it counts
+# from this machine's clock, and a deadline at the very ceiling is refused whenever the chain's
+# clock is behind (see routes/deps.session_deadline).
 DEFAULT_SESSION_TTL_SECS = 30 * 86_400
 
 # ETH transferred into a freshly deployed wallet as deployWallet's msg.value so it can pay its own ERC-4337
@@ -150,9 +151,9 @@ def _default_watched_tokens(user_id: int, chain_name: str) -> list[str]:
 def deploy_wallet(user_id: int, chain_name: str):
     """
     Deploys a new SessionHandler wallet for user_id by calling SHFactory.deployWallet(
-    dailyLimitUsd, windowDuration, watchedTokens, sessionKeyX, sessionKeyY, sessionKeyValidUntil,
-    trustedSpenders) on the given chain, then persists the resulting address to wallet.db. The
-    first three arguments seed the wallet's spending-cap config: SpendingLimitModule is installed
+    dailyLimitUsd, windowDuration, watchedTokens, nativeMetered, sessionKeyX, sessionKeyY,
+    sessionKeyValidUntil, trustedSpenders) on the given chain, then persists the resulting address
+    to wallet.db. The first four arguments seed the wallet's spending-cap config: SpendingLimitModule is installed
     as a hook with a DEFAULT_DAILY_LIMIT_USD cap per DEFAULT_WINDOW_SECS window, metering the
     DEFAULT_WATCHED_TICKERS for this network.
 
@@ -234,6 +235,10 @@ def deploy_wallet(user_id: int, chain_name: str):
         DEFAULT_DAILY_LIMIT_USD,
         DEFAULT_WINDOW_SECS,
         watched_tokens,
+        # nativeMetered. The harness's wallets count the native asset, as every wallet did before
+        # it became the owner's choice, so the tests built on them still exercise that path. The
+        # web deploy leaves it off unless the user switches it on (routes/deploy.py).
+        True,
         session_key.qx,
         session_key.qy,
         session_key_valid_until,

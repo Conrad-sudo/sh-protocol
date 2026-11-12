@@ -38,12 +38,13 @@ from __future__ import annotations
 import contextvars
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from fractions import Fraction
 from typing import Callable, Literal, Sequence
 
+import requests
 from langchain_core.tools import ToolException, tool
 from web3 import Web3
 from web3.contract import Contract
@@ -114,6 +115,14 @@ _MAX_POSITIONS_SCANNED = 200
 # in the process shares it, so it is sized for many quotes at once (a quote asks each fee tier).
 _READS = ThreadPoolExecutor(max_workers=64, thread_name_prefix="v3-read")
 
+# How long one round of quotes waits before going on without the ones still out. web3 gives one
+# request 30 s and then sends it up to 4 more times, so without this a single slow pool would hold
+# the round for about 2.5 minutes, and a fork, reading each storage slot over the network, can be
+# that slow on a thin pool.
+_QUOTE_WAIT_SECS = 30.0
+# What a quote that ran out of time comes back as: from the wait above, or from the provider itself.
+_QUOTE_TIMEOUTS = (TimeoutError, requests.exceptions.Timeout)
+
 
 def _run(read: Callable[[], object]) -> object:
     try:
@@ -133,6 +142,19 @@ def _gather(reads: Sequence[Callable[[], object]]) -> list:
     # One context copy per task: a Context can only be entered by one thread at a time.
     futures = [_READS.submit(contextvars.copy_context().run, _run, read) for read in reads]
     return [future.result() for future in futures]
+
+
+def _gather_quotes(reads: Sequence[Callable[[], object]]) -> list:
+    """
+    _gather with a time limit: a read still out after _QUOTE_WAIT_SECS comes back as a TimeoutError.
+    Nothing can cancel that read, so it finishes on its pool thread and its answer is dropped.
+    """
+    futures = [_READS.submit(contextvars.copy_context().run, _run, read) for read in reads]
+    wait(futures, timeout=_QUOTE_WAIT_SECS)
+    return [
+        future.result() if future.done() else TimeoutError(f"no answer in {_QUOTE_WAIT_SECS:g} s")
+        for future in futures
+    ]
 
 
 def _gather_strict(reads: Sequence[Callable[[], object]]) -> list:
@@ -862,7 +884,8 @@ class UniswapV3Toolkit:
     # A route is a direct pool at one fee tier, or two pools through the wrapped native token. No
     # other hop tokens: that matches what V2 offered, and every extra hop is another fee and
     # another place the price can move before the swap lands. Pools that don't exist are dropped
-    # after one round of getPool reads; the rest are quoted with QuoterV2 and the best fill wins.
+    # after one round of getPool reads, and pools holding no liquidity at today's price after one
+    # round of liquidity() reads; the rest are quoted with QuoterV2 and the best fill wins.
     #
     # Exact input quotes the direct tiers and the first leg's tiers together, then -- with the best
     # first-leg tier fixed -- every second-leg tier along the whole path, so a hop costs two
@@ -896,11 +919,25 @@ class UniswapV3Toolkit:
             pairs += [(token_in, wrapped), (wrapped, token_out)]
         return pairs
 
-    def _existing_tiers(self, pairs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
-        """{pair: the fee tiers with a pool, in fee_tiers order}, one round of getPool reads."""
+    def _liquid_tiers(self, pairs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
+        """
+        {pair: the fee tiers whose pool holds liquidity at today's price, in fee_tiers order}: one
+        round of getPool reads, then one of liquidity().
+
+        An empty pool is left out before it is quoted. Finding no liquidity, a quote searches the
+        pool's tick bitmap all the way to the end of its price range, one storage read per word:
+        4,292 reads for WETH -> PEPE at 0.01%, about 11 minutes on a fork, where each is a request
+        to the forked RPC. Liquidity only beyond today's price is skipped with it, as a fill that
+        moves the price that far is rarely the best one.
+        """
         found = self._find_pools([(a, b, fee) for a, b in pairs for fee in self.fee_tiers])
+        pools = list(dict.fromkeys(pool for pool in found.values() if pool is not None))
+        amounts = _gather_strict([lambda pool=pool: self._read_liquidity(pool) for pool in pools])
+        liquidity = dict(zip(pools, amounts))
         return {
-            (a, b): [fee for fee in self.fee_tiers if found[_pool_key(a, b, fee)] is not None]
+            (a, b): [
+                fee for fee in self.fee_tiers if liquidity.get(found[_pool_key(a, b, fee)], 0) > 0
+            ]
             for a, b in pairs
         }
 
@@ -909,13 +946,14 @@ class UniswapV3Toolkit:
         jobs: Sequence, outcomes: Sequence, kind: str, *, better: Callable[[int, int], bool]
     ) -> tuple[int, int] | None:
         """The (fee, amount) of the best successful quote among `kind` jobs, or None. A quote that
-        reverted is skipped -- that pool cannot fill this swap; anything else is a real failure
+        reverted is skipped -- that pool cannot fill this swap -- and so is one that timed out, so
+        one slow pool doesn't cost the swap the others' prices. Anything else is a real failure
         and is raised. On a tie the first tier wins."""
         top = None
         for (job_kind, fee), outcome in zip(jobs, outcomes):
             if job_kind != kind:
                 continue
-            if isinstance(outcome, ContractLogicError):
+            if isinstance(outcome, (ContractLogicError, *_QUOTE_TIMEOUTS)):
                 continue
             if isinstance(outcome, Exception):
                 raise outcome
@@ -930,7 +968,7 @@ class UniswapV3Toolkit:
         Raises if no route can fill it."""
         wrapped = self.native_wrapped_address
         pairs = self._hop_pairs(token_in, token_out)
-        tiers = self._existing_tiers(pairs)
+        tiers = self._liquid_tiers(pairs)
         direct = tiers[pairs[0]]
         leg1, leg2 = (tiers[pairs[1]], tiers[pairs[2]]) if len(pairs) == 3 else ([], [])
 
@@ -938,7 +976,7 @@ class UniswapV3Toolkit:
         jobs = [("direct", fee) for fee in direct]
         if leg1 and leg2:
             jobs += [("leg1", fee) for fee in leg1]
-        outcomes = _gather(
+        outcomes = _gather_quotes(
             [
                 (lambda fee=fee: self._quote_in_single(token_in, token_out, amount_in, fee))
                 if kind == "direct"
@@ -951,10 +989,11 @@ class UniswapV3Toolkit:
 
         # Round 2: with the best first leg fixed, every second-leg tier along the whole path.
         hop = None
+        hop_outcomes = []
         if best_leg1 is not None:
             first_fee = best_leg1[0]
             hop_jobs = [("leg2", fee) for fee in leg2]
-            hop_outcomes = _gather(
+            hop_outcomes = _gather_quotes(
                 [
                     lambda fee=fee: self._quote_in_path(
                         encode_path([token_in, wrapped, token_out], [first_fee, fee]), amount_in
@@ -973,7 +1012,7 @@ class UniswapV3Toolkit:
             return _Route([token_in, token_out], [best_direct[0]], best_direct[1])
         if hop is not None:
             return hop
-        raise self._no_route(label_in, label_out)
+        raise self._no_route(label_in, label_out, [*outcomes, *hop_outcomes])
 
     def _route_in(
         self, amount_out: int, token_in: str, token_out: str, *, label_in: str, label_out: str
@@ -982,7 +1021,7 @@ class UniswapV3Toolkit:
         it -- the exact-output mirror of _route_out. Raises if no route can fill it."""
         wrapped = self.native_wrapped_address
         pairs = self._hop_pairs(token_in, token_out)
-        tiers = self._existing_tiers(pairs)
+        tiers = self._liquid_tiers(pairs)
         direct = tiers[pairs[0]]
         leg1, leg2 = (tiers[pairs[1]], tiers[pairs[2]]) if len(pairs) == 3 else ([], [])
 
@@ -990,7 +1029,7 @@ class UniswapV3Toolkit:
         jobs = [("direct", fee) for fee in direct]
         if leg1 and leg2:
             jobs += [("leg2", fee) for fee in leg2]
-        outcomes = _gather(
+        outcomes = _gather_quotes(
             [
                 (lambda fee=fee: self._quote_out_single(token_in, token_out, amount_out, fee))
                 if kind == "direct"
@@ -1004,10 +1043,11 @@ class UniswapV3Toolkit:
         # Round 2: with the best output side fixed, every input-side tier along the whole path,
         # which exact-output quotes and swaps read backwards: token_out first.
         hop = None
+        hop_outcomes = []
         if best_leg2 is not None:
             second_fee = best_leg2[0]
             hop_jobs = [("leg1", fee) for fee in leg1]
-            hop_outcomes = _gather(
+            hop_outcomes = _gather_quotes(
                 [
                     lambda fee=fee: self._quote_out_path(
                         encode_path([token_out, wrapped, token_in], [second_fee, fee]), amount_out
@@ -1025,11 +1065,18 @@ class UniswapV3Toolkit:
             return _Route([token_in, token_out], [best_direct[0]], best_direct[1])
         if hop is not None:
             return hop
-        raise self._no_route(label_in, label_out)
+        raise self._no_route(label_in, label_out, [*outcomes, *hop_outcomes])
 
     @staticmethod
-    def _no_route(label_in: str, label_out: str) -> ToolException:
-        """The one place this message is worded, so every failed route search reports alike."""
+    def _no_route(label_in: str, label_out: str, outcomes: Sequence) -> ToolException:
+        """The one place this message is worded, so every failed route search reports alike. With a
+        quote that timed out among `outcomes`, that pool might have filled it, so "no pool can"
+        would be untrue."""
+        if any(isinstance(outcome, _QUOTE_TIMEOUTS) for outcome in outcomes):
+            return ToolException(
+                f"The Uniswap V3 pools for {label_in} -> {label_out} took too long to answer, so "
+                f"there is no price yet. Nothing was quoted; it may work if tried again."
+            )
         return ToolException(
             f"No Uniswap V3 liquidity path found for {label_in} -> {label_out}. No pool, direct or "
             f"through the wrapped native token, can fill this amount."

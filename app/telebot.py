@@ -426,7 +426,9 @@ def wallet_warnings(status: dict, chain: str, now: int) -> list[str]:
     warnings = [key] if key else []
     limit = status.get("daily_limit_usd") or 0
     remaining = status.get("remaining_usd") or 0
-    if limit > 0 and remaining < BUDGET_ALERT_THRESHOLD * limit:
+    # Only a limit that binds something can run low: with nothing counted, what an earlier spend
+    # left of it means nothing.
+    if status.get("limit_applies", True) and limit > 0 and remaining < BUDGET_ALERT_THRESHOLD * limit:
         warnings.append(
             f"⚠️ Low spending budget on {chain}: only ${remaining:,.2f} of your ${limit:,.2f} limit "
             "is left. It refills when the current period ends."
@@ -1207,13 +1209,25 @@ def _window(hours: float) -> str:
 
 def limit_lines(status: dict, chain: str, now: int) -> list[str]:
     """
-    /limit's lines: what is left of the spending limit, whether the owner has paused the wallet,
-    and the devices' approval -- its warning when one is due (_key_warning), otherwise its date.
+    /limit's lines: what is left of the spending limit and of any limit on a token in its own units,
+    whether the owner has paused the wallet, and the devices' approval -- its warning when one is due (_key_warning), otherwise its date.
     """
-    lines = [
-        f"Spending limit: ${status['remaining_usd']:,.2f} left of ${status['daily_limit_usd']:,.2f} "
-        f"{_window(status['window_hours'])}."
-    ]
+    # .get: a status built before the owner could choose what counts has no such field, and there
+    # the native asset always counted.
+    if status.get("limit_applies", True):
+        lines = [
+            f"Spending limit: ${status['remaining_usd']:,.2f} left of ${status['daily_limit_usd']:,.2f} "
+            f"{_window(status['window_hours'])}."
+        ]
+    else:
+        # Not "$0.00 left of $0.00": with nothing counted the figure binds nothing.
+        lines = ["Spending limit: none. Nothing counts toward one on this wallet."]
+    # Limits in a token's own units. .get: a status built before they existed has none.
+    for token in status.get("token_limits", []):
+        lines.append(
+            f"{html.escape(token['token'])} limit: {_price(token['remaining'])} left of "
+            f"{_price(token['limit'])} {_window(status['window_hours'])}."
+        )
     if status.get("paused"):
         lines.append("⏸ The owner has paused this wallet: nothing can be sent until it is unpaused in "
                      "the web app (Controls).")

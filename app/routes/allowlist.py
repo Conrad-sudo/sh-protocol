@@ -9,7 +9,7 @@ from web3.exceptions import ContractLogicError
 from auth import get_current_user
 from constants import (
     CHAIN_ID_BSC,
-    get_always_counted_ticker,
+    get_follows_native_ticker,
     get_default_spenders,
     get_exchange,
     get_native_asset_ticker,
@@ -195,8 +195,11 @@ def get_allowlist(chain_id: int, user_id: int = Depends(get_current_user)):
         listed_tokens = get_supported_tokens_by_chain_id(chain_id)
     except ValueError:
         listed_tokens = []
-    always = get_always_counted_ticker(chain_id)
-    on_dashboard = {t["ticker"] for t in get_dashboard_tokens(user_id, chain_id)} | {always}
+    # The wrapped native token is suggested whether or not it is on the dashboard: the assistant
+    # wraps through that contract (wrap_eth) whatever the wallet counts.
+    on_dashboard = {t["ticker"] for t in get_dashboard_tokens(user_id, chain_id)} | {
+        get_follows_native_ticker(chain_id)
+    }
     for token in listed_tokens:
         name(token["address"], token["ticker"].upper(), token["ticker"] in on_dashboard)
     for token in get_custom_tokens(user_id, chain_id):

@@ -19,6 +19,9 @@ _ARTIFACTS = (
     "./out/SessionHandler.sol/SessionHandler.json",
     "./out/SpendingLimitModule.sol/SpendingLimitModule.json",
     "./out/SHOracle.sol/SHOracle.json",
+    # The owner's recurring payments: createSchedule/cancelSchedule are simulated before signing,
+    # and the keeper's run() reports why a payment can't go through.
+    "./out/RecurringPaymentModule.sol/RecurringPaymentModule.json",
 )
 
 # Error(string): what a plain `require(cond, "message")` reverts with -- Uniswap's router, for one.
@@ -39,6 +42,20 @@ _RESTRICTED_TARGET_SELECTOR = keccak(text="SessionHandler_SessionRestrictedTarge
 # The wallet's daily gas budget for everything the owner didn't sign, used up. Explained too: the
 # name alone says neither that it refills nor that only the owner can raise it.
 _GAS_BUDGET_SELECTOR = keccak(text="SessionHandler_SessionGasBudgetExceeded(uint256,uint256)")[:4]
+
+
+# A token going past the limit the owner set on it in its own units. Explained because the name alone
+# doesn't say the limit resets, or that the owner can change it.
+_TOKEN_CAP_SELECTOR = keccak(text="SpendingLimitModule_TokenCapExceeded(address,uint256,uint256)")[:4]
+
+
+def _explain_token_cap(token: str, spent: int, limit: int) -> str:
+    """Why the wallet refused to let `token` leave, and what happens next."""
+    return (
+        f"this would take {token} past the limit the owner set on it in its own units: {spent} of its "
+        f"smallest unit this period, against a limit of {limit}. The limit resets when the period ends, "
+        f"and the owner can change it in the web app (Controls)."
+    )
 
 
 def _explain_gas_budget(spent: int, budget: int) -> str:
@@ -179,6 +196,12 @@ def describe_revert_data(data: bytes) -> str:
     if data[:4] == _GAS_BUDGET_SELECTOR:
         try:
             return _explain_gas_budget(*decode(["uint256", "uint256"], data[4:]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _TOKEN_CAP_SELECTOR:
+        try:
+            token, spent, limit = decode(["address", "uint256", "uint256"], data[4:])
+            return _explain_token_cap(to_checksum_address(token), spent, limit)
         except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
             pass
     if data[:4] == _RESTRICTED_TARGET_SELECTOR:

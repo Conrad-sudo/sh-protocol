@@ -23,6 +23,7 @@ import routes.deploy
 import routes.history
 import routes.owner
 import routes.passkeys
+import routes.recurring
 import routes.sign
 import routes.signin
 import routes.telegram_link
@@ -104,5 +105,6 @@ app.include_router(routes.deploy.router)
 app.include_router(routes.wallet.router)
 app.include_router(routes.owner.router)
 app.include_router(routes.allowlist.router)
+app.include_router(routes.recurring.router)
 app.include_router(routes.passkeys.router)
 app.include_router(routes.sign.router)

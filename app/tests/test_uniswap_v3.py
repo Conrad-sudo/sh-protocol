@@ -22,10 +22,12 @@ from fractions import Fraction                 # noqa: E402
 from pathlib import Path                       # noqa: E402
 from unittest import mock                      # noqa: E402
 
+import requests                                # noqa: E402
 from eth_abi import encode                     # noqa: E402
 from eth_utils.abi import collapse_if_tuple    # noqa: E402
 from langchain_core.tools import ToolException  # noqa: E402
 from web3 import Web3                          # noqa: E402
+from web3.exceptions import ContractLogicError  # noqa: E402
 from web3.providers import JSONBaseProvider    # noqa: E402
 
 from langchain_uniswap_v3 import DEFAULT_GAS, KNOWN_NETWORKS, UniswapV3Toolkit  # noqa: E402
@@ -1196,6 +1198,78 @@ def test_routing(chain_id: int):
         check("a failure that is not a revert is not swallowed as an unroutable pool", False)
     except ConnectionError:
         check("a failure that is not a revert is not swallowed as an unroutable pool", True)
+
+    # An empty pool is never quoted: finding no liquidity, a quote reads the pool's whole tick
+    # bitmap, which took about 11 minutes on a mainnet fork for WETH -> PEPE at 0.01%.
+    dry = World(chain_id, positions=False)
+    dry.pool(A["WETH"], A["USDC"], 500)["liquidity"] = 0
+    dry_tools = dry.tools()
+    res = dry_tools["get_quote_out"].invoke({"token_in": A["WETH"], "token_out": A["USDC"], "amount_in": 1.0})
+    quoted = [a["params"]["fee"] for _, name, a in dry.chain.calls if name == "quoteExactInputSingle"]
+    check("an empty pool is not quoted, and the swap takes the next tier", quoted == [3000] and res["fees"] == [3000], f"{quoted} {res}")
+    res = dry_tools["get_quote_in"].invoke({"token_in": A["USDC"], "token_out": A["WETH"], "amount_out": 0.5})
+    quoted = [a["params"]["fee"] for _, name, a in dry.chain.calls if name == "quoteExactOutputSingle"]
+    check("... and exact output the same", quoted == [3000] and res["fees"] == [3000], f"{quoted} {res}")
+    res = dry_tools["get_quote_out"].invoke({"token_in": A["LINK"], "token_out": A["USDC"], "amount_in": 100.0})
+    check("... and a hop's leg the same", res["fees"] == [3000, 3000], str(res))
+    dry.pool(A["WETH"], A["USDC"], 3000)["liquidity"] = 0
+    before = len(dry.chain.calls)
+    raises("every pool empty: the no-route refusal",
+           lambda: dry_tools["get_quote_out"].invoke({"token_in": A["WETH"], "token_out": A["USDC"], "amount_in": 1.0}),
+           "No Uniswap V3 liquidity path")
+    check("... without a quote sent", not [c for c in dry.chain.calls[before:] if c[1].startswith("quote")], str(dry.chain.calls[before:]))
+
+    # A quote that timed out is skipped while another answered, like one that reverted, but it doesn't
+    # count as "no pool can fill this": that pool might have.
+    def by_tier(answers):
+        def quote(token_in, token_out, amount, fee):
+            if isinstance(answers[fee], Exception):
+                raise answers[fee]
+            return answers[fee]
+        return quote
+
+    timeout = requests.exceptions.ReadTimeout("Read timed out")
+    weth_usdc = dict(label_in="WETH", label_out="USDC")
+    t = World(chain_id, positions=False).toolkit()
+    t._quote_in_single = t._quote_out_single = by_tier({500: timeout, 3000: 1000})
+    route = t._route_out(10**18, A["WETH"], A["USDC"], **weth_usdc)
+    check("exact in: a tier that timed out is skipped while another answered", route.fees == [3000] and route.amount == 1000, str(route))
+    route = t._route_in(10**18, A["WETH"], A["USDC"], **weth_usdc)
+    check("exact out: the same", route.fees == [3000] and route.amount == 1000, str(route))
+    t._quote_in_single = by_tier({500: timeout, 3000: timeout})
+    raises("every tier timed out: says so, not that no pool can fill it",
+           lambda: t._route_out(10**18, A["WETH"], A["USDC"], **weth_usdc), "took too long")
+    t._quote_in_single = by_tier({500: ContractLogicError("too big"), 3000: timeout})
+    raises("one reverted, one timed out: the same, the second might have filled it",
+           lambda: t._route_out(10**18, A["WETH"], A["USDC"], **weth_usdc), "took too long")
+    t._quote_in_single = lambda token_in, token_out, amount, fee: 1000
+    t._quote_in_path = raising(timeout)
+    raises("a hop timed out in its second round: the same",
+           lambda: t._route_out(10**18, A["LINK"], A["USDC"], label_in="LINK", label_out="USDC"), "took too long")
+
+    # web3 sends a timed-out read up to 5 times, about 2.5 minutes, so a round stops waiting by itself.
+    release = threading.Event()
+
+    def hangs_at(slow_fee):
+        def quote(token_in, token_out, amount, fee):
+            if fee == slow_fee:
+                release.wait(10)
+            return 1000
+        return quote
+
+    t = World(chain_id, positions=False).toolkit()
+    with mock.patch.object(tk, "_QUOTE_WAIT_SECS", 0.1):
+        t._quote_in_single = hangs_at(500)
+        started = time.monotonic()
+        route = t._route_out(10**18, A["WETH"], A["USDC"], **weth_usdc)
+        took = time.monotonic() - started
+        check("a pool still out when the time is up is left behind", route.fees == [3000] and took < 5, f"{route} {took:.2f}s")
+        t._quote_in_single = hangs_at(3000)
+        started = time.monotonic()
+        raises("a pair's only pool still out: says it took too long, however few quotes there are",
+               lambda: t._route_out(10**18, A["LINK"], A["WETH"], label_in="LINK", label_out="WETH"), "took too long")
+        check("... and did not wait for it", time.monotonic() - started < 5, f"{time.monotonic() - started:.2f}s")
+    release.set()
 
     # The same-token and bad-amount refusals.
     raises("the same token in and out is refused", lambda: tools["get_quote_out"].invoke({"token_in": A["USDC"], "token_out": A["USDC"], "amount_in": 1.0}), "same token")

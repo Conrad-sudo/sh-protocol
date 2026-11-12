@@ -23,6 +23,7 @@ from constants import (
 from contracts import (
     load_ierc20,
     load_session_handler,
+    read_spending_config,
 )
 from db import (
     get_contact as _get_contact,
@@ -40,6 +41,7 @@ from db import (
     resolve_token as _resolve_token,
 )
 from network_config import load_network_config
+from parallel import read_all
 
 
 def _to_base_units(amount: float | str, decimals: int) -> int:
@@ -243,30 +245,72 @@ def _refuse_same_token(user_id: int, a: str, b: str, why: str) -> None:
     )
 
 
+def _own_limits(user_id: int, *tokens: str) -> list[tuple[str, str, str] | None]:
+    """
+    For each token, (its name, its limit, what is left of it this period) in whole units if the owner
+    limited it in its own units instead of in USD, else None. The native asset can't be limited so.
+    """
+    functions = load_session_handler(user_id).functions
+    erc20s = [None if _is_native(token) else load_ierc20(user_id=user_id, token=token) for token in tokens]
+    caps = read_all({
+        str(i): functions.getTokenCap(erc20.address).call for i, erc20 in enumerate(erc20s) if erc20 is not None
+    })
+    limits = []
+    for i, token in enumerate(tokens):
+        capped, limit, left = caps.get(str(i), (False, 0, 0))
+        if not capped:
+            limits.append(None)
+            continue
+        scale = 10 ** erc20s[i].functions.decimals().call()
+        limits.append((_token_label(user_id, token), _whole(limit / scale), _whole(left / scale)))
+    return limits
+
+
 def _limit_note(user_id: int, spent: str, received: str | None = None) -> str:
     """
-    One sentence for a quote that moves a token Mitfah doesn't list, saying how the spending cap
-    treats it. Empty when every token involved is listed or native -- those quotes are unchanged.
+    One sentence for a quote that moves a token with a limit of its own or one Mitfah doesn't list,
+    saying how the spending limits treat it. Empty otherwise -- those quotes are unchanged.
 
-    The cap meters NET value across the native asset and the wallet's watched tokens, and an
-    unlisted token has no price, so:
-      - sending or selling one costs nothing against the cap;
-      - buying one with a counted token (the native asset, or a watched USDC/USDT/WETH/WBNB/...)
-        counts the FULL amount paid -- the cap sees what left the wallet and cannot value what
-        came back;
-      - buying one with a listed token the wallet doesn't count costs nothing either.
+    The USD cap meters NET value across the wallet's watched tokens and, if the owner has it counted,
+    the native asset. A token the owner limited in its own units is outside that, and an unlisted
+    token has no price, so:
+      - sending or selling a limited token uses its own limit, however fair the price, and costs
+        nothing against the USD cap;
+      - sending or selling an unlisted token with no limit costs nothing at all;
+      - buying either with a counted token (a watched USDC/USDT/..., or the native asset while it
+        counts) counts the FULL amount paid -- the cap sees what left the wallet and cannot value what
+        came back -- and doesn't use the token's own limit;
+      - buying either with a listed token the wallet doesn't count costs nothing either.
 
     @param spent     The token leaving the wallet: a ticker, a 0x address, or "eth" for native.
     @param received  For a swap, the token coming back; None for a transfer.
     """
+    if received is None:
+        spent_limit, received_limit = _own_limits(user_id, spent)[0], None
+    else:
+        spent_limit, received_limit = _own_limits(user_id, spent, received)
+    if spent_limit is not None:
+        name, limit, left = spent_limit
+        return (
+            f"{'Sending' if received is None else 'Selling'} {name} uses the limit the owner set on it "
+            f"({left} of {limit} left in this period), not the USD spending limit."
+        )
     spent_label = _unlisted_label(user_id, spent)
-    received_label = _unlisted_label(user_id, received) if received is not None else None
+    if received_limit is not None:
+        received_label = received_limit[0]
+    else:
+        received_label = _unlisted_label(user_id, received) if received is not None else None
     if spent_label is None and received_label is None:
         return ""
     if received is None:
         return (
             f"{spent_label} isn't covered by the spending limit: Mitfah has no price for it, so "
             f"sending it doesn't count toward the limit."
+        )
+    if spent_label is not None and received_limit is not None:
+        return (
+            f"Neither {spent_label} nor {received_label} counts toward the USD spending limit, and buying "
+            f"{received_label} doesn't use the limit the owner set on it."
         )
     if spent_label is not None and received_label is not None:
         return f"Neither {spent_label} nor {received_label} is covered by the spending limit."
@@ -277,19 +321,34 @@ def _limit_note(user_id: int, spent: str, received: str | None = None) -> str:
         )
 
     _, chain_id, _ = load_network_config(user_id)
+    wallet = load_session_handler(user_id)
     if _is_native(spent):
-        payer, counted = get_native_asset_ticker(chain_id), True
+        payer = get_native_asset_ticker(chain_id)
+        # By field name, never position: see contracts.read_spending_config.
+        counted = read_spending_config(wallet)["nativeMetered"]
+        uncounted = f"{payer} doesn't count on this wallet"
     else:
         payer = spent.upper()
-        counted = load_session_handler(user_id).functions.isWatched(_token_address(user_id, spent)).call()
+        counted = wallet.functions.isWatched(_token_address(user_id, spent)).call()
+        uncounted = f"{payer} isn't on this wallet's counted list"
     if counted:
+        why = (
+            f"{received_label} has a limit of its own rather than a USD value"
+            if received_limit is not None
+            else f"Mitfah can't put a price on {received_label}"
+        )
         return (
-            f"The full amount of {payer} paid counts toward the spending limit: Mitfah can't put a "
-            f"price on {received_label}, so nothing is taken off for what comes back."
+            f"The full amount of {payer} paid counts toward the spending limit: {why}, so nothing is "
+            f"taken off for what comes back."
+        )
+    if received_limit is not None:
+        return (
+            f"Neither {payer} nor {received_label} counts toward the USD spending limit: {uncounted}, "
+            f"and buying {received_label} doesn't use the limit the owner set on it."
         )
     return (
-        f"Neither {payer} nor {received_label} counts toward the spending limit: {payer} isn't on "
-        f"this wallet's counted list and {received_label} has no price."
+        f"Neither {payer} nor {received_label} counts toward the spending limit: {uncounted} and "
+        f"{received_label} has no price."
     )
 
 

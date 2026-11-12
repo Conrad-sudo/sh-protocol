@@ -84,6 +84,7 @@ ENTRY_POINT = _addr(0xE7)
 OWNER = _addr(0x0E1)
 SAM = _addr(0x5A3)
 USDC = _addr(0x05DC)
+WETH = _addr(0x0E7E)
 PEPE = _addr(0x9E9E)
 STRANGER = _addr(0xBAD)
 ETH_SENTINEL = _addr(0)
@@ -94,6 +95,7 @@ WALLET_CONTRACT = Web3().eth.contract(address=WALLET, abi=HANDLER_ABI)
 
 _db = db.get_db()
 _db.execute("INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?)", (CHAIN, "usdc", USDC))
+_db.execute("INSERT OR REPLACE INTO supported_tokens (chain_id, ticker, address) VALUES (?, ?, ?)", (CHAIN, "weth", WETH))
 _db.commit()
 
 
@@ -213,10 +215,19 @@ def test_owner_transactions_are_described_from_their_calldata():
         (_owner_tx("withdraw", [ETH_SENTINEL, 10**18, STRANGER]), f"Withdraw 1 ETH to {STRANGER[:6]}…{STRANGER[-4:]}"),
         (_owner_tx("addWatchedToken", [USDC]), "Count USDC toward the limit"),
         (_owner_tx("removeWatchedToken", [USDC]), "Stop counting USDC toward the limit"),
+        # The native asset's switch names the wrapped token it moves along, or none (flag only).
+        (_owner_tx("setNativeMetering", [True, WETH]), "Count ETH and WETH toward the limit"),
+        (_owner_tx("setNativeMetering", [False, WETH]), "Stop counting ETH and WETH toward the limit"),
+        (_owner_tx("setNativeMetering", [True, ETH_SENTINEL]), "Count ETH toward the limit"),
+        (_owner_tx("setNativeMetering", [False, ETH_SENTINEL]), "Stop counting ETH toward the limit"),
+        (_owner_tx("setTokenCap", [PEPE, 150 * 10**6]), "Limit PEPE to 150 per period"),
+        (_owner_tx("setTokenCap", [USDC, 150 * 10**6]), "Limit USDC to 150000000 base units per period"),
+        (_owner_tx("removeTokenCap", [USDC]), "Remove the limit on USDC"),
         (_owner_tx("setDailyLimit", [100 * 10**18]), "Set the spending limit to $100"),
         (_owner_tx("setDailyLimit", [1_250 * 10**16]), "Set the spending limit to $12.50"),
         (_owner_tx("setWindowDuration", [86_400]), "Set the spending period to 24 hours"),
         (_owner_tx("setWindowDuration", [7 * 86_400]), "Set the spending period to 7 days"),
+        (_owner_tx("setWindowDuration", [30 * 86_400]), "Set the spending period to 30 days"),
         (_owner_tx("addSession", [phone_x, phone_y, in_30_days]), "Let “Kani's iPhone” approve payments for 30 days"),
         (_owner_tx("addSession", [stranger_x, stranger_y, in_30_days]), "Let a device approve payments for 30 days"),
         (_owner_tx("removeSession", [bytes.fromhex(key_id(phone_x, phone_y)[2:])]), "Revoke “Kani's iPhone”"),

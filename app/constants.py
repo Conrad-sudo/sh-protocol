@@ -26,6 +26,11 @@ SESSION_RENEWAL_WARNING_SECS = 3 * 86_400
 # reads MAX_SESSION_TTL off the wallet itself before it checks a grant against it.
 MAX_SESSION_KEYS = 5
 MAX_SESSION_TTL_SECS = 90 * 86_400
+# SpendingLimitModule's ceilings, mirrored so a request past them fails here instead of on chain: the
+# largest whole-dollar limit an int88 holds at 18 decimals, and the largest window a uint24 holds
+# (16,777,215 seconds, about 194 days).
+MAX_DAILY_LIMIT_USD = (2**87 - 1) // 10**18
+MAX_WINDOW_SECS = 2**24 - 1
 # How much life a passkey's approval on the wallet must have left to count for a transaction: in
 # the wallet checks every quote runs, and in which passkeys an approval page may use. The wallet's
 # own comparison is exact (valid through the deadline second, matching the EntryPoint), so this
@@ -164,15 +169,20 @@ def get_native_wrapped_ticker(chain_id: int) -> str:
     return ticker
 
 
-def get_always_counted_ticker(chain_id: int) -> str | None:
+def get_follows_native_ticker(chain_id: int) -> str | None:
     """
-    The ERC-20 Mitfah always counts toward the spending limit on chain_id: the wrapped native token
-    (WETH, WBNB), so it is treated like the native asset it wraps -- which the wallet contract always
-    meters. New wallets are always deployed watching it, and the API won't build its removal.
+    The ERC-20 that counts toward the spending limit exactly when the native asset does on chain_id:
+    the wrapped native token (WETH, WBNB). The owner chooses whether the native asset counts
+    (SpendingLimitModule's nativeMetered, set at deploy and switched in Controls), and the wrapped
+    token goes with it: a wallet deployed counting the native asset watches it, one deployed not
+    counting it doesn't, and the switch moves both in one transaction (the wallet's
+    setNativeMetering). The API won't build its addition or removal on its own.
 
-    This is app policy, not a contract rule: the owner could still call removeWatchedToken on the
-    wallet directly, and a wallet deployed before this rule may not watch it (the Controls page
-    offers to add it).
+    Why they go together: with one counted and not the other, turning one into the other is charged
+    as spending in one direction (a wrap, or an unwrap) though no value left the wallet.
+
+    This is app policy, not a contract rule: the owner could still call addWatchedToken or
+    removeWatchedToken on the wallet directly (the Controls page then offers to put it right).
 
     None on Celo, where "celo" is the native asset itself exposed as an ERC-20: watching it would
     count every CELO movement twice.

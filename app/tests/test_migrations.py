@@ -47,7 +47,7 @@ def test_new_database():
           f"{db.schema_version(conn)} of {len(db.MIGRATIONS)}")
     check("every table is there",
           {"users", "transactions", "transaction_movements", "supported_tokens", "lp_tokens", "app_feedback",
-           "passkeys", "passkey_challenges", "sign_requests"}
+           "passkeys", "passkey_challenges", "sign_requests", "recurring_payments"}
           <= _tables(conn), str(sorted(_tables(conn))))
     check("and no table of server-held session keys", not {"session_keys", "pending_session_keys"} & _tables(conn),
           str(sorted(_tables(conn))))

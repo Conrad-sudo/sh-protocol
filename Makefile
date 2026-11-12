@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
 
 
 
@@ -136,12 +136,17 @@ passkeys-test:
 chat-memory-test:
 	.venv/bin/python3 app/tests/test_chat_memory.py
 
+# Recurring payments, offline: the schedule table, the Controls routes and the keeper's decisions,
+# against a fake chain.
+recurring-test:
+	.venv/bin/python3 app/tests/test_recurring.py
+
 # One read-only lookup of a real Basename through mainnet and its gateway. Not part of py-test.
 ens-live:
 	.venv/bin/python3 app/tests/test_ens_names.py --live
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia
@@ -284,9 +289,10 @@ celo-fork:
 #                                owner on every fork too (deploy_wallet.LIVE_PRIVATE_KEY_ENV)
 #   TELEGRAM_BUNDLER_1, _2, ...  the Telegram bot's -- separate keys, so the two processes never
 #                                hand out the same nonce (bundler.use_bundler_key)
+#   KEEPER_KEY                   the keeper's (keeper.py): it pays the gas of recurring payments
 # The addresses are derived from the keys rather than kept in .env twice. Recursively expanded (=),
 # so cast only runs when `fund` does, and inside an @-silenced recipe, so no key is ever echoed.
-BUNDLER_ADDRESSES = $(foreach key,$(filter API_BUNDLER_% TELEGRAM_BUNDLER_%,$(.VARIABLES)),$(shell cast wallet address --private-key $($(key))))
+BUNDLER_ADDRESSES = $(foreach key,$(filter API_BUNDLER_% TELEGRAM_BUNDLER_% KEEPER_KEY,$(.VARIABLES)),$(shell cast wallet address --private-key $($(key))))
 # USER_ACCOUNT is the test user's own EOA (an address, not a key), funded beside the bundlers so
 # it can pay for its own wallet's onboarding on a fresh fork. Left out when .env doesn't set it.
 FUND_ADDRESSES = $(BUNDLER_ADDRESSES) $(USER_ACCOUNT)
@@ -409,6 +415,12 @@ bot:
 
 agent:
 	.venv/bin/python3 app/smart_wallet_agent.py
+
+# The keeper: pays recurring payments when they fall due, on every chain with the protocol deployed
+# (forks too, under APP_FORK_MODE=1). Signs with KEEPER_KEY, which only ever pays gas. Run exactly ONE
+# copy: its nonces are counted in this process. ARGS=--once makes one pass and exits.
+keeper:
+	.venv/bin/python3 app/keeper.py $(ARGS)
 
 # --workers 1 is not a default worth changing: tx_sender hands out bundler nonces from a cache
 # guarded by in-process locks, so a second worker process means a second nonce counter for the

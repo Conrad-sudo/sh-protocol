@@ -16,11 +16,11 @@ import tx_history
 from auth import get_current_user
 from constants import (
     ETH_SENTINEL,
-    get_always_counted_ticker,
     get_default_spenders,
+    get_follows_native_ticker,
     get_native_asset_ticker,
 )
-from constants import MAX_SESSION_KEYS
+from constants import MAX_DAILY_LIMIT_USD, MAX_SESSION_KEYS, MAX_WINDOW_SECS
 from contracts import invalidate_cache, read_spending_config
 from db import (
     get_passkey,
@@ -38,6 +38,7 @@ from routes.deps import (
     _revert_reason,
     _to_json_tx,
     _tx_seen,
+    session_deadline,
 )
 from userop import read_sessions, session_block
 
@@ -83,6 +84,26 @@ class WatchedTokenRequest(BaseModel):
     chain_id: int
     token: str
     action: str = Field(pattern="^(add|remove)$")
+
+
+class NativeMeteringRequest(BaseModel):
+    """Body of POST /api/wallet/native-metering/prepare."""
+
+    chain_id: int
+    # Whether the native asset (ETH, BNB), and its wrapped form with it, should count toward the limit.
+    metered: bool
+
+
+class TokenCapRequest(BaseModel):
+    """Body of POST /api/wallet/token-caps/prepare."""
+
+    chain_id: int
+    # A listed ticker, a ticker the user added, or a token's contract address.
+    token: str
+    action: str = Field(pattern="^(set|remove)$")
+    # Whole units (e.g. "150"), for "set". Decimal, not float, like a withdrawal's amount. 0 is
+    # allowed: it stops the token leaving the wallet through the assistant at all.
+    limit: Decimal | None = Field(default=None, ge=0)
 
 
 class TxConfirmRequest(BaseModel):
@@ -236,21 +257,23 @@ def prepare_watched_token(req: WatchedTokenRequest, user_id: int = Depends(get_c
     32, both caught by the simulation. Adding a token that is already watched is a no-op on chain,
     not an error.
 
-    Removing the wrapped native token (WETH, WBNB) is refused: Mitfah always counts it, like the
-    native asset it wraps. As with the exchange router, the owner can still call removeWatchedToken
-    on the wallet directly -- this stops an accidental removal from the app, not a deliberate one.
+    The wrapped native token (WETH, WBNB) is refused both ways: it counts exactly when the native
+    asset does, and /api/wallet/native-metering/prepare moves the two together. As with the exchange
+    router, the owner can still call addWatchedToken or removeWatchedToken on the wallet directly --
+    this stops the two being split by accident from the app, not on purpose.
 
     @return  {"tx", "token_address"}.
     """
     owner = _require_owner(user_id)
-    always = get_always_counted_ticker(req.chain_id)
+    follower = get_follows_native_ticker(req.chain_id)
     # Before _resolve_chain, like the router check: a request that can only be refused should not
     # cost an RPC round trip.
-    if req.action == "remove" and always is not None and req.token.lower() == always:
+    if follower is not None and req.token.lower() == follower:
+        native = get_native_asset_ticker(req.chain_id)
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"{always.upper()} always counts toward your limit, like {get_native_asset_ticker(req.chain_id)}, "
-            "so it can't be removed.",
+            f"{follower.upper()} counts toward your limit exactly when {native} does. "
+            f"Switch {native} on or off instead.",
         )
     w3, _ = _resolve_chain(req.chain_id)
 
@@ -266,6 +289,112 @@ def prepare_watched_token(req: WatchedTokenRequest, user_id: int = Depends(get_c
         else wallet.functions.removeWatchedToken(token_address)
     )
     return {**_prepare_owner_tx(w3, owner, fn, req.chain_id), "token_address": token_address}
+
+
+def _refuse_usd_only_token(user_id: int, chain_id: int, token: str) -> None:
+    """
+    Refuses a limit in the native asset or its wrapped form (WETH, WBNB): those count in USD or not
+    at all, the owner's one switch for both. In their own units a wrap or a swap through them would
+    stop netting out, and the limit's rule on what a capped token may receive would refuse wrapping
+    and unwrapping outright. The wallet can't cap the native asset at all (it has no address). The
+    wrapped token is app policy: the wallet would take a cap on it while it isn't watched, and the
+    switch would then fail to turn counting on until that cap came off.
+
+    Runs before anything is read from the chain: a request that can only be refused should not cost
+    an RPC round trip.
+
+    @raises HTTPException 400 if the token can only count in USD, or the ticker is unknown.
+    """
+    native = get_native_asset_ticker(chain_id)
+    if token.lower() in ("eth", native.lower()):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{native} counts in USD or not at all, so it can't have a limit of its own.",
+        )
+    follower = get_follows_native_ticker(chain_id)
+    if follower is None:
+        return
+    try:
+        address = resolve_token(user_id, chain_id, token)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    if address.lower() == get_token_address(chain_id, follower).lower():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{follower.upper()} counts in USD or not at all, like {native}, so it can't have a limit of its own.",
+        )
+
+
+@router.post("/api/wallet/native-metering/prepare")
+def prepare_native_metering(req: NativeMeteringRequest, user_id: int = Depends(get_current_user)):
+    """
+    Builds the unsigned `setNativeMetering(metered, wrappedNative)` transaction: whether the native
+    asset (ETH, BNB) counts toward the USD limit, with its wrapped form (WETH, WBNB) moved on or off
+    the watched list in the same transaction, so the two always count together.
+
+    Switching it OFF loosens the assistant's leash, like removing a watched token, and more so: the
+    native asset can then leave the wallet with no limit at all, to any plain address even while the
+    contract allowlist is on. Selling a counted token for the native asset is then charged the full
+    amount sold, because what comes back no longer offsets it. Switching it ON tightens the leash.
+
+    On a chain with no wrapped token to move (Celo, or one this deployment doesn't list) only the flag
+    changes. Turning it on reverts if the wrapped token has a limit of its own (TokenAlreadyMetered)
+    or the watched list is full; the simulation catches both.
+
+    @return  {"tx", "metered", "wrapped_token"}; wrapped_token is null when only the flag changes.
+    """
+    owner = _require_owner(user_id)
+    w3, _ = _resolve_chain(req.chain_id)
+
+    wrapped = None
+    follower = get_follows_native_ticker(req.chain_id)
+    if follower is not None:
+        try:
+            wrapped = w3.to_checksum_address(get_token_address(req.chain_id, follower))
+        except ValueError:
+            wrapped = None   # not in this chain's table: change the flag alone
+
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    fn = wallet.functions.setNativeMetering(req.metered, wrapped or ETH_SENTINEL)
+    return {**_prepare_owner_tx(w3, owner, fn, req.chain_id), "metered": req.metered, "wrapped_token": wrapped}
+
+
+@router.post("/api/wallet/token-caps/prepare")
+def prepare_token_cap(req: TokenCapRequest, user_id: int = Depends(get_current_user)):
+    """
+    Builds the unsigned `setTokenCap(token, limit)` or `removeTokenCap(token)` transaction.
+
+    A token with a price feed counts toward the USD limit or has a limit in its own units, the
+    owner's choice; a token with no feed can only have the second. The wallet takes one or the other,
+    so setting a limit on a token that still counts reverts (TokenAlreadyMetered), as does counting one
+    that has a limit. The simulation catches both, and a full list of 8.
+
+    Setting a limit tightens the assistant's leash and removing one loosens it. Removing never reads
+    the token: a token whose reads have started failing blocks most of the wallet's transactions
+    until its limit comes off, so that must keep working whatever the token does.
+
+    @return  {"tx", "token_address"}, plus "limit_base_units" for "set".
+    """
+    owner = _require_owner(user_id)
+    if req.action == "set" and req.limit is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Say what the limit should be.")
+    if req.action == "set":
+        _refuse_usd_only_token(user_id, req.chain_id, req.token)
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+
+    if req.action == "remove":
+        try:
+            token_address = w3.to_checksum_address(resolve_token(user_id, req.chain_id, req.token))
+        except ValueError as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+        prepared = _prepare_owner_tx(w3, owner, wallet.functions.removeTokenCap(token_address), req.chain_id)
+        return {**prepared, "token_address": token_address}
+
+    token_address, decimals = _resolve_withdraw_token(w3, user_id, req.chain_id, req.token)
+    limit, _truncated = to_base_units(format(req.limit, "f"), decimals)
+    prepared = _prepare_owner_tx(w3, owner, wallet.functions.setTokenCap(token_address, limit), req.chain_id)
+    return {**prepared, "token_address": token_address, "limit_base_units": str(limit)}
 
 
 @router.post("/api/wallet/tx/confirm")
@@ -320,6 +449,7 @@ def confirm_owner_tx(req: TxConfirmRequest, response: Response, user_id: int = D
         "wallet_state": {
             "paused": wallet.functions.paused().call(),
             "watched_tokens": config["watchedTokens"],
+            "native_metered": config["nativeMetered"],
             "daily_limit_usd": config["dailyLimitUsd"] / USD_DECIMALS,
             "remaining_usd": wallet.functions.getRemainingBudget().call() / USD_DECIMALS,
         },
@@ -332,15 +462,15 @@ class DailyLimitRequest(BaseModel):
     chain_id: int
     # Whole US dollars, scaled to 18 decimals server-side. ge=0 because the contract allows 0, and
     # 0 is meaningful: it freezes agent spending without revoking the key or pausing the wallet.
-    daily_limit_usd: int = Field(ge=0)
+    daily_limit_usd: int = Field(ge=0, le=MAX_DAILY_LIMIT_USD)
 
 
 class WindowDurationRequest(BaseModel):
     """Body of POST /api/wallet/window-duration/prepare."""
 
     chain_id: int
-    # Seconds. The contract rejects 0 and anything past the uint48 storage ceiling.
-    window_secs: int = Field(gt=0, le=281_474_976_710_655)
+    # Seconds. The contract rejects 0 and anything past the uint32 storage ceiling.
+    window_secs: int = Field(gt=0, le=MAX_WINDOW_SECS)
 
 
 class SessionKeyRequest(BaseModel):
@@ -500,7 +630,7 @@ def prepare_session_key(req: SessionKeyRequest, user_id: int = Depends(get_curre
             f"Your wallet on chain {req.chain_id} already approves {MAX_SESSION_KEYS} passkeys. Remove one "
             "first (Controls → Devices).",
         )
-    valid_until = now + req.ttl_secs
+    valid_until = session_deadline(w3, req.ttl_secs)
     fn = wallet.functions.addSession(
         bytes.fromhex(passkey_row["qx"][2:]), bytes.fromhex(passkey_row["qy"][2:]), valid_until
     )

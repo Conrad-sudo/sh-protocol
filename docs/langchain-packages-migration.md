@@ -75,7 +75,7 @@ The one non-match was a **precision bug in this project, not the package** (see 
 
 ### Execution through the real hook — all flows accepted
 
-`execute()` is `onlyEntryPointOrSelfOrOwner`, so plans were driven through the real
+`execute()` only accepts the EntryPoint, the wallet or its owner, so plans were driven through the real
 `SessionHandler` + `SpendingLimitModule` by impersonating the owner on the fork:
 
 | Plan | Roles | Result |

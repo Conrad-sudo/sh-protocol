@@ -14,9 +14,11 @@ from web3.logs import DISCARD
 import tx_history
 from auth import get_current_user
 from constants import (
+    MAX_DAILY_LIMIT_USD,
     MAX_SESSION_TTL_SECS,
-    get_always_counted_ticker,
+    MAX_WINDOW_SECS,
     get_default_spenders,
+    get_follows_native_ticker,
 )
 from contracts import invalidate_cache
 from db import (
@@ -39,6 +41,7 @@ from routes.deps import (
     _revert_reason,
     _to_json_tx,
     _tx_seen,
+    session_deadline,
 )
 from userop import read_sessions
 
@@ -76,13 +79,19 @@ class DeployRequest(BaseModel):
     # The user's own EOA. They are msg.sender for deployWallet, so they own the wallet and its
     # CREATE2 salt comes from THEIR deployCount — nothing another user does moves the prediction.
     deployer: str
-    # Whole US dollars, e.g. 50000. Scaled to 18 decimals server-side.
-    daily_limit_usd: int = Field(gt=0)
-    window_secs: int = Field(default=DEFAULT_WINDOW_SECS, gt=0)
+    # Whole US dollars, e.g. 50000. Scaled to 18 decimals server-side. 0 is "no limit", and is taken
+    # only for a wallet that counts nothing (count_native false, no watched tokens): there the USD
+    # limit has nothing to bind, so the deploy screen lets the user skip it. See deploy_wallet.
+    daily_limit_usd: int = Field(ge=0, le=MAX_DAILY_LIMIT_USD)
+    window_secs: int = Field(default=DEFAULT_WINDOW_SECS, gt=0, le=MAX_WINDOW_SECS)
     # The user's picks from GET /api/tokens. The ticker is what the server trusts — the address is
     # re-resolved from the same table the list came from, so a wallet can only be seeded with tokens
     # this deployment actually prices (deployWallet reverts TokenNotPriced otherwise, on the user's gas).
     watched_tokens: list[WatchedToken] = Field(default_factory=list)
+    # Whether the native asset (ETH, BNB) counts toward the limit: deployWallet's nativeMetered. Off
+    # unless the user switches it on. Its wrapped form (WETH, WBNB) goes with it either way, whatever
+    # watched_tokens says.
+    count_native: bool = False
     # ETH sent as deployWallet's msg.value so the new wallet can pay its own ERC-4337 prefund.
     # Decimal, not float: "0.15" has to convert to wei exactly.
     prefund_eth: Decimal = Field(default=Decimal("0"), ge=0)
@@ -214,14 +223,21 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
     /api/deploy/confirm, which is where anything durable is written.
 
     The passkey the user made in onboarding (`key_id`) goes into the deploy itself: deployWallet
-    approves its (qx, qy) inside initialize(), until now + session_ttl_secs, so the wallet can take
-    a passkey-confirmed transaction from its first block. Without one the wallet is owner-only.
+    approves its (qx, qy) inside initialize(), for session_ttl_secs (see session_deadline), so the
+    wallet can take a passkey-confirmed transaction from its first block. Without one the wallet is
+    owner-only.
+
+    What counts toward the limit is the user's choice, and nothing does unless they say so: the
+    native asset when `count_native` is set (its wrapped form then counts too), plus the tokens in
+    `watched_tokens`. A wallet that counts anything needs a limit of at least $1. One that counts
+    nothing may be deployed with none (0): its USD limit binds nothing until the owner counts
+    something in Controls, which asks for a limit first.
 
     @param req  Deploy parameters collected by the front end.
-    @return     {"chain_id", "predicted_address", "key_id", "watched_tokens", "tx"}; key_id is null
-                for an owner-only wallet.
-    @raises HTTPException 400 for a key_id that isn't one of the account's passkeys, or an approval
-            longer than MAX_SESSION_TTL.
+    @return     {"chain_id", "predicted_address", "key_id", "watched_tokens", "count_native", "tx"};
+                key_id is null for an owner-only wallet.
+    @raises HTTPException 400 for a key_id that isn't one of the account's passkeys, an approval
+            longer than MAX_SESSION_TTL, or no limit on a wallet that counts something.
     """
     # Authorize BEFORE resolving the chain: _resolve_chain dials an RPC, and a caller who may not
     # deploy from this address should not be able to make the server do work or learn which chains
@@ -242,6 +258,17 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"A passkey may be approved for at most {MAX_SESSION_TTL_SECS // 86_400} days.",
+        )
+
+    # A limit is needed exactly when something counts toward it. Judged on the tickers, before any
+    # RPC, and with the wrapped native token left out of the picks: it counts only with the native
+    # asset, whatever the request lists (see below).
+    follower = get_follows_native_ticker(req.chain_id)
+    counts_a_token = any(token.ticker.lower() != follower for token in req.watched_tokens)
+    if req.daily_limit_usd == 0 and (req.count_native or counts_a_token):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Set a spending limit of at least $1, or count nothing toward it.",
         )
 
     # chain_name is only needed to reach the RPC; nothing in this endpoint writes it, so it is
@@ -265,17 +292,18 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
                 "reload the token list.",
             )
         watched_tokens.append(address)
-    # The wrapped native token is always counted, like the native asset it wraps -- whatever the
-    # picker sent. Added here rather than trusted to the client, so no wallet this API deploys can
-    # leave WETH/WBNB outside the limit (the owner could still remove it on chain themselves).
-    always = get_always_counted_ticker(chain_id)
-    if always is not None:
+    # The wrapped native token counts exactly when the native asset does -- whatever the picker
+    # sent. Settled here rather than trusted to the client, so no wallet this API deploys counts one
+    # without the other (the owner could still change either on chain themselves).
+    if follower is not None:
         try:
-            always_address = w3.to_checksum_address(get_token_address(chain_id, always))
+            follower_address = w3.to_checksum_address(get_token_address(chain_id, follower))
         except ValueError:
-            always_address = None   # not in this chain's table (an unseeded anvil): nothing to add
-        if always_address is not None and always_address not in watched_tokens:
-            watched_tokens.insert(0, always_address)
+            follower_address = None   # not in this chain's table (an unseeded anvil): nothing to do
+        if follower_address is not None:
+            watched_tokens = [address for address in watched_tokens if address != follower_address]
+            if req.count_native:
+                watched_tokens.insert(0, follower_address)
 
     try:
         factory = _load_factory_for_chain(w3, chain_id)
@@ -303,7 +331,7 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
     if passkey_row is not None:
         session_key_x = bytes.fromhex(passkey_row["qx"][2:])
         session_key_y = bytes.fromhex(passkey_row["qy"][2:])
-        session_key_valid_until = int(time.time()) + req.session_ttl_secs
+        session_key_valid_until = session_deadline(w3, req.session_ttl_secs)
     else:
         session_key_x = session_key_y = b"\x00" * 32
         session_key_valid_until = 0
@@ -333,6 +361,7 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
             req.daily_limit_usd * USD_DECIMALS,
             req.window_secs,
             watched_tokens,
+            req.count_native,
             session_key_x,
             session_key_y,
             session_key_valid_until,
@@ -360,6 +389,7 @@ def deploy_wallet(req: DeployRequest, user_id: int = Depends(get_current_user)):
         "predicted_address": predicted,
         "key_id": key_id,
         "watched_tokens": watched_tokens,
+        "count_native": req.count_native,
         "tx": _to_json_tx(tx),
     }
 

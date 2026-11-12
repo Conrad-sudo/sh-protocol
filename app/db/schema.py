@@ -364,6 +364,54 @@ def _migrate_chat_to_own_file(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_recurring_payments(db: sqlite3.Connection):
+    """
+    Adds recurring_payments (2026-11-12): the schedules each wallet holds on its
+    RecurringPaymentModule, as the keeper (keeper.py) and the Controls page need them.
+
+    The chain is the source of truth; a row is a cache of one schedule (getSchedule), refreshed
+    whenever the Controls page lists them and whenever the keeper looks, plus what only the app
+    knows: how the keeper's last attempt went. One row per (chain, wallet, schedule id); ids are
+    never reused on chain, so the key is stable.
+
+      - token / recipient / amount / interval_secs / next_due / end_at: the schedule (amount in
+        base units, as text: it can exceed SQLite's 64-bit integers). end_at 0 means no end.
+      - status: 'live', 'cancelled' (by the owner), 'finished' (its last payment ran) or 'gone'
+        (no longer on chain for another reason: the module was uninstalled).
+      - last_tx / last_run_at: the keeper's last payment. last_error / failures / retry_at: why its
+        last attempt was refused, how many attempts in a row were, and when it tries again.
+    """
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS recurring_payments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            chain_id      INTEGER NOT NULL,
+            wallet        TEXT NOT NULL,
+            module        TEXT NOT NULL,
+            schedule_id   INTEGER NOT NULL,
+            token         TEXT NOT NULL,
+            recipient     TEXT NOT NULL,
+            amount        TEXT NOT NULL,
+            interval_secs INTEGER NOT NULL,
+            next_due      INTEGER NOT NULL,
+            end_at        INTEGER NOT NULL DEFAULT 0,
+            status        TEXT NOT NULL,
+            last_tx       TEXT,
+            last_run_at   INTEGER,
+            last_error    TEXT,
+            failures      INTEGER NOT NULL DEFAULT 0,
+            retry_at      INTEGER,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS recurring_by_schedule
+            ON recurring_payments (chain_id, wallet, schedule_id);
+        CREATE INDEX IF NOT EXISTS recurring_due ON recurring_payments (chain_id, status, next_due);
+        CREATE INDEX IF NOT EXISTS recurring_by_user ON recurring_payments (user_id, chain_id);
+    """)
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -667,6 +715,7 @@ MIGRATIONS = (
     _migrate_app_feedback,           # 7: the bot's /feedback
     _migrate_passkeys,               # 8: passkeys instead of server-held session keys
     _migrate_chat_to_own_file,       # 9: the agent's conversations in wallet-chat.db
+    _migrate_recurring_payments,     # 10: schedules the keeper pays
 )
 
 

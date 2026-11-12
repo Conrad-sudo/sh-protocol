@@ -9,7 +9,7 @@ from web3 import Web3
 
 from auth import get_current_user
 from constants import (
-    get_always_counted_ticker,
+    get_follows_native_ticker,
     get_native_asset_ticker,
 )
 from contracts import read_spending_config
@@ -18,6 +18,7 @@ from db import (
     acting_network,
     add_dashboard_tokens,
     delete_custom_token,
+    get_custom_token,
     get_dashboard_tokens,
     get_supported_token_by_address,
     get_wallet_address,
@@ -109,31 +110,43 @@ def add_custom_token(request: Request, req: CustomTokenRequest, user_id: int = D
     return {"chain_id": req.chain_id, **token}
 
 
-def _remove_listed_token(user_id: int, chain_id: int, token: dict):
-    """Takes a listed token off the dashboard, refusing while the wallet still counts it."""
-    name = token["ticker"].upper()
-    # Both refusals that need no chain come first, so they cost no RPC round trip.
-    if token["ticker"] == get_always_counted_ticker(chain_id):
+def _refuse_while_capped(name: str, address: str, config: dict):
+    """Refuses to take a token off the page while the wallet has a limit on it in its own units."""
+    if any(Web3.to_checksum_address(a) == Web3.to_checksum_address(address) for a in config["cappedTokens"]):
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"{name} always counts toward your limit, like {get_native_asset_ticker(chain_id)}, "
-            "so it stays on your dashboard.",
+            status.HTTP_409_CONFLICT,
+            f"{name} has a limit of its own. Remove that first, then remove the token.",
         )
-    if not any(t["ticker"] == token["ticker"] for t in get_dashboard_tokens(user_id, chain_id)):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{name} is not on your dashboard")
+
+
+def _wallet_config(user_id: int, chain_id: int) -> dict | None:
+    """The wallet's spending config, read from the chain; None if the user has no wallet here."""
     try:
         get_wallet_address(user_id, chain_id)
-        has_wallet = True
     except ValueError:
-        has_wallet = False  # nothing can count it: nothing to check
-    if has_wallet:
-        w3, _ = _resolve_chain(chain_id)
-        watched = read_spending_config(_load_wallet_for_chain(w3, user_id, chain_id))["watchedTokens"]
-        if any(Web3.to_checksum_address(a) == token["address"] for a in watched):
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"{name} counts toward your limit. Stop counting it first, then remove it.",
+        return None  # nothing can count it or limit it: nothing to check
+    w3, _ = _resolve_chain(chain_id)
+    return read_spending_config(_load_wallet_for_chain(w3, user_id, chain_id))
+
+
+def _remove_listed_token(user_id: int, chain_id: int, token: dict):
+    """Takes a listed token off the dashboard, refusing while the wallet counts or limits it."""
+    name = token["ticker"].upper()
+    # The refusal that needs no chain comes first, so it costs no RPC round trip.
+    if not any(t["ticker"] == token["ticker"] for t in get_dashboard_tokens(user_id, chain_id)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{name} is not on your dashboard")
+    config = _wallet_config(user_id, chain_id)
+    if config is not None:
+        if any(Web3.to_checksum_address(a) == token["address"] for a in config["watchedTokens"]):
+            # The wrapped native token can't be stopped on its own: it goes with the native asset.
+            native = get_native_asset_ticker(chain_id)
+            how = (
+                f"Stop counting {native} first, then remove it."
+                if token["ticker"] == get_follows_native_ticker(chain_id)
+                else "Stop counting it first, then remove it."
             )
+            raise HTTPException(status.HTTP_409_CONFLICT, f"{name} counts toward your limit. {how}")
+        _refuse_while_capped(name, token["address"], config)
     remove_dashboard_token(user_id, chain_id, token["ticker"])
 
 
@@ -143,12 +156,14 @@ def remove_custom_token(chain_id: int, address: str, user_id: int = Depends(get_
     Removes a token from the signed-in account's list. The tokens themselves stay in the wallet --
     the owner can still withdraw them, and adding the token again brings them back into view.
 
-    A listed token comes off the dashboard, but not while the wallet counts it toward the limit
-    (read from the chain, not trusted to the page), and never the wrapped native token, which
-    always counts. An added-by-address token has no price, so it never counts.
+    A listed token comes off the dashboard, but not while the wallet counts it toward the limit or
+    has a limit on it in its own units (read from the chain, not trusted to the page). The wrapped
+    native token is no exception: it counts while the native asset does, and comes off once that is
+    switched off. An added-by-address token has no price, so it never counts, but it can have a
+    limit of its own.
 
-    @raises HTTPException 400 for the wrapped native token, 404 if the token is not on this
-            account's list for `chain_id`, 409 while a listed token still counts.
+    @raises HTTPException 404 if the token is not on this account's list for `chain_id`, 409 while a
+            token still counts or has a limit of its own.
     """
     try:
         address = Web3.to_checksum_address(address)
@@ -158,6 +173,11 @@ def remove_custom_token(chain_id: int, address: str, user_id: int = Depends(get_
     if listed is not None:
         _remove_listed_token(user_id, chain_id, listed)
         return {"status": "deleted", "chain_id": chain_id, "address": address}
+    custom = get_custom_token(user_id, chain_id, address)
+    if custom is not None:
+        config = _wallet_config(user_id, chain_id)
+        if config is not None:
+            _refuse_while_capped(custom["ticker"].upper(), address, config)
     if not delete_custom_token(user_id, chain_id, address):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"{address} is not on your token list")
     return {"status": "deleted", "chain_id": chain_id, "address": address}
