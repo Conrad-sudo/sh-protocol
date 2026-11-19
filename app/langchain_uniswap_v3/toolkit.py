@@ -68,6 +68,13 @@ DEFAULT_DEADLINE_SECS = 600
 DEFAULT_FEE_TIERS = (100, 500, 3000, 10000)
 ZERO_ADDRESS = "0x" + "00" * 20
 
+# A caller-given amount within 1/ALL_OF_IT of the holder's balance means all of it. "Swap all my
+# LINK" passes back the balance a read returned as a whole-unit float, and a float keeps ~16
+# significant digits: an 18-decimal balance comes back up to ~2.2e-16 of itself away, above
+# (refused) or below (dust left behind). Nobody means "all but a trillionth". The same rule as
+# langchain-uniswap-v2 0.5.2.
+ALL_OF_IT = 10**12
+
 # Static gas-limit fallback per call role, used when a call's gas can't be estimated yet (e.g. it
 # depends on an earlier, not-yet-mined call in the same plan). Override per-instance via the
 # constructor's default_gas param. A first mint into a fresh tick range is the expensive one: it
@@ -720,6 +727,16 @@ class UniswapV3Toolkit:
             raise ToolException(f"{amount!r} is not a valid amount.") from err
         return int(exact)
 
+    @staticmethod
+    def _snap_to_balance(amount_base: int, balance: int) -> int:
+        """balance when amount_base is within a trillionth of it (the whole balance, read back
+        through a float -- see ALL_OF_IT), else amount_base. Only for an amount the caller gave:
+        one the toolkit worked out itself (a quote, a slippage cap, a deposit's other side) is
+        never snapped."""
+        if abs(amount_base - balance) * ALL_OF_IT <= balance:
+            return balance
+        return amount_base
+
     def _token_balance(self, token_address: str, owner_address: str) -> int:
         return (
             self._erc20(token_address)
@@ -1275,30 +1292,46 @@ class UniswapV3Toolkit:
     # standing approval.
 
     def _require_token_balance(
-        self, token_address: str, amount_base: int, owner_address: str, *, decimals: int, purpose: str
-    ) -> None:
+        self,
+        token_address: str,
+        amount_base: int,
+        owner_address: str,
+        *,
+        decimals: int,
+        purpose: str,
+        snap: bool = False,
+    ) -> int:
         """Preflight check for write tools: raises ToolException naming the held amount, the
         required amount, and the shortfall, when owner_address doesn't hold enough of
-        token_address for purpose."""
+        token_address for purpose.
+
+        Returns the amount to use. With snap=True -- only for an amount the caller gave -- an
+        amount within a trillionth of the balance comes back as the whole balance (see
+        _snap_to_balance); otherwise amount_base."""
         balance = self._token_balance(token_address, owner_address)
+        if snap:
+            amount_base = self._snap_to_balance(amount_base, balance)
         if balance < amount_base:
             raise ToolException(
-                f"{owner_address} needs {amount_base / 10**decimals} of {token_address} for "
-                f"{purpose} but only holds {balance / 10**decimals} -- short by "
-                f"{(amount_base - balance) / 10**decimals}."
+                f"{owner_address} needs {_amount_str(amount_base, decimals)} of {token_address} "
+                f"for {purpose} but only holds {_amount_str(balance, decimals)} -- short by "
+                f"{_amount_str(amount_base - balance, decimals)}."
             )
+        return amount_base
 
     def _require_native_balance(
         self, amount_base: int, owner_address: str, *, purpose: str
-    ) -> None:
-        """Native-asset equivalent of _require_token_balance."""
+    ) -> int:
+        """Native-asset equivalent of _require_token_balance. Never snaps: sending the whole
+        native balance would leave nothing for gas."""
         balance = self._native_balance(owner_address)
         if balance < amount_base:
             raise ToolException(
-                f"{owner_address} needs {amount_base / 10**18} of the native asset for "
-                f"{purpose} but only holds {balance / 10**18} -- short by "
-                f"{(amount_base - balance) / 10**18}."
+                f"{owner_address} needs {_amount_str(amount_base, 18)} of the native asset for "
+                f"{purpose} but only holds {_amount_str(balance, 18)} -- short by "
+                f"{_amount_str(amount_base - balance, 18)}."
             )
+        return amount_base
 
     def _require_funds(
         self,
@@ -1309,13 +1342,15 @@ class UniswapV3Toolkit:
         decimals: int,
         native: bool,
         purpose: str,
-    ) -> None:
+        snap: bool = False,
+    ) -> int:
+        """_require_token_balance, or _require_native_balance when the side is native coin (which
+        never snaps). Returns the amount to use."""
         if native:
-            self._require_native_balance(amount_base, owner_address, purpose=purpose)
-        else:
-            self._require_token_balance(
-                token_address, amount_base, owner_address, decimals=decimals, purpose=purpose
-            )
+            return self._require_native_balance(amount_base, owner_address, purpose=purpose)
+        return self._require_token_balance(
+            token_address, amount_base, owner_address, decimals=decimals, purpose=purpose, snap=snap
+        )
 
     # ---- swaps ----
 
@@ -1371,9 +1406,9 @@ class UniswapV3Toolkit:
         if amount_in_base <= 0:
             raise ToolException("amount_in must be greater than zero.")
         if self.preflight:
-            self._require_funds(
+            amount_in_base = self._require_funds(
                 sold, amount_in_base, from_address,
-                decimals=decimals_in, native=native_in, purpose="this swap",
+                decimals=decimals_in, native=native_in, purpose="this swap", snap=True,
             )
         route = self._route_out(
             amount_in_base, sold, bought,
@@ -1522,6 +1557,7 @@ class UniswapV3Toolkit:
         *,
         use_native: bool,
         slippage_bps: int,
+        from_address: str,
     ) -> _Deposit:
         """
         Works out a deposit of amount_a of token_a into [tick_lower, tick_upper): the other
@@ -1540,6 +1576,12 @@ class UniswapV3Toolkit:
         amount_a_base = self._to_base_units(amount_a, decimals[0 if a_is_token0 else 1])
         if amount_a_base <= 0:
             raise ToolException("amount_a must be greater than zero.")
+        if self.preflight and not (use_native and token_a == self.native_wrapped_address):
+            # "Add all my LINK": settled to the balance (_snap_to_balance) before the other side is
+            # worked out from it. Native coin never settles: it pays the gas too.
+            amount_a_base = self._snap_to_balance(
+                amount_a_base, self._token_balance(token_a, from_address)
+            )
         _, derived0, derived1 = deposit_amounts(
             pool.sqrt_price, tick_lower, tick_upper, a_is_token0, amount_a_base,
             token_a=token_a, token_b=token_b,
@@ -2407,7 +2449,7 @@ class UniswapV3Toolkit:
                 )
             deposit = toolkit._plan_deposit(
                 pool, tick_lower, tick_upper, token_a, amount_a, decimals,
-                use_native=use_native, slippage_bps=slippage_bps,
+                use_native=use_native, slippage_bps=slippage_bps, from_address=from_address,
             )
             low, high, is_full = prices_for_ticks(
                 tick_lower, tick_upper, base_is_token0, decimals[0], decimals[1], pool.spacing
@@ -2539,7 +2581,7 @@ class UniswapV3Toolkit:
             tick_lower, tick_upper = position["tick_lower"], position["tick_upper"]
             deposit = toolkit._plan_deposit(
                 pool, tick_lower, tick_upper, token_a, amount_a, decimals,
-                use_native=use_native, slippage_bps=slippage_bps,
+                use_native=use_native, slippage_bps=slippage_bps, from_address=from_address,
             )
             base, quote = orient(
                 pool.token0, pool.token1, toolkit.native_wrapped_address, toolkit.stable_tokens

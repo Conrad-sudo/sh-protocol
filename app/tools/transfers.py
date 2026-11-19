@@ -9,6 +9,7 @@ from constants import (
     get_native_wrapped_ticker,
 )
 from contracts import (
+    load_ierc20,
     load_session_handler,
 )
 from network_config import load_network_config
@@ -18,6 +19,7 @@ from tools.common import (
     SENT,
     _limit_note,
     _resolve_contact,
+    _settle_amount,
     _to_base_units,
     _token_address,
 )
@@ -124,12 +126,16 @@ def transfer_erc20(
     user_id = runtime.context.user_id
     print("Running transfer_erc20")
     recipient_addr = _resolve_contact(user_id, recipient)
+    token_address = _token_address(user_id, token)
+    wallet = load_session_handler(user_id).address
+    # "Send all my LINK" arrives as the balance read back through a float: settle it to the balance.
+    amount_base = _settle_amount(load_ierc20(user_id=user_id, token=token), wallet, amount)
     plan = get_erc20_tools(user_id)["transfer"].invoke(
         {
-            "token": _token_address(user_id, token),
+            "token": token_address,
             "to": recipient_addr,
-            "from_address": load_session_handler(user_id).address,
-            "amount": str(amount),
+            "from_address": wallet,
+            "amount_base": amount_base,
         }
     )
     return _quote_plan(runtime, plan, details=_limit_note(user_id, token), legs=[(token, amount, SENT)])
@@ -173,14 +179,20 @@ def transferFrom_erc20(
     # _resolve_contact maps "me" to the wallet, which is this tool's documented convention
     # for the user naming themselves as the recipient.
     recipient_addr = _resolve_contact(user_id, recipient)
+    token_address = _token_address(user_id, token)
+    # "All of what Sandy approved" or "all her LINK" arrives as a float a few base units off the
+    # allowance or her balance: settle it to whichever it is.
+    amount_base = _settle_amount(
+        load_ierc20(user_id=user_id, token=token), sender_addr, amount, spender=wallet
+    )
 
     plan = get_erc20_tools(user_id)["transfer_from"].invoke(
         {
-            "token": _token_address(user_id, token),
+            "token": token_address,
             "owner": sender_addr,
             "to": recipient_addr,
             "from_address": wallet,
-            "amount": str(amount),
+            "amount_base": amount_base,
         }
     )
     # The limit counts only what leaves the wallet. Moving a contact's tokens on their approval

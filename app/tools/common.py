@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from langchain_core.tools import ToolException
 from langchain_erc20.amounts import to_base_units
+from web3 import Web3
 from web3.contract import Contract
 
 from constants import (
@@ -55,6 +56,42 @@ def _to_base_units(amount: float | str, decimals: int) -> int:
     """
     base_units, _truncated = to_base_units(amount, decimals)
     return base_units
+
+
+# An amount the caller gave within 1/ALL_OF_IT of a balance means all of it. The agent reads a
+# balance as a whole-unit float (get_erc20_balance), and a float keeps ~16 significant digits, so
+# "send all my LINK" comes back up to ~2.2e-16 of an 18-decimal balance away from it: above it
+# (refused) or below it (dust left behind). Nobody means "all but a trillionth". The exchange
+# toolkits settle the amounts they're given the same way (langchain-uniswap-v2 0.5.2+ and
+# langchain_uniswap_v3), and tools.checks settles a sent leg the same way, so they all agree.
+ALL_OF_IT = 10**12
+
+
+def _snap_to_balance(amount_base: int, balance: int) -> int:
+    """balance when amount_base is within a trillionth of it, else amount_base. Only for an amount
+    the caller gave, never one worked out from a quote."""
+    if abs(amount_base - balance) * ALL_OF_IT <= balance:
+        return balance
+    return amount_base
+
+
+def _settle_amount(erc20: Contract, holder: str, amount: float, *, spender: str | None = None) -> int:
+    """
+    The base units to move for `amount`, which the caller gave in whole units: all of holder's
+    balance when amount is within a trillionth of it (_snap_to_balance), and -- when `spender`
+    moves it on holder's approval -- all of the allowance when it is within a trillionth of that.
+    Otherwise amount as given. The ERC-20 only; the native asset never settles, since sending all of
+    it would leave nothing for the fees.
+    """
+    holder = Web3.to_checksum_address(holder)
+    reads = {"decimals": erc20.functions.decimals().call, "balance": erc20.functions.balanceOf(holder).call}
+    if spender is not None:
+        reads["allowance"] = erc20.functions.allowance(holder, Web3.to_checksum_address(spender)).call
+    got = read_all(reads)
+    amount_base = _snap_to_balance(_to_base_units(amount, got["decimals"]), got["balance"])
+    if spender is not None:
+        amount_base = _snap_to_balance(amount_base, got["allowance"])
+    return amount_base
 
 
 # The plan roles of the approvals a package adds around the real step: granting the allowance, and

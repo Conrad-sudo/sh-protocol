@@ -13,7 +13,7 @@ rlp==4.1.0
 # registration files over the network, so an upgrade changes an outbound-request surface
 # as well as a calldata one (THREAT_MODEL 4.6, 4.7).
 langchain-erc20==0.1.0
-langchain-uniswap-v2==0.4.0
+langchain-uniswap-v2==0.5.2
 langchain-erc8004==0.1.1
 
 # LangChain agent stack

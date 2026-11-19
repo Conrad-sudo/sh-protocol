@@ -431,7 +431,8 @@ def test_deposit_minimums():
     # position manager floors a product mid-sum and mints one unit of liquidity below the one the DAI amount was derived
     # from, so it pulls 2521 wei less DAI than that amount. A minimum set at the derived amount reverted on chain.
     stable = tk._Pool("0x" + "ab" * 20, dai, usdc, 100, 79171004539182755172116, -276339, 1, 0)
-    dep = toolkit._plan_deposit(stable, -276389, -276288, usdc, 10.0, (18, 6), use_native=False, slippage_bps=0)
+    dep = toolkit._plan_deposit(stable, -276389, -276288, usdc, 10.0, (18, 6), use_native=False, slippage_bps=0,
+                                from_address=WALLET)
     check("live regression: the DAI amount offered is the one derived for 10 USDC", dep.amount0 == 9999035545929254029 and dep.amount1 == 10_000_000, str(dep))
     check("live regression: the minimums are what the real position manager pulls (9999035545929251508 DAI), not the derived amount",
           (dep.liquidity, dep.min0, dep.min1) == (3965406102060690, 9999035545929251508, 10_000_000), str(dep))
@@ -459,7 +460,8 @@ def test_deposit_minimums():
         token_a = pool.token0 if a_is_token0 else pool.token1
         amount = float(f"{rnd.randint(100000, 999999)}e{rnd.randint(-8, 4)}")
         try:
-            dep = toolkit._plan_deposit(pool, lo, hi, token_a, amount, (d0, d1), use_native=False, slippage_bps=rnd.choice([0, 0, 1, 50]))
+            dep = toolkit._plan_deposit(pool, lo, hi, token_a, amount, (d0, d1), use_native=False,
+                                        slippage_bps=rnd.choice([0, 0, 1, 50]), from_address=WALLET)
         except ToolException:
             continue      # the range holds only the other token, or the amount buys nothing
         tested += 1
@@ -680,6 +682,9 @@ BROKEN = Web3.to_checksum_address("0x000000000000000000000000000000000000b0b0")
 UNPRICED = Web3.to_checksum_address("0x000000000000000000000000000000000000c0c0")
 OTHER = Web3.to_checksum_address("0x00000000000000000000000000000000000a11ce")
 WALLET = Web3.to_checksum_address("0x0000000000000000000000000000000000c0ffee")
+# 18-decimal balances whose whole-unit float lands off them: ABOVE converts back to 198 wei more,
+# BELOW to 89 wei less. "All of it" must still mean exactly the balance.
+ABOVE, BELOW = 1234567890123456802, 1234567890123456789
 RECIPIENT = Web3.to_checksum_address("0x00000000000000000000000000000000000dad00")
 FACTORY = Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
 
@@ -1450,6 +1455,21 @@ def test_swaps(chain_id: int):
     plan = nopre["swap_exact_tokens_for_tokens"].invoke({"token_in": A["USDC"], "token_out": A["WETH"], "amount_in": 1_200_000.0, "from_address": WALLET})
     check("preflight=False builds the plan without the balance check", roles(plan) == ["approve", "swap"])
 
+    # -- "all of it": the balance read back as a float lands a few wei off it (ABOVE: 198 more, BELOW: 89 less) --
+    for held, side in ((ABOVE, "above"), (BELOW, "below")):
+        w.balances[A["LINK"]] = held
+        plan = tools["swap_exact_tokens_for_tokens"].invoke(
+            {"token_in": A["LINK"], "token_out": A["WETH"], "amount_in": held / 10**18, "from_address": WALLET})
+        _, inner = decode_multicall(plan["calls"][1], ROUTER_ABI)
+        check(f"selling the whole LINK balance, read back as a float, sells exactly it ({side})",
+              approval(plan["calls"][0])[2] == held and inner[0][1]["params"]["amountIn"] == held, str(inner[0][1]["params"]))
+    w.balances[A["LINK"]] = 10**18 - 10**6
+    raises("...but a trillionth short is still refused, with the exact shortfall",
+           lambda: tools["swap_exact_tokens_for_tokens"].invoke(
+               {"token_in": A["LINK"], "token_out": A["WETH"], "amount_in": 1.0, "from_address": WALLET}),
+           "holds 0.999999999999 -- short by 0.000000000001.")
+    w.balances[A["LINK"]] = 100_000 * 10**18
+
     # -- EOA mode: the same calls, rendered as transactions with sequential nonces and one fee snapshot --
     eoa = World(chain_id, positions=False)
     eoa_tools = eoa.tools(tx_mode="eoa", reset_residual_approvals=True)
@@ -1740,6 +1760,17 @@ def test_add_to_position(chain_id: int):
     check("increase: the other token's amount is what the position's own range needs", (a1 if weth_is_token0 else a0) == expected_b[1 if weth_is_token0 else 0])
     check("increase: approvals go to the position manager for the desired amounts",
           sorted([approval(plan["calls"][0]), approval(plan["calls"][1])]) == sorted([(A["WETH"], w.pm, amount_weth), (A["USDC"], w.pm, amount_usdc)]))
+
+    # "Add all my WETH": the balance read back as a float settles to exactly it, before USDC is worked out.
+    for held, side in ((ABOVE, "above"), (BELOW, "below")):
+        w.balances[A["WETH"]] = held
+        settled = tools["add_to_position"].invoke(
+            {"token_id": 101, "token_a": A["WETH"], "amount_a": held / 10**18, "from_address": WALLET})
+        _, sp = decode(PM_ABI, settled["calls"][2]["data"])
+        desired = sp["params"]["amount0Desired" if weth_is_token0 else "amount1Desired"]
+        check(f"increase with the whole WETH balance, read back as a float, deposits exactly it ({side})",
+              desired == held, f"{desired} vs {held}")
+    w.balances[A["WETH"]] = 1000 * 10**18
     s = plan["summary"]
     check("increase: the summary has exactly the contract's keys",
           list(s) == ["token_id", "token_a", "token_b", "amount_a", "amount_b", "amount_a_min", "amount_b_min", "native_value", "base_token",

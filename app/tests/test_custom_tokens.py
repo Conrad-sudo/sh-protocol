@@ -1390,6 +1390,64 @@ def test_deposits_name_their_pool():
           "not a token this wallet knows" in refused, refused[:160])
 
 
+def test_send_all_settles_to_the_balance():
+    print("\n[10] \"send all\": the balance read back through a float sends exactly the balance")
+    uid = db.create_user()
+    db.save_user_network(uid, NETWORK)
+    db.save_contact(uid, "payee", _addr(0xFEE))
+    db.save_contact(uid, "sandy", _addr(0x5A))
+    runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
+    _with_tool_fakes(uid, watched={USDC, WETH})
+    held = {"balance": 0, "allowance": 0}
+
+    def weth(user_id, token):
+        functions = SimpleNamespace(
+            decimals=lambda: SimpleNamespace(call=lambda: 18),
+            balanceOf=lambda _owner: SimpleNamespace(call=lambda: held["balance"]),
+            allowance=lambda _owner, _spender: SimpleNamespace(call=lambda: held["allowance"]),
+        )
+        return SimpleNamespace(address=WETH, functions=functions)
+
+    def stop(args):
+        raise _Reached(args)
+
+    package = _StandInPackage({"transfer": stop, "transfer_from": stop})
+    original = (set_everywhere(tools, "get_erc20_tools", lambda _uid: package),
+                set_everywhere(tools, "load_ierc20", weth))
+
+    def sent(tool, **kwargs) -> int:
+        try:
+            tool.func(runtime, **kwargs)
+        except _Reached as reached:
+            return reached.args[0]["amount_base"]
+        raise AssertionError("the tool returned without reaching the package")
+
+    try:
+        # ABOVE converts back to 198 wei more than the balance, BELOW to 89 wei less.
+        for balance, side in ((1234567890123456802, "above"), (1234567890123456789, "below")):
+            held["balance"] = balance
+            amount = sent(tools.transfers.transfer_erc20, token="weth", recipient="payee", amount=balance / 10**18)
+            check(f"sending the whole WETH balance, read back as a float, sends exactly it ({side})",
+                  amount == balance, f"{amount} vs {balance}")
+        held["balance"] = 10**18
+        check("an amount that isn't all of it is sent as given",
+              sent(tools.transfers.transfer_erc20, token="weth", recipient="payee", amount=0.25) == 25 * 10**16)
+
+        # On a contact's approval: "all she approved" settles to the allowance, "all her WETH" to her balance.
+        held["balance"], held["allowance"] = 5 * 10**18, 1234567890123456802
+        amount = sent(tools.transfers.transferFrom_erc20, token="weth", sender="sandy", recipient="me",
+                      amount=held["allowance"] / 10**18)
+        check("moving all a contact approved, read back as a float, moves exactly the allowance",
+              amount == held["allowance"], str(amount))
+        held["balance"], held["allowance"] = 1234567890123456802, 5 * 10**18
+        amount = sent(tools.transfers.transferFrom_erc20, token="weth", sender="sandy", recipient="me",
+                      amount=held["balance"] / 10**18)
+        check("...and all of the contact's balance, exactly her balance", amount == held["balance"], str(amount))
+    finally:
+        set_everywhere(tools, "get_erc20_tools", original[0])
+        set_everywhere(tools, "load_ierc20", original[1])
+
+
 if __name__ == "__main__":
     try:
         test_add_rules()
@@ -1411,6 +1469,7 @@ if __name__ == "__main__":
         test_action_line_drops_approvals()
         test_action_line_names_tokens()
         test_deposits_name_their_pool()
+        test_send_all_settles_to_the_balance()
     finally:
         os.unlink(_tmp_db.name)
 

@@ -224,6 +224,20 @@ def _test_wallet_checks():
     check("exactly the balance is enough (the fees are the quote's to check)", out["enough_balance"] is True,
           str(out))
 
+    # "Send all my WETH": the balance read back through a float. ABOVE converts to 198 wei more than the
+    # wallet holds, BELOW to 89 wei less; both mean all of it, as the tool that built the transaction
+    # settled them (tools.common._snap_to_balance).
+    for held, side in ((1234567890123456802, "above"), (1234567890123456789, "below")):
+        out = tools.checks._wallet_checks(FakeWallet(), [leg("weth", held / 10**18, S, WETH, 18, balance=held)])
+        check(f"the whole token balance read back as a float is enough ({side})", out["enough_balance"] is True,
+              str(out))
+    out = tools.checks._wallet_checks(FakeWallet(), [leg("weth", 1, S, WETH, 18, balance=10**18 - 10**6)])
+    check("...but a trillionth short is still short", out["enough_balance"] is False, str(out))
+    held = 1234567890123456802
+    out = tools.checks._wallet_checks(FakeWallet(native=held), [leg("eth", held / 10**18, S)])
+    check("the native asset never settles: all of it would leave nothing for the fees",
+          out["enough_balance"] is False, str(out))
+
     # The owner may leave the native asset out of the limit. Then it is out both ways.
     off = lambda **kw: FakeWallet(native_metered=False, **kw)   # noqa: E731
     out = tools.checks._wallet_checks(off(remaining=10), [leg("eth", 0.01, S)])

@@ -5,9 +5,6 @@
 - [ ] `/api/sign/start` gives a bare 500 when the node is down, after hanging about 2 minutes. It should give a clear error.
 - [ ] After an approval, an error raised before anything was sent still says "check History", though nothing went
       out and History has no row (`confirm_signed`).
-- [ ] "Remove all my liquidity" is refused about half the time (a rounding bug in `langchain-uniswap-v2`). Same bug
-      class for "sell all" of 18-decimal tokens. The write-up is in `~/Docs/Foundry/uniswap_v2_toolkit/update.md`. Release
-      the fix, bump the 0.4.0 pin, and remove the `math.nextafter` loop in `test_e2e_fork.py`.
 - [ ] Live Sepolia has new gas prices (Glamsterdam, about 7x). Check the app's hardcoded or locally simulated gas there,
       and drop `--gas-estimate-multiplier 1000` once Forge handles it.
 - [ ] Testing only: the Base fork freezes after about 20 ops (Anvil stuck on a dead Alchemy connection), and forks

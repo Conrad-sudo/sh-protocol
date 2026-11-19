@@ -2032,19 +2032,14 @@ def _swaps_and_lp_tokens(c: TestClient, acct, headers: dict, wallet: str, next_t
     check("a new deposit lands", confirm(tools.uniswap.add_liquidity.func(next_turn(), token_a=ticker, amount_a=500))["status"] == 1)
     shows_pool("...and brings the pool back to the dashboard")
 
-    # "All of it", as the assistant asks for it: the balance it reads, in whole units. That passes
-    # through a float, which the package scales back up to a few wei more than the wallet holds
-    # (refused) or a few wei less (accepted, leaving them behind) -- about half the time each. The
-    # largest amount it accepts is what lands, and the few wei it leaves must not keep the row.
+    # "All of it", as the assistant asks for it: the balance it reads, in whole units, passed straight
+    # back. That float lands a few wei above or below the balance; langchain-uniswap-v2 (0.5.2+)
+    # takes an amount within a trillionth of the balance as all of it, so exactly the balance burns.
     everything = tools.uniswap.get_liquidity_token_balance.func(next_turn(), token_a=ticker)
-    held = pool.functions.balanceOf(wallet).call()
-    while int(Decimal(str(everything)) * 10**18) > held:
-        everything = math.nextafter(everything, 0)
     check("the assistant taking it all out lands",
           confirm(tools.uniswap.remove_liquidity.func(next_turn(), token_a=ticker, lp_amount=everything))["status"] == 1)
-    check("...leaving at most a few wei", pool.functions.balanceOf(wallet).call() < 1000,
-          str(pool.functions.balanceOf(wallet).call()))
-    check("...which the dashboard counts as none: the pool is gone", lp_rows() == [])
+    check("...leaving none", pool.functions.balanceOf(wallet).call() == 0, str(pool.functions.balanceOf(wallet).call()))
+    check("...and the pool is gone from the dashboard", lp_rows() == [])
 
 
 def _swaps_and_positions(c: TestClient, headers: dict, wallet: str, next_turn, confirm):

@@ -24,6 +24,7 @@ from tools.common import (
     SESSION_EXPIRY_MARGIN_SECS,
     _Leg,
     _resolve_legs,
+    _snap_to_balance,
     _to_base_units,
     _whole,
 )
@@ -59,8 +60,9 @@ def _wallet_checks(wallet: Contract, legs: list[_Leg]) -> dict:
     """
     first = _read_wallet_and_legs(wallet, legs)
     decimals = [18 if leg.erc20 is None else first[f"decimals{i}"] for i, leg in enumerate(legs)]
-    short = _shortfalls(legs, first, decimals)
-    over_token_limits = _over_token_limits(legs, first, decimals)
+    amounts = _base_amounts(legs, first, decimals)
+    short = _shortfalls(legs, first, decimals, amounts)
+    over_token_limits = _over_token_limits(legs, first, decimals, amounts)
     session_active, seconds_left, expiring_imminently = _session_state(first)
 
     # Round two: the prices. A token is priced when the limit counts it -- the native asset while
@@ -69,7 +71,7 @@ def _wallet_checks(wallet: Contract, legs: list[_Leg]) -> dict:
     counted = [
         first["native_metered"] if leg.erc20 is None else first[f"watched{i}"] for i, leg in enumerate(legs)
     ]
-    usd, unavailable = _usd_values(wallet.functions, legs, decimals, counted)
+    usd, unavailable = _usd_values(wallet.functions, legs, amounts, counted)
     charged, usd_value = _limit_charge(legs, usd, counted)
     remaining = first["remaining"]
 
@@ -129,11 +131,27 @@ def _read_wallet_and_legs(wallet: Contract, legs: list[_Leg]) -> dict:
     return read_all(reads)
 
 
-def _shortfalls(legs: list[_Leg], first: dict, decimals: list[int]) -> list[str]:
+def _base_amounts(legs: list[_Leg], first: dict, decimals: list[int]) -> list[int]:
+    """
+    Each leg's amount in base units. An ERC-20 the wallet sends is settled against its balance
+    first (_snap_to_balance): "send all my LINK" arrives as the balance read back through a float, a
+    few base units off it, and the tool that built the transaction settled it the same way. The
+    native asset never settles -- sending all of it would leave nothing for the fees.
+    """
+    amounts = []
+    for i, leg in enumerate(legs):
+        amount = _to_base_units(leg.amount, decimals[i])
+        if leg.direction == SENT and leg.erc20 is not None:
+            amount = _snap_to_balance(amount, first[f"balance{i}"])
+        amounts.append(amount)
+    return amounts
+
+
+def _shortfalls(legs: list[_Leg], first: dict, decimals: list[int], amounts: list[int]) -> list[str]:
     """One sentence for each leg the wallet would send but doesn't hold enough of."""
     short = []
     for i, leg in enumerate(legs):
-        if leg.direction == SENT and first[f"balance{i}"] < _to_base_units(leg.amount, decimals[i]):
+        if leg.direction == SENT and first[f"balance{i}"] < amounts[i]:
             short.append(
                 f"Not enough {leg.label or leg.token}: the wallet holds "
                 f"{_whole(first[f'balance{i}'] / 10 ** decimals[i])}, and this needs {_whole(leg.amount)}."
@@ -141,7 +159,7 @@ def _shortfalls(legs: list[_Leg], first: dict, decimals: list[int]) -> list[str]
     return short
 
 
-def _over_token_limits(legs: list[_Leg], first: dict, decimals: list[int]) -> list[str]:
+def _over_token_limits(legs: list[_Leg], first: dict, decimals: list[int], amounts: list[int]) -> list[str]:
     """
     One sentence for each leg the wallet would send past the limit the owner set on that token in its
     own units. Only what is sent counts: buying a token doesn't use its limit, and a limit is charged
@@ -152,7 +170,7 @@ def _over_token_limits(legs: list[_Leg], first: dict, decimals: list[int]) -> li
         if leg.direction != SENT or leg.erc20 is None:
             continue
         capped, limit, remaining = first[f"cap{i}"]
-        if capped and _to_base_units(leg.amount, decimals[i]) > remaining:
+        if capped and amounts[i] > remaining:
             name = leg.label or leg.token
             scale = 10 ** decimals[i]
             over.append(
@@ -180,7 +198,7 @@ def _session_state(first: dict) -> tuple[bool, int, bool]:
     return session_active, seconds_left, session_active and seconds_left < SESSION_EXPIRY_MARGIN_SECS
 
 
-def _usd_values(functions, legs: list[_Leg], decimals: list[int], counted: list[bool]) -> tuple[dict, list[str]]:
+def _usd_values(functions, legs: list[_Leg], amounts: list[int], counted: list[bool]) -> tuple[dict, list[str]]:
     """
     _wallet_checks' second round: the USD value of each leg the limit counts, or that is sent and
     has a feed, all at once. Returns ({leg index: value}, the tokens whose shown-only price failed).
@@ -190,7 +208,7 @@ def _usd_values(functions, legs: list[_Leg], decimals: list[int], counted: list[
     prices = {}
     for i, leg in enumerate(legs):
         if counted[i] or (leg.direction == SENT and not leg.unlisted):
-            base_units = _to_base_units(leg.amount, decimals[i])
+            base_units = amounts[i]
             prices[i] = start_read(
                 lambda address=leg.address, base_units=base_units: functions.getUsdValue(address, base_units).call()
             )
