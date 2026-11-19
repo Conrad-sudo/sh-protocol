@@ -200,6 +200,8 @@ def test_known_list():
         ("a client id over http", "http://claude.ai/oauth/x", CLAUDE_CB, None),
         ("a client id with no path", "https://claude.ai/", CLAUDE_CB, None),
         ("a client id on another port", "https://claude.ai:8443/x", CLAUDE_CB, None),
+        ("another client id on claude.ai", "https://claude.ai/oauth/other-client", CLAUDE_CB, None),
+        ("Claude's client id path on claude.com", "https://claude.com/oauth/mcp-oauth-client-metadata", CLAUDE_CB, None),
         ("Claude's callback with a different case", CLAUDE_ID, "https://claude.ai/api/mcp/Auth_Callback", None),
     ]
     for label, client_id, redirect_uri, expected in cases:

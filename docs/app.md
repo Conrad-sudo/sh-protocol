@@ -966,7 +966,7 @@ being both the authorization server and the resource:
    `iss` parameter. Claude uses a CIMD client id only when the first two are there. No registration
    endpoint: DCR is deprecated, and every app on the list has a CIMD client id.
 2. `GET /api/oauth/authorize` checks the client id and redirect against **the known list**
-   (`mcp_clients.py`): Claude = any https client id on claude.ai/claude.com with Claude's callback;
+   (`mcp_clients.py`): Claude = `https://claude.ai/oauth/mcp-oauth-client-metadata` with Claude's callback (claude.ai or claude.com);
    Claude Code = `https://claude.ai/oauth/claude-code-client-metadata` with `http://localhost|127.0.0.1:<any port>/callback`;
    ChatGPT = `https://chatgpt.com/oauth/client.json` with `connector_platform_oauth_redirect` (or
    `/connector/oauth/<id>`). The redirect is the real control: a code only ever goes to an address
