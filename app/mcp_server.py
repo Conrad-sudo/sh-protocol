@@ -8,9 +8,9 @@ McpEndpoint checks the bearer token itself and hands the SDK the caller in the r
 the SDK's own auth (AuthSettings, token_verifier) is not used. Its authorization-server half
 declares what Claude needs to use a CIMD client id, and can't be told otherwise.
 
-Phase 1 has one tool, get_account, to prove the sign-in end to end. The wallet's reads and its
-quotes come next, as tools whose descriptions carry the rules the web chat's system prompt holds:
-these apps' models never see that prompt.
+The tools: get_account, here, and the wallet's reads (mcp_tools.py), each with a description that
+carries the rules the web chat's system prompt holds: these apps' models never see that prompt. The
+quotes come in phase 2b.
 """
 import contextlib
 import logging
@@ -28,9 +28,7 @@ import mcp_auth
 from constants import get_chain_display_name
 from db import get_user_by_id, get_wallet_address, get_wallet_chains
 from mcp_clients import APPS
-
-# Where McpEndpoint leaves the caller in the request's state, for the tools.
-CALLER_KEY = "mitfah_mcp_caller"
+from mcp_tools import CALLER_KEY, caller_of, count_call, read_tools
 
 # Stateless, every request "terminates a session" -- an INFO line per call. Warnings still show.
 logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
@@ -41,7 +39,8 @@ logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
 INSTRUCTIONS = (
     "Mitfah is a self-custody smart wallet. This connection acts for one Mitfah account. It can read that account; it can never move funds on "
     "its own: every transaction is approved by the user with their passkey on Mitfah's own page. "
-    "Never ask the user for a seed phrase, private key or passkey."
+    "Never ask the user for a seed phrase, private key or passkey. "
+    "The account has a smart wallet per network: get_account lists them, and the other tools take that network as `network`."
 )
 
 server = MCPServer(
@@ -49,6 +48,7 @@ server = MCPServer(
     title="Mitfah smart wallet",
     instructions=INSTRUCTIONS,
     version="1",
+    tools=read_tools(),
 )
 
 # The running session manager: set while running() is open, which the API's lifespan holds.
@@ -127,15 +127,6 @@ class McpEndpoint:
         await StreamableHTTPASGIApp(_manager)({**scope, "state": state}, receive, send)
 
 
-def _caller(ctx: Context) -> dict:
-    """The connection a tool call came through: {"user_id", "connection_id", "app", "scope"}."""
-    request = ctx.request_context.request
-    caller = request.scope.get("state", {}).get(CALLER_KEY) if request is not None else None
-    if caller is None:   # only reachable if a call arrives some way other than McpEndpoint
-        raise PermissionError("Not signed in to Mitfah.")
-    return caller
-
-
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 
@@ -156,7 +147,8 @@ GET_ACCOUNT_DESCRIPTION = (
 )
 def get_account(ctx: Context) -> dict:
     """The connected account and its wallets (GET_ACCOUNT_DESCRIPTION)."""
-    caller = _caller(ctx)
+    caller = caller_of(ctx)
+    count_call(caller)
     user = get_user_by_id(caller["user_id"])
     wallets = []
     for chain_id in get_wallet_chains(caller["user_id"]):

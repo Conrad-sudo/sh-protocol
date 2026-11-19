@@ -39,7 +39,8 @@ app/
 ├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
 ├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
 ├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in)
-├── mcp_server.py          ← MCP for AI apps at /mcp (Claude, Claude Code, ChatGPT): the token check in front of the SDK, and the tools
+├── mcp_server.py          ← MCP for AI apps at /mcp (Claude, Claude Code, ChatGPT): the token check in front of the SDK, and get_account
+├── mcp_tools.py           ← The wallet's tools as AI apps see them: each wrapped with a `network`, its own thread pool, a per-app rate limit
 ├── mcp_auth.py            ← How AI apps sign in: codes with PKCE, access and refresh tokens, rotation, revocation
 ├── mcp_clients.py         ← The known list: which AI apps may connect, and the only addresses their codes may go to
 ├── redact.py              ← Masks API keys in HTTP errors, the model's tool results and the logs
@@ -948,11 +949,11 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
 
 ---
 
-## AI apps over MCP (2026-11-19, phase 1)
+## AI apps over MCP (2026-11-19, phases 1 and 2a)
 
 Claude (claude.ai and its apps), Claude Code and ChatGPT can use a Mitfah account as an MCP server at
-`<WEB_APP_URL>/mcp`. Phase 1 is the sign-in end to end plus one read-only tool (`get_account`); the
-wallet's reads and its quotes come next, as tools whose descriptions carry the rules the web chat's
+`<WEB_APP_URL>/mcp`. Phase 1 is the sign-in end to end plus `get_account`; phase 2a adds the wallet's
+reads (below); the quotes come in phase 2b, as tools whose descriptions carry the rules the web chat's
 system prompt holds (these apps' models never see that prompt, and Claude's apps drop the server's
 `instructions` too). An app never sends anything: a quote will hand the user a `/c/<token>` link, and
 only their passkey sends.
@@ -1009,6 +1010,27 @@ DNS-rebinding check admitting only localhost Host headers unless told otherwise 
 off — `/mcp` answers nothing without a token anyway), and a session manager runs once in its life, so
 `running()` builds a fresh one per lifespan. Tool descriptions are passed explicitly; the SDK would
 pass the docstring with its indentation.
+
+**The read tools (`mcp_tools.py`, phase 2a).** 14 tools, all marked read-only: `get_account`,
+`get_wallet_status`, `get_supported_tokens`, `get_all_contacts`, `get_contact`, `get_eth_balance`,
+`get_erc20_balance`, `get_price`, `get_quote_out`, `get_quote_in`, `get_positions`, `get_pool_quote`,
+`get_lp_amounts`, `get_liquidity_token_balance`. Each wraps the web chat's own tool (its `func`,
+called directly so a refusal stays an exception) rather than copying it:
+- **Who:** the token's account, handed to the tool in an `AgentContext`; an argument can't change it.
+- **Where:** a `network` argument (a name such as "Arbitrum One", an alias such as "ethereum", or a
+  chain id), only where the account has a wallet; optional when it has just one. It becomes the
+  acting network *inside* the worker thread (a ContextVar). Contacts and `get_account` take none.
+- **Threads:** a pool of its own (`POOL_SIZE` 16, per event loop), so chain reads from AI apps don't
+  take the threads FastAPI's plain `def` routes share (anyio's default pool, which the SDK would use).
+- **Rate limit:** `RATE_LIMIT` 60 calls a minute per connection, every tool, in memory per process.
+- **Schemas:** the tool's own argument types validate; the published schema shows optional arguments
+  as plain types (no "or null") and no generated titles.
+- **Errors:** a `ToolException` becomes a tool error in its own words, keys masked; anything else is
+  logged and answered with one plain sentence. A list (or None) is sent as one JSON text, since the
+  SDK would send a list as one block per item.
+- **Descriptions:** written for a model that never sees our system prompt, about 3,700 characters for
+  all 14 (the web chat's versions of the same tools run to about 13,000).
+`suggest_price_ranges` comes in 2b with `open_position`, which it feeds.
 
 **Connected apps.** `GET /api/connections`, `DELETE /api/connections/{id}`; Controls → Connected apps
 lists them (the account's, shown even with no wallet) with the address to connect one. Production

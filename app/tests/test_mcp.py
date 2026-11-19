@@ -12,6 +12,7 @@ Offline: no chain and no RPC. Whether a wallet approves a passkey is stood in fo
 
 Run: make mcp-test   (or: python app/tests/test_mcp.py)
 """
+import contextlib
 import os
 import secrets
 import tempfile
@@ -391,6 +392,166 @@ def test_mcp_calls(c: TestClient):
     check("the 2026-07-28 per-request protocol works too, as A", account_a.address in text, r.text[:300])
 
 
+# ── 7b. The wallet's read tools ───────────────────────────────────────────────
+
+READS = {
+    "get_account", "get_wallet_status", "get_supported_tokens", "get_all_contacts", "get_contact",
+    "get_eth_balance", "get_erc20_balance", "get_price", "get_quote_in", "get_quote_out", "get_positions",
+    "get_pool_quote", "get_lp_amounts", "get_liquidity_token_balance",
+}
+NOT_PER_NETWORK = {"get_account", "get_all_contacts", "get_contact"}
+
+
+def call_tool(c: TestClient, access: str, name: str, arguments: dict) -> tuple[bool, object]:
+    """A tool call over MCP: (whether it was an error, its JSON result or its text)."""
+    import json
+
+    r = mcp(c, access, "tools/call", {"name": name, "arguments": arguments})
+    result = r.json().get("result", {}) if r.status_code == 200 else {}
+    text = (result.get("content") or [{}])[0].get("text", r.text)
+    if result.get("isError"):
+        return True, text
+    try:
+        return False, json.loads(text)
+    except ValueError:
+        return False, text
+
+
+@contextlib.contextmanager
+def stand_in(tool, fake):
+    """Runs `fake` in place of a wallet tool's own function (the chain is out of reach here)."""
+    real = tool.func
+    tool.func = fake
+    try:
+        yield
+    finally:
+        tool.func = real
+
+
+def test_read_tools(c: TestClient):
+    print("\n[7b] The wallet's read tools over /mcp")
+    import threading
+
+    import mcp_tools
+    from langchain_core.tools import ToolException
+    from limits import parse
+    from network_config import network_name
+    from tools.wallet_reads import get_eth_balance, get_price
+
+    _, headers_a, _ = sign_in(c)
+    _, headers_b, _ = sign_in(c)
+    _, headers_n, _ = sign_in(c)
+    user_a = c.get("/api/me", headers=headers_a).json()["user_id"]
+    user_b = c.get("/api/me", headers=headers_b).json()["user_id"]
+    db.save_wallet_address(user_a, 1, "0x00000000000000000000000000000000000000A1")
+    db.save_wallet_address(user_a, 42161, "0x00000000000000000000000000000000000000A2")
+    db.save_wallet_address(user_b, 11155111, "0x00000000000000000000000000000000000000B1")
+    db.save_contact(user_a, "Sandy", "0x0000000000000000000000000000000000005a01")
+    db.save_contact(user_b, "Bob", "0x00000000000000000000000000000000000000b0")
+    access_a = connect(c, headers_a)["access_token"]
+    access_b = connect(c, headers_b)["access_token"]
+    access_n = connect(c, headers_n)["access_token"]
+
+    tools = {t["name"]: t for t in mcp(c, access_a, "tools/list").json()["result"]["tools"]}
+    check("tools/list shows exactly the reads", set(tools) == READS, str(sorted(set(tools) ^ READS)))
+    check("every one is marked read-only", all(t.get("annotations", {}).get("readOnlyHint") is True for t in tools.values()))
+    schemas = str([t["inputSchema"] for t in tools.values()])
+    check("no schema says 'or null'", "anyOf" not in schemas and "'null'" not in schemas, schemas[:200])
+    check("every per-network tool takes an optional `network`",
+          all("network" in t["inputSchema"].get("properties", {}) and "network" not in t["inputSchema"].get("required", [])
+              for n, t in tools.items() if n not in NOT_PER_NETWORK))
+    check("contacts and the account take none",
+          all("network" not in tools[n]["inputSchema"].get("properties", {}) for n in NOT_PER_NETWORK))
+    check("descriptions are short (under 700 characters each)", all(len(t["description"]) < 700 for t in tools.values()),
+          str({n: len(t["description"]) for n, t in tools.items() if len(t["description"]) >= 700}))
+
+    # Contacts: read from the database, the token's own account only.
+    err, contacts = call_tool(c, access_a, "get_all_contacts", {})
+    check("A's contacts are A's", not err and [x["name"] for x in contacts] == ["sandy"], str(contacts))
+    err, address = call_tool(c, access_a, "get_contact", {"name": "sandy"})
+    check("a contact by name, any case", not err and str(address).lower().endswith("5a01"), str(address))
+    err, address = call_tool(c, access_b, "get_contact", {"name": "Sandy"})
+    check("B can't see A's contact", "5a01" not in str(address).lower(), str(address))
+
+    # The network: named, checked against the account's wallets, and set inside the worker thread.
+    seen = {}
+
+    def fake_balance(runtime):
+        seen["user"] = runtime.context.user_id
+        seen["network"] = db.get_user_network(runtime.context.user_id)
+        seen["thread"] = threading.current_thread() is threading.main_thread()
+        return {"balance": 1.5, "asset": "ETH"}
+
+    with stand_in(get_eth_balance, fake_balance):
+        err, result = call_tool(c, access_a, "get_eth_balance", {"network": "Arbitrum One"})
+        check("a read answers on the named network", not err and result == {"balance": 1.5, "asset": "ETH"}
+              and seen.get("network") == network_name(42161), f"{result} {seen}")
+        check("as the token's account, off the event loop's thread", seen.get("user") == user_a and seen.get("thread") is False, str(seen))
+        for name in ("42161", "arbitrum", "ARBITRUM ONE", network_name(42161)):
+            seen.clear()
+            call_tool(c, access_a, "get_eth_balance", {"network": name})
+            check(f"network {name!r} is Arbitrum", seen.get("network") == network_name(42161), str(seen))
+        seen.clear()
+        call_tool(c, access_a, "get_eth_balance", {"network": "ethereum"})
+        check("'ethereum' is mainnet", seen.get("network") == network_name(1), str(seen))
+        seen.clear()
+        err, text = call_tool(c, access_a, "get_eth_balance", {"network": "Base"})
+        check("a network without a wallet is refused, naming the wallets'", err and "no wallet on Base" in text
+              and "Ethereum" in text and "Arbitrum One" in text and not seen, text)
+        err, text = call_tool(c, access_a, "get_eth_balance", {})
+        check("left out with two wallets: asked which", err and "Say which network" in text and not seen, text)
+        call_tool(c, access_b, "get_eth_balance", {})
+        check("left out with one wallet: that one", seen.get("user") == user_b and seen.get("network") == network_name(11155111), str(seen))
+        seen.clear()
+        call_tool(c, access_a, "get_eth_balance", {"network": "arbitrum", "user_id": user_b})
+        check("a user_id argument is ignored: the token decides", seen.get("user") == user_a, str(seen))
+        err, text = call_tool(c, access_n, "get_eth_balance", {"network": "ethereum"})
+        check("an account with no wallet is told to create one", err and "no smart wallet yet" in text, text)
+
+    # Refusals reach the model in the tool's words, with keys masked; crashes don't reach it at all.
+    key = "k3yk3yk3yk3yk3yk3yk3y"
+
+    def refuses(runtime, token, amount=None):
+        raise ToolException(f"Can't price {token}: https://eth-mainnet.g.alchemy.com/v2/{key} timed out")
+
+    def crashes(runtime, token, amount=None):
+        raise RuntimeError(f"stack trace with {key}")
+
+    with stand_in(get_price, refuses):
+        err, text = call_tool(c, access_a, "get_price", {"network": "ethereum", "token": "usdc"})
+        check("a refusal is a tool error in the tool's words", err and "Can't price usdc" in text, text)
+        check("with the key masked", key not in text, text)
+    with stand_in(get_price, crashes):
+        err, text = call_tool(c, access_a, "get_price", {"network": "ethereum", "token": "usdc"})
+        check("a crash is a plain sentence, nothing of the exception", err and mcp_tools.UNEXPECTED in text
+              and key not in text and "RuntimeError" not in text, text)
+    got = {}
+
+    def prices(runtime, token, amount=None):
+        got.update(token=token, amount=amount)
+        return 2500.0
+
+    with stand_in(get_price, prices):
+        err, result = call_tool(c, access_a, "get_price", {"network": "ethereum", "token": "eth"})
+        check("an optional argument left out arrives as None", not err and result == 2500.0 and got == {"token": "eth", "amount": None}, f"{result} {got}")
+        err, text = call_tool(c, access_a, "get_price", {"network": "ethereum", "token": "eth", "amount": "lots"})
+        check("a wrong type is refused before the tool runs", err and got.get("amount") is None, str(text)[:200])
+
+    # The rate limit, per connected app.
+    saved = mcp_tools._rate
+    mcp_tools._rate = parse("3/minute")
+    try:
+        access_x = connect(c, headers_a)["access_token"]
+        access_y = connect(c, headers_a, client_id=CHATGPT_ID, redirect_uri=CHATGPT_CB)["access_token"]
+        results = [call_tool(c, access_x, "get_all_contacts", {})[0] for _ in range(4)]
+        check("an app's calls past its limit are refused", results == [False, False, False, True], str(results))
+        err, text = call_tool(c, access_x, "get_account", {})
+        check("get_account counts too", err and "too many times" in text, str(text)[:200])
+        check("another app of the same account is not held back", not call_tool(c, access_y, "get_all_contacts", {})[0])
+    finally:
+        mcp_tools._rate = saved
+
+
 # ── 8. Refresh tokens ─────────────────────────────────────────────────────────
 
 
@@ -587,6 +748,7 @@ if __name__ == "__main__":
         test_allow_page(client)
         test_token_endpoint(client)
         test_mcp_calls(client)
+        test_read_tools(client)
         test_refresh(client)
         test_revoke(client)
         test_connections(client)
