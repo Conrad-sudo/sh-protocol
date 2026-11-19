@@ -476,5 +476,5 @@ funnel-on:
 funnel-status:
 	tailscale funnel status
 dev:
-	cd web && npx vite build && npx vite preview --port 3000 --strictPort
+	cd web && npx vite build && npx vite preview --host 127.0.0.1 --port 3000 --strictPort
 
