@@ -15,9 +15,14 @@ The rules live in mcp_auth.py and the known list in mcp_clients.py. The flow:
      Deny answers with where to send the browser: the app's redirect, with the code or the refusal.
   4. The app swaps the code at /api/oauth/token (PKCE) and calls /mcp with the access token.
 
-Why the binding cookie: without it, someone could start a request for THEIR copy of an app and get
-a signed-in victim to open the /connect link -- and Allow would connect the victim's wallet to the
-attacker's app. Only the browser that opened the request may answer it.
+What the binding cookie does: only the browser that opened a request may answer it, so a
+/connect?request= link copied out of one browser is refused in any other. What it can't do: show
+who STARTED the flow. Someone can send a signed-in victim the app's own /api/oauth/authorize link,
+carrying the state of THEIR copy of the app; the victim's browser then opens a fresh request, and
+Allow sends the code to the real app's callback in the victim's browser. Only the app's own check
+that the state belongs to that browser keeps the victim's account from joining the sender's app
+account. Hence the Allow page's warning to allow only a connection the user just started, and a
+connection never sends (THREAT_MODEL §4.12).
 """
 import re
 import secrets

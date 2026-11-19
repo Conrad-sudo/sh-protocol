@@ -974,8 +974,12 @@ being both the authorization server and the resource:
    redirect it named. Once the app is known, other errors go back to it with `state` and `iss`.
 3. The request is filed (`oauth_requests`, 10 minutes) and the browser gets an httpOnly **binding
    cookie** (path `/api/oauth`, one per browser), then `/connect?request=<id>`. Only the browser that
-   opened a request can answer it: otherwise someone could start a request for their own copy of an
-   app and get a signed-in victim to approve the link.
+   opened a request can answer it, so a copied `/connect` link is refused elsewhere. It can't show
+   who started the flow, though: a link to `/api/oauth/authorize` itself, carrying the state of
+   someone else's copy of the app, opens a fresh request in whatever browser follows it. That case
+   rests on the app checking that `state` comes back to the browser that began it, on the Allow
+   page's warning (allow only a connection you just started; Deny if a link brought you), and on a
+   connection never being able to send (THREAT_MODEL §4.12).
 4. The Allow page (`web/src/pages/ConnectPage.tsx`) signs the user in first if needed (RequireAuth,
    `?next=`), names the app from the known list and the one permission, and posts Allow or Deny; the
    answer is where to send the browser (the app's redirect with `code`, `state`, `iss`, or

@@ -33,7 +33,12 @@ const NOTHING = {
  * and sends the browser here with `?request=<id>`, or with `?error=` when the app can't connect at
  * all. Signing in comes first (RequireAuth brings the user back here). Allow or Deny sends the browser
  * back to the app, carrying the answer. Only this browser can answer: the server tied the request to
- * it with a cookie when the app opened it.
+ * it with a cookie when the app opened it, so a copied Allow link is refused anywhere else.
+ *
+ * That cookie can't show the user started the request: anyone can send them the app's own sign-in
+ * link, which opens a fresh request here. Hence the warning above the buttons. What keeps such a
+ * request from connecting the user to someone else's app account is the app's own `state` check
+ * (THREAT_MODEL §4.12), and a connection can never send.
  */
 export function ConnectPage() {
   const [params] = useSearchParams()
@@ -120,6 +125,10 @@ function Allow({ id }: { id: string }) {
       <Message type="info" showIcon className="mf-settings-note">
         <strong>It can't send anything by itself.</strong> Every transaction waits for your passkey on Mitfah's own
         page. You can disconnect {app.name} in Controls at any time.
+      </Message>
+      <Message type="warning" showIcon className="mf-settings-note">
+        Only allow this if you started it yourself in {app.name} just now. If someone sent you the link that brought
+        you here, choose Deny.
       </Message>
       {answer.isError && (
         <Message type="error" showIcon className="mf-settings-note">
