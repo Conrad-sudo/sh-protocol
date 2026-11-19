@@ -87,9 +87,14 @@ export default defineConfig({
     // A phone test reaches this server through Tailscale Funnel (https://<mac>.<tailnet>.ts.net),
     // since Telegram won't link to localhost. Vite refuses any other Host header.
     allowedHosts: ['.ts.net'],
-    // Same origin as the page, so the refresh cookie (path /api/auth) is sent without CORS.
+    // Same origin as the page, so the refresh cookie (path /api/auth) is sent without CORS. AI apps
+    // call MCP at /mcp and first read the sign-in documents under /.well-known: those go to the API
+    // too, as deploy/Caddyfile sends them (`vite preview` uses this proxy as well).
     proxy: {
       '/api': 'http://localhost:8000',
+      '/mcp': 'http://localhost:8000',
+      '/.well-known/oauth-authorization-server': 'http://localhost:8000',
+      '/.well-known/oauth-protected-resource': 'http://localhost:8000',
     },
     fs: {
       // Vite's default, plus ../deploy: src/securityHeaders.test.ts checks the security headers the

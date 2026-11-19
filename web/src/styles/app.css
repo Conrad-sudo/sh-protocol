@@ -969,6 +969,29 @@ body:has(.mf-wallpaper) :is(.rs-panel, .mf-glass-surface) .rs-btn {
   text-align: center;
 }
 
+/* The Allow page: what a connected AI app may do. */
+.mf-connect-list {
+  margin: 12px 0 0;
+  padding-left: 20px;
+}
+
+.mf-connect-list li + li {
+  margin-top: 4px;
+}
+
+/* Controls: the address an AI app connects to, with its copy button. */
+.mf-connect-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.mf-connect-url code {
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 599px) {
   .mf-auth {
     justify-content: flex-start;

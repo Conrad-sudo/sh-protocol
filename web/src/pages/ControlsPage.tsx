@@ -3,6 +3,7 @@ import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { AdvancedPanel } from '../components/controls/AdvancedPanel'
+import { ConnectedAppsPanel } from '../components/controls/ConnectedAppsPanel'
 import { DevicesPanel } from '../components/controls/DevicesPanel'
 import { EmergencyPanel } from '../components/controls/EmergencyPanel'
 import { RecurringPanel } from '../components/controls/RecurringPanel'
@@ -23,7 +24,8 @@ const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the 
 
 /**
  * Everything the owner can change about the wallet: the brake, the devices that approve payments,
- * the limit, what it counts, and the payments it makes by itself.
+ * the limit, what it counts, and the payments it makes by itself. Plus the AI apps connected to the
+ * account, which are the account's rather than one wallet's, so they show even with no wallet yet.
  */
 export function ControlsPage() {
   const view = useWalletView()
@@ -33,6 +35,9 @@ export function ControlsPage() {
     <>
       <PageHeader title={TITLE} description={DESCRIPTION} />
       {view.fallback}
+      <div className="mf-dashboard">
+        <ConnectedAppsPanel />
+      </div>
     </>
   )
 }
@@ -72,6 +77,7 @@ function Controls({ wallet }: { wallet: WalletState }) {
         <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />
         <EmergencyPanel {...panel} />
         <DevicesPanel {...panel} />
+        <ConnectedAppsPanel />
         <SpendingPanel {...panel} />
         <TokensPanel {...panel} chain={chain} />
         <TokenCapsPanel {...panel} />

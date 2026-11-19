@@ -44,13 +44,21 @@ export function isPasskeyError(error: unknown, kind?: PasskeyErrorKind): error i
 const UNSUPPORTED = "This browser can't use passkeys. Open this page in Safari or Chrome."
 
 /** What the browser's refusal means here, in plain words. */
-function asPasskeyError(error: unknown, task: 'create' | 'sign', asked: string[] = []): PasskeyError {
+function asPasskeyError(error: unknown, task: 'create' | 'sign' | 'signin', asked: string[] = []): PasskeyError {
   if (error instanceof PasskeyError) return error
   const name = (error as { name?: unknown } | null)?.name
   switch (name) {
     case 'NotAllowedError':
     case 'AbortError':
       if (task === 'create') return new PasskeyError('cancelled', 'Cancelled. No passkey was made.', { cause: error })
+      // Signing in names no passkey, so the browser can't tell a closed prompt from a device with none.
+      if (task === 'signin') {
+        return new PasskeyError(
+          'cancelled',
+          "Not signed in. If this device has no Mitfah passkey, sign in with your wallet.",
+          { cause: error },
+        )
+      }
       // The same refusal covers a closed prompt and a device with none of these passkeys: say which is
       // likelier, from what this browser has made or used before.
       return asked.some(isOnThisDevice)
@@ -326,6 +334,42 @@ export function signWithPasskey(start: SignStart): Promise<PasskeyAssertionJSON>
     },
     error => {
       throw asPasskeyError(error, 'sign', asked)
+    },
+  )
+}
+
+/**
+ * Opens the passkey prompt to sign in. No account is named (allowCredentials is empty), so the device
+ * offers the Mitfah passkeys it holds and the one picked names the account. Call it straight from the
+ * tap, with options fetched beforehand (passkeySignInOptions).
+ *
+ * @throws PasskeyError (the promise rejects): `unsupported`, `cancelled` or `failed`.
+ */
+export function signInWithPasskey(options: PublicKeyCredentialRequestOptionsJSON): Promise<PasskeyAssertionJSON> {
+  let request: Promise<Credential | null>
+  try {
+    if (!passkeysSupported()) throw new PasskeyError('unsupported', UNSUPPORTED)
+    request = navigator.credentials.get({
+      publicKey: {
+        challenge: fromBase64Url(options.challenge),
+        rpId: options.rpId,
+        allowCredentials: [],
+        userVerification: options.userVerification as UserVerificationRequirement | undefined,
+        timeout: options.timeout,
+      },
+      signal: nextCeremony(),
+    })
+  } catch (error) {
+    return Promise.reject(asPasskeyError(error, 'signin'))
+  }
+  return request.then(
+    credential => {
+      if (!isPublicKeyCredential(credential)) throw new PasskeyError('failed', "Your passkey didn't answer. Try again.")
+      rememberIfLocal(credential)
+      return toAssertionJSON(credential)
+    },
+    error => {
+      throw asPasskeyError(error, 'signin')
     },
   )
 }

@@ -657,3 +657,35 @@ export interface TransactionPage {
   /** The first page only: a search for activity outside Mitfah is running, so read again soon. */
   syncing: boolean
 }
+
+/** An AI app on the server's known list, as the Allow page and Controls name it. */
+export interface KnownApp {
+  /** 'claude', 'claude-code' or 'chatgpt'. */
+  key: string
+  name: string
+  /** The app's own web address, e.g. claude.ai. */
+  site: string
+}
+
+/** GET /api/oauth/requests/{id}: an app asking to connect to the account. */
+export interface ConnectRequest {
+  id: string
+  app: KnownApp
+  /** Unix seconds: the request can't be answered after this. */
+  expires_at: number
+}
+
+/** POST /api/oauth/requests/{id}/approve or /deny: where to send the browser next (the app). */
+export interface ConnectAnswer {
+  redirect_to: string
+}
+
+/** One entry of GET /api/connections: an AI app connected to the account. */
+export interface ConnectedApp {
+  id: number
+  app: KnownApp
+  /** Unix seconds. */
+  created_at: number
+  /** Unix seconds; null until the app first uses the connection. */
+  last_used_at: number | null
+}

@@ -46,6 +46,14 @@ export const routes: RouteObject[] = [
         ],
       },
       {
+        // The Allow page for AI apps: the sign-in card's layout, and its own sign-in check (an error
+        // from the server is shown to anyone; a request to answer needs the account).
+        element: <AuthLayout />,
+        children: [
+          { path: 'connect', lazy: async () => ({ Component: (await import('./pages/ConnectPage')).ConnectPage }) },
+        ],
+      },
+      {
         element: (
           <RequireAuth>
             <Outlet />

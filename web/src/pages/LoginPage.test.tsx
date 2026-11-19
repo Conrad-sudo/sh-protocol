@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
 import { answerRpc, isRpc, json, makeWagmiConfig, ME, renderRoutes, TOKEN, WALLET } from '../test/utils'
+import { b64url, installPasskeys, refused, signedCredential } from '../test/webauthn'
 import { routes } from '../routes'
 
 const NONCE = 'f00dfeed1234abcd'
@@ -206,5 +207,104 @@ describe('LoginPage', () => {
     expect(await screen.findByRole('heading', { name: 'Sign in with your wallet' })).toBeInTheDocument()
     expect(router.state.location.pathname).toBe('/login')
     expect(router.state.location.search).toBe(`?next=${encodeURIComponent('/onboarding')}`)
+  })
+})
+
+describe('LoginPage: signing in with a passkey', () => {
+  const CREDENTIAL = b64url('credential-one')
+  const SIGNIN_OPTIONS = {
+    challenge: b64url('sign-in challenge, 32 bytes long!'),
+    rpId: 'localhost',
+    allowCredentials: [],
+    userVerification: 'required',
+    timeout: 60_000,
+  }
+
+  /** Signed out on load; the passkey endpoints answer, `/api/auth/passkey/login` with `login`. */
+  function stubPasskeyApi(login: () => Response) {
+    const posted: unknown[] = []
+    const fetch = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/auth/refresh')) return Promise.resolve(json(401, { detail: 'No refresh token' }))
+      if (url.endsWith('/api/auth/passkey/options')) return Promise.resolve(json(200, { options: SIGNIN_OPTIONS }))
+      if (url.endsWith('/api/auth/passkey/login')) {
+        posted.push(JSON.parse(String(init?.body)))
+        return Promise.resolve(login())
+      }
+      if (url.endsWith('/api/me')) return Promise.resolve(json(200, ME))
+      if (url.endsWith('/api/chains')) return Promise.resolve(json(200, { chains: [] }))
+      if (url.endsWith('/api/contacts')) return Promise.resolve(json(200, { contacts: [] }))
+      return Promise.resolve(json(404, { detail: 'Not Found' }))
+    })
+    vi.stubGlobal('fetch', fetch)
+    return { fetch, posted }
+  }
+
+  /** The button, once the options it taps with have arrived. */
+  async function readyButton(fetch: ReturnType<typeof vi.fn>) {
+    const button = await screen.findByRole('button', { name: 'Sign in with a passkey' })
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/api/auth/passkey/options'))).toBe(true))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    return button
+  }
+
+  beforeEach(() => {
+    resetClientForTests()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+  })
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('opens the prompt inside the tap, naming no account, and signs in', async () => {
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(CREDENTIAL))
+    const { fetch, posted } = stubPasskeyApi(() => json(200, TOKEN))
+    const router = await renderRoutes(routes, '/login')
+
+    fireEvent.click(await readyButton(fetch))
+    // Before any await: Safari only opens the prompt for a call made inside the tap.
+    expect(browser.get).toHaveBeenCalledTimes(1)
+    const { publicKey } = browser.get.mock.calls[0][0]!
+    expect(publicKey!.allowCredentials).toEqual([])
+    expect(publicKey!.userVerification).toBe('required')
+    expect(publicKey!.rpId).toBe('localhost')
+
+    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/dashboard')
+    expect(posted).toEqual([{ credential: expect.objectContaining({ id: CREDENTIAL, type: 'public-key' }) }])
+  })
+
+  it("shows the server's reason when it refuses, such as a passkey no wallet approves", async () => {
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(CREDENTIAL))
+    const reason = "None of your wallets approves this passkey right now, so it can't sign you in. Sign in with your wallet."
+    const { fetch } = stubPasskeyApi(() => json(403, { detail: reason }))
+    await renderRoutes(routes, '/login')
+
+    fireEvent.click(await readyButton(fetch))
+
+    expect(await screen.findByText(reason)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect wallet' })).toBeInTheDocument()
+  })
+
+  it('says how to go on when the prompt is closed', async () => {
+    const browser = installPasskeys()
+    browser.get.mockRejectedValue(refused())
+    const { fetch, posted } = stubPasskeyApi(() => json(200, TOKEN))
+    await renderRoutes(routes, '/login')
+
+    fireEvent.click(await readyButton(fetch))
+
+    expect(await screen.findByText(/If this device has no Mitfah passkey, sign in with your wallet/)).toBeInTheDocument()
+    expect(posted).toEqual([])
+  })
+
+  it('offers no passkey button where the browser has no passkeys', async () => {
+    stubPasskeyApi(() => json(200, TOKEN))
+    await renderRoutes(routes, '/login')
+
+    expect(await screen.findByRole('button', { name: 'Connect wallet' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in with a passkey' })).toBeNull()
   })
 })
