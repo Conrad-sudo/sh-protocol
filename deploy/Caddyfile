@@ -62,6 +62,20 @@ www.{$MITFAH_DOMAIN} {
 	# A Telegram Confirm link, /c/<token>: its own small page (confirm.html), which approves the payment
 	# with a passkey. The token in the address is a single-use credential, so it goes in no Referer
 	# header (not even to this site, whose logs would keep it) and no search index.
+	# MCP for AI apps (app/mcp_server.py), and the documents they read before signing in
+	# (routes/oauth.py). Without these the web app would answer them with its own HTML.
+	handle /mcp {
+		header Cache-Control "no-store"
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+	handle /.well-known/oauth-* {
+		reverse_proxy 127.0.0.1:8000
+	}
 	handle /c/* {
 		root * {$MITFAH_WEB_ROOT:/srv/mitfah}
 		rewrite * /confirm.html

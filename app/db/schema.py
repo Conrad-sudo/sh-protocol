@@ -412,6 +412,82 @@ def _migrate_recurring_payments(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_ai_apps(db: sqlite3.Connection):
+    """
+    Adds what AI apps connect with, and passkey sign-in (2026-11-19). Claude, Claude Code and ChatGPT
+    reach the wallet over MCP (/mcp), signed in through this server's own OAuth (routes/oauth.py,
+    mcp_auth.py); a returning user can sign in to the website with a passkey.
+
+      - oauth_requests: one app's request to connect, from /api/oauth/authorize until it is
+        approved, denied or expires (10 minutes); then its authorization code, stored as SHA-256
+        only, single use, good for 60 seconds. `app` is the known-list entry the request matched
+        (mcp_clients.py), never what the app says about itself. binding_hash is the SHA-256 of the
+        binding cookie of the browser that started it: only that browser can approve it, so a link
+        to someone else's request can't be approved by whoever it is sent to. status: 'open',
+        'approved' (a code is out), 'denied', 'used' (the code was exchanged; connection_id names
+        what it made).
+      - mcp_connections: an app the user allowed, one per approval. revoked_at is set when the
+        user disconnects it, or when a used code or refresh token comes back (a stolen copy).
+      - mcp_tokens: each connection's access tokens (1 hour) and refresh tokens (30 days, renewed
+        on every use), opaque, SHA-256 stored like the web's refresh tokens. issued_by is the hash
+        of the code or refresh token that minted the row, so a retried exchange can retire exactly
+        what the first try minted. used_at marks a refresh token already exchanged.
+      - passkey_signin_challenges: the challenges a passkey sign-in answers. No account is known
+        when one is issued, so they live apart from registration's passkey_challenges.
+    """
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS oauth_requests (
+            id              TEXT PRIMARY KEY,
+            app             TEXT NOT NULL,
+            client_id       TEXT NOT NULL,
+            redirect_uri    TEXT NOT NULL,
+            state           TEXT,
+            code_challenge  TEXT NOT NULL,
+            scope           TEXT NOT NULL,
+            resource        TEXT NOT NULL,
+            binding_hash    TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open',
+            user_id         INTEGER,
+            code_hash       TEXT UNIQUE,
+            code_expires_at INTEGER,
+            connection_id   INTEGER,
+            created_at      INTEGER NOT NULL,
+            expires_at      INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mcp_connections (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL,
+            app          TEXT NOT NULL,
+            client_id    TEXT NOT NULL,
+            scope        TEXT NOT NULL,
+            created_at   INTEGER NOT NULL,
+            last_used_at INTEGER,
+            revoked_at   INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS mcp_connections_by_user ON mcp_connections (user_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS mcp_tokens (
+            token_hash    TEXT PRIMARY KEY,
+            connection_id INTEGER NOT NULL,
+            kind          TEXT NOT NULL,
+            issued_by     TEXT NOT NULL,
+            created_at    INTEGER NOT NULL,
+            expires_at    INTEGER NOT NULL,
+            used_at       INTEGER,
+            revoked       INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS mcp_tokens_by_connection ON mcp_tokens (connection_id);
+        CREATE INDEX IF NOT EXISTS mcp_tokens_by_issuer ON mcp_tokens (issued_by);
+
+        CREATE TABLE IF NOT EXISTS passkey_signin_challenges (
+            challenge  TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+    """)
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -716,6 +792,7 @@ MIGRATIONS = (
     _migrate_passkeys,               # 8: passkeys instead of server-held session keys
     _migrate_chat_to_own_file,       # 9: the agent's conversations in wallet-chat.db
     _migrate_recurring_payments,     # 10: schedules the keeper pays
+    _migrate_ai_apps,                # 11: AI apps over MCP, and passkey sign-in
 )
 
 

@@ -38,7 +38,10 @@ app/
 ├── chat_memory.py         ← The agent's conversations: a LangGraph checkpointer on wallet-chat.db, a connection per thread
 ├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
 ├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
-├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share
+├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in)
+├── mcp_server.py          ← MCP for AI apps at /mcp (Claude, Claude Code, ChatGPT): the token check in front of the SDK, and the tools
+├── mcp_auth.py            ← How AI apps sign in: codes with PKCE, access and refresh tokens, rotation, revocation
+├── mcp_clients.py         ← The known list: which AI apps may connect, and the only addresses their codes may go to
 ├── redact.py              ← Masks API keys in HTTP errors, the model's tool results and the logs
 ├── chat_limits.py         ← How often an account may message the assistant (web and Telegram), and Telegram's turn gate
 ├── telebot.py             ← Telegram front end: one bot for every chain, the network picked with /chain, read and action commands, quote cards (a passkey link and Cancel)
@@ -67,6 +70,7 @@ app/
     ├── test_position_tools.py ← The agent's V3 liquidity tools, their refusals, and the per-chain liquidity-tool filter (make position-tools-test)
     ├── test_ens_names.py  ← ENS lookups, and CCIP-Read kept off our own network (make ens-test)
     ├── test_passkeys.py   ← Approvals packed as the wallet reads them (the contract's own known-answer vector), the op deadline nonce, making/managing passkeys, a Telegram link (make passkeys-test)
+    ├── test_mcp.py        ← AI apps' sign-in (known list, Allow page, codes, tokens, refresh reuse, revocation), /mcp, connected apps, passkey sign-in (make mcp-test)
     ├── test_chat_memory.py ← The conversation store: a turn saved once as it ends, many at once on their own threads, two processes on one file (make chat-memory-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
@@ -164,7 +168,7 @@ The data persistence layer. All SQLite reads and writes go through this package.
 
 **Schema (`wallet.db`):**
 
-**Identity is an application account, not a Telegram chat.** `users.id` is what every per-user table keys on. A Telegram chat is one *optional* way to reach an account, held in `users.telegram_chat_id` and bound through a single-use deep-link nonce — never typed in, because chat ids are enumerable and a form accepting one would let anyone attach their Telegram to someone else's wallet. `users.owner_addr` is how the account signs in — Sign-In With Ethereum (`POST /api/auth/siwe/login`) is the only way in, and an address's first sign-in creates its account — and it is the EOA that owns the `SessionHandler` on chain, so it is the only address permitted to deploy for that account. `auth.verify_siwe` requires a full EIP-4361 message naming this site (`SIWE_DOMAIN`), the issued nonce in its `Nonce:` field, and a signer equal to the address it names. The domain check is the one that matters: the nonce endpoint is open, so without it a phishing page could have a victim sign a message for it and replay it here to sign in as the victim. Nothing can recover an account whose address is lost — just as nothing could ever recover control of its wallet.
+**Identity is an application account, not a Telegram chat.** `users.id` is what every per-user table keys on. A Telegram chat is one *optional* way to reach an account, held in `users.telegram_chat_id` and bound through a single-use deep-link nonce — never typed in, because chat ids are enumerable and a form accepting one would let anyone attach their Telegram to someone else's wallet. `users.owner_addr` is how the account signs in — Sign-In With Ethereum (`POST /api/auth/siwe/login`) makes every account, on an address's first sign-in, and is always open; a returning user may also sign in with a passkey one of their wallets approves (below) — and it is the EOA that owns the `SessionHandler` on chain, so it is the only address permitted to deploy for that account. `auth.verify_siwe` requires a full EIP-4361 message naming this site (`SIWE_DOMAIN`), the issued nonce in its `Nonce:` field, and a signer equal to the address it names. The domain check is the one that matters: the nonce endpoint is open, so without it a phishing page could have a victim sign a message for it and replay it here to sign in as the victim. Nothing can recover an account whose address is lost — just as nothing could ever recover control of its wallet.
 
 > Email, password and Google sign-in were removed on 2026-10-01, with `wallet.db` recreated rather than migrated, so there is no migration from the old `email` / `password_hash` / `google_sub` columns. The code still runs on a `users` table that has them; it just never reads them. An account with no `owner_addr` (only possible from the older Telegram-only migration) cannot sign in on the web.
 
@@ -944,6 +948,69 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
 
 ---
 
+## AI apps over MCP (2026-11-19, phase 1)
+
+Claude (claude.ai and its apps), Claude Code and ChatGPT can use a Mitfah account as an MCP server at
+`<WEB_APP_URL>/mcp`. Phase 1 is the sign-in end to end plus one read-only tool (`get_account`); the
+wallet's reads and its quotes come next, as tools whose descriptions carry the rules the web chat's
+system prompt holds (these apps' models never see that prompt, and Claude's apps drop the server's
+`instructions` too). An app never sends anything: a quote will hand the user a `/c/<token>` link, and
+only their passkey sends.
+
+**How an app signs in (`routes/oauth.py`, `mcp_auth.py`).** OAuth 2.1 for public clients, this server
+being both the authorization server and the resource:
+
+1. `/mcp` answers 401 with `WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource/mcp"`.
+   That document names this server (issuer = `WEB_APP_URL`); `/.well-known/oauth-authorization-server`
+   declares `client_id_metadata_document_supported`, token auth `none`, PKCE `S256` and the RFC 9207
+   `iss` parameter. Claude uses a CIMD client id only when the first two are there. No registration
+   endpoint: DCR is deprecated, and every app on the list has a CIMD client id.
+2. `GET /api/oauth/authorize` checks the client id and redirect against **the known list**
+   (`mcp_clients.py`): Claude = any https client id on claude.ai/claude.com with Claude's callback;
+   Claude Code = `https://claude.ai/oauth/claude-code-client-metadata` with `http://localhost|127.0.0.1:<any port>/callback`;
+   ChatGPT = `https://chatgpt.com/oauth/client.json` with `connector_platform_oauth_redirect` (or
+   `/connector/oauth/<id>`). The redirect is the real control: a code only ever goes to an address
+   the real app owns. Anything else goes to our own `/connect?error=unknown_app`, never to the
+   redirect it named. Once the app is known, other errors go back to it with `state` and `iss`.
+3. The request is filed (`oauth_requests`, 10 minutes) and the browser gets an httpOnly **binding
+   cookie** (path `/api/oauth`, one per browser), then `/connect?request=<id>`. Only the browser that
+   opened a request can answer it: otherwise someone could start a request for their own copy of an
+   app and get a signed-in victim to approve the link.
+4. The Allow page (`web/src/pages/ConnectPage.tsx`) signs the user in first if needed (RequireAuth,
+   `?next=`), names the app from the known list and the one permission, and posts Allow or Deny; the
+   answer is where to send the browser (the app's redirect with `code`, `state`, `iss`, or
+   `error=access_denied`).
+5. `POST /api/oauth/token` (form body, parsed by hand, each parameter once) swaps the code — 60
+   seconds, single use, same client and redirect, PKCE verifier — for an access token (`mfa_…`, 1 hour)
+   and a refresh token (`mfr_…`, 30 days from its last use). Not rate-limited by IP: the apps call from
+   their servers.
+
+**Tokens (`mcp_tokens`, `mcp_connections`).** Opaque, SHA-256 stored, looked up on every `/mcp` call,
+so disconnecting an app in Controls stops it on its next call. Each row records `issued_by`, the hash
+of the code or refresh token that minted it. Refresh rotates. A used refresh token presented again
+within 60 seconds whose successor hasn't been used is a retried lost reply: what the first try minted
+is retired and a new pair issued. Any other reuse — later, after the successor was used, or the
+retired successor itself turning up — ends the connection, as does a second exchange of a code.
+`POST /api/oauth/revoke` (RFC 7009): a refresh token ends its connection, an access token only itself.
+
+**One permission ("wallet").** Read the account and prepare transactions. Whatever scope an app asks
+for, that is what it gets (and the token response says so). No read-only option.
+
+**`/mcp` (`mcp_server.py`).** The SDK (`mcp` 2.3.0) speaks the protocol, both the initialize handshake
+and 2026-07-28's per-request envelope, stateless with JSON replies. `McpEndpoint` checks the bearer
+token first and hands the SDK the caller in the request's state (`CALLER_KEY`), so the SDK's own auth
+isn't used: its authorization server can't declare CIMD support. It is a Starlette route with an ASGI
+endpoint at exactly `/mcp` (a Mount would redirect `/mcp` to `/mcp/`). Traps: the SDK turns on a
+DNS-rebinding check admitting only localhost Host headers unless told otherwise (`running()` turns it
+off — `/mcp` answers nothing without a token anyway), and a session manager runs once in its life, so
+`running()` builds a fresh one per lifespan. Tool descriptions are passed explicitly; the SDK would
+pass the docstring with its indentation.
+
+**Connected apps.** `GET /api/connections`, `DELETE /api/connections/{id}`; Controls → Connected apps
+lists them (the account's, shown even with no wallet) with the address to connect one. Production
+needs `deploy/Caddyfile`'s `/mcp` and `/.well-known/oauth-*` blocks (the dev server proxies the same),
+and `WEB_APP_URL` set to the exact public origin: it is the issuer every token and redirect names.
+
 ## Section 3 — LangChain Agent
 
 `app/smart_wallet_agent.py` wraps the tools in a LangChain agent powered by DeepSeek (`deepseek-flash` by default), with its thinking mode off.
@@ -1092,6 +1159,18 @@ What it does that the bot cannot:
   page whether the address has an account, so a returning user sees "Welcome back" and "Sign in"
   and a new one sees "Sign up" with a note on what the address is for. There is no email, password
   or Google sign-in, and `/signup` redirects to `/login`. On a phone that means WalletConnect or the wallet app's own browser.
+- **Or a passkey, for returning users (2026-11-19).** Under the wallet button, "Sign in with a passkey"
+  opens the device's passkey prompt with no account named (`POST /api/auth/passkey/options`, fetched
+  before the tap because Safari opens the prompt only inside it); the passkey picked names the account
+  (`POST /api/auth/passkey/login`). py_webauthn checks it as it checks an approval (challenge, rp id,
+  origin, stored key and counter, user verification) and the user handle must be the account's. Then
+  the rule that keeps this from adding a way in: **the passkey must be approved, right now, on at least
+  one of the account's wallets** (`routes.passkeys.approved_on_a_wallet` reads `getSessions`; a chain
+  that can't be read decides nothing on its own, and if none approves and one couldn't be read the
+  answer is 503, not yes). Registering a passkey needs only a signed-in session, so without the rule a
+  session held for a few minutes could plant a passkey and sign in with it for good. First-time users,
+  and anyone whose passkeys lapsed, use the wallet. The session is the same as SIWE's; owner changes
+  still ask for the wallet (`OwnerWalletBar`), since nothing is connected after a passkey sign-in.
 - **Onboarding is non-custodial.** The user's own browser wallet signs `deployWallet`, so the wallet
   is owned by a key the server has never seen. The API only prepares the transaction and records it
   once the network has it (`POST /api/deploy`, then `POST /api/deploy/confirm`).

@@ -1,6 +1,7 @@
 """
-Account authentication for the web API: Sign-In With Ethereum (the only way in), JWT access
-tokens, rotating refresh tokens, and the EIP-712 signature that adds a contact.
+Account authentication for the web API: Sign-In With Ethereum, JWT access tokens, rotating
+refresh tokens, and the EIP-712 signature that adds a contact. (A returning user can also sign in
+with a passkey their wallet approves: routes/signin.py. AI apps sign in through mcp_auth.py.)
 
 Everything here exists to answer one question -- which `user_id` is this request for? -- from
 evidence the caller cannot forge. That id then flows to the agent as runtime context and to the
@@ -8,7 +9,8 @@ database as the account key, so getting it wrong here is the whole ballgame: a r
 resolves to the wrong user reaches that user's wallet, bounded only by its spending cap.
 
 An account IS an address: whoever signs a SIWE message for it signs in to its account, and the
-same address owns the account's wallets on chain. There is no email, password or Google sign-in
+same address owns the account's wallets on chain. A passkey signs in only once that address has
+approved it on a wallet, so it never adds a way in the owner didn't sign for. There is no email, password or Google sign-in
 (removed 2026-10-01), so there is nothing to recover an account with -- losing the wallet loses the
 account, just as it already lost control of the wallet itself.
 

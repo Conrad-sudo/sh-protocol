@@ -8,6 +8,7 @@ confirm the assistant's transactions there. So registering checks only what WebA
 browser made a new ES256 credential for this site, verified the user (Face ID, a fingerprint or a
 PIN), and answered the challenge this server issued to this account.
 """
+import functools
 import secrets
 import time
 
@@ -49,7 +50,7 @@ from db import (
     save_passkey_challenge,
 )
 from network_config import load_network_config_by_name, network_name
-from parallel import read_all
+from parallel import read_all, start_read
 from redact import redact
 from routes.deps import logger
 from userop import read_sessions
@@ -215,29 +216,57 @@ def rename(key_id: str, req: RenameRequest, user_id: int = Depends(get_current_u
     return _shown(row)
 
 
+def _approves(user_id: int, key_id: str, chain_id: int) -> bool:
+    """
+    Whether the account's wallet on `chain_id` approves `key_id` right now (getSessions). A wallet
+    row with no code behind it -- a fork restarted since -- approves nothing.
+
+    @raises Exception  The chain can't be read.
+    """
+    abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
+    w3, _ = load_network_config_by_name(network_name(chain_id))
+    address = get_wallet_address(user_id, chain_id)
+    if w3.eth.get_code(address) in (b"", HexBytes("0x")):
+        return False
+    now = int(time.time())
+    sessions = read_sessions(w3.eth.contract(address=address, abi=abi))
+    return any(s.key_id == key_id and s.active(now) for s in sessions)
+
+
 def _live_on(user_id: int, key_id: str) -> list[int]:
     """
     The chains where one of the account's wallets approves `key_id` right now, read from each
-    wallet (getSessions), all at once. A wallet row with no code behind it -- a fork restarted
-    since -- approves nothing.
+    wallet, all at once.
 
     @raises Exception  A chain that can't be read: the caller can't say the key is safe to forget.
     """
-    abi = get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
-
-    def approves(chain_id: int):
-        def read() -> bool:
-            w3, _ = load_network_config_by_name(network_name(chain_id))
-            address = get_wallet_address(user_id, chain_id)
-            if w3.eth.get_code(address) in (b"", HexBytes("0x")):
-                return False
-            now = int(time.time())
-            sessions = read_sessions(w3.eth.contract(address=address, abi=abi))
-            return any(s.key_id == key_id and s.active(now) for s in sessions)
-        return read
-
-    found = read_all({chain_id: approves(chain_id) for chain_id in get_wallet_chains(user_id)})
+    found = read_all({
+        chain_id: functools.partial(_approves, user_id, key_id, chain_id) for chain_id in get_wallet_chains(user_id)
+    })
     return [chain_id for chain_id, live in found.items() if live]
+
+
+def approved_on_a_wallet(user_id: int, key_id: str) -> bool | None:
+    """
+    Whether any of the account's wallets approves `key_id` right now: what lets a passkey sign in.
+
+    Unlike _live_on, one chain that can't be read decides nothing on its own: True as soon as any
+    wallet approves the key, False only when every wallet was read and none does, and None -- can't
+    tell -- when none approves it and at least one couldn't be read.
+    """
+    futures = {
+        chain_id: start_read(functools.partial(_approves, user_id, key_id, chain_id))
+        for chain_id in get_wallet_chains(user_id)
+    }
+    unreadable = False
+    for chain_id, future in futures.items():
+        try:
+            if future.result():
+                return True
+        except Exception as e:  # noqa: BLE001 -- an RPC or a wallet that can't be read
+            logger.warning("Could not check passkey %s on chain %s: %s", key_id, chain_id, redact(e))
+            unreadable = True
+    return None if unreadable else False
 
 
 @router.delete("/api/passkeys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)

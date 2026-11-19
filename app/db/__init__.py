@@ -9,7 +9,8 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   seed          reference data from seed_data.py and the deploy broadcasts (`make db`)
   chains        chains, RPCs, factory addresses, and the network each user acts on
   wallets       each user's wallet per chain
-  passkeys      the account's passkeys, its WebAuthn user handle, registration challenges
+  passkeys      the account's passkeys, its WebAuthn user handle, registration challenges and sign-in challenges
+  oauth         AI apps over MCP: requests to connect, connections, their tokens
   sign_requests quotes offered for a passkey's approval, frozen for whichever process signs them
   tokens        listed, added-by-address, dashboard and LP tokens
   contacts      the contact list, the only destinations the assistant may pay
@@ -192,15 +193,39 @@ from db.wallets import (  # noqa: E402 -- after get_db, which these modules impo
 )
 from db.passkeys import (  # noqa: E402 -- after get_db, which these modules import
     consume_passkey_challenge,
+    consume_passkey_signin_challenge,
     delete_passkey,
+    find_passkey_by_credential,
     get_or_create_webauthn_handle,
     get_passkey,
     get_passkey_by_credential,
     get_passkeys,
+    get_webauthn_handle,
     rename_passkey,
     save_passkey,
     save_passkey_challenge,
+    save_passkey_signin_challenge,
     update_passkey_sign_count,
+)
+from db.oauth import (  # noqa: E402 -- after get_db, which these modules import
+    approve_oauth_request,
+    create_mcp_connection,
+    deny_oauth_request,
+    get_mcp_connection,
+    get_mcp_connections,
+    get_mcp_token,
+    get_mcp_tokens_issued_by,
+    get_oauth_request,
+    get_oauth_request_by_code,
+    mark_mcp_token_used,
+    purge_expired_mcp_tokens,
+    revoke_mcp_connection,
+    revoke_mcp_token,
+    revoke_mcp_tokens_issued_by,
+    save_mcp_token,
+    save_oauth_request,
+    touch_mcp_connection,
+    use_oauth_code,
 )
 from db.sign_requests import (  # noqa: E402 -- after get_db, which these modules import
     cancel_sign_request,

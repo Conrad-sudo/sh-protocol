@@ -1,7 +1,10 @@
 """
-Signing in with Ethereum (SIWE, the only way in), the refresh-token cookie, and /api/me.
+Signing in -- with Ethereum (SIWE), or with a passkey a wallet already approved -- the refresh-token
+cookie, and /api/me.
 """
 import os
+import secrets
+import time
 
 from fastapi import (
     APIRouter,
@@ -15,17 +18,29 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 from web3 import Web3
+from webauthn import generate_authentication_options, verify_authentication_response
+from webauthn.helpers import bytes_to_base64url, parse_authentication_credential_json, parse_client_data_json
+from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.options_to_json_dict import options_to_json_dict
+from webauthn.helpers.structs import UserVerificationRequirement
 
 import auth
+import passkey
 import telegram_bots
 from auth import get_current_user
 from db import (
+    consume_passkey_signin_challenge,
     create_user,
+    find_passkey_by_credential,
     get_user_by_id,
     get_user_by_owner_addr,
     get_wallet_chains,
+    get_webauthn_handle,
+    save_passkey_signin_challenge,
+    update_passkey_sign_count,
 )
 from routes.deps import limiter
+from routes.passkeys import approved_on_a_wallet
 
 router = APIRouter()
 
@@ -59,6 +74,18 @@ class SiweLoginRequest(BaseModel):
     message: str = Field(max_length=2048)
     signature: str = Field(max_length=200)
     nonce: str = Field(max_length=64)
+
+
+class PasskeyLoginRequest(BaseModel):
+    """Body of POST /api/auth/passkey/login."""
+
+    # The browser's AuthenticationResponseJSON, as navigator.credentials.get() returned it.
+    credential: dict
+
+
+# How long a passkey sign-in challenge stays good: the browser's own timeout, plus room to find the
+# device.
+SIGNIN_CHALLENGE_TTL_SECS = 5 * 60
 
 
 def _set_refresh_cookie(response: Response, token: str):
@@ -173,7 +200,7 @@ def siwe_login(request: Request, req: SiweLoginRequest, response: Response):
     """
     Signs in with a Sign-In With Ethereum message, creating the account on the address's first one.
 
-    The only way in. The account IS the address that signed: the same EOA owns the account's
+    The way every account is made, and always open. The account IS the address that signed: the same EOA owns the account's
     wallets on chain (deployWallet sets owner = msg.sender), so whoever can sign for it already
     controls everything the account stands for. verify_siwe makes the signature evidence: this
     site's domain, a fresh single-use nonce, and a signer that is the address the message names.
@@ -193,6 +220,94 @@ def siwe_login(request: Request, req: SiweLoginRequest, response: Response):
     except ValueError:
         # The same address's first sign-in, twice at once: the other request made the account.
         return _issue_session(response, get_user_by_owner_addr(address)["id"])
+
+
+@router.post("/api/auth/passkey/options")
+@limiter.limit("30/minute")
+def passkey_signin_options(request: Request):
+    """
+    The options for navigator.credentials.get() when signing in with a passkey.
+
+    No account is named: allowCredentials is empty, so the device offers the user the Mitfah
+    passkeys it holds, and the one they pick names the account. User verification is required, as
+    for every approval. The challenge is single use and kept in the database.
+
+    @return  {"options": PublicKeyCredentialRequestOptionsJSON}.
+    """
+    challenge = secrets.token_bytes(32)
+    options = generate_authentication_options(
+        rp_id=passkey.rp_id(),
+        challenge=challenge,
+        timeout=passkey.WEBAUTHN_TIMEOUT_MS,
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    save_passkey_signin_challenge(bytes_to_base64url(challenge), int(time.time()) + SIGNIN_CHALLENGE_TTL_SECS)
+    return {"options": options_to_json_dict(options)}
+
+
+@router.post("/api/auth/passkey/login")
+@limiter.limit("10/minute")
+def passkey_login(request: Request, req: PasskeyLoginRequest, response: Response):
+    """
+    Signs in with a passkey: for returning users whose wallet already approves the passkey.
+
+    py_webauthn checks the answer against the challenge this server issued (single use, unexpired),
+    this site's rp id and origins, the passkey's stored public key and counter, and user
+    verification. The passkey names the account; its user handle must be that account's.
+
+    Then the rule that makes this as strong as it needs to be: the passkey must be approved, right
+    now, on at least one of the account's wallets -- an owner transaction. Registering a passkey
+    needs only a signed-in session, so without that rule anyone who held a session for a few minutes
+    could plant a passkey of their own and sign in with it for good. First-time users, and anyone
+    whose passkeys aren't approved (or have lapsed), sign in with their wallet.
+
+    @param req  The browser's answer.
+    @return     An access token; the refresh token is set as a cookie (as for SIWE).
+    @raises HTTPException 400 if the answer can't be read or its challenge expired; 401 if the
+            passkey is unknown or fails the check; 403 if no wallet approves it; 503 if the wallets
+            couldn't be read.
+    """
+    try:
+        credential = parse_authentication_credential_json(req.credential)
+        challenge = parse_client_data_json(credential.response.client_data_json).challenge
+    except (WebAuthnException, ValueError, TypeError, KeyError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The browser's answer couldn't be read.")
+    if not consume_passkey_signin_challenge(bytes_to_base64url(challenge)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in request has expired. Try again.")
+    unknown = "Mitfah doesn't know this passkey. Sign in with your wallet."
+    row = find_passkey_by_credential(bytes_to_base64url(credential.raw_id))
+    if row is None or get_user_by_id(row["user_id"]) is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
+    user_handle = credential.response.user_handle
+    if user_handle is not None and bytes(user_handle) != get_webauthn_handle(row["user_id"]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
+    try:
+        verified = verify_authentication_response(
+            credential=credential,
+            expected_challenge=challenge,
+            expected_rp_id=passkey.rp_id(),
+            expected_origin=passkey.allowed_origins(),
+            credential_public_key=row["public_key"],
+            credential_current_sign_count=row["sign_count"],
+            require_user_verification=True,
+        )
+    except WebAuthnException:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "That passkey couldn't be verified. Try again.")
+    update_passkey_sign_count(row["key_id"], verified.new_sign_count)
+
+    approved = approved_on_a_wallet(row["user_id"], row["key_id"])
+    if approved is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Couldn't check your wallet just now. Try again, or sign in with your wallet.",
+        )
+    if not approved:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "None of your wallets approves this passkey right now, so it can't sign you in. Sign in "
+            "with your wallet.",
+        )
+    return _issue_session(response, row["user_id"])
 
 
 @router.get("/api/me")

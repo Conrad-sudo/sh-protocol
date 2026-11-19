@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.routing import Route
 
 import routes.added_tokens
 import routes.allowlist
@@ -21,6 +22,7 @@ import routes.chat
 import routes.contacts
 import routes.deploy
 import routes.history
+import routes.oauth
 import routes.owner
 import routes.passkeys
 import routes.recurring
@@ -28,6 +30,7 @@ import routes.sign
 import routes.signin
 import routes.telegram_link
 import routes.wallet
+import mcp_server
 from chat_limits import CONFIRM_MAX_CONCURRENT
 from redact import install_log_redaction
 from routes.chat import CHAT_MAX_CONCURRENT
@@ -53,8 +56,8 @@ API_THREADS = CHAT_MAX_CONCURRENT + CONFIRM_MAX_CONCURRENT + 40
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
-    Sizes the route threads (API_THREADS), opens the agent's checkpointer and builds the agent on
-    startup, closing it on shutdown.
+    Sizes the route threads (API_THREADS), opens the agent's checkpointer, builds the agent and runs
+    the MCP server's session manager (mcp_server.running) on startup, closing them on shutdown.
 
     Exactly what telebot.py does around its bot. Without it `agent` stays None and every
     /api/chat request fails on the first attribute access.
@@ -63,7 +66,8 @@ async def lifespan(_app: FastAPI):
     open_checkpointer()
     init_agent()
     try:
-        yield
+        async with mcp_server.running():
+            yield
     finally:
         close_checkpointer()
 
@@ -108,3 +112,9 @@ app.include_router(routes.allowlist.router)
 app.include_router(routes.recurring.router)
 app.include_router(routes.passkeys.router)
 app.include_router(routes.sign.router)
+app.include_router(routes.oauth.router)
+
+
+# MCP, for AI apps (mcp_server.py). A route whose endpoint is an ASGI app answers every method at
+# exactly /mcp; a Mount would send /mcp to /mcp/ with a redirect, which apps POSTing don't follow.
+app.router.routes.append(Route("/mcp", endpoint=mcp_server.McpEndpoint()))

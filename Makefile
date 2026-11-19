@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
 
 
 
@@ -131,6 +131,10 @@ ens-test:
 passkeys-test:
 	.venv/bin/python3 app/tests/test_passkeys.py
 
+# AI apps over MCP: OAuth sign-in, the Allow page's API, connected apps, /mcp; and passkey sign-in.
+mcp-test:
+	.venv/bin/python3 app/tests/test_mcp.py
+
 # The agent's conversation store (chat_memory.py): a turn saved once as it ends, a failed one as it
 # stood, many at once on their own threads, two processes on one file. A stand-in model. Offline.
 chat-memory-test:
@@ -146,7 +150,7 @@ ens-live:
 	.venv/bin/python3 app/tests/test_ens_names.py --live
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test mcp-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia

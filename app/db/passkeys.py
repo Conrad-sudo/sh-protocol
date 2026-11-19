@@ -95,6 +95,44 @@ def save_passkey(
     return get_passkey(user_id, key_id)
 
 
+def save_passkey_signin_challenge(challenge: str, expires_at: int):
+    """
+    Remembers a sign-in challenge until it is used or expires, and drops the expired ones. Not tied
+    to an account: nobody is known until the passkey answers.
+
+    @param challenge  The challenge, base64url, as the browser sends it back in clientDataJSON.
+    """
+    db = get_db()
+    db.execute("DELETE FROM passkey_signin_challenges WHERE expires_at < ?", (int(time.time()),))
+    db.execute("INSERT INTO passkey_signin_challenges (challenge, expires_at) VALUES (?, ?)", (challenge, expires_at))
+    db.commit()
+
+
+def consume_passkey_signin_challenge(challenge: str) -> bool:
+    """Uses up a sign-in challenge: true only once, and only before it expires."""
+    db = get_db()
+    cur = db.execute(
+        "DELETE FROM passkey_signin_challenges WHERE challenge = ? AND expires_at >= ?",
+        (challenge, int(time.time())),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+def find_passkey_by_credential(credential_id: str) -> dict | None:
+    """
+    A passkey by the browser's credential id, whichever account it belongs to, or None. For sign-in,
+    where the passkey is what names the account. Credential ids are unique across accounts.
+    """
+    return _row(get_db().execute("SELECT * FROM passkeys WHERE credential_id = ?", (credential_id,)).fetchone())
+
+
+def get_webauthn_handle(user_id: int) -> bytes | None:
+    """The account's WebAuthn user handle, or None if it never made one (and so has no passkey)."""
+    row = get_db().execute("SELECT webauthn_handle FROM users WHERE id = ?", (user_id,)).fetchone()
+    return bytes(row["webauthn_handle"]) if row is not None and row["webauthn_handle"] else None
+
+
 def _row(row) -> dict | None:
     return dict(row) if row is not None else None
 

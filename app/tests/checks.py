@@ -59,7 +59,7 @@ def finish(success_message: str):
 
 def sign_in(client, account=None, chain_id: int = 11155111):
     """
-    Signs in the way the web app does -- a SIWE message, the only way in -- as `account`, or as a
+    Signs in the way the web app does -- with a SIWE message -- as `account`, or as a
     fresh address. The first sign-in for an address creates its account.
 
     @param client  A TestClient on the API.
