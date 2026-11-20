@@ -881,7 +881,7 @@ def confirm_signed(approved: "signing.Approved") -> Confirmed:
     The tap and what happened are written into the conversation, as if the user had pressed the
     button's label and the assistant had answered, so the next turn knows the quote is gone. A
     transaction that went out is marked, so that turn starts the conversation afresh
-    (_start_fresh_if_due). The sign request is closed with the outcome, and the quote dropped from
+    (_start_fresh_if_due). Not for an AI app's quote (signing.MCP): the conversation never saw it. The sign request is closed with the outcome, and the quote dropped from
     this process's store if it is here (a Telegram quote lives in the bot's; the bot learns from
     the request, see quotes._forget_closed).
 
@@ -904,7 +904,8 @@ def confirm_signed(approved: "signing.Approved") -> Confirmed:
             status, text = "unknown", _failure_text(e, user_id, chain_id)
         else:
             text = sending.text
-        _record_button(user_id, chain_id, CONFIRM_BUTTON, text, sent=sending is not None)
+        if _in_conversation(request):
+            _record_button(user_id, chain_id, CONFIRM_BUTTON, text, sent=sending is not None)
         quotes.drop(user_id, request["quote_id"])
         if sending is None:
             end_sign_request(request["id"], FAILED if status == "failed" else SENT, text)
@@ -960,7 +961,8 @@ def cancel_quote(user_id: int, chain_id: int, quote_id: str) -> dict | None:
 def cancel_signed(request: dict) -> bool:
     """
     Cancels a card from its approval page (POST /api/sign/cancel): its sign request, and its quote
-    if this process holds it, recorded in the conversation as a Cancel tap.
+    if this process holds it, recorded in the conversation as a Cancel tap (unless an AI app asked
+    for it: _in_conversation).
 
     @param request  The open sign request (signing.find_by_token / find_by_quote).
     @return         True if it was still open.
@@ -969,8 +971,18 @@ def cancel_signed(request: dict) -> bool:
     with _turn_running(thread_id(user_id, chain_id)):
         if not signing.cancel(request):
             return False
-        _record_button(user_id, chain_id, CANCEL_BUTTON, CANCELLED_REPLY, sent=False)
+        if _in_conversation(request):
+            _record_button(user_id, chain_id, CANCEL_BUTTON, CANCELLED_REPLY, sent=False)
         return True
+
+
+def _in_conversation(request: dict) -> bool:
+    """
+    Whether a request's quote came from the conversation (the web chat or Telegram), whose record
+    its tap belongs in. An AI app's quote (signing.MCP) never passed through it: writing its tap there
+    would tell the assistant about a quote it never made, and mark a send it never asked for.
+    """
+    return request["origin"] != signing.MCP
 
 
 def cancel_quotes(user_id: int, chain_id: int, command: str = "/cancel") -> list[dict]:

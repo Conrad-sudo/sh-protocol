@@ -453,13 +453,13 @@ def test_read_tools(c: TestClient):
     access_n = connect(c, headers_n)["access_token"]
 
     tools = {t["name"]: t for t in mcp(c, access_a, "tools/list").json()["result"]["tools"]}
-    check("tools/list shows exactly the reads", set(tools) == READS, str(sorted(set(tools) ^ READS)))
-    check("every one is marked read-only", all(t.get("annotations", {}).get("readOnlyHint") is True for t in tools.values()))
+    check("tools/list has every read", READS <= set(tools), str(sorted(READS - set(tools))))
+    check("every read is marked read-only", all(tools[n].get("annotations", {}).get("readOnlyHint") is True for n in READS))
     schemas = str([t["inputSchema"] for t in tools.values()])
     check("no schema says 'or null'", "anyOf" not in schemas and "'null'" not in schemas, schemas[:200])
     check("every per-network tool takes an optional `network`",
           all("network" in t["inputSchema"].get("properties", {}) and "network" not in t["inputSchema"].get("required", [])
-              for n, t in tools.items() if n not in NOT_PER_NETWORK))
+              for n, t in tools.items() if n in READS and n not in NOT_PER_NETWORK))
     check("contacts and the account take none",
           all("network" not in tools[n]["inputSchema"].get("properties", {}) for n in NOT_PER_NETWORK))
     check("descriptions are short (under 700 characters each)", all(len(t["description"]) < 700 for t in tools.values()),
@@ -550,6 +550,229 @@ def test_read_tools(c: TestClient):
         check("another app of the same account is not held back", not call_tool(c, access_y, "get_all_contacts", {})[0])
     finally:
         mcp_tools._rate = saved
+
+
+# ── 7c. Quotes over MCP ───────────────────────────────────────────────────────
+
+QUOTES = {
+    "send_eth", "transfer_erc20", "wrap_eth", "swap", "open_position", "add_to_position",
+    "withdraw_from_position", "collect_fees", "add_liquidity", "remove_liquidity",
+}
+FOLLOW_UPS = {"get_transaction_status", "cancel_transaction"}
+
+
+def test_quotes(c: TestClient):
+    print("\n[7c] Quotes over /mcp: a link to approve with the passkey, and what became of it")
+    import mcp_tools
+    import quotes
+    import routes.chat
+    import routes.history
+    import signing
+    import smart_wallet_agent
+    from bundler import UserOpQuote
+    from db.chains import CHAINS
+    from db.sign_requests import SENT
+    from db.transactions import add_transaction
+    from langchain_core.tools import ToolException
+    from limits import parse_many
+    from tools.transfers import transfer_erc20, wrap_eth
+
+    priced = UserOpQuote(
+        calldata="0x1234", call_gas=100_000, call_gas_used=80_000, verification_gas=200_000,
+        verification_gas_used=150_000, pre_verification_gas=60_000, max_fee=2 * 10**9, tip=10**9,
+        base_fee=10**9, outer_gas=500_000, simulated_gas=None, chain_name="sepolia",
+    )
+    turns = []
+    # The fake cards' turn: no real turn has it, so none of them is mistaken for a turn's own quote.
+    elsewhere = -1
+
+    def quotes_a_transfer(runtime, token, recipient, amount):
+        """Stands in for transfer_erc20: raises a quote on the acting network, as the real one does."""
+        user = runtime.context.user_id
+        turns.append(runtime.context.turn_id)
+        chain_id = CHAINS[db.get_user_network(user)]
+        quotes.put(user, chain_id, runtime.context.turn_id, f"Transfer {amount:g} {token.upper()} to {recipient}",
+                   [], priced, {"total_usd": 0.35}, charged_usd=5.0)
+        return "QUOTE for the chat: show its next_step"
+
+    _, headers, _ = sign_in(c)
+    _, headers_b, _ = sign_in(c)
+    user = c.get("/api/me", headers=headers).json()["user_id"]
+    db.save_wallet_address(user, 11155111, "0x00000000000000000000000000000000000000C1")
+    db.save_wallet_address(user, 1, "0x00000000000000000000000000000000000000C2")
+    access = connect(c, headers)["access_token"]
+    access_b = connect(c, headers_b)["access_token"]
+
+    tools = {t["name"]: t for t in mcp(c, access, "tools/list").json()["result"]["tools"]}
+    expected = READS | {"suggest_price_ranges"} | QUOTES | FOLLOW_UPS
+    check("tools/list shows the reads, the quotes and their two follow-ups", set(tools) == expected,
+          str(sorted(set(tools) ^ expected)))
+    check("every quote tool is marked as not read-only, so apps ask first",
+          all(tools[n]["annotations"]["readOnlyHint"] is False for n in QUOTES))
+    check("each says nothing is sent", all("Nothing is sent" in tools[n]["description"] for n in QUOTES))
+    check("get_transaction_status is read-only", tools["get_transaction_status"]["annotations"]["readOnlyHint"] is True)
+    schemas = str([t["inputSchema"] for t in tools.values()])
+    check("still no schema says 'or null'", "anyOf" not in schemas and "'null'" not in schemas)
+
+    # A web chat card and a Telegram card wait on Sepolia, and a web card on Ethereum.
+    web_card = signing.open_request(quotes.put(user, 11155111, elsewhere, "Wrap 1 ETH", [], priced, {"total_usd": 0.3}), signing.WEB)
+    tg_card = signing.open_request(quotes.put(user, 11155111, elsewhere, "Wrap 2 ETH", [], priced, {"total_usd": 0.3}),
+                                   signing.TELEGRAM, telegram_chat_id=4242)
+    other_net = signing.open_request(quotes.put(user, 1, elsewhere, "Wrap 3 ETH", [], priced, {"total_usd": 0.3}), signing.WEB)
+    told = []
+    real_tell = mcp_tools.telegram_notify.tell
+    mcp_tools.telegram_notify.tell = lambda request, text, landed=None: told.append((request["id"], text))
+    try:
+        with stand_in(transfer_erc20, quotes_a_transfer):
+            err, q = call_tool(c, access, "transfer_erc20",
+                               {"network": "sepolia", "token": "usdc", "recipient": "sandy", "amount": 5})
+    finally:
+        mcp_tools.telegram_notify.tell = real_tell
+    check("a quote comes back waiting for approval", not err and q.get("status") == "waiting_for_approval", str(q))
+    check("written from the quote: action, network, fees, limit, expiry",
+          q.get("action") == "Transfer 5 USDC to sandy" and q.get("network") == "Sepolia" and q.get("fees") == "$0.35"
+          and q.get("counts_toward_limit") == "$5.00" and q.get("expires_in_minutes") == 5, str(q))
+    check("the tool's chat text doesn't reach the app", "QUOTE for the chat" not in str(q))
+    check("it ran as a turn of its own", len(turns) == 1 and turns[0] > 0, str(turns))
+    url = q.get("approve_url", "")
+    check("with a link to the approval page", url.startswith(ISSUER + "/c/"), url)
+    check("and a next step that says only the passkey sends it",
+          "passkey" in q.get("next_step", "") and "can't send" in q.get("next_step", ""))
+    token = url.rsplit("/", 1)[-1]
+    request = signing.find_by_token(token)
+    check("the link names the quote's sign request, made through an AI app",
+          request["quote_id"] == q["quote_id"] and request["origin"] == signing.MCP and request["user_id"] == user)
+    check("which the approval page is told came from an AI app",
+          signing.summary(request, signing.thaw(request))["origin"] == "mcp")
+    check("the web chat's card on Sepolia is cancelled (one card per network)",
+          db.get_sign_request(web_card.request["id"])["status"] == "cancelled")
+    check("so is the Telegram card, and its chat is told",
+          db.get_sign_request(tg_card.request["id"])["status"] == "cancelled"
+          # (telegram_notify.tell itself passes over the web card's request: it acts on Telegram's only)
+          and (tg_card.request["id"], "Cancelled: a newer request from Claude replaced it. Nothing was sent.") in told, str(told))
+    check("a card on another network is left alone", db.get_sign_request(other_net.request["id"])["status"] == "open")
+
+    err, s = call_tool(c, access, "get_transaction_status", {"quote_id": q["quote_id"]})
+    check("its status: waiting, and for how long", not err and s.get("status") == "waiting_for_approval"
+          and 0 < s.get("expires_in_seconds", 0) <= 300, str(s))
+    err, text = call_tool(c, access_b, "get_transaction_status", {"quote_id": q["quote_id"]})
+    check("another account can't see it", err and mcp_tools.NO_QUOTE in text, str(text))
+    err, text = call_tool(c, access, "get_transaction_status", {"quote_id": web_card.pending.quote_id})
+    check("nor can an app see the web chat's quotes", err and mcp_tools.NO_QUOTE in text, str(text))
+
+    # A second quote on the network replaces the first.
+    with stand_in(transfer_erc20, quotes_a_transfer):
+        _, q2 = call_tool(c, access, "transfer_erc20", {"network": "sepolia", "token": "dai", "recipient": "sandy", "amount": 7})
+    _, s = call_tool(c, access, "get_transaction_status", {"quote_id": q["quote_id"]})
+    check("a newer quote on the network cancels the older one", s.get("status") == "cancelled", str(s))
+    check("whose link dies", _expired(signing, token))
+
+    # Cancelling.
+    err, s = call_tool(c, access, "cancel_transaction", {"quote_id": q2["quote_id"]})
+    check("cancel_transaction cancels a waiting quote", not err and s.get("status") == "cancelled", str(s))
+    check("its link dies", _expired(signing, q2["approve_url"].rsplit("/", 1)[-1]))
+    err, s = call_tool(c, access, "cancel_transaction", {"quote_id": q2["quote_id"]})
+    check("cancelling it again says there was nothing to cancel", not err and "nothing to cancel" in s.get("note", ""), str(s))
+
+    # What became of it: expired, failed, sent, confirmed, failed on chain.
+    def fresh_quote() -> tuple[dict, dict]:
+        with stand_in(transfer_erc20, quotes_a_transfer):
+            _, made = call_tool(c, access, "transfer_erc20", {"network": "sepolia", "token": "usdc", "recipient": "sandy", "amount": 1})
+        return made, signing.find_by_token(made["approve_url"].rsplit("/", 1)[-1])
+
+    made, req = fresh_quote()
+    db.get_db().execute("UPDATE sign_requests SET expires_at = ? WHERE id = ?", (int(time.time()) - 1, req["id"]))
+    db.get_db().commit()
+    check("never approved in time: expired", call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})[1].get("status") == "expired")
+
+    made, req = fresh_quote()
+    db.end_sign_request(req["id"], "failed", "It would fail on the network: not enough USDC.")
+    _, s = call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})
+    check("refused when approved: failed, with the reason", s.get("status") == "failed" and "not enough USDC" in s.get("reason", ""), str(s))
+
+    for row_status, shown in (("confirmed", "confirmed"), ("failed", "failed"), ("pending", "sent")):
+        made, req = fresh_quote()
+        tx_id = add_transaction(user, 11155111, "0x00000000000000000000000000000000000000C1", "assistant",
+                                made["action"], row_status, tx_hash="0x" + "ab" * 32)
+        db.end_sign_request(req["id"], SENT, "Sending — " + made["action"], tx_id)
+        real_watched = routes.history.landing.is_watched
+        routes.history.landing.is_watched = lambda _tx: True   # a pending row is being waited on: no chain read
+        try:
+            _, s = call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})
+        finally:
+            routes.history.landing.is_watched = real_watched
+        check(f"sent, and {row_status} in History: {shown}", s.get("status") == shown and s.get("tx_hash") == "0x" + "ab" * 32, str(s))
+
+    # A tool that raised no quote, or refused.
+    def answers_only(runtime, amount_eth):
+        return "The wallet holds no ETH to wrap."
+
+    def refuses(runtime, token, recipient, amount):
+        raise ToolException(f"{recipient} isn't a saved contact. Add them on Mitfah's website first.")
+
+    before = len(db.get_open_sign_requests(user, 11155111))
+    with stand_in(wrap_eth, answers_only):
+        err, text = call_tool(c, access, "wrap_eth", {"network": "sepolia", "amount_eth": 1})
+    check("a write tool that raises no quote answers in its own words", not err and text == "The wallet holds no ETH to wrap.", str(text))
+    with stand_in(transfer_erc20, refuses):
+        err, text = call_tool(c, access, "transfer_erc20", {"network": "sepolia", "token": "usdc", "recipient": "eve", "amount": 1})
+    check("a refusal is a tool error in the tool's words", err and "eve isn't a saved contact" in text, str(text))
+    check("neither leaves a card", len(db.get_open_sign_requests(user, 11155111)) == before)
+
+    # Busy: the account's one turn is the web chat's right now.
+    with routes.chat._chatting_lock:
+        routes.chat._chatting.add(user)
+    try:
+        with stand_in(transfer_erc20, quotes_a_transfer):
+            err, text = call_tool(c, access, "transfer_erc20", {"network": "sepolia", "token": "usdc", "recipient": "sandy", "amount": 1})
+        check("a quote while the web chat answers the account is refused, not queued", err and mcp_tools.BUSY in text, str(text))
+        _, s = call_tool(c, access, "get_all_contacts", {})
+        check("reads go on meanwhile", s == [], str(s))
+    finally:
+        with routes.chat._chatting_lock:
+            routes.chat._chatting.discard(user)
+
+    # The account's quote limits.
+    saved = mcp_tools.QUOTE_LIMITS
+    mcp_tools.QUOTE_LIMITS = parse_many("2/minute")
+    try:
+        _, headers_l, _ = sign_in(c)
+        user_l = c.get("/api/me", headers=headers_l).json()["user_id"]
+        db.save_wallet_address(user_l, 11155111, "0x00000000000000000000000000000000000000D1")
+        access_l = connect(c, headers_l)["access_token"]
+        with stand_in(transfer_erc20, quotes_a_transfer):
+            errs = [call_tool(c, access_l, "transfer_erc20", {"token": "usdc", "recipient": "sandy", "amount": 1})[0] for _ in range(3)]
+        check("quotes past the account's limit are refused", errs == [False, False, True], str(errs))
+    finally:
+        mcp_tools.QUOTE_LIMITS = saved
+
+    # Approving or cancelling an app's quote never writes into the web chat's conversation.
+    recorded = []
+    real_record = smart_wallet_agent._record_button
+    smart_wallet_agent._record_button = lambda *args, **kwargs: recorded.append(args)
+    try:
+        made, req = fresh_quote()
+        r = c.post("/api/sign/cancel", json={"token": made["approve_url"].rsplit("/", 1)[-1]})
+        check("the approval page's Don't send it cancels an app's quote", r.status_code == 200
+              and db.get_sign_request(req["id"])["status"] == "cancelled", r.text)
+        check("and writes nothing into the web chat", recorded == [], str(recorded))
+        card = signing.open_request(quotes.put(user, 11155111, elsewhere, "Wrap 1 ETH", [], priced, {"total_usd": 0.3}), signing.WEB)
+        smart_wallet_agent.cancel_signed(card.request)
+        check("a web chat card's cancel still does", len(recorded) == 1, str(recorded))
+    finally:
+        smart_wallet_agent._record_button = real_record
+    check("confirm_signed skips the conversation for an app's quote only",
+          not smart_wallet_agent._in_conversation({"origin": "mcp"})
+          and smart_wallet_agent._in_conversation({"origin": "web"}) and smart_wallet_agent._in_conversation({"origin": "telegram"}))
+
+
+def _expired(signing, token: str) -> bool:
+    """Whether a link's token no longer opens anything."""
+    try:
+        signing.find_by_token(token)
+    except signing.Expired:
+        return True
+    return False
 
 
 # ── 8. Refresh tokens ─────────────────────────────────────────────────────────
@@ -749,6 +972,7 @@ if __name__ == "__main__":
         test_token_endpoint(client)
         test_mcp_calls(client)
         test_read_tools(client)
+        test_quotes(client)
         test_refresh(client)
         test_revoke(client)
         test_connections(client)

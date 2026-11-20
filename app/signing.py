@@ -67,8 +67,12 @@ from passkey import (
 )
 from userop import OP_DEADLINE_GRACE_SECS, read_sessions
 
-# Where a quote was offered, and so where its outcome goes.
-WEB, TELEGRAM = "web", "telegram"
+# Where a quote was offered, and so where its outcome goes. MCP: an AI app's tool call
+# (mcp_tools.py), whose quote is approved through a link like Telegram's.
+WEB, TELEGRAM, MCP = "web", "telegram", "mcp"
+
+# The origins whose cards are approved through a /c/<token> link rather than a signed-in page.
+_LINKED = (TELEGRAM, MCP)
 
 # The answers the spec fixes, word for word.
 EXPIRED = "This confirmation has expired. Ask again."
@@ -149,7 +153,7 @@ class Offer:
 
     pending: quotes.PendingTransaction
     request: dict        # its sign request (db.sign_requests row)
-    token: str | None    # a Telegram card's link token, new with this offer; None on the web
+    token: str | None    # a Telegram card's or an AI app's link token, new with this offer; None on the web
     # The sign requests of the user's older cards on the chain that this one voided (offer), so a
     # Telegram caller can take their buttons off.
     superseded: tuple[dict, ...] = ()
@@ -158,7 +162,8 @@ class Offer:
 def open_request(pending: quotes.PendingTransaction, origin: str, telegram_chat_id: int | None = None) -> Offer | None:
     """
     The sign request for a quote being put on a card: made the first time, the same one after. A
-    Telegram card gets a fresh link token every time it is shown, so an older card's link dies.
+    Telegram card, or an AI app's quote, gets a fresh link token every time it is shown, so an older
+    link dies.
 
     @return  The offer, or None if the quote's request is no longer open (dealt with elsewhere).
     """
@@ -169,7 +174,7 @@ def open_request(pending: quotes.PendingTransaction, origin: str, telegram_chat_
     if not is_live(request):
         return None
     token = None
-    if request["origin"] == TELEGRAM:
+    if request["origin"] in _LINKED:
         token = secrets.token_urlsafe(24)
         if not set_sign_request_token(request["id"], token_hash(token)):
             return None
@@ -222,7 +227,7 @@ def waiting(user_id: int, chain_id: int, origin: str | None = None) -> dict | No
 
 def find_by_token(token: str) -> dict:
     """
-    The open request a Telegram link's token names.
+    The open request a link's token names (a Telegram card's, or an AI app's quote's).
 
     @raises Expired  If the token names none, or one that can no longer be approved.
     """
@@ -306,6 +311,9 @@ def summary(request: dict, frozen: dict) -> dict:
         "action": frozen["action"],
         "network": get_chain_display_name(chain_id),
         "chain_id": chain_id,
+        # Where it was asked for, so the page can say where to go back to: "telegram", "mcp" (an AI
+        # app) or "web".
+        "origin": request["origin"],
         "cost": {
             "quote_id": request["quote_id"],
             "chain_id": chain_id,

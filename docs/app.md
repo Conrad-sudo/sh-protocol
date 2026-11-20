@@ -949,13 +949,13 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
 
 ---
 
-## AI apps over MCP (2026-11-19, phases 1 and 2a)
+## AI apps over MCP (2026-11-19/20, phases 1, 2a and 2b)
 
 Claude (claude.ai and its apps), Claude Code and ChatGPT can use a Mitfah account as an MCP server at
 `<WEB_APP_URL>/mcp`. Phase 1 is the sign-in end to end plus `get_account`; phase 2a adds the wallet's
-reads (below); the quotes come in phase 2b, as tools whose descriptions carry the rules the web chat's
+reads, phase 2b its quotes (both below), as tools whose descriptions carry the rules the web chat's
 system prompt holds (these apps' models never see that prompt, and Claude's apps drop the server's
-`instructions` too). An app never sends anything: a quote will hand the user a `/c/<token>` link, and
+`instructions` too). An app never sends anything: a quote hands the user a `/c/<token>` link, and
 only their passkey sends.
 
 **How an app signs in (`routes/oauth.py`, `mcp_auth.py`).** OAuth 2.1 for public clients, this server
@@ -1030,7 +1030,39 @@ called directly so a refusal stays an exception) rather than copying it:
   SDK would send a list as one block per item.
 - **Descriptions:** written for a model that never sees our system prompt, about 3,700 characters for
   all 14 (the web chat's versions of the same tools run to about 13,000).
-`suggest_price_ranges` comes in 2b with `open_position`, which it feeds.
+
+**The quotes (`mcp_tools.py`, phase 2b).** 10 quote tools (`send_eth`, `transfer_erc20`, `wrap_eth`,
+`swap`, `open_position`, `add_to_position`, `withdraw_from_position`, `collect_fees`, `add_liquidity`,
+`remove_liquidity`), plus `suggest_price_ranges` (a read that feeds `open_position`),
+`get_transaction_status` and `cancel_transaction`: 27 tools in all, about 8,200 characters of
+descriptions (the web chat's 43 run to about 47,000). Left out: ERC-8004, `preflight_check` (every quote
+runs the same checks), `transferFrom_erc20`, `confirm_transaction` (the link replaces the card). Quote
+tools are marked not read-only, so apps ask the user before calling one.
+- **A turn of its own.** A quote holds the account's one turn (`routes.chat._chat_turn`: refused, not
+  queued, while the web chat answers the account), gets a fresh id (`_next_turn_id`), and counts toward
+  the account's message limits (`QUOTE_LIMITS`, `CHAT_RATE_LIMIT` parsed: 20 a minute, 1,000 a day),
+  counted apart from the web chat's and the bot's.
+- **The offer.** Whatever quote the turn raised is offered as the web chat's is (`signing.offer`), with
+  origin `mcp`, which gets a link token as Telegram's cards do. The offer voids every other card waiting
+  on that network, in the web chat or Telegram (one card per network, the 2026-10-22 double-pay fix);
+  a voided Telegram card loses its buttons and its chat is told which app replaced it. A turn that raised
+  no quote answers in the tool's own words; a stray quote is dropped.
+- **The result** is written from the quote, never from the tool's chat text: `status`, `quote_id`,
+  `network`, `action`, `fees`, `slippage`, `counts_toward_limit`, `expires_in_minutes`, `approve_url`
+  (`<WEB_APP_URL>/c/<token>`) and a `next_step` saying only the user's passkey sends it.
+- **After.** `get_transaction_status(quote_id)`: `waiting_for_approval`, `expired`, `sending`,
+  `cancelled`, `failed` (with the reason), `sent` (on its way), `confirmed` (with `tx_hash`), or `failed`
+  on chain, from the sign request and then its History row (settled from the chain when nothing waits on
+  it, as `GET /api/transactions/{id}` does). `cancel_transaction(quote_id)` cancels a waiting quote. Both
+  answer only for quotes an AI app raised on this account.
+- **Not in the conversation.** Approving or cancelling an app's quote isn't written into the web chat's
+  conversation (`smart_wallet_agent._in_conversation`): the assistant never made that quote.
+- **The approval page** (`web/src/confirm/`) is the same one Telegram's cards open. `POST /api/sign/start`
+  now names the request's `origin` in its summary, so for an app's quote the page says to go back to "the
+  app you came from" rather than to Telegram (and says that when it can't tell). On a phone, once a
+  tapped prompt gives no signature, it also offers the phone's own browser (`x-safari-` / `intent://`)
+  and a Copy link button (`OpenElsewhere`): other apps' browsers may refuse passkeys as Telegram's does,
+  with no sign to spot them by.
 
 **Connected apps.** `GET /api/connections`, `DELETE /api/connections/{id}`; Controls → Connected apps
 lists them (the account's, shown even with no wallet) with the address to connect one. Production

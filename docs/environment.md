@@ -50,7 +50,7 @@ CONFIRM_MAX_CONCURRENT=64                       # optional; quote-card taps at o
 LANDING_MAX_WAITS=256                           # optional; confirmed sends waited on at once, per process
 
 # Passkeys — the session keys, which live on users' devices; the server keeps only their public keys
-WEB_APP_URL=http://localhost:3000               # the web app's address; Telegram's Confirm links (/c/<token>) and /web open it
+WEB_APP_URL=http://localhost:3000               # the web app's address; Telegram's Confirm links and AI apps' approve links (/c/<token>) and /web open it
 WEBAUTHN_RP_ID=                                 # optional; default SIWE_DOMAIN's host: localhost in development, mitfah.com in production
 WEBAUTHN_ORIGINS=                               # optional; comma list of origins an approval may come from; default WEB_APP_URL + CORS_ORIGINS
 
@@ -67,7 +67,7 @@ ALCHEMY_API_KEY=your_alchemy_key
 >
 > **`WEBAUTHN_RP_ID` is the domain every passkey is made for, and a passkey is bound to it for life.** Changing it later strands every passkey made under the old one: each user would have to make a new one and approve it on each wallet again. It must be the domain the web app is served from (`mitfah.com` in production); left unset it is `SIWE_DOMAIN`'s host, which already is. Browsers allow passkeys only over https, with `localhost` the one exception, so development works on `http://localhost:3000` and nothing else plain-http.
 >
-> **`WEB_APP_URL` is where Telegram's Confirm button sends the user** (`/c/<token>`, the page that asks for the passkey), so in production it must be the public https address. It is also the **OAuth issuer** AI apps sign in with (`mcp_auth.issuer`): every token, redirect and metadata document names it, so it must be the exact public origin, with no trailing slash. Left unset, the bot uses the first of `CORS_ORIGINS`. `WEBAUTHN_ORIGINS` names the pages an approval may come from (scheme, host and port, no path); every approval is checked against it, since the relying-party id alone would admit any page under the domain.
+> **`WEB_APP_URL` is where Telegram's Confirm button and an AI app's `approve_url` send the user** (`/c/<token>`, the page that asks for the passkey), so in production it must be the public https address. It is also the **OAuth issuer** AI apps sign in with (`mcp_auth.issuer`): every token, redirect and metadata document names it, so it must be the exact public origin, with no trailing slash. Left unset, the bot uses the first of `CORS_ORIGINS`. `WEBAUTHN_ORIGINS` names the pages an approval may come from (scheme, host and port, no path); every approval is checked against it, since the relying-party id alone would admit any page under the domain.
 >
 > **The Vault variables are gone.** `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` and `VAULT_SECRET_ID_ACCESSOR` are not read any more: delete them. The Vault container can be stopped once the API and the bot run this version (their first `make db` drops the tables that held its ciphertexts).
 >

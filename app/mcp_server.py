@@ -8,9 +8,9 @@ McpEndpoint checks the bearer token itself and hands the SDK the caller in the r
 the SDK's own auth (AuthSettings, token_verifier) is not used. Its authorization-server half
 declares what Claude needs to use a CIMD client id, and can't be told otherwise.
 
-The tools: get_account, here, and the wallet's reads (mcp_tools.py), each with a description that
-carries the rules the web chat's system prompt holds: these apps' models never see that prompt. The
-quotes come in phase 2b.
+The tools: get_account, here, and the wallet's reads and quotes (mcp_tools.py), each with a
+description that carries the rules the web chat's system prompt holds: these apps' models never see
+that prompt. A quote hands the user a /c/<token> link; only their passkey sends it.
 """
 import contextlib
 import logging
@@ -28,7 +28,7 @@ import mcp_auth
 from constants import get_chain_display_name
 from db import get_user_by_id, get_wallet_address, get_wallet_chains
 from mcp_clients import APPS
-from mcp_tools import CALLER_KEY, caller_of, count_call, read_tools
+from mcp_tools import CALLER_KEY, caller_of, count_call, wallet_tools
 
 # Stateless, every request "terminates a session" -- an INFO line per call. Warnings still show.
 logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
@@ -48,7 +48,7 @@ server = MCPServer(
     title="Mitfah smart wallet",
     instructions=INSTRUCTIONS,
     version="1",
-    tools=read_tools(),
+    tools=wallet_tools(),
 )
 
 # The running session manager: set while running() is open, which the API's lifespan holds.
