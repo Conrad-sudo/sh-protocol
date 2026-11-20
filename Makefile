@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test mcp-e2e chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
 
 
 
@@ -158,6 +158,13 @@ py-test: identity-test auth-test custom-tokens-test history-test movements-test 
 # and `make setup-test ARGS=<the fork>` first. Refuses to run if it is not on a local fork.
 e2e-test:
 	.venv/bin/python3 app/tests/test_e2e_fork.py $(ARGS)
+
+# AI apps end to end, against the RUNNING API (make api) and a fork: an app connects through OAuth,
+# reads the wallet over /mcp, quotes a USDC transfer, the passkey approves it through the quote's
+# link, and the app follows it to confirmed. Talks to the API over HTTP only, so it never sends with
+# the API's bundler keys. Sepolia unless ARGS names another fork; needs the protocol deployed there.
+mcp-e2e:
+	.venv/bin/python3 app/tests/test_mcp_fork.py $(ARGS)
 
 # The prompt-regression gate: a REAL conversation against the fork, checking the agent still
 # reaches the right tools in the right order now that the prompt no longer spells out an id
