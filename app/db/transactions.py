@@ -36,7 +36,7 @@ def add_transaction(
     """
     Records a transaction for the History tab.
 
-    @param source     'assistant', 'owner' or 'outside'.
+    @param source     'assistant', 'app' (an AI app's quote), 'owner', 'recurring' or 'outside'.
     @param status     'pending', 'confirmed', 'failed' or 'dropped'.
     @param direction  'in', 'out' or 'none', when already known; see save_movements.
     @param movements  What it moved (tx_movements.Moved), when already known. The row is then

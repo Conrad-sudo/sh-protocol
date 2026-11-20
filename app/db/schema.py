@@ -694,8 +694,9 @@ def _create_schema(db: sqlite3.Connection):
 
         -- Every transaction made through Mitfah, for the History tab. Kept apart from the chat,
         -- which is cleared after each transaction, so a hash never lives only in a conversation.
-        -- `source` is 'assistant' (a UserOperation sent with the session key), 'owner' (signed
-        -- by the user's own wallet in the browser) or 'outside' (anything else that touched the
+        -- `source` is 'assistant' (a UserOperation sent with the session key), 'app' (the same,
+        -- quoted by an AI app over MCP), 'owner' (signed by the user's own wallet in the browser),
+        -- 'recurring' (a payment the keeper made) or 'outside' (anything else that touched the
         -- wallet, read from a block explorer). `action` is written by the server, never by the
         -- model, the browser or the explorer. An assistant row is written BEFORE its op is broadcast, keyed
         -- by user_op_hash, so a send that outlives the wait is still here as 'pending' --

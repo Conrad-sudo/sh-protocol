@@ -605,11 +605,12 @@ export interface Transaction {
   id: number
   chain_id: number
   /**
-   * Who sent it: the assistant (from the web chat or Telegram), the owner in the browser, Mitfah
-   * paying one of the owner's recurring payments, or someone or something outside Mitfah, as a
-   * block explorer reported it.
+   * Who sent it: the assistant (from the web chat or Telegram), a connected AI app (quoted over
+   * MCP, approved by the owner's passkey), the owner in the browser, Mitfah paying one of the
+   * owner's recurring payments, or someone or something outside Mitfah, as a block explorer
+   * reported it.
    */
-  source: 'assistant' | 'owner' | 'outside' | 'recurring'
+  source: 'assistant' | 'app' | 'owner' | 'outside' | 'recurring'
   /** What it does, written by the server from the transaction itself. */
   action: string
   /** `dropped`: never mined, and now never will be. */

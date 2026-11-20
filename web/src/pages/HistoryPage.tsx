@@ -31,10 +31,11 @@ import { chainName, explorerName, explorerUrl } from '../wallet/chains'
 
 const TITLE = 'History'
 const DESCRIPTION =
-  'Every transaction on your Mitfah wallet: what your assistant sent, here or on Telegram, what you signed, and what happened outside Mitfah.'
+  'Every transaction on your Mitfah wallet: what your assistant or a connected AI app sent, what you signed, and what happened outside Mitfah.'
 
 const SOURCE: Record<Transaction['source'], string> = {
   assistant: 'By your assistant',
+  app: 'By an AI app',
   owner: 'By you',
   outside: 'Outside Mitfah',
   recurring: 'Recurring payment',

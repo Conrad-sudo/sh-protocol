@@ -152,6 +152,15 @@ describe('HistoryPage', () => {
     expect(oldest).toHaveTextContent('Create your Mitfah smart wallet')
   })
 
+  it("says when a connected AI app sent it", async () => {
+    stubServer({ transactions: [tx(1, { source: 'app', action: `Transfer 1 USDC to ${SAM.address}` })] })
+    await renderRoutes(routes, '/history')
+
+    const [only] = await rows()
+    expect(only).toHaveTextContent('By an AI app')
+    expect(only).not.toHaveTextContent('By your assistant')
+  })
+
   it("links each hash to its network's live explorer, a local fork's included", async () => {
     stubServer({
       transactions: [

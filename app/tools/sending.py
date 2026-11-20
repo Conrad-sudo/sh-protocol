@@ -60,7 +60,7 @@ from db import (
 from contract_errors import is_expired_failure
 from network_config import load_network_config
 from parallel import start_read
-from signing import EXPIRED
+from signing import EXPIRED, MCP
 
 # What the user hears when the passkey's approval on the wallet ran out between the approval page
 # opening and the send (an op whose own deadline passed gets signing.EXPIRED instead).
@@ -173,7 +173,8 @@ def submit_signed(approved) -> Sending:
         # settle_quoted) is then still listed, as pending, and settled there once it lands -- the
         # chat it was asked for in is cleared after every transaction, so it can't be the record.
         record = tx_history.start_assistant_tx(
-            user_id, chain_id, session_handler.address, frozen["action"], prepared, frozen["direction"]
+            user_id, chain_id, session_handler.address, frozen["action"], prepared, frozen["direction"],
+            source="app" if request["origin"] == MCP else "assistant",
         )
         if frozen["lp_pool"]:
             _remember_lp_pool(user_id, chain_id, frozen["lp_pool"])

@@ -72,6 +72,7 @@ app/
     ├── test_ens_names.py  ← ENS lookups, and CCIP-Read kept off our own network (make ens-test)
     ├── test_passkeys.py   ← Approvals packed as the wallet reads them (the contract's own known-answer vector), the op deadline nonce, making/managing passkeys, a Telegram link (make passkeys-test)
     ├── test_mcp.py        ← AI apps' sign-in (known list, Allow page, codes, tokens, refresh reuse, revocation), /mcp, connected apps, passkey sign-in (make mcp-test)
+    ├── test_mcp_fork.py   ← AI apps end to end against the RUNNING API and a fork: OAuth, reads, quote, link approved by a soft passkey, confirmed (make mcp-e2e)
     ├── test_chat_memory.py ← The conversation store: a turn saved once as it ends, many at once on their own threads, two processes on one file (make chat-memory-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
@@ -247,8 +248,9 @@ CREATE TABLE supported_tokens (chain_id INTEGER NOT NULL, ticker TEXT NOT NULL, 
 CREATE TABLE transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chain_id INTEGER NOT NULL,
     wallet TEXT NOT NULL,
-    source TEXT NOT NULL,                       -- 'assistant' (session-key UserOp), 'owner' (signed in the browser)
-                                                --   or 'outside' (anything else, read from a block explorer)
+    source TEXT NOT NULL,                       -- 'assistant' (session-key UserOp), 'app' (the same, quoted by an
+                                                --   AI app over MCP), 'owner' (signed in the browser), 'recurring'
+                                                --   (the keeper's payment) or 'outside' (anything else, read from a block explorer)
     action TEXT NOT NULL,                       -- written by the server, never by the model, the browser or the explorer
     status TEXT NOT NULL,                       -- 'pending' | 'confirmed' | 'failed' | 'dropped'
     tx_hash TEXT,                               -- NULL only while an assistant op hasn't been seen on chain
@@ -841,7 +843,7 @@ chat because the chat is cleared after every transaction (see Section 3), so a c
 where a hash is kept.
 
 ```python
-start_assistant_tx(user_id, chain_id, wallet, action, prepared, direction=None) -> row id   # pending, BEFORE broadcast
+start_assistant_tx(user_id, chain_id, wallet, action, prepared, direction=None, source="assistant") -> row id   # pending, BEFORE broadcast
 finish_assistant_tx(row_id, w3, receipt, succeeded)                      # the executing tx's hash + block time
 discard_assistant_tx(row_id)                                             # never executed: nothing to list
 record_owner_tx(w3, user_id, chain_id, wallet, tx_hash, receipt=None)    # owner actions and deposits; idempotent
@@ -859,7 +861,9 @@ sync_outside(user_id, chain_id, wallet, w3)                              # one w
   An op whose call reverted is on chain and paid for, so it is listed as `failed` with its hash
   (`bundler.UserOpReverted` carries it). One that never executed is removed. One that outlives the
   wait (a `TimeoutError`) stays `pending`. The description is the quote's own `action`, written by
-  code from the calldata.
+  code from the calldata. A quote an AI app raised (sign request origin `mcp`) is recorded the same
+  way under source `app`, so the History tab says who asked; both are `USER_OP_SOURCES`, settled by
+  their op.
 - **Owner transactions are recorded when the app is handed their hash**: by every poll of the three
   web confirms (`/api/deploy/confirm`, `/api/wallet/tx/confirm`, `/api/wallet/session/confirm`) and
   by `POST /api/transactions/deposit` for the Fund drawer. The first poll that can see the
@@ -1018,7 +1022,8 @@ pass the docstring with its indentation.
 called directly so a refusal stays an exception) rather than copying it:
 - **Who:** the token's account, handed to the tool in an `AgentContext`; an argument can't change it.
 - **Where:** a `network` argument (a name such as "Arbitrum One", an alias such as "ethereum", or a
-  chain id), only where the account has a wallet; optional when it has just one. It becomes the
+  chain id, as text or as a number: published as a string, a number is taken as text before the SDK
+  checks it), only where the account has a wallet; optional when it has just one. It becomes the
   acting network *inside* the worker thread (a ContextVar). Contacts and `get_account` take none.
 - **Threads:** a pool of its own (`POOL_SIZE` 16, per event loop), so chain reads from AI apps don't
   take the threads FastAPI's plain `def` routes share (anyio's default pool, which the SDK would use).
@@ -1052,8 +1057,9 @@ tools are marked not read-only, so apps ask the user before calling one.
   (`<WEB_APP_URL>/c/<token>`) and a `next_step` saying only the user's passkey sends it.
 - **After.** `get_transaction_status(quote_id)`: `waiting_for_approval`, `expired`, `sending`,
   `cancelled`, `failed` (with the reason), `sent` (on its way), `confirmed` (with `tx_hash`), or `failed`
-  on chain, from the sign request and then its History row (settled from the chain when nothing waits on
-  it, as `GET /api/transactions/{id}` does). `cancel_transaction(quote_id)` cancels a waiting quote. Both
+  on chain or never mined (`dropped`), from the sign request and then its History row (settled from the
+  chain when nothing waits on it, as `GET /api/transactions/{id}` does). The page's own "Sending — …"
+  text (`outcome`) comes back only for a send with no History row to read. `cancel_transaction(quote_id)` cancels a waiting quote. Both
   answer only for quotes an AI app raised on this account.
 - **Not in the conversation.** Approving or cancelling an app's quote isn't written into the web chat's
   conversation (`smart_wallet_agent._in_conversation`): the assistant never made that quote.
@@ -1288,7 +1294,7 @@ What it does that the bot cannot:
 - **The History tab.** Every transaction on the user's wallets, newest first by when it happened, from
   `GET /api/transactions` (paged by the `before` cursor, `"<time>-<id>"`, filterable by `chain_id`):
   what it did, the date and time in the reader's time zone, the network, who sent it ("By your
-  assistant", "By you" or "Outside Mitfah"), its status, and its hash as a link to the network's live
+  assistant", "By an AI app", "By you", "Recurring payment" or "Outside Mitfah"), its status, and its hash as a link to the network's live
   block explorer. Tabs split it into **All · Incoming · Outgoing · Wallet changes** (`direction`),
   and each row carries an arrow in, an arrow out or a gear. The **Filter** button opens a panel
   (`components/history/HistoryFilters.tsx`): a date range (whole days in the reader's time zone),

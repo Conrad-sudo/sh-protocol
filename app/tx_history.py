@@ -8,6 +8,8 @@ where a transaction hash lives. Two kinds of row land in the `transactions` tabl
     from the web chat or Telegram). Recorded BEFORE it is broadcast, keyed by its userOpHash, and
     filled in with the hash of the transaction that executed it once that is known. A send that
     outlives the wait is therefore still listed, as pending, and settle_pending finishes it later.
+  - 'app': the same, for a quote an AI app raised over MCP (mcp_tools.py) and the user approved
+    through its link. Recorded and settled exactly as 'assistant'; only the label differs.
   - 'owner': a transaction the user's own wallet signed in the browser -- creating the wallet, the
     owner actions, deposits from the Fund drawer. Recorded when the app is handed its hash, and
     described from the transaction's own calldata, never from anything the browser says.
@@ -131,10 +133,15 @@ def _outcome(w3: Web3, receipt) -> tuple[str, int | None]:
 
 # ── The assistant's transactions ──────────────────────────────────────────────
 
+# The sources whose rows are UserOperations sent through the bundler, found and settled by their
+# userOpHash: the assistant's, and an AI app's.
+USER_OP_SOURCES = ("assistant", "app")
+
 
 @_best_effort
 def start_assistant_tx(
-    user_id: int, chain_id: int, wallet: str, action: str, prepared, direction: str | None = None
+    user_id: int, chain_id: int, wallet: str, action: str, prepared, direction: str | None = None,
+    source: str = "assistant",
 ) -> int | None:
     """
     Records a signed UserOperation as pending, just before it is broadcast.
@@ -144,13 +151,14 @@ def start_assistant_tx(
     @param direction  What it is meant to do, 'in' or 'out', from the quote; None if it can't say.
                       A pending or failed send is listed in its group by this. Once it confirms,
                       read_movements replaces it with what the receipt shows.
+    @param source     'assistant', or 'app' for a quote an AI app raised (USER_OP_SOURCES).
     @return           The row's id, for finish_assistant_tx or discard_assistant_tx.
     """
     return add_transaction(
         user_id,
         chain_id,
         wallet,
-        "assistant",
+        source,
         action,
         "pending",
         user_op_hash=_hex(prepared.user_op_hash),
@@ -441,7 +449,7 @@ def settle_one(row: dict, web3_for: Callable[[int], Web3 | None]):
         w3 = web3_for(row["chain_id"])
         if w3 is None:
             return
-        if row["source"] == "assistant":
+        if row["source"] in USER_OP_SOURCES:
             _settle_assistant_row(w3, row)
         else:
             _settle_owner_row(w3, row)

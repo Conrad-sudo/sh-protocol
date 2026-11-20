@@ -84,8 +84,8 @@ def list_transactions(
 ):
     """
     The History tab: every transaction on this account's wallets, newest first -- what the
-    assistant sent, from the web or Telegram, what the user signed in the browser, and what
-    happened outside Mitfah.
+    assistant sent, from the web or Telegram, what a connected AI app quoted and the user approved,
+    what the user signed in the browser, and what happened outside Mitfah.
 
     Reading the first page also settles transactions still pending, where it can: a send that
     outlived the wait, or an owner transaction whose page was closed before it mined. Then it

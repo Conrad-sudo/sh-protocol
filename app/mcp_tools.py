@@ -51,7 +51,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.tools.base import Tool
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
 from mcp.types import ToolAnnotations
-from pydantic import Field, create_model
+from pydantic import BeforeValidator, Field, create_model
 
 import mcp_auth
 import quotes
@@ -219,6 +219,18 @@ NETWORK_ARG = (
 TOKEN = 'A token\'s ticker, e.g. "usdc". "eth" means the network\'s own asset (BNB on BNB Smart Chain).'
 
 
+def _number_as_text(value):
+    """
+    A chain id sent as a number, as text. The schema says string, but get_account shows chain ids
+    as numbers and NETWORK_ARG accepts one, so an app may well pass 11155111 rather than "11155111".
+    """
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
+# `network` as the SDK validates it: text, or a number taken as text. Published as a plain string.
+Network = Annotated[str | None, BeforeValidator(_number_as_text)]
+
+
 @dataclass(frozen=True)
 class Spec:
     """One wallet tool as an AI app sees it."""
@@ -235,7 +247,7 @@ def _arguments_model(spec: Spec) -> type[ArgModelBase]:
     """The arguments the SDK validates a call against: the tool's own, plus `network`."""
     fields: dict[str, Any] = {}
     if spec.on_a_network:
-        fields["network"] = (str | None, Field(None, description=NETWORK_ARG))
+        fields["network"] = (Network, Field(None, description=NETWORK_ARG))
     for name, info in spec.tool.tool_call_schema.model_fields.items():
         default = ... if info.is_required() else info.default
         fields[name] = (info.annotation, Field(default, description=spec.args[name]))
@@ -655,19 +667,24 @@ def transaction_status(user_id: int, quote_id: str) -> dict:
         return result | {"status": "failed", "reason": request["outcome"], "note": "Nothing was sent."}
     if status != SENT:
         return result | {"status": status}
-    result |= {"status": "sent", "outcome": request["outcome"]}
-    if request["transaction_id"] is not None:
-        try:
-            row = get_one_transaction(request["transaction_id"], user_id=user_id)
-        except HTTPException:
-            return result
-        result["tx_hash"] = row["tx_hash"]
-        if row["status"] == "confirmed":
-            result["status"] = "confirmed"
-        elif row["status"] == "failed":
-            result |= {"status": "failed", "note": "It was sent but failed on the network."}
-        else:
-            result["note"] = "On its way: not yet in a block. Check again in a few seconds."
+    # The request's outcome is what the page said as it sent ("Sending — ..."): returned only when
+    # there is no History row to say more, as when the broadcast left it unknown whether it went out.
+    result["status"] = "sent"
+    if request["transaction_id"] is None:
+        return result | {"outcome": request["outcome"]}
+    try:
+        row = get_one_transaction(request["transaction_id"], user_id=user_id)
+    except HTTPException:
+        return result | {"outcome": request["outcome"]}
+    result["tx_hash"] = row["tx_hash"]
+    if row["status"] == "confirmed":
+        result["status"] = "confirmed"
+    elif row["status"] == "failed":
+        result |= {"status": "failed", "note": "It was sent but failed on the network."}
+    elif row["status"] == "dropped":
+        result |= {"status": "failed", "note": "It never made it into a block, and now never will. Nothing was sent."}
+    else:
+        result["note"] = "On its way: not yet in a block. Check again in a few seconds."
     return result
 
 

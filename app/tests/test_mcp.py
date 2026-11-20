@@ -460,6 +460,10 @@ def test_read_tools(c: TestClient):
     check("every per-network tool takes an optional `network`",
           all("network" in t["inputSchema"].get("properties", {}) and "network" not in t["inputSchema"].get("required", [])
               for n, t in tools.items() if n in READS and n not in NOT_PER_NETWORK))
+    check("...published as a plain string",
+          all(t["inputSchema"]["properties"]["network"] == {"type": "string", "description": mcp_tools.NETWORK_ARG}
+              for n, t in tools.items() if n in READS and n not in NOT_PER_NETWORK),
+          str(tools["get_eth_balance"]["inputSchema"]["properties"].get("network")))
     check("contacts and the account take none",
           all("network" not in tools[n]["inputSchema"].get("properties", {}) for n in NOT_PER_NETWORK))
     check("descriptions are short (under 700 characters each)", all(len(t["description"]) < 700 for t in tools.values()),
@@ -487,7 +491,7 @@ def test_read_tools(c: TestClient):
         check("a read answers on the named network", not err and result == {"balance": 1.5, "asset": "ETH"}
               and seen.get("network") == network_name(42161), f"{result} {seen}")
         check("as the token's account, off the event loop's thread", seen.get("user") == user_a and seen.get("thread") is False, str(seen))
-        for name in ("42161", "arbitrum", "ARBITRUM ONE", network_name(42161)):
+        for name in ("42161", 42161, "arbitrum", "ARBITRUM ONE", network_name(42161)):
             seen.clear()
             call_tool(c, access_a, "get_eth_balance", {"network": name})
             check(f"network {name!r} is Arbitrum", seen.get("network") == network_name(42161), str(seen))
@@ -690,7 +694,7 @@ def test_quotes(c: TestClient):
     _, s = call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})
     check("refused when approved: failed, with the reason", s.get("status") == "failed" and "not enough USDC" in s.get("reason", ""), str(s))
 
-    for row_status, shown in (("confirmed", "confirmed"), ("failed", "failed"), ("pending", "sent")):
+    for row_status, shown in (("confirmed", "confirmed"), ("failed", "failed"), ("dropped", "failed"), ("pending", "sent")):
         made, req = fresh_quote()
         tx_id = add_transaction(user, 11155111, "0x00000000000000000000000000000000000000C1", "assistant",
                                 made["action"], row_status, tx_hash="0x" + "ab" * 32)
@@ -701,7 +705,14 @@ def test_quotes(c: TestClient):
             _, s = call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})
         finally:
             routes.history.landing.is_watched = real_watched
-        check(f"sent, and {row_status} in History: {shown}", s.get("status") == shown and s.get("tx_hash") == "0x" + "ab" * 32, str(s))
+        check(f"sent, and {row_status} in History: {shown}, without the page's old 'Sending' text",
+              s.get("status") == shown and s.get("tx_hash") == "0x" + "ab" * 32 and "outcome" not in s, str(s))
+
+    made, req = fresh_quote()
+    db.end_sign_request(req["id"], SENT, "It isn't known whether it went out. Check History before trying again.")
+    _, s = call_tool(c, access, "get_transaction_status", {"quote_id": made["quote_id"]})
+    check("sent with no History row: sent, with what the page said",
+          s.get("status") == "sent" and "isn't known" in s.get("outcome", "") and "tx_hash" not in s, str(s))
 
     # A tool that raised no quote, or refused.
     def answers_only(runtime, amount_eth):

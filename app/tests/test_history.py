@@ -369,10 +369,11 @@ def _patch_send(w3, broadcast, budget_left, device_live=None):
     return restore
 
 
-def _approved(user: int, quote_id: str, action: str = "Transfer 5 USDC to 0x5A3…", lp_pool: dict | None = None):
+def _approved(user: int, quote_id: str, action: str = "Transfer 5 USDC to 0x5A3…", lp_pool: dict | None = None,
+              origin: str = "web"):
     """A request a passkey approved, as signing.approve hands it on: what submit_signed reads."""
     return SimpleNamespace(
-        request={"id": 1, "user_id": user, "chain_id": CHAIN, "quote_id": quote_id},
+        request={"id": 1, "user_id": user, "chain_id": CHAIN, "quote_id": quote_id, "origin": origin},
         frozen={"action": action, "quote": None, "lp_pool": lp_pool, "direction": "out"},
         final=None, signature=b"", key_id="0x" + "ab" * 32,
     )
@@ -423,6 +424,10 @@ def test_assistant_sends_are_recorded_before_they_go():
         check("listed as outgoing from the start, by the quote's direction", newest["direction"] == "out", str(newest["direction"]))
         check("the reply carries the same 0x-prefixed hash", "0x" + "22" * 32 in reply, reply)
         check("...and what is left of the spending limit", "\nSpending limit left this period: $123.45\nTx hash: 0x" in reply, reply)
+        _send(user, "q1app", origin="mcp")
+        newest = db.get_transactions(user)[0]
+        check("one an AI app quoted is listed as the app's, settled the same way",
+              newest["source"] == "app" and newest["status"] == "confirmed", str(newest))
 
         outcome["next"] = "reverted"
         try:
@@ -637,7 +642,8 @@ def test_pending_rows_are_settled_later():
     nonce = (7 << 64) | 3
 
     def assistant_row(n: int) -> int:
-        return db.add_transaction(user, CHAIN, WALLET, "assistant", f"op {n}", "pending",
+        # The first is an AI app's: settled by its op, exactly as the assistant's are.
+        return db.add_transaction(user, CHAIN, WALLET, "app" if n == 0 else "assistant", f"op {n}", "pending",
                                   user_op_hash=_hash(0x100 + n), op_nonce=nonce, from_block=100)
 
     landed_id, reverted_id, lost_id, waiting_id = (assistant_row(n) for n in range(4))
@@ -656,7 +662,7 @@ def test_pending_rows_are_settled_later():
         w3.eth.entry_point.nonce = nonce        # nothing has used op 2's nonce yet
         tx_history.settle_pending(user, lambda _chain: w3)
         status = {r["id"]: r for r in db.get_transactions(user)}
-        check("an op found on chain later is confirmed, with its hash and block time",
+        check("an op found on chain later (an AI app's) is confirmed, with its hash and block time",
               status[landed_id]["status"] == "confirmed" and status[landed_id]["tx_hash"] == "0x" + "31" * 32
               and status[landed_id]["mined_at"] == 1_790_000_500, str(status[landed_id]))
         check("one found reverted is failed", status[reverted_id]["status"] == "failed", str(status[reverted_id]))
