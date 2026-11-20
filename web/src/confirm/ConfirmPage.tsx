@@ -13,7 +13,9 @@ import { browserNav, browserUrl, phone, telegramAppUrl, telegramBrowser, whenLef
  * The page a Telegram quote's "Confirm with passkey" button opens: /c/<token>. Telegram may not sign
  * anything but TON inside its own apps, so the approval happens here, on mitfah.com, with the passkey
  * on this device. There is no sign-in: the link's token (single use, as long as the quote) says whose
- * payment it is, and the server sends it only with a passkey that wallet trusts.
+ * payment it is, and the server sends it only with a passkey that wallet trusts. An AI app's quote
+ * (Claude, ChatGPT over MCP) hands the user the same kind of link; the page then says to go back to
+ * "the app you came from" rather than to Telegram.
  *
  * It starts the confirmation as the page loads and opens the passkey prompt at once: iOS Safari
  * allows one prompt per page load without a tap. Refused for want of a tap, the page shows one big
@@ -23,6 +25,10 @@ import { browserNav, browserUrl, phone, telegramAppUrl, telegramBrowser, whenLef
  * in the phone's own browser (Safari on an iPhone) and closes Telegram's behind it (./browser). Once
  * the payment is sent or turned down on an iPhone, the page goes back to the chat in Telegram by
  * itself; Android's Back button does that there.
+ *
+ * Other apps' own browsers may refuse passkeys too (an AI app's, say), with no sign to spot them by.
+ * So on a phone, once a tapped prompt gives no signature, the page also offers to open itself in the
+ * phone's own browser, and to copy its link (OpenElsewhere).
  */
 
 /** A confirmation left waiting for the tap is started again this often, so its fees stay fresh. */
@@ -40,13 +46,13 @@ type View =
   | { kind: 'loading' }
   /** In Telegram's browser: leaving for the phone's own. `stuck` once that hasn't opened. */
   | { kind: 'leaving'; on: Phone; stuck: boolean }
-  /** The payment is shown; `step` is where its approval is. */
-  | { kind: 'ready'; start: SignStart; step: 'prompting' | 'tap' | 'sending'; note?: Note }
+  /** The payment is shown; `step` is where its approval is. `elsewhere`: offer the phone's own browser. */
+  | { kind: 'ready'; start: SignStart; step: 'prompting' | 'tap' | 'sending'; note?: Note; elsewhere?: boolean }
   | { kind: 'sent'; start: SignStart; outcome: string }
   | { kind: 'declined'; start: SignStart; outcome: string }
   | { kind: 'expired'; start?: SignStart }
   | { kind: 'no-passkey' }
-  | { kind: 'failed'; text: string; start?: SignStart; retry: boolean }
+  | { kind: 'failed'; text: string; start?: SignStart; retry: boolean; elsewhere?: boolean }
 
 /**
  * The first start for a token, shared: React's development double mount runs the page's effect
@@ -105,10 +111,24 @@ function finishFailed(error: unknown, start: SignStart): View {
   // It may have reached the server and gone out, so this page never offers to send it again.
   return {
     kind: 'failed',
-    text: 'No answer arrived, so it may still have been sent. Check the chat in Telegram before you try again.',
+    text: `No answer arrived, so it may still have been sent. ${
+      fromAnApp(start)
+        ? 'Ask the app you came from for its status before you try again.'
+        : 'Check the chat in Telegram before you try again.'
+    }`,
     start,
     retry: false,
   }
+}
+
+/** Whether an AI app (over MCP) asked for this payment, rather than Telegram. */
+function fromAnApp(start?: SignStart): boolean {
+  return start?.summary.origin === 'mcp'
+}
+
+/** Where to ask for a fresh confirmation: Telegram's, or the app's when it isn't known to be Telegram's. */
+function askAgain(start?: SignStart): string {
+  return start && !fromAnApp(start) ? 'Ask again in Telegram.' : 'Ask again in the app you came from.'
 }
 
 /** Why the prompt gave no signature, for the line under the Confirm button. */
@@ -174,7 +194,7 @@ export function ConfirmPage({ token }: { token: string | null }) {
             // A refusal here is most often the browser wanting a tap first: offer the button.
             setView(
               isPasskeyError(error, 'unsupported')
-                ? { kind: 'failed', text: error.message, start, retry: false }
+                ? { kind: 'failed', text: error.message, start, retry: false, elsewhere: true }
                 : { kind: 'ready', start, step: 'tap' },
             )
           },
@@ -251,10 +271,12 @@ export function ConfirmPage({ token }: { token: string | null }) {
       credential => send(start, credential, mine),
       (error: unknown) => {
         if (attempt.current !== mine) return
+        // A tapped prompt that gave nothing may be a browser that refuses passkeys: on a phone, offer
+        // its own browser too.
         setView(
           isPasskeyError(error, 'unsupported')
-            ? { kind: 'failed', text: error.message, start, retry: false }
-            : { kind: 'ready', start, step: 'tap', note: passkeyNote(error) },
+            ? { kind: 'failed', text: error.message, start, retry: false, elsewhere: true }
+            : { kind: 'ready', start, step: 'tap', note: passkeyNote(error), elsewhere: phone() !== null },
         )
       },
     )
@@ -354,8 +376,8 @@ function Body({
       return (
         <>
           <h1>This confirmation has expired.</h1>
-          <p>Ask again in Telegram.</p>
-          <BackToTelegram bot={view.start?.telegram_bot} />
+          <p>{askAgain(view.start)}</p>
+          <BackTo start={view.start} />
         </>
       )
     case 'no-passkey':
@@ -378,7 +400,7 @@ function Body({
             Sent <span aria-hidden="true">✓</span>
           </h1>
           <p className="mfc-outcome">{view.outcome}</p>
-          <BackToTelegram bot={view.start.telegram_bot} />
+          <BackTo start={view.start} />
         </>
       )
     case 'declined':
@@ -386,7 +408,7 @@ function Body({
         <>
           <h1>Not sent</h1>
           <p className="mfc-outcome">{view.outcome}</p>
-          <BackToTelegram bot={view.start.telegram_bot} />
+          <BackTo start={view.start} />
         </>
       )
     case 'failed':
@@ -401,8 +423,9 @@ function Body({
               Try again
             </button>
           ) : (
-            <BackToTelegram bot={view.start?.telegram_bot} />
+            !view.elsewhere && <BackTo start={view.start} />
           )}
+          {view.elsewhere && <OpenElsewhere />}
         </>
       )
     case 'ready': {
@@ -411,8 +434,8 @@ function Body({
         return (
           <>
             <h1>This confirmation has expired.</h1>
-            <p>Ask again in Telegram.</p>
-            <BackToTelegram bot={view.start.telegram_bot} />
+            <p>{askAgain(view.start)}</p>
+            <BackTo start={view.start} />
           </>
         )
       }
@@ -439,6 +462,7 @@ function Body({
               {view.note.text}
             </p>
           )}
+          {view.step === 'tap' && view.elsewhere && <OpenElsewhere />}
           {view.step === 'tap' && (
             <button type="button" className="mfc-link" onClick={onDecline}>
               Don't send it
@@ -464,6 +488,44 @@ function Summary({ start, now }: { start: SignStart; now: number }) {
       </p>
     </>
   )
+}
+
+/**
+ * For a browser that may refuse passkeys (another app's own): this page in the phone's own browser,
+ * and its link to paste there. The link is the one this page was opened with.
+ */
+function OpenElsewhere() {
+  const on = phone()
+  const [copied, setCopied] = useState(false)
+  const href = window.location.href
+  const copy = () => {
+    void navigator.clipboard?.writeText(href).then(
+      () => setCopied(true),
+      () => {},
+    )
+  }
+  return (
+    <div className="mfc-elsewhere">
+      <p className="mfc-meta">
+        No passkey prompt? Some apps' own browsers can't use passkeys. Open this page in{' '}
+        {on === 'ios' ? 'Safari' : on === 'android' ? 'Chrome' : 'your browser'} and approve there.
+      </p>
+      {on && (
+        <a className="mfc-button mfc-secondary" href={browserUrl(href, on)}>
+          {on === 'ios' ? 'Open in Safari' : 'Open in browser'}
+        </a>
+      )}
+      <button type="button" className="mfc-link" onClick={copy}>
+        {copied ? 'Link copied' : 'Copy link'}
+      </button>
+    </div>
+  )
+}
+
+/** The way back: to Telegram, or for an AI app's payment (or one not known), to the app it came from. */
+function BackTo({ start }: { start?: SignStart }) {
+  if (!start || fromAnApp(start)) return <p className="mfc-meta">You can close this page and go back to the app you came from.</p>
+  return <BackToTelegram bot={start.telegram_bot} />
 }
 
 /** Telegram usernames: 5-32 letters, digits and underscores. */

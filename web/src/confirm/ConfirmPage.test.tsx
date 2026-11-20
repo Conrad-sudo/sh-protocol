@@ -38,7 +38,7 @@ function putAway() {
 }
 
 /** POST /api/sign/start for the link's quote; each start gets a new sign_id, as the server's do. */
-function signStart(n: number): SignStart {
+function signStart(n: number, origin?: 'telegram' | 'mcp'): SignStart {
   return {
     sign_id: `sign-${n}`,
     challenge: b64url('the user operation hash, 32 b!!!'),
@@ -47,7 +47,7 @@ function signStart(n: number): SignStart {
     user_verification: 'required',
     timeout_ms: 60_000,
     expires_at: Math.floor(Date.now() / 1000) + 300,
-    summary: { action: 'Transfer 5 USDC to sam', network: 'Sepolia', chain_id: SEPOLIA, cost: { fees: '$0.35' } },
+    summary: { action: 'Transfer 5 USDC to sam', network: 'Sepolia', chain_id: SEPOLIA, origin, cost: { fees: '$0.35' } },
     telegram_bot: 'MitfahBot',
   }
 }
@@ -59,10 +59,12 @@ interface ServerOptions {
   start?: Answer
   /** What POST /api/sign/finish refuses with, instead of sending. */
   finish?: Answer
+  /** Where the quote was asked for, as the start reports it. Left out: as an older server, Telegram's. */
+  origin?: 'telegram' | 'mcp'
 }
 
 /** The API as the page meets it: no sign-in, only the link's token. */
-function stubServer({ start, finish }: ServerOptions = {}) {
+function stubServer({ start, finish, origin }: ServerOptions = {}) {
   const requests: { url: string; body: Record<string, unknown>; headers: Record<string, string> }[] = []
   const refuse = (answer: Answer) =>
     answer === 'offline' ? Promise.reject(new TypeError('Failed to fetch')) : Promise.resolve(json(answer.status, { detail: answer.detail }))
@@ -74,7 +76,7 @@ function stubServer({ start, finish }: ServerOptions = {}) {
       const starts = requests.filter(r => r.url === '/api/sign/start').length
       switch (url) {
         case '/api/sign/start':
-          return start ? refuse(start) : Promise.resolve(json(200, signStart(starts)))
+          return start ? refuse(start) : Promise.resolve(json(200, signStart(starts, origin)))
         case '/api/sign/finish':
           return finish ? refuse(finish) : Promise.resolve(json(200, { status: 'sent', outcome: SENT, transaction_id: 77 }))
         case '/api/sign/cancel':
@@ -172,7 +174,8 @@ describe('ConfirmPage', () => {
     stubServer({ start: { status: 404, detail: EXPIRED } })
     render(<ConfirmPage token={TOKEN} />)
     expect(await screen.findByRole('heading', { name: 'This confirmation has expired.' })).toBeInTheDocument()
-    expect(screen.getByText('Ask again in Telegram.')).toBeInTheDocument()
+    // Nothing says where the link came from (Telegram, or an AI app), so the page names neither.
+    expect(screen.getByText('Ask again in the app you came from.')).toBeInTheDocument()
     cleanup()
 
     // A link with no token worth sending is answered the same way, without asking the server.
@@ -348,6 +351,62 @@ describe('ConfirmPage', () => {
 
     putAway()
     expect(nav.close).toHaveBeenCalledTimes(1)
+  })
+
+  it("sends an AI app's payment back to the app it came from, not to Telegram", async () => {
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    stubServer({ origin: 'mcp' })
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(await screen.findByText(SENT)).toBeInTheDocument()
+    expect(screen.getByText('You can close this page and go back to the app you came from.')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Back to Telegram' })).toBeNull()
+  })
+
+  it("sends the user to the AI app, not Telegram, when no answer arrived", async () => {
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    stubServer({ origin: 'mcp', finish: 'offline' })
+    render(<ConfirmPage token={TOKEN} />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'No answer arrived, so it may still have been sent. Ask the app you came from for its status before you try again.',
+    )
+  })
+
+  it("offers the phone's own browser once a tapped prompt gives nothing, as in another app's browser", async () => {
+    onPhone(IPHONE)
+    const browser = installPasskeys()
+    browser.get.mockRejectedValue(refused())
+    stubServer({ origin: 'mcp' })
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+    render(<ConfirmPage token={TOKEN} />)
+
+    // The prompt opened with no tap is refused: that is most often Safari wanting a tap, so only the button.
+    const confirm = await screen.findByRole('button', { name: 'Confirm' })
+    expect(screen.queryByText(/No passkey prompt\?/)).toBeNull()
+    await user.click(confirm)
+
+    expect(await screen.findByText(/No passkey prompt\?/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open in Safari' })).toHaveAttribute('href', `x-safari-${window.location.href}`)
+    await user.click(screen.getByRole('button', { name: 'Copy link' }))
+    expect(writeText).toHaveBeenCalledWith(window.location.href)
+    expect(await screen.findByRole('button', { name: 'Link copied' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument()
+  })
+
+  it('offers no other browser on a computer when the prompt is closed', async () => {
+    const browser = installPasskeys()
+    browser.get.mockRejectedValue(refused())
+    stubServer()
+    const user = userEvent.setup()
+    render(<ConfirmPage token={TOKEN} />)
+
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByRole('button', { name: 'Confirm' })).toBeInTheDocument()
+    expect(screen.queryByText(/No passkey prompt\?/)).toBeNull()
   })
 
   it("says so on a browser that can't use passkeys", async () => {

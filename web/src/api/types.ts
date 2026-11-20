@@ -323,6 +323,8 @@ export interface SignStart {
     /** The network's name, e.g. "Base". */
     network: string
     chain_id: number
+    /** Where it was asked for: a Telegram card, an AI app over MCP, or the web chat. */
+    origin?: 'telegram' | 'mcp' | 'web'
     cost: SignCost
   }
   /**

@@ -237,3 +237,14 @@ body {
 .mfc-card p.mfc-note {
   margin: 16px 0 0;
 }
+
+/* Another browser, for one that may refuse passkeys: set apart from the payment's own buttons. */
+.mfc-elsewhere {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--mfc-rule);
+}
+
+.mfc-elsewhere .mfc-button {
+  margin-top: 12px;
+}
