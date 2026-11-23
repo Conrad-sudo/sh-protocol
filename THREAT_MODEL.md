@@ -271,6 +271,32 @@ A capped token may be anyone's contract, which three rules allow for:
 
 **Guarded by:** `test/unit/RecurringPaymentTest.t.sol` (owner-only creation incl. a real passkey UserOp, cap/pause/allowlist/fee failures leaving the schedule due, one payment per period, re-entry, uninstall wipe), `test_executor_*` in `SessionGuardTest`, and `test_setRecurringPaymentModule_onlyAffectsNewWallets` in `RegistryFeeTest`.
 
+### 3.17 Trading Agents — an Executor with Its Own Key and Limit ⚠️
+**Status: Mitigated by design, with accepted residual risk (2026-11-23).**
+**Threat:** `AgentModule` lets an agent trade from the wallet with **no tap from the user**: the agent holds its own secp256k1 key, signs each trade, and anyone may send it. This breaks "only your passkey sends" on purpose, for wallets whose owner adds an agent. A leaked agent key, an agent whose own model is manipulated, or a hostile relayer could try to: spend past what the owner allowed; move tokens the USD limit can't see; give itself more authority; replay or alter a signed trade; or drain ETH through fees, which the wallet's limit doesn't count. By the user's choice an agent may call **any exchange or protocol**, so on chain it can send value anywhere: the limits are the fence.
+
+**Mitigation in place:**
+- **Only the owner, directly, adds an agent or raises one** (`msg.sender == account.owner()`, `owner != account`, the module installed). A passkey acts as the wallet and is refused, as with recurring payments (§3.16). `onInstall` takes nothing, since anything acting as the wallet can call it directly. At most **3 agents**, each expiring within **90 days** of being set.
+- **The owner or a passkey can stop one.** `removeAgent` also accepts the wallet itself, which only takes authority away. Pausing the wallet stops every agent (`executeFromExecutor` is `whenNotPaused`); uninstalling removes them all.
+- **Two limits.** Every agent trade runs through `executeFromExecutor`: the wallet's guard (§3.5: no admin surface, limit module or EntryPoint, no `delegatecall`, the owner's allowlist when on), its fee, and its USD limit hook. The module then charges the agent's **own** limit with the drop in the wallet's remaining budget across the call (exact: within one transaction the wallet's spend only rises and its limit can't change) **plus the trade's fee in USD** at the oracle's native price. Without the fee, a leaked key could submit empty trades until the wallet's ETH went in fees. The agent's limit runs on the wallet's own window. Over either limit, the whole trade reverts, nonce included.
+- **Native ETH/BNB must be metered (rule 1).** Native metering is optional (§3.2); with it off, native could leave unseen. An agent can't be added, and no agent can trade, while it is off.
+- **No uncounted token leaves through the agent (rule 2).** A call with a token-moving function (the ERC-20, ERC-721, ERC-1155, ERC-1363/677, ERC-777 and ERC-6909 transfer and approval names, and DSToken's `push`/`move`) to anything not on the wallet's watched list is refused. Tokens capped in their own units (§3.15) are refused too: the agent's limit is in USD.
+- **No call to the module itself (rule 3)**, so an agent can't remove, raise or add agents through its own trade.
+- **Signatures bind everything.** EIP-712 over the wallet, the mode (a plain call or a plain batch only, no "try"), the calls, a nonce, a deadline and the agent's epoch; the domain binds the chain and the module. Nonces are a bitmap per agent (any order, each once). Each add gives a new epoch, so a removal voids every signature the agent made, even if the same address is added back. The sender chooses nothing the agent didn't sign.
+- **No re-entry.** One lock for the whole module: a call inside a trade can't start another trade.
+
+**Residual risk:**
+- **Up to the agent's limit per window is at risk** if its key leaks or it trades badly: a sandwiched swap, a bad rate, counted tokens or ETH sent to any address. That is the deal the owner makes; the wallet's own limit binds too.
+- **Funds already inside other protocols are outside both limits.** V3 positions (`collect` takes a recipient and needs no approval), lending deposits (`withdraw(to)`), LP tokens and NFTs the wallet holds can be pulled out to any address by calls on the protocol, not on the token. Putting counted tokens *into* a protocol is charged as spending, so this concerns what was there before, or what the agent put in and already paid for. The web app warns about it; the owner's allowlist stays opt-in.
+- **Function names not on the list.** A token that moves under some other name is not caught. The same limitation as the hook's approval rules (§3.3).
+- **An agent can buy a token the limit doesn't count but can't sell it** (its approvals are refused). Users should add tokens they want an agent to trade to the limit.
+- **Revoking a personal access token doesn't stop an agent** that holds its key and sends its own trades: only Remove, expiry, pause or uninstall do.
+- **The wallet pays the keeper fee even when the agent sends a trade itself.** A stale native feed stops agent trades, since the fee is priced with it.
+- **One contract per chain for every wallet that installs it.** A bug in it is reachable on all of them, bounded by the guard and each wallet's own limit.
+- **An owner tricked into adding an attacker's address** gives that attacker trades within that agent's limit, until removed or expired.
+
+**Guarded by:** `test/unit/AgentModuleTest.t.sol` (owner-only add/update incl. a real passkey UserOp; passkey removal; signatures across key, wallet, chain, module, nonce, deadline and epoch; the three rules; both limits, fees, the window; pause, uninstall, re-entry; a fuzz test of the limits; each rule broken on purpose fails the suite) and the agent tests in `SHForkTestBase` on real exchanges.
+
 ---
 
 ## 4. Off-Chain Threats

@@ -52,6 +52,7 @@
 | `make base-fork` | Start a Base fork at the latest block, on port 8549, and fund both bundlers |
 | `make fund ARGS=<network>` | Set a 100 ETH balance on every bundler key's address — `API_BUNDLER_1` (= `SEPOLIA_ACCOUNT`), `API_BUNDLER_2`, … and `TELEGRAM_BUNDLER_1`, … — and the keeper's (`KEEPER_KEY`) via `anvil_setBalance`. Runs for `*-fork` networks and bare `anvil` and no-ops for everything else, since only a local node implements that cheat RPC. Every fork target runs it as soon as the fork starts, and it is a prerequisite of both `deploy` and `deploy-wallet`, so it rarely needs running by hand — those addresses are the deployer/protocol owner and the two processes' bundlers on a fork, and start at the forked chain's real balance (zero on mainnet-fork/bsc-fork) |
 | `make deploy [ARGS="sepolia-fork"]` | Deploy `DeploySHProtocol.s.sol` — `ARGS` selects the signer/broadcast target (see `docs/setup.md`) |
+| `make deploy-agent-module [ARGS=<network>]` | Deploy `AgentModule` alone (`DeployAgentModule.s.sol`), on a network whose protocol is already deployed: nothing else refers to it, so no redeploy. Same `ARGS` as `deploy` |
 | `make db` | Bring the SQLite database up to date (numbered migrations, `db/schema.py`) and seed reference data |
 | `make deploy-wallet [ARGS=<network>]` | Deploy a per-user `SessionHandler` (seeded with its USD spending cap) for the CLI harness, approving the harness's soft passkey (a real user's passkey is made on their device, in the web app) |
 | `make agent` | Start the agent in interactive CLI mode (no Telegram needed) |
@@ -79,6 +80,7 @@ sh-protocol/
 │   ├── SessionHandler.sol
 │   ├── SpendingLimitModule.sol
 │   ├── RecurringPaymentModule.sol    ← the executor every wallet gets: owner-approved recurring payments
+│   ├── AgentModule.sol               ← an optional executor: trading agents with their own key and USD limit
 │   ├── utils/
 │   │   └── WebAuthnNative.sol       ← a passkey's signature checked on the P-256 precompile only (RIP-7212)
 │   ├── interfaces/
@@ -95,6 +97,7 @@ sh-protocol/
 │       └── MockWeth.sol
 ├── script/
 │   ├── DeploySHProtocol.s.sol
+│   ├── DeployAgentModule.s.sol
 │   ├── Constants.s.sol
 │   ├── HelperConfig.s.sol
 │   └── SendPackedUserOp.s.sol

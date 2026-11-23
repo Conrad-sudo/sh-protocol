@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console2} from "forge-std/Test.sol";
 import {VmSafe} from "forge-std/Vm.sol";
 import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/PackedUserOperation.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
-import {Execution, MODULE_TYPE_HOOK} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {Execution, MODULE_TYPE_HOOK, MODULE_TYPE_EXECUTOR} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {ERC7579Utils} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
 import {IUniswapV2Router01} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router01.sol";
 import {IUniswapV2Factory} from "lib/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
@@ -15,6 +15,7 @@ import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
 import {RecurringPaymentModule} from "../../src/RecurringPaymentModule.sol";
+import {AgentModule} from "../../src/AgentModule.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
 import {SHRegistry} from "../../src/SHRegistry.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
@@ -834,37 +835,10 @@ abstract contract SHForkTestBase is Test {
     function _liquidityRoundTrip() internal virtual {
         IERC20 tokenIn = _tokenIn();
         IERC20 tokenOut = _tokenOut();
-        uint256 amtIn = _swapAmount();
-
-        // Fund both sides so the pool ratio, not our balance, bounds addLiquidity. The V2 router
-        // creates the pair if this network has no direct tokenIn/tokenOut pool.
-        deal(address(tokenIn), address(wallet), amtIn * 4);
-        deal(address(tokenOut), address(wallet), amtIn * 1_000_000);
-        uint256 tokenOutBudget = tokenOut.balanceOf(address(wallet)) / 2;
 
         // 1. addLiquidity batch: approve both priced tokens, add, then zero any residual allowance.
-        Execution[] memory add = new Execution[](5);
-        add[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), amtIn)));
-        add[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), tokenOutBudget)));
-        add[2] = Execution(
-            address(v2Router),
-            0,
-            abi.encodeCall(
-                IUniswapV2Router01.addLiquidity,
-                (
-                    address(tokenIn),
-                    address(tokenOut),
-                    amtIn,
-                    tokenOutBudget,
-                    0,
-                    0,
-                    address(wallet),
-                    block.timestamp + 1 hours
-                )
-            )
-        );
-        add[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
-        add[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
+        //    Built before the prank, which its own calls (deal, balanceOf) would otherwise use up.
+        Execution[] memory add = _depositBatch();
         vm.prank(owner);
         wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(add));
 
@@ -894,6 +868,214 @@ abstract contract SHForkTestBase is Test {
         assertGt(tokenIn.balanceOf(address(wallet)), inBefore, "tokenIn not returned");
         assertGt(tokenOut.balanceOf(address(wallet)), outBefore, "tokenOut not returned");
         assertEq(IERC20(pair).allowance(address(wallet), address(v2Router)), 0, "LP approval left standing");
+    }
+
+    /// @dev A deposit into the venue as one batch, with the wallet funded for it: on V2, approve both
+    ///      priced tokens to the router, addLiquidity, then approve both back to 0. The V3 suites
+    ///      override it with step 1 of their position round-trip.
+    function _depositBatch() internal virtual returns (Execution[] memory add) {
+        IERC20 tokenIn = _tokenIn();
+        IERC20 tokenOut = _tokenOut();
+        uint256 amtIn = _swapAmount();
+
+        // Fund both sides so the pool ratio, not our balance, bounds addLiquidity. The V2 router
+        // creates the pair if this network has no direct tokenIn/tokenOut pool.
+        deal(address(tokenIn), address(wallet), amtIn * 4);
+        deal(address(tokenOut), address(wallet), amtIn * 1_000_000);
+        uint256 tokenOutBudget = tokenOut.balanceOf(address(wallet)) / 2;
+
+        add = new Execution[](5);
+        add[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), amtIn)));
+        add[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), tokenOutBudget)));
+        add[2] = Execution(
+            address(v2Router),
+            0,
+            abi.encodeCall(
+                IUniswapV2Router01.addLiquidity,
+                (
+                    address(tokenIn),
+                    address(tokenOut),
+                    amtIn,
+                    tokenOutBudget,
+                    0,
+                    0,
+                    address(wallet),
+                    block.timestamp + 1 hours
+                )
+            )
+        );
+        add[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
+        add[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(v2Router), 0)));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+             AGENTS (AgentModule, trading on the real exchange)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Installs a fresh AgentModule and adds one agent with `limitUsd`, as the owner does: two
+    ///      direct transactions. The fork wallet already meters native value (setUp).
+    function _addAgent(uint128 limitUsd) internal returns (AgentModule agents, address agent, uint256 agentKey) {
+        agents = new AgentModule();
+        (agent, agentKey) = makeAddrAndKey("agent");
+        vm.startPrank(owner);
+        wallet.installModule(MODULE_TYPE_EXECUTOR, address(agents), "");
+        agents.addAgent(address(wallet), agent, limitUsd, uint48(block.timestamp + 30 days));
+        vm.stopPrank();
+    }
+
+    /// @dev The agent's signature over `calls`, at its current epoch, an hour to run.
+    function _agentSig(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls, uint256 nonce)
+        internal
+        view
+        returns (uint48 deadline, bytes memory sig)
+    {
+        (AgentModule.Agent memory info,,,) = agents.getAgent(address(wallet), agent);
+        deadline = uint48(block.timestamp + 1 hours);
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(agentKey, agents.hashExecution(address(wallet), mode, calls, nonce, deadline, info.epoch));
+        sig = abi.encodePacked(r, s, v);
+    }
+
+    /// @dev Signs `calls` as the agent and sends them from a stranger, as Mitfah's relay would. Returns
+    ///      the gas the call used.
+    function _agentTrade(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls, uint256 nonce)
+        internal
+        returns (uint256 gasUsed)
+    {
+        (uint48 deadline, bytes memory sig) = _agentSig(agents, agent, agentKey, mode, calls, nonce);
+        vm.prank(makeAddr("relayer"));
+        gasUsed = gasleft();
+        agents.execute(address(wallet), agent, mode, calls, nonce, deadline, sig);
+        gasUsed -= gasleft();
+    }
+
+    /// @dev The wallet's fee for one executor call, in USD at the live native price.
+    function _agentFeeUsd() internal view returns (uint256) {
+        (, uint256 fee, uint256 keeperFee) = feeRegistry.feeConfig();
+        return uint256(oracle.getPrice(address(0), fee + keeperFee));
+    }
+
+    function _agentSpent(AgentModule agents, address agent) internal view returns (uint256 spent) {
+        (, spent,,) = agents.getAgent(address(wallet), agent);
+    }
+
+    /// @notice An agent's signed swap on the real exchange, sent by a stranger: the wallet's limit is
+    ///         charged the net value lost, and the agent's own limit that plus the fee.
+    function test_agent_realSwap_chargedToBothLimits() public {
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
+        uint256 amountIn = _swapAmount();
+        uint256 inBefore = _tokenIn().balanceOf(address(wallet));
+        uint256 outBefore = _tokenOut().balanceOf(address(wallet));
+
+        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)), 0);
+
+        uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
+        assertEq(_tokenIn().balanceOf(address(wallet)), inBefore - amountIn, "swap input not spent");
+        assertGt(received, 0, "swap produced no output");
+        assertEq(_tokenIn().allowance(address(wallet), swapRouter), 0, "router approval left standing");
+        int256 netUsd = oracle.getPrice(address(_tokenIn()), amountIn) - oracle.getPrice(address(_tokenOut()), received);
+        uint256 expected = netUsd > 0 ? uint256(netUsd) : 0;
+        assertEq(_spentInWindow(), int256(expected), "wallet's limit != net value lost");
+        assertEq(_agentSpent(agents, agent), expected + _agentFeeUsd(), "agent's limit != net value lost + fee");
+    }
+
+    /// @notice A native-in swap by an agent: the ETH/BNB it spends is charged, net of what it bought.
+    function test_agent_nativeInSwap_charged() public {
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
+        uint256 value = _nativeSwapValue();
+        uint256 outBefore = _tokenOut().balanceOf(address(wallet));
+        uint256 nativeBefore = address(wallet).balance;
+        (, uint256 fee, uint256 keeperFee) = feeRegistry.feeConfig();
+
+        _agentTrade(agents, agent, key, bytes32(0), abi.encodePacked(swapRouter, value, _nativeInSwapCalldata(value)), 0);
+
+        uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
+        assertGt(received, 0, "swap produced no output");
+        assertEq(address(wallet).balance, nativeBefore - value - fee - keeperFee, "native spent != value + fees");
+        int256 netUsd = oracle.getPrice(address(0), value) - oracle.getPrice(address(_tokenOut()), received);
+        uint256 expected = netUsd > 0 ? uint256(netUsd) : 0;
+        assertEq(_spentInWindow(), int256(expected), "wallet's limit");
+        assertEq(_agentSpent(agents, agent), expected + _agentFeeUsd(), "agent's limit");
+    }
+
+    /// @notice Any protocol: an agent deposits into the exchange's liquidity (a V3 position, or a V2
+    ///         pair), and what went in is charged to both limits.
+    function test_agent_depositIntoTheExchange_charged() public {
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
+        Execution[] memory deposit = _depositBatch();
+        uint256 inBefore = _tokenIn().balanceOf(address(wallet));
+        uint256 outBefore = _tokenOut().balanceOf(address(wallet));
+
+        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(deposit), 0);
+
+        uint256 usedIn = inBefore - _tokenIn().balanceOf(address(wallet));
+        uint256 usedOut = outBefore - _tokenOut().balanceOf(address(wallet));
+        assertGt(usedIn, 0, "no tokenIn went in");
+        assertGt(usedOut, 0, "no tokenOut went in");
+        int256 expected = oracle.getPrice(address(_tokenIn()), usedIn) + oracle.getPrice(address(_tokenOut()), usedOut);
+        assertEq(_spentInWindow(), expected, "wallet's limit != what went in");
+        assertEq(_agentSpent(agents, agent), uint256(expected) + _agentFeeUsd(), "agent's limit");
+    }
+
+    /// @notice Rule 2 on a real token: one of this chain's listed tokens that the wallet doesn't count
+    ///         can be neither sent nor approved by an agent.
+    function test_agent_uncountedRealTokenRefused() public {
+        (AgentModule agents, address agent,) = _addAgent(1_000_000e18);
+        address token = _uncountedListedToken();
+        deal(token, address(wallet), 10 ** IERC20Metadata(token).decimals());
+
+        bytes[2] memory attempts =
+            [abi.encodeCall(IERC20.transfer, (sink, uint256(1))), abi.encodeCall(IERC20.approve, (swapRouter, uint256(1)))];
+        for (uint256 i = 0; i < attempts.length; i++) {
+            vm.expectRevert(
+                abi.encodeWithSelector(AgentModule.AgentModule_UncountedToken.selector, token, bytes4(attempts[i]))
+            );
+            vm.prank(agent);
+            agents.execute(
+                address(wallet), agent, bytes32(0), abi.encodePacked(token, uint256(0), attempts[i]), i, uint48(block.timestamp), ""
+            );
+        }
+    }
+
+    /// @notice The agent's own limit stops a real transfer the wallet's limit would allow.
+    function test_agent_ownLimitStopsARealTransfer() public {
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1e18);
+        bytes memory calls =
+            abi.encodePacked(address(_tokenIn()), uint256(0), abi.encodeCall(IERC20.transfer, (sink, _swapAmount())));
+        (uint48 deadline, bytes memory sig) = _agentSig(agents, agent, key, bytes32(0), calls, 0);
+        vm.expectPartialRevert(AgentModule.AgentModule_AgentLimitExceeded.selector);
+        agents.execute(address(wallet), agent, bytes32(0), calls, 0, deadline, sig);
+        assertEq(_tokenIn().balanceOf(sink), 0);
+    }
+
+    /// @notice Gas of the same real swap sent by an agent and by a passkey. The two run in separate
+    ///         tests from the same setUp, so neither warms storage for the other. Read with -vv.
+    function test_agent_gas_swap() public {
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
+        uint256 amountIn = _swapAmount();
+        uint256 gasUsed = _agentTrade(
+            agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)), 0
+        );
+        console2.log("agent swap, signed and relayed (gas, execution only):", gasUsed);
+    }
+
+    function test_agent_gas_passkeySwapForComparison() public {
+        uint256 amountIn = _swapAmount();
+        PackedUserOperation memory userOp = _sessionBatchOp(_swapBatch(amountIn, amountIn));
+        uint256 gasUsed = gasleft();
+        _handleOps(userOp);
+        gasUsed -= gasleft();
+        console2.log("passkey swap, through the EntryPoint (gas, execution only):", gasUsed);
+    }
+
+    /// @dev The first token this chain lists that has code and that the wallet doesn't count.
+    function _uncountedListedToken() internal view returns (address) {
+        address[22] memory configured = configuredTokens(config);
+        for (uint256 i = 0; i < configured.length; i++) {
+            address token = configured[i];
+            if (token != address(0) && token.code.length != 0 && !wallet.isWatched(token)) return token;
+        }
+        revert("every listed token is counted");
     }
 
     /// @notice A revoked session key fails validation (AA24) on the real EntryPoint.

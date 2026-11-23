@@ -171,21 +171,7 @@ abstract contract SHUniswapV3ForkTestBase is SHForkTestBase {
     function _openPosition(INonfungiblePositionManager npm) private returns (uint256 tokenId) {
         IERC20 tokenIn = _tokenIn();
         IERC20 tokenOut = _tokenOut();
-        INonfungiblePositionManager.MintParams memory params = _mintParams(npm);
-        (uint256 amountIn, uint256 amountOut) = params.token0 == address(tokenIn)
-            ? (params.amount0Desired, params.amount1Desired)
-            : (params.amount1Desired, params.amount0Desired);
-
-        // The position manager pays the WETH side out of its OWN ETH when it holds at least that
-        // much, which a testnet's can. Empty it, so the WETH that goes in is the wallet's.
-        vm.deal(address(npm), 0);
-
-        Execution[] memory open = new Execution[](5);
-        open[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(npm), amountIn)));
-        open[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(npm), amountOut)));
-        open[2] = Execution(address(npm), 0, abi.encodeCall(INonfungiblePositionManager.mint, (params)));
-        open[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(npm), 0)));
-        open[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(npm), 0)));
+        (Execution[] memory open, INonfungiblePositionManager.MintParams memory params) = _openBatch(npm);
 
         uint256 nftsBefore = npm.balanceOf(address(wallet));
         uint256 inBefore = tokenIn.balanceOf(address(wallet));
@@ -222,6 +208,35 @@ abstract contract SHUniswapV3ForkTestBase is SHForkTestBase {
         // The no-standing-approval rule, held to the letter: neither token has an allowance left.
         assertEq(tokenIn.allowance(address(wallet), address(npm)), 0, "tokenIn approval left standing");
         assertEq(tokenOut.allowance(address(wallet), address(npm)), 0, "tokenOut approval left standing");
+    }
+
+    /// @dev Step 1's batch, with the wallet funded for it, and the mint's parameters.
+    function _openBatch(INonfungiblePositionManager npm)
+        private
+        returns (Execution[] memory open, INonfungiblePositionManager.MintParams memory params)
+    {
+        IERC20 tokenIn = _tokenIn();
+        IERC20 tokenOut = _tokenOut();
+        params = _mintParams(npm);
+        (uint256 amountIn, uint256 amountOut) = params.token0 == address(tokenIn)
+            ? (params.amount0Desired, params.amount1Desired)
+            : (params.amount1Desired, params.amount0Desired);
+
+        // The position manager pays the WETH side out of its OWN ETH when it holds at least that
+        // much, which a testnet's can. Empty it, so the WETH that goes in is the wallet's.
+        vm.deal(address(npm), 0);
+
+        open = new Execution[](5);
+        open[0] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(npm), amountIn)));
+        open[1] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(npm), amountOut)));
+        open[2] = Execution(address(npm), 0, abi.encodeCall(INonfungiblePositionManager.mint, (params)));
+        open[3] = Execution(address(tokenIn), 0, abi.encodeCall(IERC20.approve, (address(npm), 0)));
+        open[4] = Execution(address(tokenOut), 0, abi.encodeCall(IERC20.approve, (address(npm), 0)));
+    }
+
+    /// @dev The agent's deposit (see SHForkTestBase): step 1 of the round-trip, a new position.
+    function _depositBatch() internal override returns (Execution[] memory open) {
+        (open,) = _openBatch(INonfungiblePositionManager(positionManager));
     }
 
     /// @dev Step 2, one batch of one call, the way the app's withdraw_from_position sends it: a

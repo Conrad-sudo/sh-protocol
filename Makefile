@@ -390,8 +390,14 @@ NETWORK_ARGS := $(strip --rpc-url $(DEPLOY_RPC) $(DEPLOY_SIGNER) --broadcast $(D
 # real balance — zero on mainnet-fork/bsc-fork. Without the top-up first, the very first broadcast
 # fails for lack of gas. `fund` self-skips on live networks, and Make runs it once per invocation,
 # so the setup chains below are unaffected.
-deploy: 
+deploy:
 	forge script script/DeploySHProtocol.s.sol $(NETWORK_ARGS)
+
+# AgentModule alone, on a network whose protocol is already deployed (or a fork): no other contract
+# refers to it, so this needs no redeploy. Same ARGS as deploy. The app finds it in
+# broadcast/DeployAgentModule.s.sol/<chain id>/run-latest.json.
+deploy-agent-module:
+	forge script script/DeployAgentModule.s.sol $(NETWORK_ARGS)
 
 # Deploys to all four forks in turn. ARGS picks the network when the Makefile is read, so each
 # chain needs its own make run; the first failure stops the rest.
