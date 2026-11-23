@@ -302,19 +302,24 @@ export interface SignCost {
   native_asset?: string
 }
 
-/**
- * POST /api/sign/start: the final transaction is built, and its hash is the challenge the passkey
- * signs. Starting again rebuilds it and the older `sign_id` stops working.
- */
-export interface SignStart {
-  sign_id: string
-  /** Base64url of the 32 bytes the passkey signs. */
+/** What the passkey prompt needs to sign a challenge: the shape POST /api/sign/start and POST /api/tokens/options share. */
+export interface PasskeyPrompt {
+  /** Base64url of the bytes the passkey signs. */
   challenge: string
   rp_id: string
-  /** The account's passkeys this wallet trusts now: only these can approve it. */
+  /** The passkeys that may answer. */
   allow_credentials: { type: 'public-key'; id: string; transports?: string[] }[]
   user_verification: 'required'
   timeout_ms: number
+}
+
+/**
+ * POST /api/sign/start: the final transaction is built, and its hash is the challenge the passkey
+ * signs (32 bytes). Starting again rebuilds it and the older `sign_id` stops working.
+ * `allow_credentials` are the account's passkeys this wallet trusts now: only these can approve it.
+ */
+export interface SignStart extends PasskeyPrompt {
+  sign_id: string
   /** Unix seconds: the quote's own deadline. */
   expires_at: number
   summary: {
@@ -683,12 +688,35 @@ export interface ConnectAnswer {
   redirect_to: string
 }
 
-/** One entry of GET /api/connections: an AI app connected to the account. */
+/** What a connection may do: read the account only, or read it and prepare transactions. */
+export type ConnectionAccess = 'read' | 'prepare'
+
+/**
+ * One entry of GET /api/connections: an AI app connected to the account, or a personal access token
+ * the user made. A token's `app.name` is the name the user gave it.
+ */
 export interface ConnectedApp {
   id: number
+  kind: 'app' | 'token'
   app: KnownApp
+  access: ConnectionAccess
   /** Unix seconds. */
   created_at: number
   /** Unix seconds; null until the app first uses the connection. */
   last_used_at: number | null
+  /** Unix seconds: when a token stops working. Null for an app. */
+  expires_at: number | null
+}
+
+/** How long a personal access token may last, in days. */
+export type TokenDays = 7 | 30 | 90
+
+/** POST /api/tokens: a new personal access token. `token` is shown this once. */
+export interface CreatedToken {
+  id: number
+  token: string
+  name: string
+  access: ConnectionAccess
+  /** Unix seconds. */
+  expires_at: number
 }

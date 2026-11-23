@@ -1,5 +1,14 @@
 import { apiFetch } from './client'
-import type { ConnectAnswer, ConnectedApp, ConnectRequest } from './types'
+import type {
+  ConnectAnswer,
+  ConnectedApp,
+  ConnectionAccess,
+  ConnectRequest,
+  CreatedToken,
+  PasskeyAssertionJSON,
+  PasskeyPrompt,
+  TokenDays,
+} from './types'
 
 /**
  * AI apps connecting to the account over MCP: the Allow page's request, its two answers, and the
@@ -29,7 +38,20 @@ export async function fetchConnectedApps(signal?: AbortSignal) {
   return (await apiFetch<{ connections: ConnectedApp[] }>('/api/connections', { signal })).connections
 }
 
-/** Disconnects an app: its access ends on its very next call. */
+/** Disconnects an app, or revokes a token: its access ends on its very next call. */
 export function disconnectApp(id: number) {
   return apiFetch<void>(`/api/connections/${id}`, { method: 'DELETE' })
+}
+
+/**
+ * The passkey prompt for making a personal access token: a single-use challenge and the account's
+ * passkeys. Fetch it before the tap (Safari opens the prompt only inside it).
+ */
+export function fetchTokenOptions(signal?: AbortSignal) {
+  return apiFetch<PasskeyPrompt>('/api/tokens/options', { method: 'POST', signal })
+}
+
+/** Makes a personal access token with the passkey's answer. The answer holds the token, this once. */
+export function createToken(body: { name: string; days: TokenDays; access: ConnectionAccess; credential: PasskeyAssertionJSON }) {
+  return apiFetch<CreatedToken>('/api/tokens', { method: 'POST', body })
 }

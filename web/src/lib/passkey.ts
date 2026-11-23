@@ -12,7 +12,7 @@
  * Binary fields travel as base64url without padding, in the JSON shapes the WebAuthn spec names
  * (RegistrationResponseJSON, AuthenticationResponseJSON), which the server's py_webauthn reads.
  */
-import type { PasskeyAssertionJSON, PasskeyRegistrationJSON, SignStart } from '../api/types'
+import type { PasskeyAssertionJSON, PasskeyPrompt, PasskeyRegistrationJSON } from '../api/types'
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -298,13 +298,13 @@ function toAssertionJSON(credential: PublicKeyCredential): PasskeyAssertionJSON 
 }
 
 /**
- * Opens the passkey prompt for a confirmation (POST /api/sign/start's answer): only the passkeys this
- * wallet trusts, and the device must check it is the user (Face ID, fingerprint or PIN), not just
- * that someone is there. Call it straight from the tap.
+ * Opens the passkey prompt for a confirmation (POST /api/sign/start's answer) or a new token (POST
+ * /api/tokens/options'): only the passkeys the server named, and the device must check it is the
+ * user (Face ID, fingerprint or PIN), not just that someone is there. Call it straight from the tap.
  *
  * @throws PasskeyError (the promise rejects): `unsupported`, `cancelled`, `no-passkey` or `failed`.
  */
-export function signWithPasskey(start: SignStart): Promise<PasskeyAssertionJSON> {
+export function signWithPasskey(start: PasskeyPrompt): Promise<PasskeyAssertionJSON> {
   const asked = start.allow_credentials.map(credential => credential.id)
   let request: Promise<Credential | null>
   try {
