@@ -11,14 +11,16 @@ PIN), and answered the challenge this server issued to this account.
 import functools
 import secrets
 import time
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from hexbytes import HexBytes
 from pydantic import BaseModel, Field
-from webauthn import generate_registration_options, verify_registration_response
+from webauthn import generate_registration_options, verify_authentication_response, verify_registration_response
 from webauthn.helpers import (
     base64url_to_bytes,
     bytes_to_base64url,
+    parse_authentication_credential_json,
     parse_client_data_json,
     parse_registration_credential_json,
 )
@@ -38,6 +40,7 @@ from auth import get_current_user
 from db import (
     consume_passkey_challenge,
     delete_passkey,
+    find_passkey_by_credential,
     get_json,
     get_or_create_webauthn_handle,
     get_passkey,
@@ -45,9 +48,11 @@ from db import (
     get_user_by_id,
     get_wallet_address,
     get_wallet_chains,
+    get_webauthn_handle,
     rename_passkey,
     save_passkey,
     save_passkey_challenge,
+    update_passkey_sign_count,
 )
 from network_config import load_network_config_by_name, network_name
 from parallel import read_all, start_read
@@ -214,6 +219,61 @@ def rename(key_id: str, req: RenameRequest, user_id: int = Depends(get_current_u
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "You have no such passkey.")
     return _shown(row)
+
+
+def verify_assertion(
+    credential_json: dict,
+    consume_challenge: Callable[[str], bool],
+    *,
+    expired: str,
+    unknown: str,
+    user_id: int | None = None,
+) -> dict:
+    """
+    Checks a passkey's answer to a challenge this server issued (navigator.credentials.get()), for
+    signing in and for making a personal access token, and returns the passkey's row.
+
+    The challenge is used up first (consume_challenge gets it as base64url, and says whether it was
+    issued, unused and unexpired), so an answer is good once. Then py_webauthn checks it against this
+    site's rp id and origins, the passkey's stored public key and counter, and user verification
+    (Face ID, a fingerprint or a PIN). A user handle, when the device sends one, must be the
+    passkey's account's.
+
+    Whether a wallet approves the passkey is the caller's to ask (approved_on_a_wallet).
+
+    @param expired  What to say when the challenge isn't good (400).
+    @param unknown  What to say when the passkey isn't one this server knows -- or, with `user_id`,
+                    isn't that account's (401).
+    @raises HTTPException 400 if the answer can't be read or its challenge isn't good; 401 if the
+            passkey is unknown, another account's, or fails the check.
+    """
+    try:
+        credential = parse_authentication_credential_json(credential_json)
+        challenge = parse_client_data_json(credential.response.client_data_json).challenge
+    except (WebAuthnException, ValueError, TypeError, KeyError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The browser's answer couldn't be read.")
+    if not consume_challenge(bytes_to_base64url(challenge)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, expired)
+    row = find_passkey_by_credential(bytes_to_base64url(credential.raw_id))
+    if row is None or get_user_by_id(row["user_id"]) is None or (user_id is not None and row["user_id"] != user_id):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
+    user_handle = credential.response.user_handle
+    if user_handle is not None and bytes(user_handle) != get_webauthn_handle(row["user_id"]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
+    try:
+        verified = verify_authentication_response(
+            credential=credential,
+            expected_challenge=challenge,
+            expected_rp_id=passkey.rp_id(),
+            expected_origin=passkey.allowed_origins(),
+            credential_public_key=row["public_key"],
+            credential_current_sign_count=row["sign_count"],
+            require_user_verification=True,
+        )
+    except WebAuthnException:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "That passkey couldn't be verified. Try again.")
+    update_passkey_sign_count(row["key_id"], verified.new_sign_count)
+    return row
 
 
 def _approves(user_id: int, key_id: str, chain_id: int) -> bool:

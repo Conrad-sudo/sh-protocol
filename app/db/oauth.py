@@ -2,6 +2,9 @@
 AI apps connected over MCP: their requests to connect, the connections the user allowed, and the
 tokens each connection holds. Only SHA-256 hashes of codes and tokens are stored, so a read of the
 database cannot be replayed as a login. The rules that use these rows live in mcp_auth.py.
+
+A personal access token is a connection too: its app is PERSONAL_APP, its label the name the user
+gave it, and it holds one token of kind PERSONAL_APP that lasts until it expires or is revoked.
 """
 import time
 
@@ -11,6 +14,16 @@ from db import get_db
 # enough that a code presented a second time is still recognised as used, and so revokes what it
 # made, rather than being treated as one nobody issued.
 FINISHED_REQUEST_KEEP_SECS = 86_400
+
+# The app of a personal access token's connection, and the kind of its one token. No app on the
+# known list (mcp_clients.py) has this key.
+PERSONAL_APP = "personal"
+
+# A personal token that is live: not revoked, not expired, of a connection not ended. `c` is the
+# connection; `?` is now.
+_LIVE_PERSONAL_TOKEN = f"""EXISTS (SELECT 1 FROM mcp_tokens t
+                                  WHERE t.connection_id = c.id AND t.kind = '{PERSONAL_APP}'
+                                    AND t.revoked = 0 AND t.expires_at >= ?)"""
 
 
 def _row(row) -> dict | None:
@@ -106,12 +119,56 @@ def get_mcp_connection(connection_id: int) -> dict | None:
 
 
 def get_mcp_connections(user_id: int) -> list[dict]:
-    """The account's live connections, newest first."""
+    """
+    The account's live connections, newest first: apps it allowed, and personal tokens that haven't
+    expired.
+
+    @return  mcp_connections rows, plus `expires_at`: a personal token's expiry, None for an app.
+    """
+    now = int(time.time())
     rows = get_db().execute(
-        "SELECT * FROM mcp_connections WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC, id DESC",
-        (user_id,),
+        f"""SELECT c.*,
+                   (SELECT MAX(t.expires_at) FROM mcp_tokens t
+                     WHERE t.connection_id = c.id AND t.kind = '{PERSONAL_APP}') AS expires_at
+            FROM mcp_connections c
+            WHERE c.user_id = ? AND c.revoked_at IS NULL
+              AND (c.app != '{PERSONAL_APP}' OR {_LIVE_PERSONAL_TOKEN})
+            ORDER BY c.created_at DESC, c.id DESC""",
+        (user_id, now),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_personal_token(user_id: int, label: str, scope: str, token_hash: str, expires_at: int,
+                          max_live: int) -> int | None:
+    """
+    Files a personal access token: its connection and its one token, in one transaction, unless the
+    account already has `max_live` live ones. The count and the insert are one statement, so two
+    tokens made at once can't both slip under the limit.
+
+    @return  The connection's id, or None when the account is at the limit.
+    """
+    db = get_db()
+    now = int(time.time())
+    cur = db.execute(
+        f"""INSERT INTO mcp_connections (user_id, app, client_id, scope, label, created_at)
+            SELECT ?, '{PERSONAL_APP}', '{PERSONAL_APP}', ?, ?, ?
+            WHERE (SELECT COUNT(*) FROM mcp_connections c
+                    WHERE c.user_id = ? AND c.app = '{PERSONAL_APP}' AND c.revoked_at IS NULL
+                      AND {_LIVE_PERSONAL_TOKEN}) < ?""",
+        (user_id, scope, label, now, user_id, now, max_live),
+    )
+    if cur.rowcount != 1:
+        db.rollback()
+        return None
+    connection_id = cur.lastrowid
+    db.execute(
+        """INSERT INTO mcp_tokens (token_hash, connection_id, kind, issued_by, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (token_hash, connection_id, PERSONAL_APP, PERSONAL_APP, now, expires_at),
+    )
+    db.commit()
+    return connection_id
 
 
 def revoke_mcp_connection(connection_id: int, user_id: int | None = None) -> bool:
@@ -167,10 +224,10 @@ def get_mcp_token(token_hash: str) -> dict | None:
     """
     A token by its hash, with its connection's account, app and revocation, or None.
 
-    @return  The mcp_tokens row plus user_id, app, client_id, scope and connection_revoked_at.
+    @return  The mcp_tokens row plus user_id, app, client_id, scope, label and connection_revoked_at.
     """
     return _row(get_db().execute(
-        """SELECT t.*, c.user_id, c.app, c.client_id, c.scope, c.revoked_at AS connection_revoked_at
+        """SELECT t.*, c.user_id, c.app, c.client_id, c.scope, c.label, c.revoked_at AS connection_revoked_at
            FROM mcp_tokens t JOIN mcp_connections c ON c.id = t.connection_id
            WHERE t.token_hash = ?""",
         (token_hash,),

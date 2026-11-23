@@ -15,6 +15,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.routing import Route
 
+import routes.access_tokens
 import routes.added_tokens
 import routes.allowlist
 import routes.catalog
@@ -111,6 +112,7 @@ app.include_router(routes.owner.router)
 app.include_router(routes.allowlist.router)
 app.include_router(routes.recurring.router)
 app.include_router(routes.passkeys.router)
+app.include_router(routes.access_tokens.router)
 app.include_router(routes.sign.router)
 app.include_router(routes.oauth.router)
 

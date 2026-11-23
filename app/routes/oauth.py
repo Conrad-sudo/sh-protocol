@@ -1,6 +1,7 @@
 """
 Connecting AI apps (Claude, Claude Code, ChatGPT) to a Mitfah account over MCP: this server's own
-OAuth 2.1 endpoints, the API behind the Allow page (/connect), and the account's connected apps.
+OAuth 2.1 endpoints, the API behind the Allow page (/connect), and the account's connected apps --
+listed beside its personal access tokens, which are made in routes/access_tokens.py.
 
 The rules live in mcp_auth.py and the known list in mcp_clients.py. The flow:
 
@@ -33,7 +34,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 import mcp_auth
 from auth import get_current_user
-from db import get_mcp_connections, purge_expired_mcp_tokens, revoke_mcp_connection
+from db import PERSONAL_APP, get_mcp_connections, purge_expired_mcp_tokens, revoke_mcp_connection
 from mcp_clients import APPS, find_app
 from routes.deps import limiter
 from routes.signin import COOKIE_SECURE
@@ -305,30 +306,40 @@ def revoke(form: dict[str, str] | None = Depends(_form)):
 # ── Connected apps (Controls) ─────────────────────────────────────────────────
 
 
+def _connection_shown(row: dict) -> dict:
+    """A connection as Controls lists it: an app the user allowed, or a personal token."""
+    personal = row["app"] == PERSONAL_APP
+    return {
+        "id": row["id"],
+        "kind": "token" if personal else "app",
+        "app": (
+            {"key": PERSONAL_APP, "name": mcp_auth.connection_name(row["app"], row["label"]), "site": ""}
+            if personal else _app_shown(row["app"])
+        ),
+        "access": mcp_auth.access_of(row["scope"]),
+        "created_at": row["created_at"],
+        "last_used_at": row["last_used_at"],
+        "expires_at": row["expires_at"],
+    }
+
+
 @router.get("/api/connections")
 def list_connections(user_id: int = Depends(get_current_user)):
     """
-    The AI apps connected to this account, newest first.
+    The AI apps connected to this account and its personal access tokens (routes/access_tokens.py),
+    newest first. A token that has expired is left out.
 
-    @return  {"connections": [{"id", "app": {"key", "name", "site"}, "created_at", "last_used_at"}]}.
+    @return  {"connections": [{"id", "kind": "app" | "token", "app": {"key", "name", "site"},
+             "access": "prepare" | "read", "created_at", "last_used_at", "expires_at"}]}. A token's
+             app.name is the name the user gave it; expires_at is None for an app.
     """
-    return {
-        "connections": [
-            {
-                "id": row["id"],
-                "app": _app_shown(row["app"]),
-                "created_at": row["created_at"],
-                "last_used_at": row["last_used_at"],
-            }
-            for row in get_mcp_connections(user_id)
-        ]
-    }
+    return {"connections": [_connection_shown(row) for row in get_mcp_connections(user_id)]}
 
 
 @router.delete("/api/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
 def disconnect(connection_id: int, user_id: int = Depends(get_current_user)):
     """
-    Disconnects an app: its tokens stop working on the very next call.
+    Disconnects an app, or revokes a personal token: its tokens stop working on the very next call.
 
     @raises HTTPException 404 if the account has no such live connection.
     """

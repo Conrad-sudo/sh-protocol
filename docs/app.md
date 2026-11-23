@@ -38,7 +38,7 @@ app/
 ├── chat_memory.py         ← The agent's conversations: a LangGraph checkpointer on wallet-chat.db, a connection per thread
 ├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
 ├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
-├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in)
+├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in; routes/access_tokens.py: personal access tokens)
 ├── mcp_server.py          ← MCP for AI apps at /mcp (Claude, Claude Code, ChatGPT): the token check in front of the SDK, and get_account
 ├── mcp_tools.py           ← The wallet's tools as AI apps see them: each wrapped with a `network`, its own thread pool, a per-app rate limit
 ├── mcp_auth.py            ← How AI apps sign in: codes with PKCE, access and refresh tokens, rotation, revocation
@@ -71,7 +71,7 @@ app/
     ├── test_position_tools.py ← The agent's V3 liquidity tools, their refusals, and the per-chain liquidity-tool filter (make position-tools-test)
     ├── test_ens_names.py  ← ENS lookups, and CCIP-Read kept off our own network (make ens-test)
     ├── test_passkeys.py   ← Approvals packed as the wallet reads them (the contract's own known-answer vector), the op deadline nonce, making/managing passkeys, a Telegram link (make passkeys-test)
-    ├── test_mcp.py        ← AI apps' sign-in (known list, Allow page, codes, tokens, refresh reuse, revocation), /mcp, connected apps, passkey sign-in (make mcp-test)
+    ├── test_mcp.py        ← AI apps' sign-in (known list, Allow page, codes, tokens, refresh reuse, revocation), /mcp, connected apps, passkey sign-in, personal access tokens (make mcp-test)
     ├── test_mcp_fork.py   ← AI apps end to end against the RUNNING API and a fork: OAuth, reads, quote, link approved by a soft passkey, confirmed (make mcp-e2e)
     ├── test_chat_memory.py ← The conversation store: a turn saved once as it ends, many at once on their own threads, two processes on one file (make chat-memory-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
@@ -1002,8 +1002,9 @@ is retired and a new pair issued. Any other reuse — later, after the successor
 retired successor itself turning up — ends the connection, as does a second exchange of a code.
 `POST /api/oauth/revoke` (RFC 7009): a refresh token ends its connection, an access token only itself.
 
-**One permission ("wallet").** Read the account and prepare transactions. Whatever scope an app asks
-for, that is what it gets (and the token response says so). No read-only option.
+**One permission for apps ("wallet").** Read the account and prepare transactions. Whatever scope an
+app asks for, that is what it gets (and the token response says so). Only a personal token can be
+read-only (below).
 
 **`/mcp` (`mcp_server.py`).** The SDK (`mcp` 2.3.0) speaks the protocol, both the initialize handshake
 and 2026-07-28's per-request envelope, stateless with JSON replies. `McpEndpoint` checks the bearer
@@ -1070,8 +1071,33 @@ tools are marked not read-only, so apps ask the user before calling one.
   and a Copy link button (`OpenElsewhere`): other apps' browsers may refuse passkeys as Telegram's does,
   with no sign to spot them by.
 
-**Connected apps.** `GET /api/connections`, `DELETE /api/connections/{id}`; Controls → Connected apps
-lists them (the account's, shown even with no wallet) with the address to connect one. Production
+**Personal access tokens (`routes/access_tokens.py`, 2026-11-20).** For anything not on the known list
+— the user's own scripts and agents, an app on a local model — which sends `Authorization: Bearer
+mfp_…` to the same `/mcp`. Made in Controls → Connected apps → Create a token:
+1. `POST /api/tokens/options` → a passkey prompt (`challenge`, `rp_id`, `allow_credentials` = the
+   account's passkeys, `user_verification`, `timeout_ms`: the shape `/api/sign/start` uses). Its
+   challenge is kept with registration's (`passkey_challenges`, per account, single use, 10 minutes).
+   409 when the account has no passkey or already has `MAX_PERSONAL_TOKENS` (10) live.
+2. `POST /api/tokens` {`name` 1–40, `days` 7|30|90, `access` `read`|`prepare`, `credential`} →
+   `routes.passkeys.verify_assertion` (shared with passkey sign-in: challenge used up first, then
+   py_webauthn with user verification; the passkey must be this account's), then
+   `approved_on_a_wallet` (403 if no wallet approves it now, 503 if the wallets can't be read). The
+   answer (`Cache-Control: no-store`) carries the token, the only time it exists in the clear.
+
+A token is an `mcp_connections` row with `app = 'personal'`, the name in `label` (migration 12), scope
+`read` or `wallet`, holding one `mcp_tokens` row of kind `personal`. The limit check and the insert are
+one SQL statement. `verify_access` accepts `mfp_` tokens of that kind only; a refresh grant refuses
+them; RFC 7009 revocation of one ends it. The caller carries `name` (the label, or the known app's
+name), used by `get_account`'s `connected_app` and the "replaced by" note on a voided card;
+`get_account` also says `access`. A read-only token's `tools/list` leaves out the quote tools and
+`cancel_transaction` (`mcp_tools.PREPARING_TOOLS`, by the SDK's server middleware
+`hide_preparing_tools`), and calling one anyway is refused first thing (`require_prepares`): the SDK
+still finds a hidden tool by name. A read-and-prepare token is exactly an app: quotes, links, the
+passkey. Phase 1 of the agent plan; autonomous agents (their own key and limit) come later.
+
+**Connected apps.** `GET /api/connections` (each with `kind` app|token, `access`, and a token's
+`expires_at`; expired tokens left out), `DELETE /api/connections/{id}` (Disconnect or Revoke); Controls →
+Connected apps lists them (the account's, shown even with no wallet) with the address to connect one. Production
 needs `deploy/Caddyfile`'s `/mcp` and `/.well-known/oauth-*` blocks (the dev server proxies the same),
 and `WEB_APP_URL` set to the exact public origin: it is the issuer every token and redirect names.
 

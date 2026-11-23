@@ -31,6 +31,10 @@ what stopped a double payment on 2026-10-22); a Telegram card it voids loses its
 cancel's does.
 
 get_transaction_status and cancel_transaction answer for a quote an AI app raised, by its id.
+
+A read-only personal token (mcp_auth.READ_SCOPE) gets the reads and get_transaction_status only: the
+tools that prepare or cancel are left out of its tools/list (hide_preparing_tools) and refused if it
+calls one anyway (require_prepares).
 """
 import asyncio
 import functools
@@ -62,7 +66,6 @@ from chat_limits import CHAT_RATE_LIMIT
 from constants import get_chain_display_name
 from db import acting_network, cancel_sign_request, get_sign_request_by_quote, get_wallet_chains
 from db.sign_requests import CANCELLED, FAILED, OPEN, SENDING, SENT
-from mcp_clients import APPS
 from network_config import CHAIN_NAME_BY_ID, network_name
 from redact import redact
 from routes.chat import _chat_turn
@@ -125,6 +128,10 @@ PREPARES = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotent
 CANCELS = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
 BUSY = "Mitfah is answering another request for this account right now. Try again in a moment."
+READ_ONLY_TOKEN = (
+    "This connection is read-only: it can't prepare transactions. To do that, make a token that can "
+    "\"read and prepare\" in Mitfah's Controls, under Connected apps."
+)
 
 # Other names people and models use for a network, beyond its chain id, its name here and the name
 # get_account shows.
@@ -159,6 +166,17 @@ def count_call(caller: dict) -> None:
         raise ToolError(
             "This app has asked Mitfah too many times in the last minute. Wait a minute, then try again."
         )
+
+
+def require_prepares(caller: dict) -> None:
+    """
+    Refuses a read-only personal token a tool that prepares or cancels a transaction. The rule:
+    hiding those tools from its tools/list (hide_preparing_tools) is only a courtesy to its model.
+
+    @raises ToolError  When the caller may only read.
+    """
+    if not mcp_auth.prepares(caller):
+        raise ToolError(READ_ONLY_TOKEN)
 
 
 def count_quote(user_id: int) -> None:
@@ -314,9 +332,8 @@ def _quote(tool: BaseTool, caller: dict, chain_id: int, args: dict) -> Any:
             for pending in quotes.raised_in(user_id, chain_id, turn_id):
                 quotes.drop(user_id, pending.quote_id, chain_id)
             return told
-    app = APPS[caller["app"]].name if caller["app"] in APPS else "an AI app"
     for request in offered.superseded:
-        telegram_notify.tell(request, f"Cancelled: a newer request from {app} replaced it. Nothing was sent.")
+        telegram_notify.tell(request, f"Cancelled: a newer request from {caller['name']} replaced it. Nothing was sent.")
     return quote_result(offered)
 
 
@@ -364,6 +381,8 @@ def wrap(spec: Spec) -> Tool:
     async def call(ctx: Context, **args: Any) -> Any:
         caller = caller_of(ctx)
         count_call(caller)
+        if spec.quotes:
+            require_prepares(caller)
         network = args.pop("network", None)
         chain_id = resolve_network(caller["user_id"], network) if spec.on_a_network else None
         if spec.quotes:
@@ -714,6 +733,7 @@ async def get_transaction_status(ctx: Context, quote_id: QuoteId) -> dict:
 async def cancel_transaction(ctx: Context, quote_id: QuoteId) -> dict:
     caller = caller_of(ctx)
     count_call(caller)
+    require_prepares(caller)
     try:
         return await anyio.to_thread.run_sync(
             functools.partial(cancel_quote, caller["user_id"], quote_id), limiter=_thread_pool(),
@@ -723,6 +743,26 @@ async def cancel_transaction(ctx: Context, quote_id: QuoteId) -> dict:
     except Exception as e:
         log.exception("MCP cancel_transaction failed (connection %s)", caller["connection_id"])
         raise ToolError(UNEXPECTED) from e
+
+
+# What a read-only token may not call, and doesn't see in its tools/list.
+PREPARING_TOOLS = frozenset({spec.tool.name for spec in QUOTES} | {"cancel_transaction"})
+
+
+async def hide_preparing_tools(ctx, call_next):
+    """
+    Server middleware (mcp_server.py): leaves PREPARING_TOOLS out of a read-only caller's tools/list,
+    so its model isn't offered tools it would only be refused (require_prepares). Every other
+    message, and every other caller, passes through as it is.
+    """
+    result = await call_next(ctx)
+    if ctx.method != "tools/list" or not isinstance(result, dict):
+        return result
+    request = ctx.request
+    caller = request.scope.get("state", {}).get(CALLER_KEY) if request is not None else None
+    if caller is None or mcp_auth.prepares(caller):
+        return result
+    return {**result, "tools": [tool for tool in result.get("tools", []) if tool.get("name") not in PREPARING_TOOLS]}
 
 
 def wallet_tools() -> list[Tool]:

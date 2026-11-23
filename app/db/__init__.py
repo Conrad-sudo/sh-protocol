@@ -10,7 +10,7 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   chains        chains, RPCs, factory addresses, and the network each user acts on
   wallets       each user's wallet per chain
   passkeys      the account's passkeys, its WebAuthn user handle, registration challenges and sign-in challenges
-  oauth         AI apps over MCP: requests to connect, connections, their tokens
+  oauth         AI apps over MCP: requests to connect, connections, their tokens, personal tokens
   sign_requests quotes offered for a passkey's approval, frozen for whichever process signs them
   tokens        listed, added-by-address, dashboard and LP tokens
   contacts      the contact list, the only destinations the assistant may pay
@@ -208,8 +208,10 @@ from db.passkeys import (  # noqa: E402 -- after get_db, which these modules imp
     update_passkey_sign_count,
 )
 from db.oauth import (  # noqa: E402 -- after get_db, which these modules import
+    PERSONAL_APP,
     approve_oauth_request,
     create_mcp_connection,
+    create_personal_token,
     deny_oauth_request,
     get_mcp_connection,
     get_mcp_connections,

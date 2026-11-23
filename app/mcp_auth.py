@@ -7,18 +7,24 @@ PKCE (S256 only), no client secrets, the `iss` parameter on every answer (RFC 92
 to this server's /mcp (RFC 8707). Only apps on the known list (mcp_clients.py) get a code, and only
 at the address that app owns.
 
-What a connection can do is the one permission there is, "wallet": read the account and prepare
-transactions. It never sends anything: every send still needs the user's passkey on the confirm
-page.
+What an app's connection can do is SCOPE, "wallet": read the account and prepare transactions. It
+never sends anything: every send still needs the user's passkey on the confirm page.
+
+Apps not on the known list -- the user's own scripts and agents -- connect with a personal access
+token instead, made in Controls (routes/access_tokens.py): the user names it, picks 7, 30 or 90 days
+and what it may do, READ_SCOPE (read only) or SCOPE (read and prepare), and confirms with a passkey
+a wallet approves. It is shown once. At most MAX_PERSONAL_TOKENS are live per account. A read-only
+token's caller doesn't see the tools that prepare, and is refused if it calls one (mcp_tools.py).
 
 Tokens are opaque random strings, looked up on every call (only their SHA-256 is stored), so
-disconnecting an app in Controls stops it at once:
+disconnecting an app or revoking a token in Controls stops it at once:
   - access token: 1 hour.
   - refresh token: 30 days from its last use. Each use swaps it for a new pair (rotation). If a
     used one comes back within REFRESH_RETRY_SECS and what it was swapped for hasn't been used yet,
     that is the app retrying a reply it lost: what the first try minted is retired and a fresh
     pair issued. Any other reuse means two parties hold it, so the connection is ended.
   - authorization code: 60 seconds, once. A second exchange ends the connection the first made.
+  - personal access token: the days the user picked. Never refreshed: a new one is made in Controls.
 """
 import base64
 import hashlib
@@ -30,8 +36,10 @@ import time
 from urllib.parse import urlencode
 
 from db import (
+    PERSONAL_APP,
     approve_oauth_request,
     create_mcp_connection,
+    create_personal_token,
     deny_oauth_request,
     get_mcp_token,
     get_mcp_tokens_issued_by,
@@ -47,9 +55,17 @@ from db import (
     touch_mcp_connection,
     use_oauth_code,
 )
+from mcp_clients import APPS
 
-# The one permission a connection has: read the account and prepare transactions (never send).
+# What an app's connection may do: read the account and prepare transactions (never send). A
+# personal token has it too, when the user chose "read and prepare".
 SCOPE = "wallet"
+# What a read-only personal token may do: read the account, nothing else.
+READ_SCOPE = "read"
+
+# How long a personal token may last, in days; and how many may be live per account.
+PERSONAL_TOKEN_DAYS = (7, 30, 90)
+MAX_PERSONAL_TOKENS = 10
 
 ACCESS_TOKEN_TTL_SECS = 60 * 60
 REFRESH_TOKEN_TTL_SECS = 30 * 86_400
@@ -63,6 +79,7 @@ REFRESH_RETRY_SECS = 60
 ACCESS_PREFIX = "mfa_"
 REFRESH_PREFIX = "mfr_"
 CODE_PREFIX = "mfc_"
+PERSONAL_PREFIX = "mfp_"
 
 # RFC 7636: a verifier is 43-128 unreserved characters; an S256 challenge is 43 base64url ones.
 _VERIFIER = re.compile(r"[A-Za-z0-9\-._~]{43,128}")
@@ -331,18 +348,61 @@ def refresh(refresh_token: str | None, client_id: str | None, resource_param: st
 
 def revoke(token: str | None):
     """
-    RFC 7009 revocation. A refresh token ends its whole connection; an access token only itself.
-    Unknown tokens are ignored, so the answer reveals nothing about which exist.
+    RFC 7009 revocation. A refresh token or a personal token ends its whole connection; an access
+    token only itself. Unknown tokens are ignored, so the answer reveals nothing about which exist.
     """
     if not token:
         return
     row = get_mcp_token(hash_token(token))
     if row is None:
         return
-    if row["kind"] == "refresh":
+    if row["kind"] in ("refresh", PERSONAL_APP):
         revoke_mcp_connection(row["connection_id"])
     else:
         revoke_mcp_token(row["token_hash"])
+
+
+# ── Personal access tokens ────────────────────────────────────────────────────
+
+
+def create_personal(user_id: int, label: str, days: int, read_only: bool) -> dict | None:
+    """
+    Makes a personal access token. The caller has already checked the user's passkey.
+
+    @param label      What the user calls it (the connection's name everywhere).
+    @param days       One of PERSONAL_TOKEN_DAYS.
+    @param read_only  True: READ_SCOPE. False: SCOPE, read and prepare.
+    @return  {"id", "token", "scope", "expires_at"}: the token itself, the only time it exists in
+             the clear. None when the account already has MAX_PERSONAL_TOKENS live.
+    @raises ValueError  For days not in PERSONAL_TOKEN_DAYS.
+    """
+    if days not in PERSONAL_TOKEN_DAYS:
+        raise ValueError(f"A token lasts {', '.join(map(str, PERSONAL_TOKEN_DAYS))} days.")
+    token = PERSONAL_PREFIX + secrets.token_urlsafe(32)
+    scope = READ_SCOPE if read_only else SCOPE
+    expires_at = int(time.time()) + days * 86_400
+    connection_id = create_personal_token(user_id, label, scope, hash_token(token), expires_at, MAX_PERSONAL_TOKENS)
+    if connection_id is None:
+        return None
+    return {"id": connection_id, "token": token, "scope": scope, "expires_at": expires_at}
+
+
+def connection_name(app: str, label: str | None) -> str:
+    """What a connection is called: a personal token's label, or the known app's name."""
+    if app == PERSONAL_APP:
+        return label or "Personal token"
+    known = APPS.get(app)
+    return known.name if known else "an AI app"
+
+
+def prepares(caller: dict) -> bool:
+    """Whether a caller (verify_access's answer) may prepare transactions, not only read."""
+    return caller["scope"] == SCOPE
+
+
+def access_of(scope: str) -> str:
+    """A scope as Controls names it: "prepare" (read and prepare) or "read" (read only)."""
+    return "prepare" if scope == SCOPE else "read"
 
 
 # ── Every /mcp call ───────────────────────────────────────────────────────────
@@ -350,18 +410,24 @@ def revoke(token: str | None):
 
 def verify_access(token: str) -> dict | None:
     """
-    The connection an access token speaks for, or None if it is unknown, expired, revoked, of an
-    ended connection, or of an account that no longer exists.
+    The connection a token speaks for -- an app's access token or a personal token -- or None if it
+    is unknown, expired, revoked, of an ended connection, or of an account that no longer exists.
+    A refresh token is never accepted here.
 
-    @return  {"user_id", "connection_id", "app", "scope"}.
+    @return  {"user_id", "connection_id", "app", "scope", "name"}: `name` is what the connection is
+             called (connection_name).
     """
-    if not token.startswith(ACCESS_PREFIX):
+    if token.startswith(ACCESS_PREFIX):
+        kind = "access"
+    elif token.startswith(PERSONAL_PREFIX):
+        kind = PERSONAL_APP
+    else:
         return None
     row = get_mcp_token(hash_token(token))
     now = int(time.time())
     if (
         row is None
-        or row["kind"] != "access"
+        or row["kind"] != kind
         or row["revoked"]
         or row["connection_revoked_at"] is not None
         or row["expires_at"] < now
@@ -369,4 +435,10 @@ def verify_access(token: str) -> dict | None:
     ):
         return None
     touch_mcp_connection(row["connection_id"], now)
-    return {"user_id": row["user_id"], "connection_id": row["connection_id"], "app": row["app"], "scope": row["scope"]}
+    return {
+        "user_id": row["user_id"],
+        "connection_id": row["connection_id"],
+        "app": row["app"],
+        "scope": row["scope"],
+        "name": connection_name(row["app"], row["label"]),
+    }

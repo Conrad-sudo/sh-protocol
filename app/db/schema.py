@@ -488,6 +488,21 @@ def _migrate_ai_apps(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_personal_tokens(db: sqlite3.Connection):
+    """
+    Adds personal access tokens (2026-11-20): what the user's own scripts and agents connect to /mcp
+    with, made in Controls rather than through an app's sign-in. A token is an mcp_connections row
+    whose app is 'personal', holding one mcp_tokens row of kind 'personal' that lasts 7, 30 or 90
+    days; its scope is 'read' (read only) or 'wallet' (read and prepare). `label` is the name the user
+    gave it, shown wherever a known app's name would be. Apps that signed in through OAuth leave it
+    NULL.
+    """
+    columns = [row[1] for row in db.execute("PRAGMA table_info(mcp_connections)").fetchall()]
+    if "label" not in columns:
+        db.execute("ALTER TABLE mcp_connections ADD COLUMN label TEXT")
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -794,6 +809,7 @@ MIGRATIONS = (
     _migrate_chat_to_own_file,       # 9: the agent's conversations in wallet-chat.db
     _migrate_recurring_payments,     # 10: schedules the keeper pays
     _migrate_ai_apps,                # 11: AI apps over MCP, and passkey sign-in
+    _migrate_personal_tokens,        # 12: personal access tokens for /mcp
 )
 
 

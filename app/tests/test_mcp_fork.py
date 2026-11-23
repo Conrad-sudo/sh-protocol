@@ -4,8 +4,9 @@ AI apps end to end, against the RUNNING API and a local fork -- Sepolia unless a
 An app connects through the real OAuth flow, reads the wallet over /mcp, quotes a token transfer,
 and hands the user a link; the user approves it there with their passkey, as Mitfah's page does
 (/api/sign/start and /finish with the link's token, no session); the app follows it to confirmed.
-Also: a newer quote replaces an older one, cancel_transaction stops a link working, and a used link
-can't send twice.
+Also: a newer quote replaces an older one, cancel_transaction stops a link working, a used link
+can't send twice, and a personal access token made with the wallet's passkey reads the chain
+read-only until revoked.
 
 Everything goes to the API over HTTP, as an app and a browser would, so this process never sends
 with the API's bundler keys (two processes counting the same keys' nonces collide). What it does
@@ -320,6 +321,34 @@ def test_approve_through_link(c: httpx.Client, access: str, headers: dict, key: 
     check("the confirmed status carries no leftover 'Sending' text", "outcome" not in again, str(again))
 
 
+def test_personal_token(c: httpx.Client, headers: dict, key: SoftPasskey, wallet: str):
+    """
+    A personal access token, made with the passkey the wallet approves on chain (the server reads the
+    wallet to check it), reads the real chain read-only, is refused a quote, and stops on Revoke.
+    """
+    print("\n[6] a personal access token for the user's own script")
+    r = c.post("/api/tokens/options", headers=headers)
+    check("the token form gets a passkey prompt", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    credential = key.assertion(base64url_to_bytes(r.json()["challenge"]))
+    r = c.post("/api/tokens", headers=headers,
+               json={"name": "e2e script", "days": 7, "access": "read", "credential": credential})
+    check("the passkey the wallet approves on chain makes a token", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    token = r.json()["token"]
+    ok = mcp(c, token, "tools/list")
+    names = {t["name"] for t in ok.json()["result"]["tools"]} if ok.status_code == 200 else set()
+    check("it lists the reads but no quotes", "get_eth_balance" in names and "transfer_erc20" not in names, str(sorted(names)))
+    error, result = call_tool(c, token, "get_eth_balance", {"network": NETWORK_NAME})
+    on_chain = w3.eth.get_balance(Web3.to_checksum_address(wallet)) / 10**18
+    check("it reads the wallet's balance off the chain", not error and abs(float(result["balance"]) - on_chain) < 1e-6,
+          str(result))
+    error, text = call_tool(c, token, "transfer_erc20", {"network": NETWORK_NAME, "token": "usdc", "recipient": "payee", "amount": 1})
+    check("a quote is refused: it's read-only", error and "read-only" in str(text), str(text))
+    row = next(x for x in c.get("/api/connections", headers=headers).json()["connections"] if x["kind"] == "token")
+    check("Controls lists it", row["app"]["name"] == "e2e script" and row["access"] == "read", str(row))
+    check("revoked", c.delete(f"/api/connections/{row['id']}", headers=headers).status_code == 204)
+    check("it stops working at once", mcp(c, token, "tools/list").status_code == 401)
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     with httpx.Client(base_url=API_URL, timeout=180) as client:
@@ -337,5 +366,6 @@ if __name__ == "__main__":
         test_reads(client, access_token, deployed)
         test_replace_and_cancel(client, access_token)
         test_approve_through_link(client, access_token, auth_headers, phone, deployed, payee_address)
+        test_personal_token(client, auth_headers, phone, deployed)
 
     finish(f"All AI-app fork checks passed on {NETWORK}.")

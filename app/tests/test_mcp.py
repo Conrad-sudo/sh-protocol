@@ -1,12 +1,13 @@
 """
 Checks how AI apps connect to a Mitfah account -- this server's OAuth for MCP, the Allow page's API,
-connected apps, /mcp itself -- and signing in to the website with a passkey. Run against a
-throwaway database.
+connected apps, personal access tokens, /mcp itself -- and signing in to the website with a passkey.
+Run against a throwaway database.
 
 The properties under test: an app gets a code only at an address the real app owns, and only the
 browser that opened the request can approve it; a token speaks for the account that approved it and
 no other, and stops working the moment the user disconnects the app or a copy of it shows up; a
-passkey signs in only if a wallet of its account approves it.
+passkey signs in, or makes a personal token, only if a wallet of its account approves it; a
+read-only token can't prepare anything.
 
 Offline: no chain and no RPC. Whether a wallet approves a passkey is stood in for.
 
@@ -945,6 +946,159 @@ def test_passkey_signin(c: TestClient):
         set_everywhere(api, "approved_on_a_wallet", saved)
 
 
+# ── 13. Personal access tokens ────────────────────────────────────────────────
+
+
+def _token_options(c: TestClient, headers: dict):
+    return c.post("/api/tokens/options", headers=headers)
+
+
+def _make_token(c: TestClient, headers: dict, phone: SoftPasskey, *, name="Trading bot", days=30, access="read",
+                handle=None, **assertion) -> object:
+    """Asks for options, answers them with `phone`, and posts the token request. Returns the response."""
+    options = _token_options(c, headers)
+    assert options.status_code == 200, options.text
+    credential = phone.assertion(base64url_to_bytes(options.json()["challenge"]), user_handle=handle, **assertion)
+    return c.post("/api/tokens", headers=headers,
+                  json={"name": name, "days": days, "access": access, "credential": credential})
+
+
+def test_personal_tokens(c: TestClient):
+    print("\n[13] Personal access tokens")
+    import mcp_tools
+
+    _, headers, _ = sign_in(c)
+    _, headers_b, _ = sign_in(c)
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    phone, phone_b = SoftPasskey(), SoftPasskey()
+
+    r = _token_options(c, headers)
+    check("no passkey yet: 409, saying to add one", r.status_code == 409 and "passkey" in r.json()["detail"], r.text)
+    _register(c, headers, phone)
+    _register(c, headers_b, phone_b)
+    handle = db.get_webauthn_handle(user_id)
+    approved = {"answer": True}
+    saved = set_everywhere(api, "approved_on_a_wallet", lambda _user, _key: approved["answer"])
+    try:
+        options = _token_options(c, headers).json()
+        check("the options are a passkey prompt for this account's passkeys, Face ID required",
+              options["rp_id"] == "localhost" and options["user_verification"] == "required"
+              and [x["id"] for x in options["allow_credentials"]] == [db.get_passkeys(user_id)[0]["credential_id"]],
+              str(options))
+
+        r = _make_token(c, headers, phone, handle=handle)
+        body = r.json()
+        check("an approved passkey makes a token", r.status_code == 200 and body["token"].startswith("mfp_"), r.text)
+        check("...read only, named as asked, lasting 30 days",
+              body["access"] == "read" and body["name"] == "Trading bot"
+              and abs(body["expires_at"] - (time.time() + 30 * 86_400)) < 60, str(body))
+        check("...and the answer isn't cached", r.headers.get("cache-control") == "no-store")
+        read_token = body["token"]
+        check("only its hash is stored", db.get_mcp_token(mcp_auth.hash_token(read_token)) is not None
+              and db.get_mcp_token(read_token) is None)
+
+        tools = {t["name"] for t in mcp(c, read_token, "tools/list").json()["result"]["tools"]}
+        check("a read-only token's tools/list has the reads", READS <= tools, str(sorted(READS - tools)))
+        check("...and none that prepare or cancel", not (tools & mcp_tools.PREPARING_TOOLS),
+              str(sorted(tools & mcp_tools.PREPARING_TOOLS)))
+        account = account_of(c, read_token)
+        check("get_account names the token and says read only",
+              account.get("connected_app") == "Trading bot" and account.get("access") == "read only", str(account))
+        error, text = call_tool(c, read_token, "transfer_erc20", {"token": "usdc", "recipient": "Sandy", "amount": 1})
+        check("calling a quote tool anyway is refused", error and mcp_tools.READ_ONLY_TOKEN in text, str(text))
+        error, text = call_tool(c, read_token, "cancel_transaction", {"quote_id": "q1"})
+        check("so is cancel_transaction", error and mcp_tools.READ_ONLY_TOKEN in text, str(text))
+        check("it can't stand in for the website's own sign-in",
+              c.get("/api/me", headers={"Authorization": f"Bearer {read_token}"}).status_code == 401)
+        r = c.post("/api/oauth/token", data={"grant_type": "refresh_token", "refresh_token": read_token})
+        check("nor be refreshed like an app's token", r.status_code == 400 and r.json()["error"] == "invalid_grant", r.text)
+
+        r = _make_token(c, headers, phone, name="  Script  ", days=7, access="prepare", handle=handle)
+        prepare_token = r.json()["token"]
+        tools = {t["name"] for t in mcp(c, prepare_token, "tools/list").json()["result"]["tools"]}
+        check("a read-and-prepare token sees the quotes", mcp_tools.PREPARING_TOOLS <= tools,
+              str(sorted(mcp_tools.PREPARING_TOOLS - tools)))
+        account = account_of(c, prepare_token)
+        check("...its name trimmed, and get_account says read and prepare",
+              account.get("connected_app") == "Script" and account.get("access") == "read and prepare", str(account))
+        app_access = connect(c, headers)["access_token"]
+        check("an app signed in through OAuth still sees every tool",
+              mcp_tools.PREPARING_TOOLS <= {t["name"] for t in mcp(c, app_access, "tools/list").json()["result"]["tools"]})
+
+        listed = c.get("/api/connections", headers=headers).json()["connections"]
+        check("tokens are listed with the apps, newest first",
+              [(x["kind"], x["app"]["name"], x["access"]) for x in listed]
+              == [("app", "Claude", "prepare"), ("token", "Script", "prepare"), ("token", "Trading bot", "read")], str(listed))
+        check("a token shows its expiry; an app has none",
+              listed[0]["expires_at"] is None and abs(listed[1]["expires_at"] - (time.time() + 7 * 86_400)) < 60)
+        check("another account sees none of them", c.get("/api/connections", headers=headers_b).json()["connections"] == [])
+
+        # Refusals. Each answer uses up its challenge, so each asks for fresh options.
+        r = _make_token(c, headers, phone, days=14, handle=handle)
+        check("days other than 7, 30 or 90: 422", r.status_code == 422, r.text)
+        r = _make_token(c, headers, phone, name="   ", handle=handle)
+        check("a blank name: 422", r.status_code == 422, r.text)
+        r = _make_token(c, headers, phone, access="send", handle=handle)
+        check("an access other than read or prepare: 422", r.status_code == 422, r.text)
+        r = _make_token(c, headers, phone, handle=handle, user_verified=False)
+        check("no Face ID / PIN (user not verified): 401", r.status_code == 401, r.text)
+        r = _make_token(c, headers, phone_b)
+        check("another account's passkey: 401", r.status_code == 401, r.text)
+        r = _make_token(c, headers, phone, handle=handle, origin="https://evil.example")
+        check("asked from another site: 401", r.status_code == 401, r.text)
+        options = _token_options(c, headers).json()
+        credential = phone.assertion(base64url_to_bytes(options["challenge"]), user_handle=handle)
+        body = {"name": "Twice", "days": 30, "access": "read", "credential": credential}
+        first = c.post("/api/tokens", headers=headers, json=body)
+        again = c.post("/api/tokens", headers=headers, json=body)
+        check("a challenge is used once", first.status_code == 200 and again.status_code == 400, again.text)
+        c.delete(f"/api/connections/{first.json()['id']}", headers=headers)
+        r = c.post("/api/tokens", headers=headers_b, json={**body, "credential": phone.assertion(
+            base64url_to_bytes(_token_options(c, headers).json()["challenge"]), user_handle=handle)})
+        check("another account's challenge: 400", r.status_code == 400, r.text)
+        approved["answer"] = False
+        r = _make_token(c, headers, phone, handle=handle)
+        check("a passkey no wallet approves: 403", r.status_code == 403, r.text)
+        approved["answer"] = None
+        r = _make_token(c, headers, phone, handle=handle)
+        check("the wallets couldn't be read: 503", r.status_code == 503, r.text)
+        approved["answer"] = True
+        check("signed out: 401", c.post("/api/tokens/options").status_code == 401)
+        check("nothing refused was made", len([x for x in c.get("/api/connections", headers=headers).json()["connections"]
+                                               if x["kind"] == "token"]) == 2)
+
+        # Revoking, expiry and the limit.
+        script_id = next(x["id"] for x in listed if x["app"]["name"] == "Script")
+        check("revoke: 204", c.delete(f"/api/connections/{script_id}", headers=headers).status_code == 204)
+        check("its token stops working at once", not works(c, prepare_token))
+        r = c.post("/api/oauth/revoke", data={"token": read_token})
+        check("RFC 7009 revocation ends a token too", r.status_code == 200 and not works(c, read_token))
+        expiring = mcp_auth.create_personal(user_id, "Old", 7, read_only=True)
+        db.get_db().execute("UPDATE mcp_tokens SET expires_at = ? WHERE connection_id = ?",
+                            (int(time.time()) - 1, expiring["id"]))
+        db.get_db().commit()
+        check("an expired token stops working", not works(c, expiring["token"]))
+        check("...and leaves the list", all(x["id"] != expiring["id"]
+                                            for x in c.get("/api/connections", headers=headers).json()["connections"]))
+        for i in range(mcp_auth.MAX_PERSONAL_TOKENS - 1):
+            assert mcp_auth.create_personal(user_id, f"Bot {i}", 30, read_only=True) is not None
+        options = _token_options(c, headers)
+        check("one below the limit, options are still given", options.status_code == 200, options.text)
+        mcp_auth.create_personal(user_id, "The tenth", 30, read_only=True)
+        check("at the limit: the model can't make an eleventh",
+              mcp_auth.create_personal(user_id, "Eleventh", 30, read_only=True) is None)
+        credential = phone.assertion(base64url_to_bytes(options.json()["challenge"]), user_handle=handle)
+        r = c.post("/api/tokens", headers=headers, json={"name": "Late", "days": 30, "access": "read", "credential": credential})
+        check("a request that was started below the limit: 409", r.status_code == 409, r.text)
+        r = _token_options(c, headers)
+        check("options at the limit: 409, saying to revoke one", r.status_code == 409 and "Revoke" in r.json()["detail"], r.text)
+        check("expired and revoked tokens didn't count toward it",
+              len([x for x in c.get("/api/connections", headers=headers).json()["connections"] if x["kind"] == "token"])
+              == mcp_auth.MAX_PERSONAL_TOKENS)
+    finally:
+        set_everywhere(api, "approved_on_a_wallet", saved)
+
+
 def test_approved_on_a_wallet():
     print("\n[12] Approved on a wallet: one unreadable chain doesn't decide")
     saved = routes.passkeys._approves, routes.passkeys.get_wallet_chains
@@ -988,4 +1142,5 @@ if __name__ == "__main__":
         test_revoke(client)
         test_connections(client)
         test_passkey_signin(client)
+        test_personal_tokens(client)
     finish("All MCP sign-in, /mcp and passkey sign-in checks passed.")

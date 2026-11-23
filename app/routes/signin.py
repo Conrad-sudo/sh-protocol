@@ -18,9 +18,8 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 from web3 import Web3
-from webauthn import generate_authentication_options, verify_authentication_response
-from webauthn.helpers import bytes_to_base64url, parse_authentication_credential_json, parse_client_data_json
-from webauthn.helpers.exceptions import WebAuthnException
+from webauthn import generate_authentication_options
+from webauthn.helpers import bytes_to_base64url
 from webauthn.helpers.options_to_json_dict import options_to_json_dict
 from webauthn.helpers.structs import UserVerificationRequirement
 
@@ -31,16 +30,13 @@ from auth import get_current_user
 from db import (
     consume_passkey_signin_challenge,
     create_user,
-    find_passkey_by_credential,
     get_user_by_id,
     get_user_by_owner_addr,
     get_wallet_chains,
-    get_webauthn_handle,
     save_passkey_signin_challenge,
-    update_passkey_sign_count,
 )
 from routes.deps import limiter
-from routes.passkeys import approved_on_a_wallet
+from routes.passkeys import approved_on_a_wallet, verify_assertion
 
 router = APIRouter()
 
@@ -251,9 +247,9 @@ def passkey_login(request: Request, req: PasskeyLoginRequest, response: Response
     """
     Signs in with a passkey: for returning users whose wallet already approves the passkey.
 
-    py_webauthn checks the answer against the challenge this server issued (single use, unexpired),
-    this site's rp id and origins, the passkey's stored public key and counter, and user
-    verification. The passkey names the account; its user handle must be that account's.
+    The answer is checked against a sign-in challenge this server issued (routes.passkeys.
+    verify_assertion: single use, rp id, origins, the stored key and counter, user verification).
+    The passkey names the account; its user handle must be that account's.
 
     Then the rule that makes this as strong as it needs to be: the passkey must be approved, right
     now, on at least one of the account's wallets -- an owner transaction. Registering a passkey
@@ -267,34 +263,12 @@ def passkey_login(request: Request, req: PasskeyLoginRequest, response: Response
             passkey is unknown or fails the check; 403 if no wallet approves it; 503 if the wallets
             couldn't be read.
     """
-    try:
-        credential = parse_authentication_credential_json(req.credential)
-        challenge = parse_client_data_json(credential.response.client_data_json).challenge
-    except (WebAuthnException, ValueError, TypeError, KeyError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The browser's answer couldn't be read.")
-    if not consume_passkey_signin_challenge(bytes_to_base64url(challenge)):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This sign-in request has expired. Try again.")
-    unknown = "Mitfah doesn't know this passkey. Sign in with your wallet."
-    row = find_passkey_by_credential(bytes_to_base64url(credential.raw_id))
-    if row is None or get_user_by_id(row["user_id"]) is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
-    user_handle = credential.response.user_handle
-    if user_handle is not None and bytes(user_handle) != get_webauthn_handle(row["user_id"]):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, unknown)
-    try:
-        verified = verify_authentication_response(
-            credential=credential,
-            expected_challenge=challenge,
-            expected_rp_id=passkey.rp_id(),
-            expected_origin=passkey.allowed_origins(),
-            credential_public_key=row["public_key"],
-            credential_current_sign_count=row["sign_count"],
-            require_user_verification=True,
-        )
-    except WebAuthnException:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "That passkey couldn't be verified. Try again.")
-    update_passkey_sign_count(row["key_id"], verified.new_sign_count)
-
+    row = verify_assertion(
+        req.credential,
+        consume_passkey_signin_challenge,
+        expired="This sign-in request has expired. Try again.",
+        unknown="Mitfah doesn't know this passkey. Sign in with your wallet.",
+    )
     approved = approved_on_a_wallet(row["user_id"], row["key_id"])
     if approved is None:
         raise HTTPException(

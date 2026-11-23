@@ -11,6 +11,9 @@ declares what Claude needs to use a CIMD client id, and can't be told otherwise.
 The tools: get_account, here, and the wallet's reads and quotes (mcp_tools.py), each with a
 description that carries the rules the web chat's system prompt holds: these apps' models never see
 that prompt. A quote hands the user a /c/<token> link; only their passkey sends it.
+
+The caller is an app signed in through OAuth or the user's own personal access token; a read-only
+token's tools/list leaves out the quotes (mcp_tools.hide_preparing_tools).
 """
 import contextlib
 import logging
@@ -27,8 +30,7 @@ from starlette.types import Receive, Scope, Send
 import mcp_auth
 from constants import get_chain_display_name
 from db import get_user_by_id, get_wallet_address, get_wallet_chains
-from mcp_clients import APPS
-from mcp_tools import CALLER_KEY, caller_of, count_call, wallet_tools
+from mcp_tools import CALLER_KEY, caller_of, count_call, hide_preparing_tools, wallet_tools
 
 # Stateless, every request "terminates a session" -- an INFO line per call. Warnings still show.
 logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
@@ -49,6 +51,7 @@ server = MCPServer(
     instructions=INSTRUCTIONS,
     version="1",
     tools=wallet_tools(),
+    middleware=[hide_preparing_tools],
 )
 
 # The running session manager: set while running() is open, which the API's lifespan holds.
@@ -134,8 +137,8 @@ class McpEndpoint:
 # sentences, and passed explicitly (the SDK would pass the docstring as it is, indentation and all).
 GET_ACCOUNT_DESCRIPTION = (
     "Which Mitfah account this app is connected to: the address that owns it, and its smart wallet's "
-    "address on each network where it has one. Use it to check the connection works, or before talking "
-    "about the user's wallets. Read-only."
+    "address on each network where it has one, and whether this connection can prepare transactions or "
+    "only read. Use it to check the connection works, or before talking about the user's wallets. Read-only."
 )
 
 
@@ -157,11 +160,11 @@ def get_account(ctx: Context) -> dict:
             "chain_id": chain_id,
             "address": get_wallet_address(caller["user_id"], chain_id),
         })
-    app = APPS.get(caller["app"])
     return {
         "owner_address": user["owner_addr"] if user else None,
         "wallets": wallets,
-        "connected_app": app.name if app else caller["app"],
+        "connected_app": caller["name"],
+        "access": "read and prepare" if mcp_auth.prepares(caller) else "read only",
         "note": (
             "No smart wallet yet: the user creates one on Mitfah's website."
             if not wallets else
