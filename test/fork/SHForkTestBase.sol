@@ -7,7 +7,13 @@ import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/Pac
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
-import {Execution, MODULE_TYPE_HOOK, MODULE_TYPE_EXECUTOR} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {
+    Execution,
+    IERC7579Execution,
+    MODULE_TYPE_HOOK,
+    MODULE_TYPE_VALIDATOR
+} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {IAccountExecute} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
 import {ERC7579Utils} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
 import {IUniswapV2Router01} from "lib/v2-periphery/contracts/interfaces/IUniswapV2Router01.sol";
 import {IUniswapV2Factory} from "lib/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
@@ -912,62 +918,68 @@ abstract contract SHForkTestBase is Test {
              AGENTS (AgentModule, trading on the real exchange)
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Installs a fresh AgentModule and adds one agent with `limitUsd`, as the owner does: two
-    ///      direct transactions. The fork wallet already meters native value (setUp).
+    /// @dev The wallet's AgentModule (the factory installed it) with one agent added by the owner: one
+    ///      direct transaction. The fork wallet already meters native value (setUp).
     function _addAgent(uint128 limitUsd) internal returns (AgentModule agents, address agent, uint256 agentKey) {
-        agents = new AgentModule();
+        agents = AgentModule(feeRegistry.agentModule());
+        assertTrue(wallet.isModuleInstalled(MODULE_TYPE_VALIDATOR, address(agents), ""), "wallet deployed without it");
         (agent, agentKey) = makeAddrAndKey("agent");
-        vm.startPrank(owner);
-        wallet.installModule(MODULE_TYPE_EXECUTOR, address(agents), "");
+        vm.prank(owner);
         agents.addAgent(address(wallet), agent, limitUsd, uint48(block.timestamp + 30 days));
-        vm.stopPrank();
     }
 
-    /// @dev The agent's signature over `calls`, at its current epoch, an hour to run.
-    function _agentSig(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls, uint256 nonce)
+    /// @dev The agent's UserOp for `calls`, as Mitfah's bundler builds it: executeUserOp around the
+    ///      wallet's execute, a nonce key naming the module with a fresh lane, signed by the agent at
+    ///      its current epoch with an hour to run.
+    function _agentOp(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls)
         internal
-        view
-        returns (uint48 deadline, bytes memory sig)
+        returns (PackedUserOperation memory op, bytes32 hash)
     {
+        bytes memory callData = abi.encodePacked(
+            IAccountExecute.executeUserOp.selector, abi.encodeCall(IERC7579Execution.execute, (mode, calls))
+        );
+        uint192 key = uint192((uint256(uint160(address(agents))) << 32) | ++_agentLane);
+        (op, hash) = sendPackedUserOp.generateUnsignedUserOpWithCallData(address(wallet), config, callData, key);
         (AgentModule.Agent memory info,,,) = agents.getAgent(address(wallet), agent);
-        deadline = uint48(block.timestamp + 1 hours);
-        (uint8 v, bytes32 r, bytes32 s) =
-            vm.sign(agentKey, agents.hashExecution(address(wallet), mode, calls, nonce, deadline, info.epoch));
-        sig = abi.encodePacked(r, s, v);
+        uint48 deadline = uint48(block.timestamp + 1 hours);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(agentKey, agents.hashOperation(hash, deadline, info.epoch));
+        op.signature = abi.encodePacked(agent, info.epoch, deadline, r, s, v);
     }
 
-    /// @dev Signs `calls` as the agent and sends them from a stranger, as Mitfah's relay would. Returns
-    ///      the gas the call used.
-    function _agentTrade(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls, uint256 nonce)
+    uint32 private _agentLane;
+
+    /// @dev Signs `calls` as the agent and sends them through the real EntryPoint. Returns the gas
+    ///      handleOps used.
+    function _agentTrade(AgentModule agents, address agent, uint256 agentKey, bytes32 mode, bytes memory calls)
         internal
         returns (uint256 gasUsed)
     {
-        (uint48 deadline, bytes memory sig) = _agentSig(agents, agent, agentKey, mode, calls, nonce);
-        vm.prank(makeAddr("relayer"));
+        (PackedUserOperation memory op,) = _agentOp(agents, agent, agentKey, mode, calls);
         gasUsed = gasleft();
-        agents.execute(address(wallet), agent, mode, calls, nonce, deadline, sig);
+        _handleOps(op);
         gasUsed -= gasleft();
     }
 
-    /// @dev The wallet's fee for one executor call, in USD at the live native price.
+    /// @dev The wallet's protocol fee for one agent op, in USD at the live native price. No keeper
+    ///      fee: the wallet pays its own gas.
     function _agentFeeUsd() internal view returns (uint256) {
-        (, uint256 fee, uint256 keeperFee) = feeRegistry.feeConfig();
-        return uint256(oracle.getPrice(address(0), fee + keeperFee));
+        (, uint256 fee,) = feeRegistry.feeConfig();
+        return uint256(oracle.getPrice(address(0), fee));
     }
 
     function _agentSpent(AgentModule agents, address agent) internal view returns (uint256 spent) {
         (, spent,,) = agents.getAgent(address(wallet), agent);
     }
 
-    /// @notice An agent's signed swap on the real exchange, sent by a stranger: the wallet's limit is
-    ///         charged the net value lost, and the agent's own limit that plus the fee.
+    /// @notice An agent's swap on the real exchange, as a UserOp through the real EntryPoint: the
+    ///         wallet's limit is charged the net value lost, and the agent's own limit that plus the fee.
     function test_agent_realSwap_chargedToBothLimits() public {
         (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
         uint256 amountIn = _swapAmount();
         uint256 inBefore = _tokenIn().balanceOf(address(wallet));
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
 
-        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)), 0);
+        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)));
 
         uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
         assertEq(_tokenIn().balanceOf(address(wallet)), inBefore - amountIn, "swap input not spent");
@@ -980,18 +992,23 @@ abstract contract SHForkTestBase is Test {
     }
 
     /// @notice A native-in swap by an agent: the ETH/BNB it spends is charged, net of what it bought.
+    ///         The op's gas leaves the wallet too, counted in its daily gas allowance, not in either
+    ///         USD limit.
     function test_agent_nativeInSwap_charged() public {
         (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
         uint256 value = _nativeSwapValue();
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
         uint256 nativeBefore = address(wallet).balance;
-        (, uint256 fee, uint256 keeperFee) = feeRegistry.feeConfig();
+        uint256 gasBefore = wallet.sessionGasSpent();
+        (, uint256 fee,) = feeRegistry.feeConfig();
 
-        _agentTrade(agents, agent, key, bytes32(0), abi.encodePacked(swapRouter, value, _nativeInSwapCalldata(value)), 0);
+        _agentTrade(agents, agent, key, bytes32(0), abi.encodePacked(swapRouter, value, _nativeInSwapCalldata(value)));
 
         uint256 received = _tokenOut().balanceOf(address(wallet)) - outBefore;
         assertGt(received, 0, "swap produced no output");
-        assertEq(address(wallet).balance, nativeBefore - value - fee - keeperFee, "native spent != value + fees");
+        uint256 gasPrefund = wallet.sessionGasSpent() - gasBefore;
+        assertGt(gasPrefund, 0, "the wallet paid no gas");
+        assertEq(address(wallet).balance, nativeBefore - value - fee - gasPrefund, "native spent != value + fee + gas");
         int256 netUsd = oracle.getPrice(address(0), value) - oracle.getPrice(address(_tokenOut()), received);
         uint256 expected = netUsd > 0 ? uint256(netUsd) : 0;
         assertEq(_spentInWindow(), int256(expected), "wallet's limit");
@@ -1006,7 +1023,7 @@ abstract contract SHForkTestBase is Test {
         uint256 inBefore = _tokenIn().balanceOf(address(wallet));
         uint256 outBefore = _tokenOut().balanceOf(address(wallet));
 
-        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(deposit), 0);
+        _agentTrade(agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(deposit));
 
         uint256 usedIn = inBefore - _tokenIn().balanceOf(address(wallet));
         uint256 usedOut = outBefore - _tokenOut().balanceOf(address(wallet));
@@ -1018,45 +1035,69 @@ abstract contract SHForkTestBase is Test {
     }
 
     /// @notice Rule 2 on a real token: one of this chain's listed tokens that the wallet doesn't count
-    ///         can be neither sent nor approved by an agent.
+    ///         can be neither sent nor approved by an agent. Refused in validation, so the op costs
+    ///         the wallet nothing.
     function test_agent_uncountedRealTokenRefused() public {
-        (AgentModule agents, address agent,) = _addAgent(1_000_000e18);
+        (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
         address token = _uncountedListedToken();
         deal(token, address(wallet), 10 ** IERC20Metadata(token).decimals());
 
         bytes[2] memory attempts =
             [abi.encodeCall(IERC20.transfer, (sink, uint256(1))), abi.encodeCall(IERC20.approve, (swapRouter, uint256(1)))];
         for (uint256 i = 0; i < attempts.length; i++) {
+            (PackedUserOperation memory op,) =
+                _agentOp(agents, agent, key, bytes32(0), abi.encodePacked(token, uint256(0), attempts[i]));
             vm.expectRevert(
-                abi.encodeWithSelector(AgentModule.AgentModule_UncountedToken.selector, token, bytes4(attempts[i]))
+                abi.encodeWithSelector(
+                    IEntryPoint.FailedOpWithRevert.selector,
+                    0,
+                    "AA23 reverted",
+                    abi.encodeWithSelector(AgentModule.AgentModule_UncountedToken.selector, token, bytes4(attempts[i]))
+                )
             );
-            vm.prank(agent);
-            agents.execute(
-                address(wallet), agent, bytes32(0), abi.encodePacked(token, uint256(0), attempts[i]), i, uint48(block.timestamp), ""
-            );
+            _handleOps(op);
         }
     }
 
-    /// @notice The agent's own limit stops a real transfer the wallet's limit would allow.
+    /// @notice The agent's own limit stops a real transfer the wallet's limit would allow. It is
+    ///         refused in execution, so nothing moves.
     function test_agent_ownLimitStopsARealTransfer() public {
         (AgentModule agents, address agent, uint256 key) = _addAgent(1e18);
         bytes memory calls =
             abi.encodePacked(address(_tokenIn()), uint256(0), abi.encodeCall(IERC20.transfer, (sink, _swapAmount())));
-        (uint48 deadline, bytes memory sig) = _agentSig(agents, agent, key, bytes32(0), calls, 0);
-        vm.expectPartialRevert(AgentModule.AgentModule_AgentLimitExceeded.selector);
-        agents.execute(address(wallet), agent, bytes32(0), calls, 0, deadline, sig);
+        (PackedUserOperation memory op, bytes32 hash) = _agentOp(agents, agent, key, bytes32(0), calls);
+        vm.recordLogs();
+        _handleOps(op);
+        assertEq(bytes4(_opRevertReason(hash)), AgentModule.AgentModule_AgentLimitExceeded.selector);
         assertEq(_tokenIn().balanceOf(sink), 0);
+        assertEq(_agentSpent(agents, agent), 0);
     }
 
-    /// @notice Gas of the same real swap sent by an agent and by a passkey. The two run in separate
-    ///         tests from the same setUp, so neither warms storage for the other. Read with -vv.
+    /// @dev The revert reason the EntryPoint logged for the op `hash`, from the recorded logs.
+    function _opRevertReason(bytes32 hash) internal returns (bytes memory reason) {
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == config.entryPoint && logs[i].topics[0] == IEntryPoint.UserOperationRevertReason.selector
+                    && logs[i].topics[1] == hash
+            ) {
+                (, reason) = abi.decode(logs[i].data, (uint256, bytes));
+                return reason;
+            }
+        }
+        revert("the op did not revert");
+    }
+
+    /// @notice Gas of the same real swap sent by an agent and by a passkey, both whole handleOps
+    ///         through the real EntryPoint. The two run in separate tests from the same setUp, so
+    ///         neither warms storage for the other. Read with -vv.
     function test_agent_gas_swap() public {
         (AgentModule agents, address agent, uint256 key) = _addAgent(1_000_000e18);
         uint256 amountIn = _swapAmount();
         uint256 gasUsed = _agentTrade(
-            agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)), 0
+            agents, agent, key, bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn))
         );
-        console2.log("agent swap, signed and relayed (gas, execution only):", gasUsed);
+        console2.log("agent swap, through the EntryPoint (gas, execution only):", gasUsed);
     }
 
     function test_agent_gas_passkeySwapForComparison() public {

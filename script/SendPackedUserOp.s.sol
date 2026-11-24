@@ -154,6 +154,26 @@ contract SendPackedUserOp is Script {
         return _buildUserOp(sender, config, callData, nonceKey);
     }
 
+    /**
+     * @notice Like {generateUnsignedUserOp}, around `callData` exactly as given: for an op whose
+     *         callData is not a plain execute(), such as an agent's (`executeUserOp` around execute,
+     *         with a nonce key naming AgentModule; see SessionHandler.executeUserOp).
+     * @param sender   The SessionHandler account address that will send the UserOp.
+     * @param config   Network configuration containing the entryPoint address.
+     * @param callData The op's whole callData.
+     * @param nonceKey The EntryPoint nonce key (the high 192 bits of the nonce).
+     * @return userOp     The constructed PackedUserOperation, `signature` empty.
+     * @return userOpHash The EntryPoint's hash of it.
+     */
+    function generateUnsignedUserOpWithCallData(
+        address sender,
+        HelperConfig.NetworkConfig memory config,
+        bytes memory callData,
+        uint192 nonceKey
+    ) external view returns (PackedUserOperation memory userOp, bytes32 userOpHash) {
+        return _buildUserOp(sender, config, callData, nonceKey);
+    }
+
     /// @dev Nonce lookup, unsigned op construction and hashing, shared by every builder here.
     function _buildUserOp(
         address sender,

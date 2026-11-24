@@ -11,14 +11,16 @@ import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
 import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol";
 import {SpendingLimitModule} from "../src/SpendingLimitModule.sol";
 import {RecurringPaymentModule} from "../src/RecurringPaymentModule.sol";
+import {AgentModule} from "../src/AgentModule.sol";
 import "./Constants.s.sol";
 
 /**
  * @title DeploySHProtocol
  * @notice Deployment script for the SessionHandler protocol's shared infrastructure
  * @dev Retrieves network configuration from HelperConfig and deploys the SHTreasury, SHOracle,
- *      SHRegistry, SpendingLimitModule, and SHFactory. Individual SessionHandler wallets are
- *      deployed later via SHFactory.deployWallet().
+ *      SHRegistry, SpendingLimitModule, RecurringPaymentModule, AgentModule and SHFactory. Individual
+ *      SessionHandler wallets are deployed later via SHFactory.deployWallet(), each with the three
+ *      modules installed.
  *
  *      SHTreasury is the protocol's single admin root and is therefore deployed FIRST, so its
  *      address can be passed as the `owner` argument to the oracle, registry, and factory. Every
@@ -60,7 +62,8 @@ contract DeploySHProtocol is Script {
      *      1. Instantiate HelperConfig to resolve chain-specific configuration
      *      2. Broadcast as config.account to set it as the Ownable owner of the treasury
      *      3. Deploy SHTreasury first, then SHOracle and SHRegistry owned by it, wire the registry
-     *         back into the treasury, then the SpendingLimitModule and SHFactory
+     *         back into the treasury, then the three modules (registered on the registry) and
+     *         SHFactory
      *
      * @return factory  The newly deployed SHFactory used to deploy individual SessionHandler wallets
      * @return treasury The newly deployed SHTreasury that owns the registry, oracle, and factory
@@ -213,6 +216,12 @@ contract DeploySHProtocol is Script {
         //     reads nothing at construction; it is registered the same way as the hook, for symmetry.
         RecurringPaymentModule recurringModule = new RecurringPaymentModule();
         treasury.setRecurringPaymentModule(address(recurringModule));
+
+        // 6c. The agent validator, installed on every wallet the factory deploys, holding no agents
+        //     until a wallet's owner adds one. No constructor arguments: it reads all it needs from
+        //     each wallet.
+        AgentModule agentModule = new AgentModule();
+        treasury.setAgentModule(address(agentModule));
 
         // 7. Factory, owned by the treasury. It reads EntryPoint, both ERC-8004 registries, and the
         //    module from the registry, so beyond owner + registry it takes only this chain's

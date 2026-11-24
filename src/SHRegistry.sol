@@ -76,6 +76,8 @@ contract SHRegistry is Ownable {
     error SHRegistry_InvalidSpendingLimitModule();
     /// @dev Thrown when address(0) is passed as the RecurringPaymentModule address.
     error SHRegistry_InvalidRecurringPaymentModule();
+    /// @dev Thrown when address(0) is passed as the AgentModule address.
+    error SHRegistry_InvalidAgentModule();
     /// @dev Thrown when address(0) is passed as the ERC-8004 Identity Registry address.
     error SHRegistry_InvalidIdentityRegistry();
     /// @dev Thrown when address(0) is passed as the Reputation Registry address.
@@ -154,6 +156,14 @@ contract SHRegistry is Ownable {
     ///      (within the guard and the spending cap), where a hook can only refuse, so this setter is
     ///      the more sensitive of the two: whoever controls it chooses the executor new wallets get.
     address public recurringPaymentModule;
+
+    /// @notice AgentModule installed as a VALIDATOR on every SessionHandler deployed from here on.
+    /// @dev Settable, with the same reach as the two above: changing it only affects wallets deployed
+    ///      afterwards. SHFactory.deployWallet reverts while it is unset. As sensitive as
+    ///      {recurringPaymentModule}: a validator approves UserOps for the wallet (AgentModule only an
+    ///      op signed by an agent the wallet's OWNER added), so whoever controls this setter chooses
+    ///      what new wallets trust to sign for them.
+    address public agentModule;
 
     /// @notice Address that receives protocol fees collected by SessionHandler wallets.
     address public treasury;
@@ -234,6 +244,11 @@ contract SHRegistry is Ownable {
     /// @param oldModule The previous module.
     /// @param newModule The new module.
     event RecurringPaymentModuleUpdated(address indexed oldModule, address indexed newModule);
+
+    /// @notice Emitted when the AgentModule for future wallet deployments changes.
+    /// @param oldModule The previous module.
+    /// @param newModule The new module.
+    event AgentModuleUpdated(address indexed oldModule, address indexed newModule);
 
     /*//////////////////////////////////////////////////////////////
                                   TYPES
@@ -410,6 +425,21 @@ contract SHRegistry is Ownable {
         address oldModule = recurringPaymentModule;
         recurringPaymentModule = newModule;
         emit RecurringPaymentModuleUpdated(oldModule, newModule);
+    }
+
+    /**
+     * @notice Sets the AgentModule installed as a validator on wallets deployed from this point on.
+     *         Only callable by the owner.
+     * @dev Does NOT touch wallets already deployed: each keeps the validator it installed at deploy,
+     *      and only its owner can uninstall it. See {agentModule} for why this setter is sensitive.
+     * @param newModule The deployed AgentModule address. Must not be address(0); to halt deployments,
+     *        pause the factory instead.
+     */
+    function setAgentModule(address newModule) external onlyOwner {
+        if (newModule == address(0)) revert SHRegistry_InvalidAgentModule();
+        address oldModule = agentModule;
+        agentModule = newModule;
+        emit AgentModuleUpdated(oldModule, newModule);
     }
 
     /**

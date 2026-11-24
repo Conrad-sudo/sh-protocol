@@ -14,6 +14,8 @@ contract SHFactory is Ownable, Pausable {
     error SHFactory_SpendingLimitModuleNotSet();
     /// @dev Thrown by deployWallet when no RecurringPaymentModule has been configured yet.
     error SHFactory_RecurringPaymentModuleNotSet();
+    /// @dev Thrown by deployWallet when no AgentModule has been configured yet.
+    error SHFactory_AgentModuleNotSet();
 
     /// @notice The SHRegistry this factory's wallets are wired to. Its EntryPoint and ERC-8004
     ///         registries are baked into {IMPLEMENTATION} at construction; its SpendingLimitModule is
@@ -111,8 +113,8 @@ contract SHFactory is Ownable, Pausable {
     }
 
     /// @notice Deploys a SessionHandler (ERC-7579 account) with spendingLimitModule installed as a
-    ///         hook and recurringPaymentModule installed as an executor, seeded with the caller's
-    ///         spending-cap config and first passkey. Reverts if either module isn't set.
+    ///         hook, recurringPaymentModule as an executor and agentModule as a validator, seeded with
+    ///         the caller's spending-cap config and first passkey. Reverts if any module isn't set.
     /// @dev Deployed with CREATE2 at a salt derived from (msg.sender, that owner's {deployCount}),
     ///      so the address is known before the transaction is signed -- see {predictWalletAddress}.
     ///      The counter is consumed here, so calling this twice yields two distinct wallets and a
@@ -157,6 +159,8 @@ contract SHFactory is Ownable, Pausable {
         if (module == address(0)) revert SHFactory_SpendingLimitModuleNotSet();
         address recurringModule = REGISTRY.recurringPaymentModule();
         if (recurringModule == address(0)) revert SHFactory_RecurringPaymentModuleNotSet();
+        address agentModule = REGISTRY.agentModule();
+        if (agentModule == address(0)) revert SHFactory_AgentModuleNotSet();
 
         bytes32 salt = _salt(msg.sender, deployCount[msg.sender]++);
 
@@ -179,6 +183,7 @@ contract SHFactory is Ownable, Pausable {
                     walletId: walletId,
                     spendingLimitModule: module,
                     recurringPaymentModule: recurringModule,
+                    agentModule: agentModule,
                     dailyLimitUsd: dailyLimitUsd,
                     windowDuration: windowDuration,
                     watchedTokens: watchedTokens,

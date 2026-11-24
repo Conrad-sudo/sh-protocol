@@ -3,9 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {MODULE_TYPE_EXECUTOR} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {MODULE_TYPE_EXECUTOR, MODULE_TYPE_VALIDATOR} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {RecurringPaymentModule} from "../../src/RecurringPaymentModule.sol";
+import {AgentModule} from "../../src/AgentModule.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
 import {SHTreasury} from "../../src/SHTreasury.sol";
 import {SHOracle} from "../../src/SHOracle.sol";
@@ -30,7 +31,7 @@ contract RegistryFeeTest is Test {
 
     /// @dev The slot holding `treasury`, `_protocolFeeGwei` and `_keeperFeeGwei`
     ///      (`forge inspect SHRegistry storage`).
-    uint256 constant FEE_SLOT = 6;
+    uint256 constant FEE_SLOT = 7;
 
     function setUp() public {
         (factory, treasury, config, oracle) = new DeploySHProtocol().run();
@@ -170,12 +171,54 @@ contract RegistryFeeTest is Test {
         treasury.setRecurringPaymentModule(makeAddr("m"));
     }
 
+    /// @notice The same for the agent validator: a new module reaches wallets deployed afterwards
+    ///         only; existing wallets keep theirs, and their agents with it.
+    function test_setAgentModule_onlyAffectsNewWallets() public {
+        address oldModule = registry.agentModule();
+        address[] memory none = new address[](0);
+        vm.prank(rando);
+        SessionHandler before =
+            SessionHandler(payable(factory.deployWallet(1e18, 1 days, none, true, bytes32(0), bytes32(0), 0, none)));
+
+        AgentModule replacement = new AgentModule();
+        vm.expectEmit(address(registry));
+        emit SHRegistry.AgentModuleUpdated(oldModule, address(replacement));
+        vm.prank(operator);
+        treasury.setAgentModule(address(replacement));
+
+        vm.prank(rando);
+        SessionHandler afterChange =
+            SessionHandler(payable(factory.deployWallet(1e18, 1 days, none, true, bytes32(0), bytes32(0), 0, none)));
+
+        assertTrue(before.isModuleInstalled(MODULE_TYPE_VALIDATOR, oldModule, ""));
+        assertFalse(before.isModuleInstalled(MODULE_TYPE_VALIDATOR, address(replacement), ""));
+        assertTrue(afterChange.isModuleInstalled(MODULE_TYPE_VALIDATOR, address(replacement), ""));
+        assertFalse(afterChange.isModuleInstalled(MODULE_TYPE_VALIDATOR, oldModule, ""));
+    }
+
+    function test_setAgentModule_rejectsZeroAndStrangers() public {
+        vm.expectRevert(SHRegistry.SHRegistry_InvalidAgentModule.selector);
+        vm.prank(operator);
+        treasury.setAgentModule(address(0));
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        vm.prank(rando);
+        treasury.setAgentModule(makeAddr("m"));
+
+        // Only the treasury (the registry's owner) may set it on the registry itself.
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        vm.prank(rando);
+        registry.setAgentModule(makeAddr("m"));
+    }
+
     function test_treasuryPassthroughs_refuseBeforeRegistryIsSet() public {
         SHTreasury fresh = new SHTreasury();
         vm.expectRevert(SHTreasury.SHTreasury_RegistryNotSet.selector);
         fresh.setKeeperFee(1 gwei);
         vm.expectRevert(SHTreasury.SHTreasury_RegistryNotSet.selector);
         fresh.setRecurringPaymentModule(makeAddr("m"));
+        vm.expectRevert(SHTreasury.SHTreasury_RegistryNotSet.selector);
+        fresh.setAgentModule(makeAddr("m"));
     }
 
     /*//////////////////////////////////////////////////////////////

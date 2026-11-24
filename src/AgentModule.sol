@@ -4,34 +4,44 @@ pragma solidity 0.8.33;
 
 import {
     IERC7579Module,
+    IERC7579Validator,
     IERC7579Execution,
     IERC7579ModuleConfig,
-    MODULE_TYPE_EXECUTOR,
+    MODULE_TYPE_VALIDATOR,
     Execution
 } from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {PackedUserOperation, IAccountExecute} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
 import {ERC7579Utils} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
+import {ERC4337Utils} from "@openzeppelin/contracts/account/utils/draft-ERC4337Utils.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {SessionHandler} from "./SessionHandler.sol";
 import {SpendingLimitModule} from "./SpendingLimitModule.sol";
+import {IUserOpHooks} from "./interfaces/IUserOpHooks.sol";
 
 /**
  * @title AgentModule
  * @author Conrad Japhet
- * @notice ERC-7579 EXECUTOR that lets a wallet's owner give a trading agent its own key and its own
+ * @notice ERC-7579 VALIDATOR that lets a wallet's owner give a trading agent its own key and its own
  *         USD limit, so the agent can trade without the user approving each transaction. One
- *         contract per chain serves every wallet; an owner installs it once on their wallet.
- * @dev The flow: the owner installs this module and adds an agent (its address, a USD limit, an
- *      expiry) with direct transactions. The agent signs each trade (EIP-712) with its own
- *      secp256k1 key, which it holds and Mitfah never sees. Anyone may submit a signed trade (Mitfah's
- *      backend normally; the agent itself also can, without a signature). This module checks its
- *      rules, then calls the wallet's `executeFromExecutor`, where the wallet runs its session guard,
- *      takes its fee (protocol fee plus keeper fee) and runs the calls through its spending-limit
- *      hook, exactly as for a recurring payment. Afterwards it charges the agent's own limit with
- *      what the trade cost the wallet's limit, plus the fee.
+ *         contract per chain serves every wallet, and every SessionHandler gets it at deploy.
+ * @dev The flow: the owner adds an agent (its address, a USD limit, an expiry) with a direct
+ *      transaction. The agent's trades are then ordinary ERC-4337 UserOps from the wallet, sent by
+ *      Mitfah's bundler exactly like a passkey's, with the gas paid by the wallet. An agent op names
+ *      this module in its nonce key, its callData is `executeUserOp` around the wallet's own `execute`
+ *      call, and its signature is the agent's, over the op's hash (see {hashOperation}). The agent
+ *      holds its key.
+ *        - Validation, {validateUserOp}, read-only: the agent's signature, then the three rules
+ *          below, so an op that breaks one is refused before it costs the wallet any gas.
+ *        - Execution: the wallet calls {preExecute}, runs the calls through its `execute` (its
+ *          guard, the protocol fee and the spending-limit hook, as for a passkey op), then calls
+ *          {postExecute}, which charges the agent's own limit.
+ *      Everything else that binds a passkey op binds an agent op too: the wallet's per-op gas ceiling,
+ *      its daily gas allowance (one allowance for the passkeys and the agents together, the user's
+ *      choice), and its pause.
  *
  *      WHO CAN DO WHAT -- the property everything else rests on:
  *        - {addAgent} / {updateAgent}: ONLY the wallet's owner, calling this module DIRECTLY
@@ -39,10 +49,12 @@ import {SpendingLimitModule} from "./SpendingLimitModule.sol";
  *          anything it routes through `execute` arrives with msg.sender == the wallet: it can neither
  *          add an agent nor raise one's limit or expiry.
  *        - {removeAgent}: the owner, OR the wallet itself, so the user can stop an agent with a
- *          passkey from their phone. Removing only ever takes authority away. An agent cannot reach
+ *          passkey from their device. Removing only ever takes authority away. An agent cannot reach
  *          it: a call to this module from inside an agent's trade is refused.
- *        - {execute}: any caller, with the agent's signature over exactly this trade; or the agent
- *          itself. The caller chooses nothing the agent did not sign.
+ *        - A trade: only an op the agent signed, and only that exact op.
+ *        - A message: never. {isValidSignatureWithSender} always answers no, so an agent can't sign
+ *          for the wallet under ERC-1271. Such a signature (a Permit2 grant, an off-chain order) could
+ *          move the wallet's tokens without passing its spending limit.
  *
  *      What an agent's trade may do. Anything a passkey may (the wallet's guard: not the wallet's own
  *      settings, not the limit module, not the EntryPoint, no delegatecall, the owner's allowlist when
@@ -57,28 +69,32 @@ import {SpendingLimitModule} from "./SpendingLimitModule.sol";
  *           list, so they are refused too: the agent's limit is in USD and can't see them. The check
  *           goes by function name, like the limit module's own approval rules, so a token that moves
  *           under a name on no list is not caught (THREAT_MODEL §3.17).
- *        3. No call to this module, so an agent can't remove, add or raise itself or another agent.
+ *        3. No call to this module, so an agent can't remove, add or raise itself or another agent,
+ *           or touch the bookkeeping {preExecute} and {postExecute} keep.
  *
  *      The agent's own limit. The wallet's spending-limit hook already measures, per transaction, the
- *      net USD value that left the wallet. This module reads the wallet's remaining budget ("as of
- *      now", which already accounts for a window that has run out) before and after the calls; the
- *      difference is exactly what this trade cost the wallet's limit. It adds the trade's fee, which
- *      the wallet's limit doesn't count, in USD at the oracle's native price: without that, a leaked
- *      agent key could drain the wallet's ETH in fees by submitting empty trades. The agent's limit
- *      runs on the wallet's own window and starts over when that window does. Over either limit, the
- *      whole trade reverts.
+ *      net USD value that left the wallet. {preExecute} reads the wallet's remaining budget ("as of
+ *      now", which already accounts for a window that has run out) and {postExecute} reads it again;
+ *      the difference is exactly what the trade cost the wallet's limit. It adds the trade's protocol
+ *      fee, which the wallet's limit doesn't count, in USD at the oracle's native price: without that,
+ *      a leaked agent key could drain the wallet's ETH in fees with empty trades. Gas is NOT counted,
+ *      as it isn't for a passkey; the wallet's gas ceilings bound it instead. The agent's limit runs on
+ *      the wallet's own window and starts over when that window does. Over either limit, the whole
+ *      trade reverts -- in execution, since what a trade costs is only known once it has run, so the
+ *      wallet still pays that op's gas. Mitfah simulates every op before sending it.
  *
- *      Signatures. EIP-712 over (account, mode, the calls, nonce, deadline, epoch), bound to this
- *      contract and chain by the domain. Nonces are a bitmap per agent, so an agent may sign several
- *      trades at once and they may land in any order; each is usable once. The epoch changes each
- *      time an agent is added, so signatures made before a removal die with it, even if the same
- *      address is added again.
+ *      Signatures. EIP-712 over (the op's hash, a deadline, the agent's epoch), bound to this
+ *      contract and chain by the domain. The op's hash covers everything in the op -- the wallet, the
+ *      chain, the EntryPoint, the nonce, the calls and the gas fields -- and the EntryPoint's nonce makes
+ *      each op usable once. The deadline makes an op that was signed but never sent die minutes later.
+ *      The epoch changes each time an agent is added, so ops signed before a removal die with it, even
+ *      if the same address is added again.
  *
- *      Uninstalling this module removes every agent of the wallet. Pausing the wallet stops them, as
- *      `executeFromExecutor` is `whenNotPaused`. One trade can't start another inside itself
- *      ({ReentrancyGuardTransient}, one lock for the whole module).
+ *      Uninstalling this module removes every agent of the wallet.
  */
-contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
+contract AgentModule is IERC7579Validator, IUserOpHooks, EIP712 {
+    using TransientSlot for *;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -86,7 +102,7 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     /// @dev Thrown when the caller may not do this for `account`: not its owner (or, for
     ///      {removeAgent}, not the wallet itself), or the wallet owns itself.
     error AgentModule_NotOwner(address account, address caller);
-    /// @dev Thrown by {addAgent} when this module is not installed on `account` as an executor.
+    /// @dev Thrown by {addAgent} when this module is not installed on `account` as a validator.
     error AgentModule_NotInstalled(address account);
     /// @dev Thrown when the wallet's spending limit leaves native ETH/BNB out (rule 1).
     error AgentModule_NativeNotMetered(address account);
@@ -100,17 +116,13 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     error AgentModule_TooManyAgents(address account);
     /// @dev Thrown by {addAgent} when `agent` is already one of the wallet's agents.
     error AgentModule_AlreadyAdded(address account, address agent);
-    /// @dev Thrown when `agent` is not one of the wallet's agents.
+    /// @dev Thrown when `agent` is not one of the wallet's agents. In {preExecute}, also when it was
+    ///      removed and added again after the op was signed (another epoch).
     error AgentModule_UnknownAgent(address account, address agent);
-    /// @dev Thrown by {execute} once the agent's expiry has passed.
-    error AgentModule_AgentExpired(address account, address agent, uint48 validUntil);
-    /// @dev Thrown by {execute} when the caller is not the agent and the signature is not the agent's.
-    error AgentModule_BadSignature();
-    /// @dev Thrown by {execute} after the signed deadline.
-    error AgentModule_DeadlinePassed(uint48 deadline);
-    /// @dev Thrown by {execute} when the nonce was used before.
-    error AgentModule_NonceUsed(uint256 nonce);
-    /// @dev Thrown by {execute} on any mode but a plain single call or a plain batch.
+    /// @dev Thrown by {validateUserOp} when the op's callData is not `executeUserOp` around the
+    ///      wallet's `execute`: the one shape that makes the wallet call {preExecute} and {postExecute}.
+    error AgentModule_NotAnAgentOp();
+    /// @dev Thrown on any mode but a plain single call or a plain batch.
     error AgentModule_UnsupportedMode(bytes32 mode);
     /// @dev Thrown when a call in an agent's trade targets this module (rule 3).
     error AgentModule_TargetNotAllowed(address target);
@@ -123,6 +135,8 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     /// @param spentUsd The agent's spend in the window had the trade gone through (18 decimals).
     /// @param limitUsd The agent's limit (18 decimals).
     error AgentModule_AgentLimitExceeded(uint256 spentUsd, uint256 limitUsd);
+    /// @dev Thrown by {postExecute} when the calling wallet has no {preExecute} open.
+    error AgentModule_NoTradeOpen(address account);
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -145,14 +159,14 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     event AgentsCleared(address indexed account);
 
     /// @notice Emitted for every agent trade, so the user can be told of each one.
-    /// @param nonce      The nonce the trade used.
+    /// @param userOpHash The op's hash: the EntryPoint's UserOperationEvent carries the same one.
     /// @param chargedUsd What the trade cost the wallet's USD limit (18 decimals).
-    /// @param feeUsd     The trade's fee in USD, charged to the agent's limit only.
+    /// @param feeUsd     The trade's protocol fee in USD, charged to the agent's limit only.
     /// @param spentUsd   The agent's spend in the window after this trade.
     event AgentExecuted(
         address indexed account,
         address indexed agent,
-        uint256 nonce,
+        bytes32 indexed userOpHash,
         uint256 chargedUsd,
         uint256 feeUsd,
         uint256 spentUsd
@@ -168,17 +182,27 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     /// @notice The furthest ahead an agent's expiry may be set, counted from the moment it is set.
     uint256 public constant MAX_VALIDITY = 90 days;
 
-    /// @notice The EIP-712 type an agent signs for each trade. `executionCalldata` is hashed as EIP-712
-    ///         hashes `bytes`: keccak256 of its contents.
-    bytes32 public constant EXECUTION_TYPEHASH = keccak256(
-        "AgentExecution(address account,bytes32 mode,bytes executionCalldata,uint256 nonce,uint48 deadline,uint32 epoch)"
-    );
+    /// @notice The EIP-712 type an agent signs for each op.
+    bytes32 public constant OPERATION_TYPEHASH =
+        keccak256("AgentOperation(bytes32 userOpHash,uint48 deadline,uint32 epoch)");
+
+    /// @notice The length of an agent op's signature: agent (20 bytes) ‖ epoch (4) ‖ deadline (6) ‖
+    ///         r (32) ‖ s (32) ‖ v (1). The wallet sends an op here by its signature's length: neither
+    ///         the owner's 65 bytes nor a passkey's 256 or more.
+    /// @dev The agent and the epoch ride along, though both are known once the signature is checked,
+    ///      so {preExecute} and {postExecute} can read them without recovering the signer again.
+    uint256 public constant SIGNATURE_LENGTH = 95;
 
     /// @dev ERC-7579 modes an agent may use: one plain call, or a plain batch; both revert as a whole
     ///      on any failure. CALLTYPE_SINGLE / CALLTYPE_BATCH in the first byte, EXECTYPE_DEFAULT and
     ///      no selector or payload after it.
     bytes32 private constant _SINGLE_MODE = bytes32(0);
     bytes32 private constant _BATCH_MODE = bytes32(uint256(0x01) << 248);
+
+    /// @dev Base of the TRANSIENT slot that carries the wallet's remaining budget from {preExecute} to
+    ///      {postExecute}, keyed by the wallet: keccak256(abi.encode(account, _REMAINING_BEFORE)).
+    ///      Never in storage.
+    bytes32 private constant _REMAINING_BEFORE = keccak256("mitfah.AgentModule.remainingBefore");
 
     /**
      * @notice One agent of one wallet. Two slots.
@@ -187,7 +211,7 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
      * @param validUntil  When it stops working.
      * @param windowStart The wallet's window start when `spentUsd` was last written. A different
      *                    window now means `spentUsd` belongs to an earlier one and counts as 0.
-     * @param epoch       The epoch its signatures must name; set when it was added.
+     * @param epoch       The epoch its signatures must name; set when it was added. Never 0.
      * @param position    1-based place in the wallet's agent list; 0 marks no agent.
      */
     struct Agent {
@@ -209,10 +233,6 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     ///      included, so a re-added agent never gets an epoch it had before.
     mapping(address account => mapping(address agent => uint32)) private _lastEpoch;
 
-    /// @dev account => agent => word => bitmap of used nonces (nonce >> 8 picks the word, its low 8
-    ///      bits the bit). Kept across removals: the epoch already voids old signatures.
-    mapping(address account => mapping(address agent => mapping(uint256 word => uint256))) private _usedNonces;
-
     constructor() EIP712("AgentModule", "1") {}
 
     /*//////////////////////////////////////////////////////////////
@@ -221,8 +241,8 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
 
     /// @inheritdoc IERC7579Module
     /// @dev Takes nothing, on purpose: anything acting as the wallet (a passkey through `execute`, an
-    ///      agent, another executor) can call a module's onInstall directly, so it must not be able to
-    ///      add an agent. Agents are added by the owner with {addAgent}.
+    ///      executor) can call a module's onInstall directly, so it must not be able to add an agent.
+    ///      Agents are added by the owner with {addAgent}.
     function onInstall(bytes calldata) external override {}
 
     /// @inheritdoc IERC7579Module
@@ -241,7 +261,7 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
 
     /// @inheritdoc IERC7579Module
     function isModuleType(uint256 moduleTypeId) external pure override returns (bool) {
-        return moduleTypeId == MODULE_TYPE_EXECUTOR;
+        return moduleTypeId == MODULE_TYPE_VALIDATOR;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -253,15 +273,15 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
      * @dev Refused unless this module is installed on the wallet and the wallet's limit meters native
      *      ETH/BNB (rule 1); the web app turns metering on first when it is off.
      * @param account    The SessionHandler wallet the agent will trade from.
-     * @param agent      The agent's address: the key it signs trades with. Not zero, not the wallet,
-     *                   not this module.
+     * @param agent      The agent's address: the key it signs ops with. Not zero, not the wallet, not
+     *                   this module.
      * @param limitUsd   USD it may spend per window of the wallet's limit (18 decimals). Non-zero. The
      *                   wallet's own limit binds too, whichever is lower.
      * @param validUntil When it stops working: in the future, at most {MAX_VALIDITY} from now.
      */
     function addAgent(address account, address agent, uint128 limitUsd, uint48 validUntil) external {
         _requireOwner(account);
-        if (!IERC7579ModuleConfig(account).isModuleInstalled(MODULE_TYPE_EXECUTOR, address(this), "")) {
+        if (!IERC7579ModuleConfig(account).isModuleInstalled(MODULE_TYPE_VALIDATOR, address(this), "")) {
             revert AgentModule_NotInstalled(account);
         }
         if (!SessionHandler(payable(account)).getConfig().nativeMetered) revert AgentModule_NativeNotMetered(account);
@@ -307,7 +327,8 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
      * @notice Removes an agent at once. The wallet's owner calling directly, or the wallet itself (a
      *         passkey through `execute`).
      * @dev The wallet itself may only remove, never add or raise, so a passkey can stop an agent
-     *      without the owner wallet. An agent's own trade can't call this: rule 3.
+     *      without the owner wallet. An agent's own trade can't call this: rule 3. An op the agent
+     *      signed that has not run yet fails when it does ({preExecute}), even within the same bundle.
      * @param account The wallet.
      * @param agent   One of its agents.
      */
@@ -330,66 +351,124 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     }
 
     /*//////////////////////////////////////////////////////////////
-                              AGENT TRADES
+                           AGENT OPS: VALIDATION
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Runs one trade of `agent` from `account`: one call or a batch, through the wallet's
-     *         guard, fee and spending limit, charged to the agent's own limit too.
-     * @dev Callable by anyone with the agent's signature, or by the agent itself with none.
-     *      Checks-effects-interactions: the nonce is used before the wallet is called, and
-     *      {ReentrancyGuardTransient} keeps any call the trade makes from starting another trade.
-     *      The agent's spend is written after the wallet's call, because it depends on it; a trade
-     *      over the agent's limit reverts as a whole, nonce included.
-     * @param account           The wallet to trade from.
-     * @param agent             The agent whose trade it is.
-     * @param mode              A plain single call (bytes32(0)) or a plain batch (0x01 then zeros).
-     * @param executionCalldata The calls, ERC-7579 encoded for `mode`.
-     * @param nonce             Any nonce the agent has not used before.
-     * @param deadline          The last moment the trade may run.
-     * @param signature         The agent's 65-byte signature of {hashExecution}; ignored when the
-     *                          agent itself calls.
-     * @return results Each call's return data.
+     * @notice Validates an agent's op for the calling wallet: the agent's signature, then rules 1-3.
+     * @dev Called by the wallet, read-only, during the EntryPoint's validation of the op, with the
+     *      wallet as msg.sender. The signature is `agent ‖ epoch ‖ deadline ‖ r ‖ s ‖ v` (see
+     *      {SIGNATURE_LENGTH}), over {hashOperation}. Anything wrong with it -- its length, an unknown
+     *      agent, another epoch, a zero deadline, another signer -- returns SIG_VALIDATION_FAILED, as
+     *      ERC-4337 asks, never a revert. A signed op that breaks a rule REVERTS, with the rule's
+     *      error, which the EntryPoint passes on (`AA23 reverted`) so the cause is visible in a
+     *      simulation.
+     * @dev The op runs only until the earlier of its deadline and the agent's expiry: returned as the
+     *      op's validity window, which the EntryPoint enforces. A zero deadline is refused rather than
+     *      returned, since the EntryPoint would read it as "valid forever".
+     * @dev The callData must be `executeUserOp` (selector only) followed by a call to the wallet's
+     *      `execute`. That is the shape that makes the wallet call {preExecute} and {postExecute}; any
+     *      other would run the calls without charging the agent. The wallet refuses other shapes too.
+     *      The inner call is decoded here exactly as the wallet and its hook decode it, so the calls
+     *      checked are the calls that run.
+     * @param userOp     The op.
+     * @param userOpHash Its hash, as the EntryPoint computed it.
+     * @return validationData SIG_VALIDATION_FAILED, or success with the op's validity window.
      */
-    function execute(
-        address account,
-        address agent,
-        bytes32 mode,
-        bytes calldata executionCalldata,
-        uint256 nonce,
-        uint48 deadline,
-        bytes calldata signature
-    ) external nonReentrant returns (bytes[] memory results) {
-        Agent storage info = _requireAgent(account, agent);
-        if (block.timestamp > info.validUntil) revert AgentModule_AgentExpired(account, agent, info.validUntil);
-        if (block.timestamp > deadline) revert AgentModule_DeadlinePassed(deadline);
-        if (mode != _SINGLE_MODE && mode != _BATCH_MODE) revert AgentModule_UnsupportedMode(mode);
-        if (msg.sender != agent) {
-            bytes32 digest = hashExecution(account, mode, executionCalldata, nonce, deadline, info.epoch);
-            (address signer, ECDSA.RecoverError error,) = ECDSA.tryRecover(digest, signature);
-            if (error != ECDSA.RecoverError.NoError || signer != agent) revert AgentModule_BadSignature();
-        }
-        _useNonce(account, agent, nonce);
+    function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash)
+        external
+        view
+        override
+        returns (uint256)
+    {
+        address account = msg.sender;
+        bytes calldata signature = userOp.signature;
+        if (signature.length != SIGNATURE_LENGTH) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        address agent = address(bytes20(signature[0:20]));
+        uint32 epoch = uint32(bytes4(signature[20:24]));
+        uint48 deadline = uint48(bytes6(signature[24:30]));
 
-        SessionHandler wallet = SessionHandler(payable(account));
-        // Its storage reads warm the slots the wallet's hook reads next, so most of their cost is
-        // paid once.
-        SpendingLimitModule.Config memory config = wallet.getConfig();
+        Agent storage info = _agents[account][agent];
+        // An unknown agent reads all zero, and no agent ever has epoch 0.
+        if (info.position == 0 || info.epoch != epoch || deadline == 0) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        (address signer, ECDSA.RecoverError error,) =
+            ECDSA.tryRecoverCalldata(hashOperation(userOpHash, deadline, epoch), signature[30:]);
+        if (error != ECDSA.RecoverError.NoError || signer != agent) return ERC4337Utils.SIG_VALIDATION_FAILED;
+
+        (bytes32 mode, bytes calldata executionCalldata) = _decodeOp(userOp.callData);
+        SpendingLimitModule.Config memory config = SessionHandler(payable(account)).getConfig();
         if (!config.nativeMetered) revert AgentModule_NativeNotMetered(account);
         _checkCalls(mode, executionCalldata, config.watchedTokens);
 
-        uint256 feeUsd = _feeUsd(wallet);
-        int256 remainingBefore = wallet.getRemainingBudget();
-        results = IERC7579Execution(account).executeFromExecutor(mode, executionCalldata);
-        // The wallet's spend only rises within a transaction, and its limit can't change inside one,
-        // so the drop in what remains is exactly what this trade cost the limit.
-        uint256 chargedUsd = SafeCast.toUint256(remainingBefore - wallet.getRemainingBudget());
+        uint48 validUntil = info.validUntil;
+        return ERC4337Utils.packValidationData(true, 0, deadline < validUntil ? deadline : validUntil);
+    }
 
-        // The window the wallet's hook spent in: a new one if the last had run out, as the hook's
-        // preCheck just started it then.
-        uint32 window = block.timestamp >= uint256(config.windowStart) + uint256(config.windowDuration)
-            ? uint32(block.timestamp)
-            : config.windowStart;
+    /// @inheritdoc IERC7579Validator
+    /// @dev Always "invalid": an agent never signs messages for the wallet. ERC-1271 signatures can
+    ///      authorize token movements (Permit2, off-chain orders) that would never pass the wallet's
+    ///      spending limit or this module's rules.
+    function isValidSignatureWithSender(address, bytes32, bytes calldata) external pure override returns (bytes4) {
+        return 0xffffffff;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           AGENT OPS: EXECUTION
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @inheritdoc IUserOpHooks
+     * @dev Called by the wallet just before an agent op's calls run. Re-checks the agent: every op in
+     *      a bundle is validated before any of them runs, so an op earlier in the same bundle (a
+     *      passkey removing the agent) may have changed what validation saw. Removal and a fresh add
+     *      (another epoch) are what can change; expiry needs no second look, since validation and
+     *      execution share one block and an expiry can only ever be moved to a later moment. Then
+     *      notes the wallet's remaining budget for {postExecute}, in transient storage keyed by the
+     *      wallet.
+     * @dev Keyed by msg.sender, so a direct call from anyone else only writes that caller's own note.
+     *      The wallet itself can call this outside an agent op (a passkey through `execute`); that can
+     *      only ever ADD to an agent's spend, never take any off (see {postExecute}). An agent can't
+     *      call it: rule 3.
+     */
+    function preExecute(PackedUserOperation calldata userOp, bytes32) external override {
+        address account = msg.sender;
+        bytes calldata signature = userOp.signature;
+        address agent = address(bytes20(signature[0:20]));
+        Agent storage info = _agents[account][agent];
+        if (info.position == 0 || info.epoch != uint32(bytes4(signature[20:24]))) {
+            revert AgentModule_UnknownAgent(account, agent);
+        }
+
+        // +1 so that 0 keeps meaning "no trade open", even with nothing left in the budget.
+        _remainingBefore(account).tstore(SafeCast.toUint256(SessionHandler(payable(account)).getRemainingBudget()) + 1);
+    }
+
+    /**
+     * @inheritdoc IUserOpHooks
+     * @dev Called by the wallet just after an agent op's calls ran. Charges the agent what the calls
+     *      cost the wallet's limit -- the drop in its remaining budget since {preExecute} -- plus the
+     *      op's protocol fee in USD, reverting past the agent's limit, and emits {AgentExecuted}.
+     * @dev The drop can't be negative: the wallet's spend only rises within a transaction and its
+     *      limit can't change inside one (a rise would revert here rather than credit the agent). With
+     *      the agent's earlier spend in this window only ever added to, nothing that calls this --
+     *      the wallet itself included -- can lower what an agent has spent.
+     * @dev The window is the one the wallet's hook just spent in: its preCheck starts a new one when the
+     *      last has run out, so the wallet's windowStart after the calls is always it.
+     */
+    function postExecute(PackedUserOperation calldata userOp, bytes32 userOpHash) external override {
+        address account = msg.sender;
+        TransientSlot.Uint256Slot slot = _remainingBefore(account);
+        uint256 remainingBefore = slot.tload();
+        if (remainingBefore == 0) revert AgentModule_NoTradeOpen(account);
+        slot.tstore(0);
+
+        address agent = address(bytes20(userOp.signature[0:20]));
+        Agent storage info = _requireAgent(account, agent);
+        SessionHandler wallet = SessionHandler(payable(account));
+        uint256 chargedUsd = remainingBefore - 1 - SafeCast.toUint256(wallet.getRemainingBudget());
+        uint256 feeUsd = _feeUsd(wallet);
+        uint32 window = wallet.getConfig().windowStart;
+
         uint256 spentUsd = (info.windowStart == window ? uint256(info.spentUsd) : 0) + chargedUsd + feeUsd;
         if (spentUsd > info.limitUsd) revert AgentModule_AgentLimitExceeded(spentUsd, info.limitUsd);
         // Safe: spentUsd <= limitUsd, a uint128.
@@ -397,7 +476,7 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
         info.spentUsd = uint128(spentUsd);
         info.windowStart = window;
 
-        emit AgentExecuted(account, agent, nonce, chargedUsd, feeUsd, spentUsd);
+        emit AgentExecuted(account, agent, userOpHash, chargedUsd, feeUsd, spentUsd);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -405,22 +484,13 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice The EIP-712 digest an agent signs for one trade.
-     * @param epoch The agent's current epoch, from {getAgent}.
+     * @notice The EIP-712 digest an agent signs for one op.
+     * @param userOpHash The op's hash: EntryPoint.getUserOpHash(op).
+     * @param deadline   The last moment the op may run. Non-zero.
+     * @param epoch      The agent's current epoch, from {getAgent}.
      */
-    function hashExecution(
-        address account,
-        bytes32 mode,
-        bytes calldata executionCalldata,
-        uint256 nonce,
-        uint48 deadline,
-        uint32 epoch
-    ) public view returns (bytes32) {
-        return _hashTypedDataV4(
-            keccak256(
-                abi.encode(EXECUTION_TYPEHASH, account, mode, keccak256(executionCalldata), nonce, deadline, epoch)
-            )
-        );
+    function hashOperation(bytes32 userOpHash, uint48 deadline, uint32 epoch) public view returns (bytes32) {
+        return _hashTypedDataV4(keccak256(abi.encode(OPERATION_TYPEHASH, userOpHash, deadline, epoch)));
     }
 
     /// @notice The wallet's agents, in no particular order.
@@ -449,11 +519,6 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
         active = block.timestamp <= info.validUntil;
     }
 
-    /// @notice True when `agent` has used `nonce` on `account`.
-    function isNonceUsed(address account, address agent, uint256 nonce) external view returns (bool) {
-        return _usedNonces[account][agent][nonce >> 8] & (uint256(1) << (nonce & 0xff)) != 0;
-    }
-
     /*//////////////////////////////////////////////////////////////
                                 INTERNAL
     //////////////////////////////////////////////////////////////*/
@@ -479,13 +544,32 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
         if (validUntil <= block.timestamp || validUntil > latest) revert AgentModule_InvalidExpiry(validUntil, latest);
     }
 
-    /// @dev Marks `nonce` used, reverting if it already was.
-    function _useNonce(address account, address agent, uint256 nonce) private {
-        uint256 bit = uint256(1) << (nonce & 0xff);
-        mapping(uint256 => uint256) storage words = _usedNonces[account][agent];
-        uint256 word = words[nonce >> 8];
-        if (word & bit != 0) revert AgentModule_NonceUsed(nonce);
-        words[nonce >> 8] = word | bit;
+    /// @dev The transient slot holding `account`'s remaining budget (+1) between {preExecute} and
+    ///      {postExecute}.
+    function _remainingBefore(address account) private pure returns (TransientSlot.Uint256Slot) {
+        return keccak256(abi.encode(account, _REMAINING_BEFORE)).asUint256();
+    }
+
+    /**
+     * @dev Reads (mode, executionCalldata) out of an agent op's callData, which must be
+     *      `executeUserOp.selector ‖ execute.selector ‖ abi.encode(mode, executionCalldata)`, and
+     *      refuses any mode but a plain single call or a plain batch.
+     * @dev Follows the ABI offset exactly as Solidity's decoder does in the wallet's `execute`, and as
+     *      the spending-limit hook's `_decodeExecuteCalldata` does in its preCheck, so the calls checked
+     *      here are byte for byte the calls that run. An encoding this can't read reverts (an
+     *      out-of-range slice); one that only the wallet's decoder refuses fails the op in execution.
+     */
+    function _decodeOp(bytes calldata callData) private pure returns (bytes32 mode, bytes calldata executionCalldata) {
+        if (
+            callData.length < 8 || bytes4(callData[:4]) != IAccountExecute.executeUserOp.selector
+                || bytes4(callData[4:8]) != IERC7579Execution.execute.selector
+        ) revert AgentModule_NotAnAgentOp();
+        bytes calldata args = callData[8:];
+        mode = bytes32(args[0:32]);
+        if (mode != _SINGLE_MODE && mode != _BATCH_MODE) revert AgentModule_UnsupportedMode(mode);
+        uint256 offset = uint256(bytes32(args[32:64]));
+        uint256 length = uint256(bytes32(args[offset:offset + 32]));
+        executionCalldata = args[offset + 32:offset + 32 + length];
     }
 
     /// @dev Rules 2 and 3 for every call of the trade. `mode` is already one of the two allowed.
@@ -520,7 +604,7 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
      *      ERC-6909, and DSToken's (DAI, MKR) `push` and `move`. The grants SpendingLimitModule can't
      *      track (approveFor, addAllowanceIfNeeded, the 3-argument approveAndCall, paidCall) are
      *      refused by its hook on every call, so they aren't repeated here. `permit` needs the
-     *      wallet's own signature, which an agent can't make.
+     *      wallet's own signature, which an agent can't make ({isValidSignatureWithSender}).
      */
     function _movesTokens(bytes4 selector) private pure returns (bool) {
         return selector == 0xa9059cbb // transfer(address,uint256)
@@ -549,12 +633,12 @@ contract AgentModule is IERC7579Module, EIP712, ReentrancyGuardTransient {
             || selector == 0xbb35783b; // move(address,address,uint256): DSToken
     }
 
-    /// @dev The fee the wallet pays for this trade (protocol fee plus keeper fee, in wei, read where the
-    ///      wallet reads it), in USD at the oracle's native price. Zero when both fees are.
+    /// @dev The protocol fee the wallet pays for an agent op (in wei, read where the wallet reads it),
+    ///      in USD at the oracle's native price. Zero when the fee is. No keeper fee: the wallet pays
+    ///      its own gas, as for a passkey op.
     function _feeUsd(SessionHandler wallet) private view returns (uint256) {
-        (, uint256 fee, uint256 keeperFee) = wallet.REGISTRY().feeConfig();
-        uint256 total = fee + keeperFee;
-        if (total == 0) return 0;
-        return SafeCast.toUint256(wallet.getUsdValue(address(0), total));
+        (, uint256 fee,) = wallet.REGISTRY().feeConfig();
+        if (fee == 0) return 0;
+        return SafeCast.toUint256(wallet.getUsdValue(address(0), fee));
     }
 }

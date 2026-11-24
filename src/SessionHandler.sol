@@ -4,8 +4,15 @@ pragma solidity 0.8.33;
 
 import {IEntryPoint, PackedUserOperation} from "@openzeppelin/contracts/interfaces/draft-IERC4337.sol";
 import {AccountERC7579Hooked} from "@openzeppelin/contracts/account/extensions/draft-AccountERC7579Hooked.sol";
-import {MODULE_TYPE_HOOK, MODULE_TYPE_EXECUTOR, Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {
+    MODULE_TYPE_HOOK,
+    MODULE_TYPE_EXECUTOR,
+    MODULE_TYPE_VALIDATOR,
+    IERC7579Validator,
+    Execution
+} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {Calldata} from "@openzeppelin/contracts/utils/Calldata.sol";
+import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {ERC7579Utils, Mode, CallType} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -22,6 +29,7 @@ import {SpendingLimitModule} from "./SpendingLimitModule.sol";
 import {WebAuthnNative} from "./utils/WebAuthnNative.sol";
 import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
+import {IUserOpHooks} from "./interfaces/IUserOpHooks.sol";
 import {Context} from "@openzeppelin/contracts/utils/Context.sol";
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 
@@ -40,10 +48,17 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  *      fingerprint or a PIN, so the server never holds a key that can sign for the wallet. The owner
  *      authorizes up to {MAX_SESSION_KEYS} at once, one per device, with {addSession} /
  *      {removeSession} / {removeAllSessions}, and {getSessions} answers "which keys does this wallet
- *      trust?". No separate validator module is installed -- SpendingLimitModule is a hook (module
- *      type 4) ONLY, enforcing the USD spending cap on every execution. Raw-signature validation is
- *      left disabled at the base's default, so {_authenticate} is the single authentication path;
- *      see its NatSpec for why it does not delegate to {AccountERC7579-_validateUserOp}.
+ *      trust?". SpendingLimitModule is a hook (module type 4) ONLY, enforcing the USD spending cap on
+ *      every execution. Raw-signature validation is left disabled at the base's default, so
+ *      {_authenticate} is the single authentication path; see its NatSpec for why it does not
+ *      delegate to {AccountERC7579-_validateUserOp}.
+ * @dev A third kind of signer: a VALIDATOR MODULE the wallet has installed -- AgentModule, from
+ *      {initialize}, and nothing else unless the owner installs it. A UserOp whose signature is
+ *      neither the owner's nor a passkey's is handed to the validator its nonce key names, read-only,
+ *      and runs only through {executeUserOp}: the module's {IUserOpHooks-preExecute}, then the calls
+ *      through {execute} exactly as a passkey's would run, then its {IUserOpHooks-postExecute}. That
+ *      is how a trading agent trades with its own key under its own limit, paying gas from this
+ *      wallet like a passkey. Such ops never sign messages: AgentModule refuses every ERC-1271 check.
  * @dev A session key EXPIRES: its deadline in {sessionValidUntil} bounds the op's ERC-4337 validity
  *      window, so the EntryPoint refuses an expired key with `AA22 expired or not due`. Each passkey
  *      op also carries a deadline of its OWN, in its nonce key, and the window is the earlier of the
@@ -138,6 +153,9 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     error SessionHandler_EmptyAllowlist();
     /// @dev Thrown when address(0) is passed as a session-key allowlist target.
     error SessionHandler_InvalidAllowedTarget();
+    /// @dev Thrown by {executeUserOp} for an op a validator module did not approve, or whose callData
+    ///      does not go on to call {execute}.
+    error SessionHandler_NotModuleOp();
 
     /*//////////////////////////////////////////////////////////////
                                     EVENTS
@@ -208,6 +226,11 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     ///      the list ({_pruneExpiredSessions}, {removeAllSessions}) and the {getSessions} read, so none
     ///      of them can be made expensive.
     uint256 public constant MAX_SESSION_KEYS = 5;
+
+    /// @dev The shortest signature that can be a passkey's: 64 bytes of public key, then the 192 bytes
+    ///      of head {WebAuthnNative-tryDecodeAuth} reads. {_authenticate} tells signers apart by length
+    ///      against it: 65 bytes is the owner, this or more a passkey, anything else a validator module.
+    uint256 private constant _MIN_PASSKEY_SIGNATURE = 64 + 0xC0;
 
     /// @notice This deployment's ERC-4337 EntryPoint. Overrides Account's default (OZ's canonical v0.8
     ///         singleton), since this project uses a v0.7 EntryPoint (see HelperConfig.s.sol).
@@ -387,6 +410,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      * @param walletId            Sequential id assigned by the factory. Bookkeeping only.
      * @param spendingLimitModule SpendingLimitModule to install as MODULE_TYPE_HOOK.
      * @param recurringPaymentModule RecurringPaymentModule to install as MODULE_TYPE_EXECUTOR.
+     * @param agentModule         AgentModule to install as MODULE_TYPE_VALIDATOR.
      * @param dailyLimitUsd       Max USD (18 decimals) spendable per window. Must be >= 0.
      * @param windowDuration      Spending-window length in seconds. Must be > 0.
      * @param watchedTokens       Tokens to meter. Each must already be priced by the oracle.
@@ -406,6 +430,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         uint64 walletId;
         address spendingLimitModule;
         address recurringPaymentModule;
+        address agentModule;
         int256 dailyLimitUsd;
         uint256 windowDuration;
         address[] watchedTokens;
@@ -434,23 +459,32 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         // forge-lint: disable-next-line(unsafe-typecast)
         sessionGasBudget = uint80(DEFAULT_SESSION_GAS_BUDGET);
 
-        // Install the recurring-payment executor, which takes no install data. Every wallet gets it,
-        // but it can move nothing until the OWNER creates a schedule on the module, and every payment
-        // it sends comes back through {executeFromExecutor}: the guard, the fee and the spending cap
-        // all apply. The owner can uninstall it like any module.
-        // BEFORE the hook on purpose: OpenZeppelin wraps every module install in the hook, so
-        // installing it after would run a full preCheck/postCheck on this deploy for nothing.
-        _installModule(MODULE_TYPE_EXECUTOR, cfg.recurringPaymentModule, "");
-
-        // Install the spending-limit hook. Its onInstall
-        // decodes exactly this (dailyLimitUsd, windowDuration, watchedTokens, nativeMetered) tuple, so
-        // the config must be non-empty and valid: windowDuration > 0, dailyLimitUsd >= 0, and every
-        // watched token already priced by the oracle.
-        _installModule(
-            MODULE_TYPE_HOOK,
-            cfg.spendingLimitModule,
-            abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens, cfg.nativeMetered)
-        );
+        // The three modules every wallet starts with, in this order:
+        //   0. RecurringPaymentModule, an EXECUTOR, with no install data. It can move nothing until
+        //      the OWNER creates a schedule on the module, and every payment it sends comes back
+        //      through {executeFromExecutor}: the guard, the fee and the spending cap all apply.
+        //   1. AgentModule, a VALIDATOR, with no install data. It holds no agents: only the OWNER adds
+        //      one, on the module directly, and only while native value is metered. Until then every
+        //      op it is asked about fails validation.
+        //   2. SpendingLimitModule, the HOOK, LAST: OpenZeppelin wraps every module install in the
+        //      hook, so installing the other two after it would run a full preCheck/postCheck on this
+        //      deploy for nothing. Its onInstall decodes exactly this (dailyLimitUsd, windowDuration,
+        //      watchedTokens, nativeMetered) tuple, so the config must be valid: windowDuration > 0,
+        //      dailyLimitUsd >= 0, and every watched token already priced by the oracle.
+        // One call site in a loop rather than three calls, ON PURPOSE: the compiler inlines
+        // {_installModule} wherever it is called, at about 570 bytes a copy, and this contract sits
+        // close to the 24,576-byte limit. The owner can uninstall any of them like any module.
+        uint256[3] memory types = [MODULE_TYPE_EXECUTOR, MODULE_TYPE_VALIDATOR, MODULE_TYPE_HOOK];
+        address[3] memory modules = [cfg.recurringPaymentModule, cfg.agentModule, cfg.spendingLimitModule];
+        for (uint256 i = 0; i < 3; i++) {
+            _installModule(
+                types[i],
+                modules[i],
+                i == 2
+                    ? abi.encode(cfg.dailyLimitUsd, cfg.windowDuration, cfg.watchedTokens, cfg.nativeMetered)
+                    : bytes("")
+            );
+        }
 
         // Authorize the wallet's first passkey, if one was supplied. Routed through the SAME internal
         // grant as {addSession} -- including the curve and expiry rules -- so a deploy can never seed
@@ -487,12 +521,15 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Executes on behalf of the account. Callable by the EntryPoint, the account itself
-     *         (via an installed executor), or directly by the owner without a UserOp.
+     * @notice Executes on behalf of the account. Callable by the EntryPoint, the account itself, or
+     *         directly by the owner without a UserOp.
      * @dev The installed SpendingLimitModule hook wraps this call: its preCheck/postCheck enforce
      *      the account's USD spending cap around whatever runs here. For non-owner (session-key)
      *      executions, {_guardSessionExecution} additionally blocks any sub-call to the account's own
      *      admin surface, so a session key cannot uninstall the hook or raise the cap to escape it.
+     * @dev The account calls this itself from {executeUserOp}, for an op a validator module (an
+     *      agent) approved: the self-call branch is what holds such an op to the same guard, fee and
+     *      hook as a passkey's.
      * @dev Anyone else reverts with {Account-AccountUnauthorized}. The EntryPoint is compared before the
      *      owner so a passkey-signed op, which never needs the owner, doesn't pay to read that slot. It
      *      also means an owner set to the EntryPoint or the account itself stays restricted.
@@ -1040,30 +1077,34 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      `gasFees` = maxPriorityFeePerGas | maxFeePerGas (high | LOW 128 each). Paymaster limits are
      *      excluded — a sponsored op costs the account nothing.
      * @dev Authenticates the op HERE rather than delegating to {AccountERC7579-_validateUserOp}. The
-     *      base routes to a validator module when the nonce key names one and otherwise falls back to
-     *      {AbstractSigner-_rawSignatureValidation}; this account installs no validator module
-     *      (SpendingLimitModule is a hook ONLY), so that branch is dead, and taking it would add a
-     *      hop just to learn who signed. Deciding here is also what lets an expired session key be
-     *      reported as `AA22 expired or not due` rather than the misleading `AA24 signature error`.
-     *      DELIBERATE CONSEQUENCE: a validator module installed by the owner is ignored for UserOp
-     *      validation, though {AccountERC7579-isValidSignature} would still consult it. Installing one
-     *      is an owner-key action (THREAT_MODEL §3.9), and ignoring it here fails towards this
-     *      account's own auth rather than towards a module's.
-     * @dev The two kinds of signer are told apart by the signature's LENGTH. Exactly 65 bytes is the
-     *      owner: a plain ECDSA signature, unchanged. Anything else is a passkey (see
-     *      {_authenticatePasskey}). The encodings cannot be confused -- the shortest passkey
-     *      signature is 256 bytes -- so no type byte is needed, and every tool that already signs for
-     *      the owner keeps working untouched. It also means a 64-byte "compact" ECDSA signature, or
-     *      any truncated owner signature, is judged as a passkey and fails there: the owner has
-     *      exactly one encoding.
+     *      base asks a validator module first whenever the nonce key names an installed one, and falls
+     *      back to {AbstractSigner-_rawSignatureValidation} otherwise. Here the owner and the passkeys
+     *      are judged by the account itself, with no module hop, and a validator module is asked ONLY
+     *      for an op neither of them could have signed. Deciding here is also what lets an expired
+     *      session key be reported as `AA22 expired or not due` rather than the misleading
+     *      `AA24 signature error`.
+     * @dev The three kinds of signer are told apart by the signature's LENGTH, which no signer can
+     *      fake: the length is part of what a signature check looks at, never something it trusts.
+     *        - Exactly 65 bytes: the owner, a plain ECDSA signature, unchanged. Every tool that already
+     *          signs for the owner keeps working untouched.
+     *        - 256 bytes or more: a passkey (see {_authenticatePasskey}). 256 is the shortest blob that
+     *          can hold one: 64 bytes of key plus the 192 bytes of head that
+     *          {WebAuthnNative-tryDecodeAuth} needs.
+     *        - Anything else: the validator module the nonce key names, if this wallet installed it as
+     *          one (see {_validateWithModule}) -- AgentModule's signatures are 95 bytes.
+     *      So the owner has exactly one encoding: a 64-byte "compact" ECDSA signature, or any truncated
+     *      owner signature, is never the owner's. Neither the owner's nor a passkey's op ever reaches
+     *      a module, whatever its nonce key says.
      * @dev The owner signs the EIP-191 envelope of {Account-_signableUserOpHash} (toEthSignedMessageHash /
      *      eth_account.encode_defunct), so it is re-wrapped before recovery. A passkey signs the raw
      *      32 bytes as its WebAuthn challenge: WebAuthn already wraps the challenge in its own signed
      *      envelope (a clientDataJSON carrying a type and an origin), so another would add nothing.
-     * @dev A BAD SIGNATURE NEVER REVERTS HERE, for either kind: a signature that is malformed, from
-     *      the wrong key or simply wrong returns SIG_VALIDATION_FAILED, which is what the EntryPoint
+     * @dev A BAD SIGNATURE NEVER REVERTS HERE, for any kind: a signature that is malformed, from the
+     *      wrong key or simply wrong returns SIG_VALIDATION_FAILED, which is what the EntryPoint
      *      requires of an account. A revert would fail the whole bundle (FailedOp) instead of just
-     *      this op.
+     *      this op. A validator module's own revert is passed on: ERC-4337 asks a module to revert
+     *      for anything that is not a bad signature (AgentModule does, for an op that breaks one of
+     *      its rules), and the EntryPoint reports it with the reason.
      * @dev A passkey op's deadline -- the earlier of the key's and the op's own -- is RETURNED as the
      *      op's validity window, not compared here: the EntryPoint does that comparison inside
      *      handleOps. A zero deadline would read as "valid forever" there, which is why
@@ -1102,7 +1143,90 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
             return (ERC4337Utils.SIG_VALIDATION_FAILED, false);
         }
 
+        if (signature.length < _MIN_PASSKEY_SIGNATURE) return (_validateWithModule(userOp), false);
         return (_authenticatePasskey(hash, userOp.nonce, signature), false);
+    }
+
+    /**
+     * @dev Validation data for an op signed by neither the owner nor a passkey: the answer of the
+     *      validator module it is routed to ({_opModule}), or SIG_VALIDATION_FAILED when there is
+     *      none.
+     * @dev The module is asked with a STATICCALL, so validating an op can't change any state. It gets
+     *      this call's own arguments re-addressed to {IERC7579Validator-validateUserOp} --
+     *      `abi.encode(userOp, userOpHash, missingAccountFunds)`, whose first two words read exactly as
+     *      that function's two arguments, the third being ignored -- so the op is not copied and
+     *      re-encoded. That reuse is only sound inside {validateUserOp}, so the route is refused from
+     *      anywhere else (OpenZeppelin's {_validateUserOp} is overridden above, but kept reachable).
+     *      `userOpHash` reaches the module as the EntryPoint computed it, which is also what
+     *      {Account-_signableUserOpHash} returns here.
+     * @dev A module's revert is bubbled up unchanged (see {_authenticate}); a module that answers
+     *      with fewer than 32 bytes fails the op.
+     */
+    function _validateWithModule(PackedUserOperation calldata userOp) private view returns (uint256) {
+        address module = _opModule(userOp);
+        if (module == address(0) || msg.sig != this.validateUserOp.selector) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        (bool success, bytes32 validationData,) = LowLevelCall.staticcallReturn64Bytes(
+            module, abi.encodePacked(IERC7579Validator.validateUserOp.selector, msg.data[4:])
+        );
+        if (!success) LowLevelCall.bubbleRevert();
+        if (LowLevelCall.returnDataSize() < 32) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        return uint256(validationData);
+    }
+
+    /**
+     * @dev The validator module an op is routed to, or address(0) for an op that has none. It is the
+     *      module the op's nonce key names (its top 20 bytes, {AccountERC7579-_extractUserOpValidator}),
+     *      for an op that meets ALL of:
+     *        - its signature is neither the owner's length (65) nor a passkey's (256 or more);
+     *        - its callData calls {executeUserOp}, so it can only run through the module's hooks;
+     *        - that module is installed here as a validator.
+     *      {validateUserOp} and {executeUserOp} both decide with this one function, on the same op, so
+     *      the module whose hooks run an op is always the module that approved it.
+     */
+    function _opModule(PackedUserOperation calldata userOp) private view returns (address module) {
+        uint256 length = userOp.signature.length;
+        module = _extractUserOpValidator(userOp);
+        if (
+            length == 65 || length >= _MIN_PASSKEY_SIGNATURE || bytes4(userOp.callData) != this.executeUserOp.selector
+                || !isModuleInstalled(MODULE_TYPE_VALIDATOR, module, Calldata.emptyBytes())
+        ) return address(0);
+    }
+
+    /**
+     * @notice Runs a UserOp that a validator module approved. ERC-4337's IAccountExecute entry point:
+     *         the EntryPoint calls it, instead of forwarding the op's callData, whenever that callData
+     *         starts with this function's selector, and passes it the whole op.
+     * @dev The ONLY way such an op runs. {_opModule} requires an op that a module approves to call
+     *      this function, and this function runs only an op that {_opModule} routes to a module -- so
+     *      an owner's or a passkey's op that calls it reverts, and the module whose hooks run here is
+     *      the one that approved the op.
+     * @dev The op's callData after this selector must be a call to {execute}, which is made here as a
+     *      SELF-CALL. That is load-bearing: the spending-limit hook reads the calls it meters out of
+     *      `execute` calldata, so running them any other way would skip its approval tracking, its
+     *      own-unit caps and its admin-target check. Through the self-call, the calls get exactly what
+     *      a passkey op's get: {_guardSessionExecution}, the protocol fee (no keeper fee: this wallet
+     *      paid the gas), and the hook.
+     * @dev The module's {IUserOpHooks-preExecute} runs first and {IUserOpHooks-postExecute} last, both
+     *      given this function's own arguments, unchanged. Every op in a bundle is validated before
+     *      any of them runs, so preExecute is where the module re-checks what an op earlier in the
+     *      bundle may have changed; postExecute is where AgentModule charges what the calls spent. A
+     *      revert in any of the three fails the op, with its gas still paid, as for any op that
+     *      reverts in execution.
+     */
+    function executeUserOp(PackedUserOperation calldata userOp, bytes32) external onlyEntryPoint {
+        address module = _opModule(userOp);
+        bytes calldata inner = userOp.callData[4:];
+        // Safe: a shorter `inner` is padded with zeros, which no selector comparison accepts.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        if (module == address(0) || bytes4(inner) != this.execute.selector) revert SessionHandler_NotModuleOp();
+        _call(module, abi.encodePacked(IUserOpHooks.preExecute.selector, msg.data[4:]));
+        _call(address(this), inner);
+        _call(module, abi.encodePacked(IUserOpHooks.postExecute.selector, msg.data[4:]));
+    }
+
+    /// @dev Calls `target` with `data`, bubbling up its revert unchanged.
+    function _call(address target, bytes memory data) private {
+        if (!LowLevelCall.callNoReturn(target, data)) LowLevelCall.bubbleRevert();
     }
 
     /**
@@ -1147,9 +1271,8 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      near 2^256 would panic, or ask for memory no gas limit could pay for, inside validation.
      *      Both indices are therefore bounds-checked against the JSON first, which changes no
      *      verdict: an index past the end could never have matched.
-     * @dev The shortest blob that can hold a signature is 64 bytes of key plus the 192 bytes of head
-     *      that {WebAuthnNative-tryDecodeAuth} needs. The explicit length check also keeps the
-     *      slices below from reverting on a short signature.
+     * @dev {_authenticate} sends only signatures of {_MIN_PASSKEY_SIGNATURE} bytes or more here: the
+     *      shortest blob that can hold one, and what keeps the slices below from reverting.
      */
     function _authenticatePasskey(bytes32 hash, uint256 nonce, bytes calldata signature)
         internal
@@ -1157,7 +1280,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
         returns (uint256)
     {
         uint48 opDeadline = uint48(nonce >> 208);
-        if (opDeadline == 0 || signature.length < 64 + 0xC0) return ERC4337Utils.SIG_VALIDATION_FAILED;
+        if (opDeadline == 0) return ERC4337Utils.SIG_VALIDATION_FAILED;
 
         bytes32 qx = bytes32(signature[0x00:0x20]);
         bytes32 qy = bytes32(signature[0x20:0x40]);

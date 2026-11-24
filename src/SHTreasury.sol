@@ -342,6 +342,17 @@ contract SHTreasury is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice Sets the AgentModule installed as a validator on wallets deployed from this point on.
+     *         Only callable by the owner.
+     * @dev Lives on the registry for the same reason as {setSpendingLimitModule}. Does not touch
+     *      wallets already deployed — they keep the validator they were initialized with.
+     * @param newModule The deployed AgentModule address. Must not be address(0).
+     */
+    function setAgentModule(address newModule) external onlyOwner registrySet {
+        REGISTRY.setAgentModule(newModule);
+    }
+
+    /**
      * @notice Records the SHFactory deploying wallets against the registry. Only callable by the owner.
      * @dev Called by the deploy script once the factory exists. Off-chain discoverability only.
      * @param newFactory The SHFactory address. Must not be address(0).

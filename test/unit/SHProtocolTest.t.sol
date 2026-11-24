@@ -21,6 +21,7 @@ import {P256} from "@openzeppelin/contracts/utils/cryptography/P256.sol";
 //Local imports
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
+import {AgentModule} from "../../src/AgentModule.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {configuredTokens} from "../utils/ConfiguredTokens.sol";
@@ -224,6 +225,41 @@ contract SHProtocolTest is Test {
         assertTrue(wallet.isModuleInstalled(MODULE_TYPE_HOOK, address(module), ""));
     }
 
+    /// @dev The agent validator is required too: with the hook and the executor set but no
+    ///      AgentModule, the factory refuses.
+    function test_deployWallet_revertsWhenAgentModuleUnset() public {
+        SHRegistry bareRegistry = new SHRegistry(
+            address(this),
+            _protocolFeeAtFloor(),
+            _keeperFeeAtFloor(),
+            address(treasury),
+            address(oracle),
+            config.reputationRegistry,
+            config.identityRegistry,
+            config.entryPoint,
+            1
+        );
+        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry))));
+        bareRegistry.setRecurringPaymentModule(feeRegistry.recurringPaymentModule());
+        SHFactory bareFactory = new SHFactory(
+            address(this),
+            address(bareRegistry),
+            SessionHandler.GasCeilings({maxOpGasCost: config.maxOpGasCost, sessionGasBudget: config.sessionGasBudget})
+        );
+
+        address[] memory watched = new address[](0);
+        vm.expectRevert(SHFactory.SHFactory_AgentModuleNotSet.selector);
+        bareFactory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0));
+    }
+
+    /// @dev Every wallet comes with the agent validator installed, holding no agents.
+    function test_deployWallet_installsAgentValidator() public view {
+        address agentModule = feeRegistry.agentModule();
+        assertTrue(agentModule != address(0));
+        assertTrue(wallet.isModuleInstalled(MODULE_TYPE_VALIDATOR, agentModule, ""));
+        assertEq(AgentModule(agentModule).getAgents(address(wallet)).length, 0);
+    }
+
     function _protocolFeeAtFloor() internal view returns (SHRegistry.FeeBounds memory) {
         return SHRegistry.FeeBounds(
             feeRegistry.MIN_PROTOCOL_FEE(), feeRegistry.MIN_PROTOCOL_FEE(), feeRegistry.MAX_PROTOCOL_FEE()
@@ -275,6 +311,7 @@ contract SHProtocolTest is Test {
     function test_initialize_cannotRerun() public {
         address[] memory watched = new address[](0);
         address recurringModule = feeRegistry.recurringPaymentModule(); // before expectRevert, or it latches here
+        address agentModule = feeRegistry.agentModule();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         wallet.initialize(
             SessionHandler.InitConfig({
@@ -282,6 +319,7 @@ contract SHProtocolTest is Test {
                 walletId: 9,
                 spendingLimitModule: address(module),
                 recurringPaymentModule: recurringModule,
+                agentModule: agentModule,
                 dailyLimitUsd: 1,
                 windowDuration: 1,
                 watchedTokens: watched,
