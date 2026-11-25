@@ -10,6 +10,8 @@ where a transaction hash lives. Two kinds of row land in the `transactions` tabl
     outlives the wait is therefore still listed, as pending, and settle_pending finishes it later.
   - 'app': the same, for a quote an AI app raised over MCP (mcp_tools.py) and the user approved
     through its link. Recorded and settled exactly as 'assistant'; only the label differs.
+  - 'controls': the same, for a change the user made in Controls and approved there with a passkey
+    (stopping a trading agent, routes/agents.py). Recorded and settled exactly as 'assistant'.
   - 'owner': a transaction the user's own wallet signed in the browser -- creating the wallet, the
     owner actions, deposits from the Fund drawer. Recorded when the app is handed its hash, and
     described from the transaction's own calldata, never from anything the browser says.
@@ -134,8 +136,9 @@ def _outcome(w3: Web3, receipt) -> tuple[str, int | None]:
 # ── The assistant's transactions ──────────────────────────────────────────────
 
 # The sources whose rows are UserOperations sent through the bundler, found and settled by their
-# userOpHash: the assistant's, an AI app's, and a trading agent's (agents.py).
-USER_OP_SOURCES = ("assistant", "app", "agent")
+# userOpHash: the assistant's, an AI app's, a trading agent's (agents.py), and a passkey's change made
+# in Controls.
+USER_OP_SOURCES = ("assistant", "app", "agent", "controls")
 
 
 @_best_effort
@@ -151,8 +154,8 @@ def start_assistant_tx(
     @param direction  What it is meant to do, 'in' or 'out', from the quote; None if it can't say.
                       A pending or failed send is listed in its group by this. Once it confirms,
                       read_movements replaces it with what the receipt shows.
-    @param source     'assistant', 'app' for a quote an AI app raised, or 'agent' for a trading
-                      agent's trade (USER_OP_SOURCES).
+    @param source     'assistant', 'app' for a quote an AI app raised, 'agent' for a trading
+                      agent's trade, or 'controls' for a change approved in Controls (USER_OP_SOURCES).
     @param agent      The agent's address, for an 'agent' row.
     @return           The row's id, for finish_assistant_tx or discard_assistant_tx.
     """

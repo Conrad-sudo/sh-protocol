@@ -881,7 +881,8 @@ def confirm_signed(approved: "signing.Approved") -> Confirmed:
     The tap and what happened are written into the conversation, as if the user had pressed the
     button's label and the assistant had answered, so the next turn knows the quote is gone. A
     transaction that went out is marked, so that turn starts the conversation afresh
-    (_start_fresh_if_due). Not for an AI app's quote (signing.MCP): the conversation never saw it. The sign request is closed with the outcome, and the quote dropped from
+    (_start_fresh_if_due). Not for an AI app's quote (signing.MCP) or a change made in Controls
+    (signing.CONTROLS): the conversation never saw them. The sign request is closed with the outcome, and the quote dropped from
     this process's store if it is here (a Telegram quote lives in the bot's; the bot learns from
     the request, see quotes._forget_closed).
 
@@ -979,10 +980,11 @@ def cancel_signed(request: dict) -> bool:
 def _in_conversation(request: dict) -> bool:
     """
     Whether a request's quote came from the conversation (the web chat or Telegram), whose record
-    its tap belongs in. An AI app's quote (signing.MCP) never passed through it: writing its tap there
-    would tell the assistant about a quote it never made, and mark a send it never asked for.
+    its tap belongs in. An AI app's quote (signing.MCP) and a change made in Controls
+    (signing.CONTROLS) never passed through it: writing their tap there would tell the assistant about
+    a quote it never made, and mark a send it never asked for.
     """
-    return request["origin"] != signing.MCP
+    return request["origin"] not in (signing.MCP, signing.CONTROLS)
 
 
 def cancel_quotes(user_id: int, chain_id: int, command: str = "/cancel") -> list[dict]:

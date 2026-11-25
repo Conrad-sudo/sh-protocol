@@ -521,6 +521,138 @@ def test_schema_and_rename():
           .status_code == 401)
 
 
+# ── 11. Stopping an agent with a passkey, from Controls ─────────────────────────
+
+
+def _contract(address: str, **views):
+    """A stand-in contract: `address`, and views answering fixed values (functions.<name>().call())."""
+    functions = SimpleNamespace(**{
+        name: (lambda value=value: SimpleNamespace(call=lambda: value)) for name, value in views.items()
+    })
+    return SimpleNamespace(address=address, functions=functions)
+
+
+def test_stop():
+    print("\n[11] Stopping an agent with a passkey: a card of its own, out of the chat")
+    import quotes
+    import routes.agents as agent_routes
+    import smart_wallet_agent
+    import telegram_notify
+    import tx_history
+    from tools import sending
+    from web3 import Web3
+
+    check("its History rows are settled as passkey ops", "controls" in tx_history.USER_OP_SOURCES)
+    check("...and labelled as the user's own, from Controls", sending._SOURCE_OF[signing.CONTROLS] == "controls")
+    check("its tap is no part of the conversation", not smart_wallet_agent._in_conversation({"origin": signing.CONTROLS}))
+
+    api.limiter.enabled = False
+    client = TestClient(api.app)
+    _, headers, _ = sign_in(client)
+    user = client.get("/api/me", headers=headers).json()["user_id"]
+    chain = 11155111
+    wallet = to_checksum_address("0x00000000000000000000000000000000000000ef")
+    module_address = to_checksum_address(MODULE)
+    agent = Account.create().address
+    db.save_wallet_address(user, chain, wallet)
+    db.add_agent_row(user, chain, wallet, agent, "Scalper", (1, 0, 0))
+
+    state = {"allowlist_on": False, "allowed": [], "agent": _state(agent, 1, 0, 0)}
+    quoted: list = []
+    told: list = []
+    recorded: list = []
+
+    def quote(runtime, executions, action):
+        quoted.append((runtime.context.user_id, executions, action))
+        ctx = runtime.context
+        state["last"] = quotes.put(user_id=ctx.user_id, chain_id=chain, turn_id=ctx.turn_id, action=action,
+                   calls=[{"to": t, "value": v, "data": "0x" + d.hex()} for t, v, d in executions],
+                   quote=UserOpQuote("0x", 1, 1, 1, 1, 1, 1, 1, 1, 1, None, "sepolia"),
+                   cost={"total_usd": 0.12, "total_native": 0.00004, "native_asset": "ETH"}).quote_id
+        if state.get("refuse"):
+            raise ToolException(state["refuse"])
+        return {"quote_id": "unused"}
+
+    module = SimpleNamespace(address=module_address,
+                             encode_abi=lambda abi_element_identifier, args: "0x" + keccak(text=f"{abi_element_identifier}{args}").hex())
+    saved = (agent_routes._resolve_chain, agent_routes._load_wallet_for_chain, agent_routes._module_or_400,
+             agent_routes._quote_executions, agents.read_agent, telegram_notify.tell, smart_wallet_agent._record_button)
+    agent_routes._resolve_chain = lambda chain_id: (Web3, None)
+    agent_routes._load_wallet_for_chain = lambda w3, uid, chain_id: _contract(
+        wallet, sessionAllowlistEnabled=state["allowlist_on"], getAllowedTargets=state["allowed"])
+    agent_routes._module_or_400 = lambda w3, w: module
+    agent_routes._quote_executions = quote
+    agents.read_agent = lambda m, w, a: state["agent"]
+    telegram_notify.tell = lambda request, text, landed=None: told.append((request["origin"], text))
+    smart_wallet_agent._record_button = lambda *args, **kwargs: recorded.append(args)
+    try:
+        def stop(who=agent):
+            return client.post("/api/wallet/agents/stop", headers=headers, json={"chain_id": chain, "agent": who})
+
+        check("signed out: 401",
+              client.post("/api/wallet/agents/stop", json={"chain_id": chain, "agent": agent}).status_code == 401)
+        check("not an address: 400", stop("0x1234").status_code == 400)
+
+        state["agent"] = None
+        r = stop()
+        check("an address that isn't one of the wallet's agents: 400, nothing quoted",
+              r.status_code == 400 and "isn't one of this wallet's agents" in r.text and not quoted, r.text)
+        state["agent"] = _state(agent, 1, 0, 0)
+
+        state["allowlist_on"], state["allowed"] = True, ["0x0000000000000000000000000000000000000001"]
+        r = stop()
+        check("an allowlist that leaves the module out: 400, naming the owner's Remove, nothing quoted",
+              r.status_code == 400 and "owner wallet" in r.text and not quoted, r.text)
+        state["allowed"] = [module_address.lower()]
+        r = stop()
+        check("...one that lists it (in any case) lets it through", r.status_code == 200, r.text)
+        first_stop = r.json()["quote"]["quote_id"]
+        state["allowlist_on"], state["allowed"] = False, []
+
+        before = len(quoted)
+        state["refuse"] = "The owner has paused this wallet, so it can't send anything. Nothing was sent."
+        r = stop()
+        check("a quote the wallet would refuse: 400 with its reason", r.status_code == 400 and "paused" in r.text, r.text)
+        check("...and its quote isn't left waiting", state["last"] not in quotes._pending)
+        state.pop("refuse")
+        check("...(it was asked for)", len(quoted) == before + 1)
+
+        # Cards already waiting on the network: a web chat card and a Telegram one.
+        db.open_sign_request("q-web-card", user, chain, signing.WEB, json.dumps({"action": "x"}), int(time.time()) + 300)
+        db.open_sign_request("q-tg-card", user, chain, signing.TELEGRAM, json.dumps({"action": "y"}), int(time.time()) + 300,
+                             telegram_chat_id=42)
+        quoted.clear()
+        r = stop()
+        body = r.json()
+        check("a stop is quoted", r.status_code == 200 and body["quote"]["chain_id"] == chain, r.text)
+        _, executions, action = quoted[0]
+        target, value, data = executions[0]
+        check("...as the wallet's own call of removeAgent on its module, sending no value",
+              len(executions) == 1 and target == module_address and value == 0
+              and data == bytes.fromhex(module.encode_abi("removeAgent", [wallet, agent])[2:]))
+        check("...named as the owner's Remove is, with the agent's name", action == "Remove agent “Scalper”", action)
+        check("...on the card the page approves, with its fees", body["quote"]["action"] == action
+              and body["quote"]["fees"] == "$0.12", str(body))
+        found = signing.find_by_quote(user, chain, body["quote"]["quote_id"])
+        check("the page finds its request, from Controls, with no link", found["origin"] == signing.CONTROLS
+              and found["token_hash"] is None)
+        check("one card per network: the web and Telegram cards, and the earlier stop, are voided",
+              body["replaced"] == 3 and [r["quote_id"] for r in db.get_open_sign_requests(user, chain)]
+              == [body["quote"]["quote_id"]] and db.get_sign_request_by_quote(user, chain, first_stop)["status"] != OPEN)
+        check("...and the Telegram one is told why (tell leaves every other card alone)",
+              [t for t in told if t[0] == signing.TELEGRAM] == [(signing.TELEGRAM, agent_routes.STOP_REPLACED)], str(told))
+        check("the web chat never shows it as its card",
+              client.get(f"/api/chat/quote?chain_id={chain}", headers=headers).json()["quote"] is None)
+
+        r = client.post("/api/sign/cancel", headers=headers, json={"chain_id": chain, "quote_id": body["quote"]["quote_id"]})
+        check("closing the dialog cancels it", r.status_code == 200
+              and db.get_sign_request_by_quote(user, chain, body["quote"]["quote_id"])["status"] != OPEN, r.text)
+        check("...and nothing is written into the conversation", recorded == [], str(recorded))
+    finally:
+        (agent_routes._resolve_chain, agent_routes._load_wallet_for_chain, agent_routes._module_or_400,
+         agent_routes._quote_executions, agents.read_agent, telegram_notify.tell, smart_wallet_agent._record_button) = saved
+
+
 if __name__ == "__main__":
     test_message()
     test_signatures()
@@ -532,4 +664,5 @@ if __name__ == "__main__":
     test_send()
     test_reasons()
     test_schema_and_rename()
+    test_stop()
     finish("All trading-agent checks passed.")

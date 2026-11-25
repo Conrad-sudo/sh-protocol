@@ -579,6 +579,22 @@ Note the reputation writes are deliberately *not* restricted this way: a user's 
 
 **Guarded by:** `make agents-test` (the message pinned to the same known answer as `AgentModuleTest.test_hashOperation_knownAnswer`; the signature reading; the request kept out of the passkey flows; sending once and only with the agent's signature; the account and the keeper's look across Mitfah's trades, outside ones, in-flight ones, a trade landing mid-look, re-added and removed agents; renaming), `make mcp-test` [14] (who sees and may call the agent tools), and `make mcp-e2e` [7] on a fork (an owner-added agent trading with its own key through the real bundler and EntryPoint, the rule and limit refusals, a quote taken over, a trade sent outside Mitfah and reported, removal).
 
+### 4.14 Trading Agents in Controls — the Web Panel and the Passkey Stop (2026-11-25)
+
+**What it is:** Controls → Trading agents lists the wallet's agents and lets the owner add, change, rename and remove them (owner-wallet transactions to the module, `routes/agents.py`), make an agent's key in the browser, and — with no owner wallet at hand — stop an agent with a passkey (`POST /api/wallet/agents/stop`: the wallet's own `removeAgent`, quoted and approved as a passkey card with origin `controls`; `docs/app.md` "Trading agents").
+
+**Threats and what stops them:**
+- *A passkey, or a session alone, giving an agent power.* Only the owner adds an agent or raises its limit or expiry: the module requires msg.sender == the wallet's owner (§3.17). The passkey's route only ever removes. The web asks before adding or giving more, and says what an agent can do.
+- *The key made in the browser leaking.* It comes from viem's `generatePrivateKey` (the browser's CSPRNG), lives only in the page's memory, is never sent anywhere (the web test checks every request body, the browser wallet's included), is shown once, and is gone once the agent is added or the page is left. Add waits for "I've put this key in my agent", so an agent nobody holds the key of isn't added by mistake.
+- *The stop approved from somewhere else, or twice.* It has no link token, so only the signed-in account's page can start and finish it (`signing.find_by_quote`); it is claimed once, as every card. It is not the web chat's card, and its tap is not written into the conversation.
+- *The stop not going through when needed.* It can't while the wallet is paused (which already stops every agent), with no passkey approved, when the day's gas allowance is spent (§3.12: a runaway agent can spend it), or with a contract allowlist that leaves the module out (answered before a quote is made). The owner wallet's Remove and Pause have none of these limits, and the panel offers Remove whenever the owner wallet can sign.
+- *A waiting payment approved by mistake after a stop.* A stop voids every other quote waiting on that network, as every new card does (one card per network, the user's call 2026-11-25); the dialog says when one was cancelled.
+- *Turning ETH counting off without knowing it stops agents.* The Tokens panel's dialog says so when an agent is active.
+
+**Residual risk:** a script running in the page while a key is shown (an XSS on mitfah.com, a malicious browser extension) could read it; the agent's limit and expiry bound what it could do, and pasting the address of a key made elsewhere keeps the key off the page entirely. The stop dialog shows the action the server quoted; as with every passkey card, the user trusts Mitfah's page to show the op the passkey signs (the wallet's rules still bind it). A stop costs gas and Mitfah's fee from the wallet.
+
+**Guarded by:** `make agents-test` [11] (the stop: who may, the allowlist refusal, a refused quote left nowhere, the card of its own: not the chat's, voiding the other cards, Telegram told, cancel kept out of the conversation), `make mcp-e2e` [8] on a fork (an owner-added agent stopped by a soft passkey through the real bundler: History `controls`, the agent gone, the chat untouched, a second approval refused), `web/src/pages/ControlsPage.test.tsx` "trading agents" (15: listing, adding and the name kept for the confirm, the key made here and never sent, native counting first, three agents, old wallets, remove, change asking only for more, rename, the passkey stop and its cancel and refusal, the Tokens warning), `web/src/pages/HistoryPage.test.tsx` (the agent and passkey labels).
+
 ## 5. Out of Scope
 
 - Chainlink oracle network node-level collusion or manipulation

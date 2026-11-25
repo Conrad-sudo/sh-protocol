@@ -60,7 +60,11 @@ from db import (
 from contract_errors import is_expired_failure
 from network_config import load_network_config
 from parallel import start_read
-from signing import EXPIRED, MCP
+from signing import CONTROLS, EXPIRED, MCP
+
+# The History tab's source for an approved quote, by where it was asked for: an AI app's ('app'), a
+# change made in Controls ('controls'), or the assistant's, from the web chat or Telegram.
+_SOURCE_OF = {MCP: "app", CONTROLS: "controls"}
 
 # What the user hears when the passkey's approval on the wallet ran out between the approval page
 # opening and the send (an op whose own deadline passed gets signing.EXPIRED instead).
@@ -174,7 +178,7 @@ def submit_signed(approved) -> Sending:
         # chat it was asked for in is cleared after every transaction, so it can't be the record.
         record = tx_history.start_assistant_tx(
             user_id, chain_id, session_handler.address, frozen["action"], prepared, frozen["direction"],
-            source="app" if request["origin"] == MCP else "assistant",
+            source=_SOURCE_OF.get(request["origin"], "assistant"),
         )
         if frozen["lp_pool"]:
             _remember_lp_pool(user_id, chain_id, frozen["lp_pool"])

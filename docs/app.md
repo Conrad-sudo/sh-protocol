@@ -75,7 +75,7 @@ app/
     ├── test_ens_names.py  ← ENS lookups, and CCIP-Read kept off our own network (make ens-test)
     ├── test_passkeys.py   ← Approvals packed as the wallet reads them (the contract's own known-answer vector), the op deadline nonce, making/managing passkeys, a Telegram link (make passkeys-test)
     ├── test_mcp.py        ← AI apps' sign-in (known list, Allow page, codes, tokens, refresh reuse, revocation), /mcp, connected apps, passkey sign-in, personal access tokens (make mcp-test)
-    ├── test_mcp_fork.py   ← AI apps end to end against the RUNNING API and a fork: OAuth, reads, quote, link approved by a soft passkey, confirmed (make mcp-e2e)
+    ├── test_mcp_fork.py   ← AI apps end to end against the RUNNING API and a fork: OAuth, reads, quote, link approved by a soft passkey, confirmed; a personal token; a trading agent; a passkey stopping one (make mcp-e2e)
     ├── test_chat_memory.py ← The conversation store: a turn saved once as it ends, many at once on their own threads, two processes on one file (make chat-memory-test)
     ├── test_e2e_fork.py   ← Full user journey on a fork, Sepolia unless ARGS names another (make e2e-test)
     └── test_agent_smoke.py ← Real agent conversation, checks tool calls (make agent-smoke)
@@ -1104,7 +1104,7 @@ Connected apps lists them (the account's, shown even with no wallet) with the ad
 needs `deploy/Caddyfile`'s `/mcp` and `/.well-known/oauth-*` blocks (the dev server proxies the same),
 and `WEB_APP_URL` set to the exact public origin: it is the issuer every token and redirect names.
 
-## Trading agents (2026-11-24, agent plan step 3: the backend)
+## Trading agents (2026-11-24, agent plan step 3: the backend; 2026-11-25, step 4: the web panel)
 
 The user's own agent trades from the wallet with ITS OWN key and no passkey, within a USD limit and an
 expiry the owner gave it on `AgentModule` (docs/contracts.md). Its trades are ordinary UserOps from the
@@ -1170,7 +1170,7 @@ user only after the swap wins, so a trade landing mid-look is never reported. A 
 is accounted afresh; a removed one's row is deleted. `agents.sync_chain` (with the keeper's sync) records
 agents added outside the app, from what they had already spent.
 
-**Owner routes** (`routes/agents.py`; the web panel is step 4): `GET /api/wallet/{chain_id}/agents`
+**Owner routes** (`routes/agents.py`; the web panel is below): `GET /api/wallet/{chain_id}/agents`
 (`available`, `module`, `native_metered`, `max_agents`, `max_days`, the agents; brings the rows in line
 with the chain), `POST /api/wallet/agents/prepare` {action add|update|remove, agent, limit_usd, days} → the
 owner's unsigned transaction TO THE MODULE (an add needs native counting on: a 400 says so first; the
@@ -1179,7 +1179,38 @@ only a transaction to this wallet's module that changed this wallet's agents; re
 History row (`owner`), answers the list; `POST /api/wallet/agents/rename` {chain_id, agent, name}, wallet.db
 only. Names: 1–40 characters, single-spaced, no control characters.
 
-**History**: `GET /api/transactions` rows of source `agent` carry `agent: {address, name}`.
+**Stopping one with a passkey** (`POST /api/wallet/agents/stop` {chain_id, agent}), for when the owner
+wallet isn't at hand. The module lets the wallet itself call `removeAgent` (only remove: never add or
+raise), so the route quotes that call as an ordinary passkey op (`tools.quoting._quote_executions`, the
+same checks and pricing as the assistant's quotes) and puts it on a card of its own:
+`signing.offer_alone` with origin `controls`. Unlike `signing.offer`, it isn't marked offered, so the web
+chat never shows it as its card nor answers a typed "yes" with it, and `smart_wallet_agent._in_conversation`
+keeps its tap out of the conversation; like `offer`, it voids every other quote waiting on that network
+(one card per network; a Telegram one is told why). The page approves it as a chat card: `POST
+/api/sign/start` and `/finish` naming {chain_id, quote_id}, signed in, no link. History source `controls`.
+Refused first (400) for an address that isn't one of the wallet's agents, and when the wallet's contract
+allowlist is on without the module (a passkey op can't reach it then); refused by the quote's own checks
+when the wallet is paused (which stops every agent anyway) or no passkey is approved on it, and by the
+simulation when the day's gas allowance is spent. It costs gas and Mitfah's fee, like any passkey op. The
+owner wallet's Remove has none of these limits. Same rate limit and turn rule as a chat message
+(`CHAT_RATE_LIMIT`, `_chat_turn`).
+
+**The web panel** (Controls → Trading agents, `web/src/components/controls/AgentsPanel.tsx`): each agent
+with its name (or short address), Active/Expired, what it has spent of its limit this period, until when
+it works, and its address to copy. Change (a new limit and 7/30/90 days from now; giving it more asks
+first), Rename (wallet.db only), and Remove with the owner wallet — or, while the owner wallet can't sign
+(not connected, another account), "Stop with passkey" instead (`hooks/useAgentStop.tsx`,
+`StopAgentDialog.tsx`: the first tap quotes, the second opens the passkey prompt, then it follows the
+History row until it lands; closing the dialog cancels the quote). The add form takes a name, the agent's
+address, its limit and 7/30/90 days, and asks first, saying the agent can trade on any exchange or protocol,
+that funds already in other protocols are outside the limit, and that revoking its token won't stop it.
+"No key yet? Make one here" makes the key in the browser (viem's `generatePrivateKey`), fills in its
+address and shows the private key once with a copy button; Mitfah never receives it, and Add waits for "I've
+put this key in my agent". With ETH/BNB not counted, the form is replaced by a "Count ETH" button; with three
+agents, by a note. Turning ETH counting off in the Tokens panel warns that agents stop trading.
+
+**History**: `GET /api/transactions` rows of source `agent` carry `agent: {address, name}`; the web shows
+them as "By your agent “name”", and a passkey's stop (source `controls`) as "By you, with your passkey".
 
 **Database**: migration 13 (`_migrate_agents`) — the `agents` table and `transactions.agent`. The API does
 not migrate on start: run `make db` (or start the keeper) after updating.

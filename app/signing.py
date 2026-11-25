@@ -70,8 +70,10 @@ from userop import OP_DEADLINE_GRACE_SECS, read_sessions
 # Where a quote was offered, and so where its outcome goes. MCP: an AI app's tool call
 # (mcp_tools.py), whose quote is approved through a link like Telegram's. AGENT: a trading agent's own
 # trade (agents.py), frozen here like a quote but signed by the agent's key: it gets no link, is no
-# card, and nothing in this module's passkey flow will open or approve one.
-WEB, TELEGRAM, MCP, AGENT = "web", "telegram", "mcp", "agent"
+# card, and nothing in this module's passkey flow will open or approve one. CONTROLS: a change the
+# user asked for in Controls and approves there with a passkey -- stopping a trading agent
+# (routes/agents.py) -- on a card of its own, outside any conversation (offer_alone).
+WEB, TELEGRAM, MCP, AGENT, CONTROLS = "web", "telegram", "mcp", "agent", "controls"
 
 # The origins whose cards are approved through a /c/<token> link rather than a signed-in page.
 _LINKED = (TELEGRAM, MCP)
@@ -199,11 +201,28 @@ def offer(user_id: int, chain_id: int, turn_id: int | None, origin: str,
     """
     pending = quotes.offer(user_id, chain_id, turn_id)
     offered = open_request(pending, origin, telegram_chat_id) if pending is not None else None
-    if offered is None:
-        return None
-    quotes.drop_others(user_id, chain_id, keep=pending.quote_id)
+    return None if offered is None else _only_card(offered)
+
+
+def offer_alone(pending: quotes.PendingTransaction, origin: str) -> Offer | None:
+    """
+    A quote raised outside any conversation, on a card of its own: Controls' passkey stop
+    (routes/agents.py). Unlike offer, it is NOT marked offered (quotes.offer), so the web chat never
+    shows it as its card, nor answers a typed "yes" with it. It is still the only card on its
+    network: every other quote waiting there is voided, as offer voids them.
+
+    @return  The offer, or None if the quote's request is no longer open.
+    """
+    offered = open_request(pending, origin)
+    return None if offered is None else _only_card(offered)
+
+
+def _only_card(offered: Offer) -> Offer:
+    """One card at a time per chain (see offer): voids the user's other quotes waiting there."""
+    pending = offered.pending
+    quotes.drop_others(pending.user_id, pending.chain_id, keep=pending.quote_id)
     superseded = tuple(
-        r for r in get_open_sign_requests(user_id, chain_id)
+        r for r in get_open_sign_requests(pending.user_id, pending.chain_id)
         if r["quote_id"] != pending.quote_id and cancel_sign_request(r["id"])
     )
     return dataclasses.replace(offered, superseded=superseded)

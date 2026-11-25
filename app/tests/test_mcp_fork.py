@@ -8,7 +8,7 @@ Also: a newer quote replaces an older one, cancel_transaction stops a link worki
 can't send twice, a personal access token made with the wallet's passkey reads the chain read-only
 until revoked, and a trading agent the owner adds trades with its own key and no passkey -- held to
 the module's rules and its own limit, its trades made outside Mitfah reported by the keeper's look --
-until the owner removes it.
+until the owner removes it; and the passkey alone stops another, from Controls, with no owner wallet.
 
 Everything goes to the API over HTTP, as an app and a browser would, so this process never sends
 with the API's bundler keys (two processes counting the same keys' nonces collide). What it does
@@ -528,6 +528,59 @@ def test_trading_agent(c: httpx.Client, headers: dict, owner, key: SoftPasskey, 
     check("...and it can trade no more", error and "not one of this wallet's agents" in str(text), str(text))
 
 
+def test_passkey_stop(c: httpx.Client, headers: dict, owner, key: SoftPasskey, wallet: str):
+    """
+    Stopping an agent from Controls with the passkey, no owner wallet: the wallet's own removeAgent,
+    quoted on a card of its own, approved as a chat card is, and settled in the History tab as the
+    user's own, outside the conversation.
+    """
+    print("\n[8] the passkey stops an agent, with no owner wallet")
+    agent = Account.create()
+    r = owner_action(c, headers, owner, "/api/wallet/agents/prepare",
+                     {"action": "add", "agent": agent.address, "limit_usd": "3", "days": 7},
+                     "/api/wallet/agents/confirm", name="e2e stop")
+    check("the owner adds an agent to stop", r.status_code == 200 and agent.address in
+          [a["address"] for a in r.json()["agents"]["agents"]], f"{r.status_code} {r.text[:200]}")
+    chat_before = len(c.get(f"/api/chat/history?chain_id={CHAIN_ID}", headers=headers).json().get("messages", []))
+
+    stranger = c.post("/api/wallet/agents/stop", headers=headers, json={"chain_id": CHAIN_ID, "agent": Account.create().address})
+    check("an address that isn't one of its agents: refused", stranger.status_code == 400, f"{stranger.status_code} {stranger.text[:200]}")
+
+    r = c.post("/api/wallet/agents/stop", headers=headers, json={"chain_id": CHAIN_ID, "agent": agent.address})
+    stop = r.json().get("quote", {}) if r.status_code == 200 else {}
+    print(f"  quote: {stop.get('action')}; fees {stop.get('fees')}")
+    check("the stop is quoted as the wallet's own removal",
+          r.status_code == 200 and stop.get("action") == "Remove agent “e2e stop”", f"{r.status_code} {r.text[:300]}")
+    check("...and the web chat never shows it as its card",
+          c.get(f"/api/chat/quote?chain_id={CHAIN_ID}", headers=headers).json()["quote"] is None)
+
+    r = c.post("/api/sign/start", headers=headers, json={"chain_id": CHAIN_ID, "quote_id": stop.get("quote_id")})
+    started = r.json() if r.status_code == 200 else {}
+    check("the page opens the approval, from Controls",
+          r.status_code == 200 and started["summary"].get("origin") == "controls", f"{r.status_code} {r.text[:300]}")
+    credential = key.assertion(base64url_to_bytes(started["challenge"]))
+    r = c.post("/api/sign/finish", headers=headers, json={"sign_id": started["sign_id"], "credential": credential})
+    sent = r.json() if r.status_code == 200 else {}
+    check("the passkey's approval sends it", sent.get("status") == "sent" and sent.get("transaction_id"),
+          f"{r.status_code} {r.text[:300]}")
+
+    row, deadline = {}, time.time() + 120
+    while time.time() < deadline:
+        row = c.get(f"/api/transactions/{sent.get('transaction_id')}", headers=headers).json()
+        if row.get("status") != "pending":
+            break
+        time.sleep(1)
+    print(f"  History: {row.get('source')} · {row.get('action')} · {row.get('status')}")
+    check("it lands, in the History tab as the user's own from Controls",
+          row.get("status") == "confirmed" and row.get("source") == "controls", str(row))
+    listed = c.get(f"/api/wallet/{CHAIN_ID}/agents", headers=headers).json()["agents"]
+    check("the agent is gone", agent.address not in [a["address"] for a in listed], str(listed))
+    chat_after = len(c.get(f"/api/chat/history?chain_id={CHAIN_ID}", headers=headers).json().get("messages", []))
+    check("...and the conversation never heard of it", chat_after == chat_before, f"{chat_before} -> {chat_after}")
+    again = c.post("/api/sign/finish", headers=headers, json={"sign_id": started["sign_id"], "credential": credential})
+    check("a second approval sends nothing", again.status_code == 409, f"{again.status_code} {again.text[:200]}")
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     with httpx.Client(base_url=API_URL, timeout=180) as client:
@@ -547,5 +600,6 @@ if __name__ == "__main__":
         test_approve_through_link(client, access_token, auth_headers, phone, deployed, payee_address)
         test_personal_token(client, auth_headers, phone, deployed)
         test_trading_agent(client, auth_headers, owner, phone, deployed, payee_address)
+        test_passkey_stop(client, auth_headers, owner, phone, deployed)
 
     finish(f"All AI-app fork checks passed on {NETWORK}.")

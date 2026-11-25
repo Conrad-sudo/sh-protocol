@@ -6,26 +6,43 @@ Only the wallet's OWNER, calling AgentModule directly, can add an agent or raise
 the module checks msg.sender == the wallet's owner, and a passkey acts AS the wallet, so it can never
 give an agent anything. So, like the other owner actions, these endpoints PREPARE an unsigned
 transaction the user signs in their browser wallet, and confirm it once mined. The transaction goes to
-the module, not the wallet. (The wallet itself may only remove an agent -- a passkey's way to stop one
-without the owner wallet.)
+the module, not the wallet. The wallet itself may only remove an agent: POST /api/wallet/agents/stop
+is a passkey's way to stop one without the owner wallet, approved like a chat card.
 
 Names live in Mitfah's database only (db.agents); everything else is read from the chain on every list.
 """
 import time
 from decimal import Decimal
+from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 from web3.logs import DISCARD
 
 import agents
+import quotes
+import signing
+import telegram_notify
+from agent_context import AgentContext
 from auth import get_current_user
+from chat_limits import CHAT_RATE_LIMIT
 from constants import MAX_DAILY_LIMIT_USD, get_native_asset_ticker
 from contracts import read_spending_config
-from db import add_agent_row, add_transaction, delete_agent_row, get_agent_row, get_wallet_address, rename_agent
+from db import (
+    acting_network,
+    add_agent_row,
+    add_transaction,
+    delete_agent_row,
+    get_agent_row,
+    get_wallet_address,
+    rename_agent,
+)
+from network_config import network_name
 from parallel import read_all
+from routes.chat import _chat_rate_key, _chat_turn, _quote_card
 from routes.deps import (
     CONFIRM_POLL_TIMEOUT_SECS,
     _failed_tx_detail,
@@ -33,8 +50,11 @@ from routes.deps import (
     _require_owner,
     _resolve_chain,
     _tx_seen,
+    limiter,
 )
 from routes.owner import TxConfirmRequest, _prepare_owner_tx
+from smart_wallet_agent import _next_turn_id
+from tools.quoting import _quote_executions
 
 router = APIRouter()
 
@@ -58,6 +78,17 @@ class AgentConfirmRequest(TxConfirmRequest):
 
     # For an add: the name the owner gives the agent, kept in Mitfah's database only.
     name: str | None = Field(default=None, max_length=agents.NAME_MAX_LENGTH)
+
+
+class AgentStopRequest(BaseModel):
+    """Body of POST /api/wallet/agents/stop."""
+
+    chain_id: int
+    agent: str
+
+
+# Told in Telegram when a stop voids a card waiting there (one card per network).
+STOP_REPLACED = "Cancelled: you're stopping a trading agent with your passkey in Controls. Nothing was sent."
 
 
 class AgentRenameRequest(BaseModel):
@@ -236,6 +267,77 @@ def confirm_agent(req: AgentConfirmRequest, response: Response, user_id: int = D
         tx_hash=req.tx_hash if req.tx_hash.startswith("0x") else f"0x{req.tx_hash}", mined_at=mined_at, direction="none",
     )
     return {"status": "confirmed", "tx_hash": req.tx_hash, "agents": _listing(user_id, req.chain_id, wallet, module)}
+
+
+@router.post("/api/wallet/agents/stop")
+@limiter.limit(CHAT_RATE_LIMIT, key_func=_chat_rate_key)
+def stop_agent(request: Request, req: AgentStopRequest, user_id: int = Depends(get_current_user)):
+    """
+    Stops an agent with a passkey, for when the owner wallet isn't at hand: quotes the wallet's own
+    call of removeAgent -- the one change to its agents the module lets the wallet itself make -- as a
+    passkey op, on a card of its own (signing.CONTROLS). The page approves it as it does a chat card:
+    POST /api/sign/start, then /finish, naming {chain_id, quote_id}. Nothing is sent here.
+
+    It costs what any passkey op costs, gas and Mitfah's fee from the wallet, and can't go through
+    when no passkey op can: the wallet paused (which already stops every agent), no passkey approved
+    on it, or its day's gas allowance spent. The owner wallet's Remove has none of those limits. Nor
+    can it while the wallet's contract allowlist leaves the module out: answered here, before a
+    quote is made.
+
+    Like every card it voids the quotes waiting on that network (signing.offer_alone: one card per
+    network), but it is no card of the web chat's, and its tap is no part of the conversation.
+
+    @return  {"quote": {"quote_id", "chain_id", "action", "fees", "expires_at"} (GET /api/chat/quote's
+             card), "replaced": how many waiting quotes it voided}.
+    @raises HTTPException 400 for a wallet without the module, an address that isn't one of its agents,
+            an allowlist that leaves the module out, or a quote the wallet would refuse (the reason
+            named); 409 or 429 while the account's turn or every slot is taken (_chat_turn), or 429
+            past CHAT_RATE_LIMIT.
+    """
+    w3, _ = _resolve_chain(req.chain_id)
+    agent = _address(w3, req.agent)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    module = _module_or_400(w3, wallet)
+    first = read_all({
+        "agent": lambda: agents.read_agent(module, wallet.address, agent),
+        "allowlist_on": wallet.functions.sessionAllowlistEnabled().call,
+        "allowed": wallet.functions.getAllowedTargets().call,
+    })
+    if first["agent"] is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That address isn't one of this wallet's agents.")
+    if first["allowlist_on"] and module.address not in {Web3.to_checksum_address(a) for a in first["allowed"]}:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Your wallet's contract allowlist is on and doesn't list the agent module, so a passkey can't "
+            "reach it. Remove the agent with your owner wallet instead.",
+        )
+
+    row = get_agent_row(req.chain_id, wallet.address, agent)
+    action = f"Remove agent {agents.label(row['name'] if row else None, agent)}"
+    removal = module.encode_abi(abi_element_identifier="removeAgent", args=[wallet.address, agent])
+    with _chat_turn(user_id):
+        turn_id = _next_turn_id()
+        # _quote_executions reads only the runtime's context: who, and which turn raised the quote.
+        runtime = SimpleNamespace(context=AgentContext(user_id=user_id, turn_id=turn_id))
+        try:
+            with acting_network(user_id, network_name(req.chain_id), req.chain_id):
+                _quote_executions(runtime, [(module.address, 0, bytes.fromhex(removal[2:]))], action)
+        except ToolException as e:
+            refused = str(e)
+        else:
+            refused = None
+        raised = quotes.raised_in(user_id, req.chain_id, turn_id)
+        offered = signing.offer_alone(raised[0], signing.CONTROLS) if refused is None and len(raised) == 1 else None
+        if offered is None:
+            # Nothing to approve: leave no quote behind.
+            for pending in raised:
+                quotes.drop(user_id, pending.quote_id, req.chain_id)
+            if refused is not None:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, refused)
+            raise HTTPException(status.HTTP_409_CONFLICT, signing.EXPIRED)
+    for replaced in offered.superseded:
+        telegram_notify.tell(replaced, STOP_REPLACED)
+    return {"quote": _quote_card(offered.pending), "replaced": len(offered.superseded)}
 
 
 @router.post("/api/wallet/agents/rename")
