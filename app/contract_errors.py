@@ -22,6 +22,9 @@ _ARTIFACTS = (
     # The owner's recurring payments: createSchedule/cancelSchedule are simulated before signing,
     # and the keeper's run() reports why a payment can't go through.
     "./out/RecurringPaymentModule.sol/RecurringPaymentModule.json",
+    # Trading agents: the owner's add/update/remove are simulated before signing, and an agent's trade
+    # is refused by the module's rules in validation or by its own limit in execution.
+    "./out/AgentModule.sol/AgentModule.json",
 )
 
 # Error(string): what a plain `require(cond, "message")` reverts with -- Uniswap's router, for one.
@@ -47,6 +50,37 @@ _GAS_BUDGET_SELECTOR = keccak(text="SessionHandler_SessionGasBudgetExceeded(uint
 # A token going past the limit the owner set on it in its own units. Explained because the name alone
 # doesn't say the limit resets, or that the owner can change it.
 _TOKEN_CAP_SELECTOR = keccak(text="SpendingLimitModule_TokenCapExceeded(address,uint256,uint256)")[:4]
+
+
+# An agent's trade refused by AgentModule: explained, because an agent's author reads these, and the
+# names alone don't say what to do next.
+_AGENT_LIMIT_SELECTOR = keccak(text="AgentModule_AgentLimitExceeded(uint256,uint256)")[:4]
+_AGENT_UNCOUNTED_SELECTOR = keccak(text="AgentModule_UncountedToken(address,bytes4)")[:4]
+_AGENT_NATIVE_SELECTOR = keccak(text="AgentModule_NativeNotMetered(address)")[:4]
+
+
+def _explain_agent_limit(spent: int, limit: int) -> str:
+    """Why the agent may not make this trade: its own limit."""
+    return (
+        f"this would take the agent past its own limit: ${spent / 10**18:,.2f} spent this period with it, "
+        f"against ${limit / 10**18:,.2f}. Its spend starts over when the wallet's period does, and the "
+        f"owner can raise the limit in the web app (Controls)."
+    )
+
+
+def _explain_agent_uncounted(token: str, selector: bytes) -> str:
+    """Why the agent may not move this token: the wallet's limit doesn't count it."""
+    return (
+        f"an agent may not move or approve {token} (function 0x{selector.hex()}): the wallet's USD limit "
+        f"doesn't count it, so nothing would see it leave. The owner can add it to the tokens the limit "
+        f"counts in the web app (Controls)."
+    )
+
+
+_AGENT_NATIVE_TEXT = (
+    "agents can't trade while the wallet's limit leaves ETH (or BNB) out: the owner turns counting it "
+    "on in the web app (Controls)."
+)
 
 
 def _explain_token_cap(token: str, spent: int, limit: int) -> str:
@@ -209,6 +243,19 @@ def describe_revert_data(data: bytes) -> str:
             return _explain_restricted_target(to_checksum_address(decode(["address"], data[4:])[0]))
         except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
             pass
+    if data[:4] == _AGENT_LIMIT_SELECTOR:
+        try:
+            return _explain_agent_limit(*decode(["uint256", "uint256"], data[4:]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _AGENT_UNCOUNTED_SELECTOR:
+        try:
+            token, selector = decode(["address", "bytes4"], data[4:])
+            return _explain_agent_uncounted(to_checksum_address(token), selector)
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _AGENT_NATIVE_SELECTOR:
+        return _AGENT_NATIVE_TEXT
     if not data:
         return "no revert data"
     # Matched on the leading 4 bytes only: an error's arguments could contain another selector.

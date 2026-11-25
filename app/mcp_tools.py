@@ -35,6 +35,13 @@ get_transaction_status and cancel_transaction answer for a quote an AI app raise
 A read-only personal token (mcp_auth.READ_SCOPE) gets the reads and get_transaction_status only: the
 tools that prepare or cancel are left out of its tools/list (hide_preparing_tools) and refused if it
 calls one anyway (require_prepares).
+
+A trading agent's own token -- a personal token that can read and prepare -- also gets the agent tools
+(AGENT_TOOLS): get_agent_setup, prepare_agent_trade and send_agent_trade (agents.py, agent_trades.py).
+They let the user's own agent trade from the wallet with its own key, within the limit the owner gave
+it, with no passkey: the one way anything over /mcp sends. Nobody else sees them or may call them
+(require_agent_access): an app signed in through OAuth holds no agent's key, and a read-only token
+can't prepare.
 """
 import asyncio
 import functools
@@ -55,8 +62,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.tools.base import Tool
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
 from mcp.types import ToolAnnotations
-from pydantic import BeforeValidator, Field, create_model
+from pydantic import BaseModel, BeforeValidator, Field, create_model
 
+import agent_trades
+import agents
 import mcp_auth
 import quotes
 import signing
@@ -64,7 +73,7 @@ import telegram_notify
 from agent_context import AgentContext
 from chat_limits import CHAT_RATE_LIMIT
 from constants import get_chain_display_name
-from db import acting_network, cancel_sign_request, get_sign_request_by_quote, get_wallet_chains
+from db import PERSONAL_APP, acting_network, cancel_sign_request, get_sign_request_by_quote, get_wallet_chains
 from db.sign_requests import CANCELLED, FAILED, OPEN, SENDING, SENT
 from network_config import CHAIN_NAME_BY_ID, network_name
 from redact import redact
@@ -126,6 +135,8 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotent
 # A quote changes nothing on chain, but it is a step toward a transaction: apps ask the user first.
 PREPARES = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 CANCELS = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+# An agent's trade moves funds on chain, signed by the agent: the one tool here that sends.
+SENDS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 
 BUSY = "Mitfah is answering another request for this account right now. Try again in a moment."
 READ_ONLY_TOKEN = (
@@ -142,6 +153,10 @@ _ALIASES = {
 }
 
 UNEXPECTED = "Mitfah couldn't complete that just now. Try again in a moment."
+AGENT_ONLY = (
+    "Agent trading is for the user's own trading agent: it connects with a personal access token made in "
+    "Mitfah's Controls, under Connected apps, that can \"read and prepare\"."
+)
 
 
 # ── The caller ────────────────────────────────────────────────────────────────
@@ -177,6 +192,22 @@ def require_prepares(caller: dict) -> None:
     """
     if not mcp_auth.prepares(caller):
         raise ToolError(READ_ONLY_TOKEN)
+
+
+def trades_as_agent(caller: dict) -> bool:
+    """Whether a caller may use the agent tools: a personal token (not an app's) that can prepare."""
+    return caller.get("app") == PERSONAL_APP and mcp_auth.prepares(caller)
+
+
+def require_agent_access(caller: dict) -> None:
+    """
+    Refuses the agent tools to anyone but a trading agent's own token (trades_as_agent). Leaving them
+    out of others' tools/list (hide_preparing_tools) is only a courtesy to their models.
+
+    @raises ToolError  When the caller is an app signed in through OAuth, or a read-only token.
+    """
+    if not trades_as_agent(caller):
+        raise ToolError(AGENT_ONLY)
 
 
 def count_quote(user_id: int) -> None:
@@ -644,20 +675,24 @@ QUOTES = [
 
 # ── After a quote: its status, and cancelling it ──────────────────────────────
 
-QuoteId = Annotated[str, Field(description="The quote_id a quote tool returned.")]
+QuoteId = Annotated[str, Field(description="The quote_id a quote tool (or prepare_agent_trade) returned.")]
 NO_QUOTE = "No quote with that id was made through an AI app on this account."
+
+# The origins whose quotes an app may follow and cancel: its own quotes, and agent trades.
+_APP_ORIGINS = (signing.MCP, signing.AGENT)
 
 
 def _app_request(user_id: int, quote_id: str) -> dict:
     """
-    The sign request of a quote an AI app raised for this account, on whichever of its networks.
+    The sign request of a quote an AI app raised for this account, or of an agent trade, on whichever
+    of its networks.
 
     @raises ToolError  When there is none: unknown, another account's, or made in the web chat or
                        Telegram (an app gets only the ids of its own quotes).
     """
     for chain_id in get_wallet_chains(user_id):
         request = get_sign_request_by_quote(user_id, chain_id, quote_id)
-        if request is not None and request["origin"] == signing.MCP:
+        if request is not None and request["origin"] in _APP_ORIGINS:
             return request
     raise ToolError(NO_QUOTE)
 
@@ -668,18 +703,25 @@ def transaction_status(user_id: int, quote_id: str) -> dict:
     chain if nothing is waiting on it, as the History tab does).
     """
     request = _app_request(user_id, quote_id)
+    frozen = signing.thaw(request)
+    by_agent = request["origin"] == signing.AGENT
     result = {
         "quote_id": quote_id,
         "network": get_chain_display_name(request["chain_id"]),
-        "action": signing.thaw(request)["action"],
+        "action": frozen["action"],
     }
+    if by_agent:
+        result["agent"] = frozen["agent"]
     status, now = request["status"], int(time.time())
     if status == OPEN and request["expires_at"] >= now:
-        return result | {"status": "waiting_for_approval", "expires_in_seconds": request["expires_at"] - now}
+        waiting = "waiting_for_signature" if by_agent else "waiting_for_approval"
+        return result | {"status": waiting, "expires_in_seconds": request["expires_at"] - now}
     if status == OPEN:
-        return result | {"status": "expired", "note": "It was never approved, so nothing was sent."}
+        never = "It was never signed and sent" if by_agent else "It was never approved"
+        return result | {"status": "expired", "note": f"{never}, so nothing was sent."}
     if status == SENDING:
-        return result | {"status": "sending", "note": "The user approved it; it is being sent now."}
+        sending = "It is being sent now." if by_agent else "The user approved it; it is being sent now."
+        return result | {"status": "sending", "note": sending}
     if status == CANCELLED:
         return result | {"status": "cancelled", "note": "Nothing was sent."}
     if status == FAILED:
@@ -745,44 +787,186 @@ async def cancel_transaction(ctx: Context, quote_id: QuoteId) -> dict:
         raise ToolError(UNEXPECTED) from e
 
 
+# ── Trading agents ────────────────────────────────────────────────────────────
+# The user's own agent trading from the wallet with its own key (agents.py, agent_trades.py): it reads
+# its setup, has a trade prepared, signs it, and sends it. Only its own token gets these.
+
+# Wei as the agent gives it: a whole number, as text or as a number. Published as a string, since a
+# JSON number loses precision past 2**53.
+Wei = Annotated[str, BeforeValidator(_number_as_text)]
+
+
+class TradeCall(BaseModel):
+    """One call of an agent's trade, made from the wallet."""
+
+    to: str = Field(description="The contract to call, or the address to send to.")
+    data: str = Field("0x", description="The calldata, as hex. 0x, or left out, for a plain send of value.")
+    value: Wei = Field("0", description="The native value to send with the call, in wei, as a whole number.")
+
+
+GET_AGENT_SETUP = (
+    "For the user's own trading agent: the wallet's agents on one network -- each one's address, name, USD limit "
+    "per period, what it has spent and has left, and when it expires -- the tokens a trade may move "
+    "(counted_tokens), the rules every trade must meet, and the EIP-712 domain an agent signs in. Read-only."
+)
+PREPARE_AGENT_TRADE = (
+    "Prepares a trade for one of the wallet's agents to sign with its own key; send_agent_trade then sends it. Give "
+    "either `calls`, the contract calls to make from the wallet in order, or `quote_id`, a quote one of the quote "
+    "tools (swap, transfer_erc20, ...) made, to run it as this agent's trade instead of the user approving it (its "
+    "approve_url stops working). Mitfah checks it against the rules, the wallet's limit and the agent's own, and "
+    "simulates it; nothing is signed or sent. Returns typed_data: sign it as EIP-712 with the agent's key, within "
+    "expires_in_minutes."
+)
+SEND_AGENT_TRADE = (
+    "Sends a trade prepare_agent_trade prepared, with the agent's EIP-712 signature of its typed_data. Mitfah checks "
+    "the signature is that agent's, runs the trade once more and sends it from the wallet; it counts toward the "
+    "agent's limit and the wallet's, and the user is told of it. Returns as soon as it is on its way: follow it with "
+    "get_transaction_status. A trade is sent once."
+)
+
+
+async def _agent_work(caller: dict, name: str, work) -> Any:
+    """Runs an agent tool's work on the tools' own threads, its refusals as tool errors (see wrap)."""
+    try:
+        return await anyio.to_thread.run_sync(work, limiter=_thread_pool())
+    except ToolError:
+        raise
+    except ToolException as e:
+        raise ToolError(redact(e.args[0] if e.args else "The tool refused.")) from e
+    except Exception as e:
+        log.exception("MCP %s failed (connection %s)", name, caller["connection_id"])
+        raise ToolError(UNEXPECTED) from e
+
+
+async def _get_agent_setup(ctx: Context, network: str | None = None) -> dict:
+    caller = caller_of(ctx)
+    count_call(caller)
+    require_agent_access(caller)
+    chain_id = resolve_network(caller["user_id"], network)
+    return await _agent_work(caller, "get_agent_setup", functools.partial(agents.setup, caller["user_id"], chain_id))
+
+
+async def _prepare_agent_trade(
+    ctx: Context, agent: str, network: str | None = None, calls: list | None = None, quote_id: str | None = None,
+) -> dict:
+    caller = caller_of(ctx)
+    count_call(caller)
+    require_agent_access(caller)
+    chain_id = resolve_network(caller["user_id"], network)
+    # A trade is priced and simulated as a quote is: it counts toward the same per-account limits.
+    count_quote(caller["user_id"])
+    plain = None if calls is None else [c.model_dump() if isinstance(c, BaseModel) else dict(c) for c in calls]
+    work = functools.partial(
+        agent_trades.prepare_trade, caller["user_id"], chain_id, agent, calls=plain, quote_id=quote_id,
+        app=caller["name"],
+    )
+    return await _agent_work(caller, "prepare_agent_trade", work)
+
+
+async def _send_agent_trade(ctx: Context, quote_id: str, signature: str) -> dict:
+    caller = caller_of(ctx)
+    count_call(caller)
+    require_agent_access(caller)
+    work = functools.partial(agent_trades.send_trade, caller["user_id"], quote_id, signature)
+    return await _agent_work(caller, "send_agent_trade", work)
+
+
+def _agent_tool(fn, name: str, title: str, description: str, fields: dict, annotations: ToolAnnotations) -> Tool:
+    """An agent tool, its arguments published plain as wrap() publishes a wallet tool's."""
+    model = create_model(f"{name}_arguments", __base__=ArgModelBase, **fields)
+    return Tool(
+        fn=fn, name=name, title=title, description=description, parameters=published_schema(model),
+        fn_metadata=FuncMetadata(arg_model=model), is_async=True, context_kwarg="ctx", annotations=annotations,
+    )
+
+
+def agent_tools() -> list[Tool]:
+    """The three agent tools (AGENT_TOOLS)."""
+    network = (Network, Field(None, description=NETWORK_ARG))
+    return [
+        _agent_tool(_get_agent_setup, "get_agent_setup", "Agent setup", GET_AGENT_SETUP, {"network": network}, READ_ONLY),
+        _agent_tool(
+            _prepare_agent_trade, "prepare_agent_trade", "Prepare an agent trade", PREPARE_AGENT_TRADE,
+            {
+                "agent": (str, Field(description=(
+                    "The agent's address: the key it signs with, one of the wallet's agents (get_agent_setup "
+                    "lists them)."))),
+                "network": network,
+                "calls": (list[TradeCall] | None, Field(None, description=(
+                    "The calls to make from the wallet, in order, e.g. an approve on a counted token and then the "
+                    "exchange's swap. They run together or not at all. Leave it out when giving quote_id."))),
+                "quote_id": (str | None, Field(None, description=(
+                    "A quote_id from a quote tool (swap, transfer_erc20, ...), to run that quote as this agent's "
+                    "trade. Leave it out when giving calls."))),
+            },
+            PREPARES,
+        ),
+        _agent_tool(
+            _send_agent_trade, "send_agent_trade", "Send an agent trade", SEND_AGENT_TRADE,
+            {
+                "quote_id": (str, Field(description="The quote_id prepare_agent_trade returned.")),
+                "signature": (str, Field(description=(
+                    "The agent's EIP-712 signature of that trade's typed_data: 65 bytes (r, s, v) as hex."))),
+            },
+            SENDS,
+        ),
+    ]
+
+
 # What a read-only token may not call, and doesn't see in its tools/list.
 PREPARING_TOOLS = frozenset({spec.tool.name for spec in QUOTES} | {"cancel_transaction"})
+# What only a trading agent's own token may call and sees (trades_as_agent).
+AGENT_TOOLS = frozenset({"get_agent_setup", "prepare_agent_trade", "send_agent_trade"})
 
 
 async def hide_preparing_tools(ctx, call_next):
     """
-    Server middleware (mcp_server.py): leaves PREPARING_TOOLS out of a read-only caller's tools/list,
-    so its model isn't offered tools it would only be refused (require_prepares). Every other
-    message, and every other caller, passes through as it is.
+    Server middleware (mcp_server.py): leaves out of a caller's tools/list what it would only be refused
+    -- PREPARING_TOOLS for a read-only caller (require_prepares), AGENT_TOOLS for anyone but a trading
+    agent's own token (require_agent_access) -- so its model isn't offered them. Every other message
+    passes through as it is.
     """
     result = await call_next(ctx)
     if ctx.method != "tools/list" or not isinstance(result, dict):
         return result
     request = ctx.request
     caller = request.scope.get("state", {}).get(CALLER_KEY) if request is not None else None
-    if caller is None or mcp_auth.prepares(caller):
+    if caller is None:
         return result
-    return {**result, "tools": [tool for tool in result.get("tools", []) if tool.get("name") not in PREPARING_TOOLS]}
+    hidden = set()
+    if not mcp_auth.prepares(caller):
+        hidden |= PREPARING_TOOLS
+    if not trades_as_agent(caller):
+        hidden |= AGENT_TOOLS
+    if not hidden:
+        return result
+    return {**result, "tools": [tool for tool in result.get("tools", []) if tool.get("name") not in hidden]}
 
 
 def wallet_tools() -> list[Tool]:
-    """Every wallet tool an AI app gets: the reads, the quotes, and the two that follow a quote."""
+    """
+    Every wallet tool an AI app may get: the reads, the quotes, the two that follow a quote, and the agent
+    tools (which only a trading agent's own token sees: hide_preparing_tools).
+    """
     return [
         *(wrap(spec) for spec in READS),
         *(wrap(spec) for spec in QUOTES),
         Tool.from_function(
             get_transaction_status, title="Transaction status", annotations=READ_ONLY,
             description=(
-                "What happened to a quote this app prepared, by its quote_id: waiting_for_approval (and for how "
-                "long), sending, sent (on its way), confirmed (in a block, with tx_hash), failed (with the reason), "
-                "cancelled or expired. Read-only."
+                "What happened to a quote this app prepared, or to an agent's trade, by its quote_id: "
+                "waiting_for_approval (waiting_for_signature for an agent's trade) and for how long, sending, sent "
+                "(on its way), confirmed (in a block, with tx_hash), failed (with the reason), cancelled or "
+                "expired. Read-only."
             ),
         ),
         Tool.from_function(
             cancel_transaction, title="Cancel a quote", annotations=CANCELS,
             description=(
-                "Cancels a quote that is still waiting for approval, by its quote_id: its approve_url stops "
-                "working. Use it when the user changes their mind. Nothing was sent, so nothing is reversed."
+                "Cancels a quote that is still waiting for approval, or an agent's trade not yet sent, by its "
+                "quote_id: its approve_url stops working. Use it when the user changes their mind. Nothing was "
+                "sent, so nothing is reversed."
             ),
         ),
+        *agent_tools(),
     ]

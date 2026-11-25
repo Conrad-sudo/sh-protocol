@@ -503,6 +503,44 @@ def _migrate_personal_tokens(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_agents(db: sqlite3.Connection):
+    """
+    Adds trading agents (2026-11-24, agents.py): `agents`, what Mitfah keeps about each wallet's agents
+    on its AgentModule, and `transactions.agent`, the agent whose trade an 'agent' row is.
+
+    The chain holds an agent's terms and spend; a row holds only what the chain doesn't. `name` is what
+    the owner called it (NULL for one added outside Mitfah). seen_epoch / seen_window / seen_spent are
+    the agent's record on chain (its epoch, windowStart and spentUsd) when the keeper last looked, and
+    `relayed` what Mitfah's own trades of it have charged in seen_window since (agents.settle adds each
+    one, in whatever order they land). Spend on chain beyond seen_spent + relayed, with no trade of
+    Mitfah's in flight, was made outside Mitfah, and the keeper tells the user (keeper.check_agents).
+    Amounts are text: uint128s in 18 decimals, past SQLite's integers. One row per (chain, wallet,
+    agent), deleted when the agent leaves the wallet.
+    """
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            chain_id    INTEGER NOT NULL,
+            wallet      TEXT NOT NULL,
+            address     TEXT NOT NULL,
+            name        TEXT,
+            added_at    INTEGER NOT NULL,
+            seen_epoch  INTEGER NOT NULL DEFAULT 0,
+            seen_window INTEGER NOT NULL DEFAULT 0,
+            seen_spent  TEXT NOT NULL DEFAULT '0',
+            relayed     TEXT NOT NULL DEFAULT '0',
+            checked_at  INTEGER
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS agents_by_address ON agents (chain_id, wallet, address);
+        CREATE INDEX IF NOT EXISTS agents_by_user ON agents (user_id, chain_id);
+    """)
+    columns = [row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "agent" not in columns:
+        db.execute("ALTER TABLE transactions ADD COLUMN agent TEXT")
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -810,6 +848,7 @@ MIGRATIONS = (
     _migrate_recurring_payments,     # 10: schedules the keeper pays
     _migrate_ai_apps,                # 11: AI apps over MCP, and passkey sign-in
     _migrate_personal_tokens,        # 12: personal access tokens for /mcp
+    _migrate_agents,                 # 13: trading agents, and which agent made a trade
 )
 
 

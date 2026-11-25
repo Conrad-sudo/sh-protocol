@@ -1,6 +1,6 @@
 """
-The API process's few words to Telegram: how an approval made on the /c/<token> page went, and the
-buttons taken off the quote's card.
+The API process's few words to Telegram: how an approval made on the /c/<token> page went, the
+buttons taken off the quote's card, and each trade a trading agent makes through Mitfah (tell_user).
 
 The Telegram bot is a process of its own (`make bot`) and it raised the quote, but the approval
 page posts to the API, which checks the passkey and sends the transaction. So the API tells the chat
@@ -19,6 +19,7 @@ from concurrent.futures import Future
 import requests
 
 from constants import get_chain_display_name
+from db import get_user_by_id
 from telegram_bots import bot_token
 from telegram_format import code_escaped, headed
 
@@ -88,5 +89,21 @@ def tell(request: dict, text: str, landed: Future | None = None) -> threading.Th
             send(chat_id, chain_id, final)
 
     thread = threading.Thread(target=run, name="telegram-notify", daemon=True)
+    thread.start()
+    return thread
+
+
+def tell_user(user_id: int, chain_id: int, text: str) -> threading.Thread | None:
+    """
+    Posts `text` to the user's linked Telegram chat, on a thread of its own: how they hear of each trade
+    their agent makes through Mitfah (agent_trades.settle). Nothing when they linked no chat.
+
+    @return  The thread doing it, or None when there is nobody to tell.
+    """
+    user = get_user_by_id(user_id)
+    chat_id = user.get("telegram_chat_id") if user else None
+    if chat_id is None:
+        return None
+    thread = threading.Thread(target=send, args=(chat_id, chain_id, text), name="telegram-notify", daemon=True)
     thread.start()
     return thread

@@ -134,14 +134,14 @@ def _outcome(w3: Web3, receipt) -> tuple[str, int | None]:
 # ── The assistant's transactions ──────────────────────────────────────────────
 
 # The sources whose rows are UserOperations sent through the bundler, found and settled by their
-# userOpHash: the assistant's, and an AI app's.
-USER_OP_SOURCES = ("assistant", "app")
+# userOpHash: the assistant's, an AI app's, and a trading agent's (agents.py).
+USER_OP_SOURCES = ("assistant", "app", "agent")
 
 
 @_best_effort
 def start_assistant_tx(
     user_id: int, chain_id: int, wallet: str, action: str, prepared, direction: str | None = None,
-    source: str = "assistant",
+    source: str = "assistant", agent: str | None = None,
 ) -> int | None:
     """
     Records a signed UserOperation as pending, just before it is broadcast.
@@ -151,7 +151,9 @@ def start_assistant_tx(
     @param direction  What it is meant to do, 'in' or 'out', from the quote; None if it can't say.
                       A pending or failed send is listed in its group by this. Once it confirms,
                       read_movements replaces it with what the receipt shows.
-    @param source     'assistant', or 'app' for a quote an AI app raised (USER_OP_SOURCES).
+    @param source     'assistant', 'app' for a quote an AI app raised, or 'agent' for a trading
+                      agent's trade (USER_OP_SOURCES).
+    @param agent      The agent's address, for an 'agent' row.
     @return           The row's id, for finish_assistant_tx or discard_assistant_tx.
     """
     return add_transaction(
@@ -165,6 +167,7 @@ def start_assistant_tx(
         op_nonce=prepared.op[1],
         from_block=prepared.from_block,
         direction=direction,
+        agent=agent,
     )
 
 

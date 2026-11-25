@@ -10,10 +10,13 @@ declares what Claude needs to use a CIMD client id, and can't be told otherwise.
 
 The tools: get_account, here, and the wallet's reads and quotes (mcp_tools.py), each with a
 description that carries the rules the web chat's system prompt holds: these apps' models never see
-that prompt. A quote hands the user a /c/<token> link; only their passkey sends it.
+that prompt. A quote hands the user a /c/<token> link; only their passkey sends it. The one exception
+is the agent tools: the user's own trading agent sends trades it signs with its own key, within the
+limit the owner gave it (agent_trades.py).
 
 The caller is an app signed in through OAuth or the user's own personal access token; a read-only
-token's tools/list leaves out the quotes (mcp_tools.hide_preparing_tools).
+token's tools/list leaves out the quotes, and only a personal token that can read and prepare sees
+the agent tools (mcp_tools.hide_preparing_tools).
 """
 import contextlib
 import logging
@@ -30,7 +33,7 @@ from starlette.types import Receive, Scope, Send
 import mcp_auth
 from constants import get_chain_display_name
 from db import get_user_by_id, get_wallet_address, get_wallet_chains
-from mcp_tools import CALLER_KEY, caller_of, count_call, hide_preparing_tools, wallet_tools
+from mcp_tools import CALLER_KEY, caller_of, count_call, hide_preparing_tools, trades_as_agent, wallet_tools
 
 # Stateless, every request "terminates a session" -- an INFO line per call. Warnings still show.
 logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
@@ -40,7 +43,8 @@ logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
 # Code keeps 2,048 characters, and ChatGPT reads the first 512 most closely.
 INSTRUCTIONS = (
     "Mitfah is a self-custody smart wallet. This connection acts for one Mitfah account. It can read that account; it can never move funds on "
-    "its own: every transaction is approved by the user with their passkey on Mitfah's own page. "
+    "its own: every transaction is approved by the user with their passkey on Mitfah's own page, except a trade by the user's own "
+    "trading agent, signed with the agent's key within the limit the user gave it. "
     "Never ask the user for a seed phrase, private key or passkey. "
     "The account has a smart wallet per network: get_account lists them, and the other tools take that network as `network`."
 )
@@ -137,8 +141,9 @@ class McpEndpoint:
 # sentences, and passed explicitly (the SDK would pass the docstring as it is, indentation and all).
 GET_ACCOUNT_DESCRIPTION = (
     "Which Mitfah account this app is connected to: the address that owns it, and its smart wallet's "
-    "address on each network where it has one, and whether this connection can prepare transactions or "
-    "only read. Use it to check the connection works, or before talking about the user's wallets. Read-only."
+    "address on each network where it has one, whether this connection can prepare transactions or only "
+    "read, and whether it can trade as the user's own agent. Use it to check the connection works, or before "
+    "talking about the user's wallets. Read-only."
 )
 
 
@@ -165,6 +170,7 @@ def get_account(ctx: Context) -> dict:
         "wallets": wallets,
         "connected_app": caller["name"],
         "access": "read and prepare" if mcp_auth.prepares(caller) else "read only",
+        "agent_trading": trades_as_agent(caller),
         "note": (
             "No smart wallet yet: the user creates one on Mitfah's website."
             if not wallets else

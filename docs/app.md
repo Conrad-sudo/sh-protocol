@@ -28,7 +28,10 @@ app/
 ├── tx_history.py          ← The History tab's record: every transaction on the wallet, Mitfah's and outside it, kept apart from the chat
 ├── tx_movements.py        ← What each transaction moved in or out of the wallet, for the History tab's filters
 ├── recurring.py           ← Recurring payments: each wallet's schedules read off its RecurringPaymentModule, worded like History
-├── keeper.py              ← The keeper process (`make keeper`): pays each recurring payment when it falls due
+├── keeper.py              ← The keeper process (`make keeper`): pays each recurring payment when it falls due, and reports agents' trades made outside Mitfah
+├── agent_ops.py           ← A trading agent's op as AgentModule reads it: nonce key, call data, 95-byte signature, EIP-712 message
+├── agents.py              ← Trading agents read from the chain, their names, the keeper's look at their spend
+├── agent_trades.py        ← An agent's trade through Mitfah: prepared and frozen, its signature checked, sent once, settled
 ├── explorers.py           ← Reads activity outside Mitfah: Etherscan's API (Ethereum, Sepolia, Arbitrum, Celo), NodeReal (BSC), Alchemy (Base)
 ├── custom_tokens.py       ← The checks run on a token a user adds by address (MetaMask-style)
 ├── ens_names.py           ← ENS name → address on Ethereum mainnet, for adding a contact by name (sam.eth)
@@ -38,7 +41,7 @@ app/
 ├── chat_memory.py         ← The agent's conversations: a LangGraph checkpointer on wallet-chat.db, a connection per thread
 ├── auth.py                ← SIWE sign-in, JWTs, the EIP-712 signature that adds a contact
 ├── api.py                 ← FastAPI app — what the web app in web/ talks to; builds the app and includes routes/
-├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in; routes/access_tokens.py: personal access tokens)
+├── routes/                ← The API's routers, one per area; routes/deps.py holds what they share (routes/oauth.py: AI apps' sign-in; routes/access_tokens.py: personal access tokens; routes/agents.py: the owner's trading agents)
 ├── mcp_server.py          ← MCP for AI apps at /mcp (Claude, Claude Code, ChatGPT): the token check in front of the SDK, and get_account
 ├── mcp_tools.py           ← The wallet's tools as AI apps see them: each wrapped with a `network`, its own thread pool, a per-app rate limit
 ├── mcp_auth.py            ← How AI apps sign in: codes with PKCE, access and refresh tokens, rotation, revocation
@@ -1100,6 +1103,86 @@ passkey. Phase 1 of the agent plan; autonomous agents (their own key and limit) 
 Connected apps lists them (the account's, shown even with no wallet) with the address to connect one. Production
 needs `deploy/Caddyfile`'s `/mcp` and `/.well-known/oauth-*` blocks (the dev server proxies the same),
 and `WEB_APP_URL` set to the exact public origin: it is the issuer every token and redirect names.
+
+## Trading agents (2026-11-24, agent plan step 3: the backend)
+
+The user's own agent trades from the wallet with ITS OWN key and no passkey, within a USD limit and an
+expiry the owner gave it on `AgentModule` (docs/contracts.md). Its trades are ordinary UserOps from the
+wallet, sent by Mitfah's bundler like a passkey's; what changes is who signs. Mitfah never holds an agent's
+key and signs nothing for one. Files: `agent_ops.py` (encodings), `agents.py` (chain reads, names, the
+keeper's look), `agent_trades.py` (prepare, send, settle), `routes/agents.py` (owner), `db/agents.py`,
+`bundler.quote_agent_op`.
+
+**An agent op** (`agent_ops.py`): nonce key = the module's address (20 bytes) ‖ a random 4-byte lane, so
+the wallet routes the op to the module and trades never queue; callData = `executeUserOp`'s selector
+(`0x8dd7712f`) ‖ the wallet's `execute()` calldata, so the wallet runs the module's `preExecute` /
+`postExecute` around the calls; signature = agent (20) ‖ epoch (4) ‖ deadline (6) ‖ r ‖ s ‖ v, 95 bytes.
+The agent signs the EIP-712 digest of `AgentOperation(userOpHash, deadline, epoch)` in the module's domain
+(`AgentModule`, `1`, chain, module): `typed_data` for `eth_signTypedData_v4`, `operation_digest` for the
+hash. Pinned to one known answer in both `app/tests/test_agents.py` and AgentModuleTest
+(`test_hashOperation_knownAnswer`). `recover_agent` mirrors OpenZeppelin's ECDSA (v 27/28, low s; a v of
+0/1 is read as 27/28).
+
+**Pricing** (`bundler.quote_agent_op`): execution is estimated as `executeUserOp` from the EntryPoint with
+the REAL agent named (the hooks read only the agent and epoch at the head of the signature), so the
+agent's own limit, the wallet's limit and any failing call are caught before the agent signs. Validation
+is estimated with a THROWAWAY agent planted on the module by a state override (`_agents` is slot 2; the
+record's two words are in `agent_ops.record_words`), so the module's signature check and its three rules
+run in full; the plant is checked first with `getAgent` (`_agent_override_honoured`), and a node that
+ignores overrides gets `AGENT_VALIDATION_FALLBACK_GAS` instead. preVerificationGas is counted for a 95-byte
+signature; the fee cap is clamped to `maxOpGasCost` as for a passkey; the whole bundle is simulated with
+the planted agent. Quote and build are one step: the op's fees and nonce are fixed at once.
+
+**Over MCP** — only a personal token that can read and prepare (`mcp_tools.trades_as_agent`; the tools are
+left out of everyone else's `tools/list` and refused if called, `AGENT_ONLY`):
+- `get_agent_setup(network)` → the wallet's agents (address, name, limit, spent, left, expiry, active), the
+  tokens a trade may move (`counted_tokens`), whether the limit counts the native asset, the rules, and the
+  EIP-712 domain (`agents.setup`). A wallet from before agents answers `available: false`.
+- `prepare_agent_trade(network, agent, calls | quote_id)` (`agent_trades.prepare_trade`): `calls` are the
+  agent's own, `[{to, data, value (wei, text)}]`, at most 16, described by code ("Agent trade: approve on
+  USDC; exactInputSingle on 0x…"); `quote_id` takes over a waiting quote an AI app raised (its link is
+  cancelled first, so it can't be sent twice). Refused in words when the agent isn't the wallet's, has
+  expired, the wallet is paused or doesn't count the native asset, or the trade would fail. Frozen in a
+  sign request with origin `agent` (expires in `TRADE_TTL_SECS`, 5 min; the op's deadline adds
+  `OP_DEADLINE_GRACE_SECS`), the build's `challenge` holding the digest. Counts toward the account's quote
+  limits. Returns `typed_data`, `digest`, the fees, what the agent has left.
+- `send_agent_trade(quote_id, signature)` (`send_trade`): the signature is recovered off chain and must be
+  the agent's (else refused, the trade stays open); the request is claimed once; `_submit` re-reads the
+  agent (removed or re-added, expired), re-runs the execution estimate and `check_signed_user_op` with the
+  real signature, writes the History row (source `agent`, `transactions.agent`), and submits through the
+  bundler's lanes. Returns `sending`; `get_transaction_status` follows it (`waiting_for_signature` while
+  unsigned) and `cancel_transaction` drops an unsent one.
+- `settle` (on a `landing.watch` thread): reads `AgentExecuted` from the receipt, accounts for the charge
+  (`db.add_relayed`, in the window read with `getAgent` at the receipt's block) BEFORE the History row
+  settles, then tells the user on Telegram — every trade (`telegram_notify.tell_user`).
+
+**Kept out of the passkey flows.** An `agent` request gets no link token, `get_open_sign_requests` leaves it
+out unless asked by that origin (so one-card-per-network, a typed "yes" and `/cancel` never touch it), and
+`signing.find_by_quote` / `find_by_sign_id` / `start` / `approve` refuse it.
+
+**Trades made outside Mitfah.** The agent holds its key, so it can also hand a signed op to any bundler.
+The keeper (`agents.check_agents`, every pass) reads each agent's record and tells the owner when it spent
+more than Mitfah's own trades account for: per row, `seen_epoch/seen_window/seen_spent` (the record at the
+keeper's last look) plus `relayed` (what Mitfah's trades charged since, added in any order). Outside spend
+= on-chain spend − seen − relayed (all of it in a later window none of Mitfah's trades reached). The look
+waits while a trade of Mitfah's for that agent is pending, rebases with a compare-and-swap, and tells the
+user only after the swap wins, so a trade landing mid-look is never reported. A re-added agent (new epoch)
+is accounted afresh; a removed one's row is deleted. `agents.sync_chain` (with the keeper's sync) records
+agents added outside the app, from what they had already spent.
+
+**Owner routes** (`routes/agents.py`; the web panel is step 4): `GET /api/wallet/{chain_id}/agents`
+(`available`, `module`, `native_metered`, `max_agents`, `max_days`, the agents; brings the rows in line
+with the chain), `POST /api/wallet/agents/prepare` {action add|update|remove, agent, limit_usd, days} → the
+owner's unsigned transaction TO THE MODULE (an add needs native counting on: a 400 says so first; the
+expiry is counted from the chain's time), `POST /api/wallet/agents/confirm` {chain_id, tx_hash, name} →
+only a transaction to this wallet's module that changed this wallet's agents; records the name, the
+History row (`owner`), answers the list; `POST /api/wallet/agents/rename` {chain_id, agent, name}, wallet.db
+only. Names: 1–40 characters, single-spaced, no control characters.
+
+**History**: `GET /api/transactions` rows of source `agent` carry `agent: {address, name}`.
+
+**Database**: migration 13 (`_migrate_agents`) — the `agents` table and `transactions.agent`. The API does
+not migrate on start: run `make db` (or start the keeper) after updating.
 
 ## Section 3 — LangChain Agent
 

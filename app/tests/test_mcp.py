@@ -1099,6 +1099,88 @@ def test_personal_tokens(c: TestClient):
         set_everywhere(api, "approved_on_a_wallet", saved)
 
 
+def test_agent_tools(c: TestClient):
+    print("\n[14] Agent tools: only for the user's own agent's token")
+    import json as _json
+
+    import agent_trades
+    import agents
+    import mcp_tools
+    import signing
+    from langchain_core.tools import ToolException
+
+    _, headers, _ = sign_in(c)
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    db.save_wallet_address(user_id, 11155111, "0x00000000000000000000000000000000000000E1")
+    agent_token = mcp_auth.create_personal(user_id, "Trader", 30, read_only=False)["token"]
+    read_token = mcp_auth.create_personal(user_id, "Reader", 30, read_only=True)["token"]
+    app_access = connect(c, headers)["access_token"]
+
+    def listed(token) -> set:
+        return {t["name"] for t in mcp(c, token, "tools/list").json()["result"]["tools"]}
+
+    check("an agent's token (personal, read and prepare) sees the agent tools",
+          mcp_tools.AGENT_TOOLS <= listed(agent_token), str(sorted(mcp_tools.AGENT_TOOLS - listed(agent_token))))
+    check("an app signed in through OAuth doesn't", not (listed(app_access) & mcp_tools.AGENT_TOOLS))
+    check("nor does a read-only token", not (listed(read_token) & mcp_tools.AGENT_TOOLS))
+    for name, arguments in [("get_agent_setup", {}), ("prepare_agent_trade", {"agent": "0x" + "11" * 20, "quote_id": "q"}),
+                            ("send_agent_trade", {"quote_id": "q", "signature": "0x00"})]:
+        error, text = call_tool(c, app_access, name, arguments)
+        check(f"{name} refused to an app", error and mcp_tools.AGENT_ONLY in str(text), str(text))
+        error, text = call_tool(c, read_token, name, arguments)
+        check(f"{name} refused to a read-only token", error and mcp_tools.AGENT_ONLY in str(text), str(text))
+    check("get_account says which may trade as an agent",
+          account_of(c, agent_token).get("agent_trading") is True and account_of(c, app_access).get("agent_trading") is False)
+
+    seen: dict = {}
+    saved = agents.setup, agent_trades.prepare_trade, agent_trades.send_trade
+
+    def fake_prepare(user, chain, agent, *, calls=None, quote_id=None, app=None):
+        seen["prepare"] = (user, chain, agent, calls, quote_id, app)
+        if agent == "0xrefuse":
+            raise ToolException("This trade would fail: AgentModule_UncountedToken")
+        return {"status": "waiting_for_signature", "quote_id": "t1"}
+
+    agents.setup = lambda user, chain: seen.setdefault("setup", (user, chain)) and {"agents": []}
+    agent_trades.prepare_trade = fake_prepare
+    agent_trades.send_trade = lambda user, quote_id, signature: (seen.__setitem__("send", (user, quote_id, signature)),
+                                                                 {"status": "sending"})[1]
+    try:
+        error, result = call_tool(c, agent_token, "get_agent_setup", {"network": 11155111})
+        check("get_agent_setup reads the account's network", not error and seen.get("setup") == (user_id, 11155111),
+              str(result))
+        calls = [{"to": "0x" + "22" * 20, "data": "0x095ea7b3", "value": 5}, {"to": "0x" + "33" * 20}]
+        error, result = call_tool(c, agent_token, "prepare_agent_trade",
+                                  {"agent": "0x" + "44" * 20, "network": "Sepolia", "calls": calls})
+        check("prepare_agent_trade passes the calls on as plain values, numbers as text",
+              not error and seen["prepare"] == (user_id, 11155111, "0x" + "44" * 20, [
+                  {"to": "0x" + "22" * 20, "data": "0x095ea7b3", "value": "5"},
+                  {"to": "0x" + "33" * 20, "data": "0x", "value": "0"}], None, "Trader"), str(seen.get("prepare")))
+        error, result = call_tool(c, agent_token, "prepare_agent_trade",
+                                  {"agent": "0x" + "44" * 20, "quote_id": "abc"})
+        check("...or the quote_id, with the only network the account has",
+              not error and seen["prepare"][3:5] == (None, "abc"), str(seen.get("prepare")))
+        error, text = call_tool(c, agent_token, "prepare_agent_trade", {"agent": "0xrefuse", "quote_id": "abc"})
+        check("a refusal reaches the agent in words", error and "UncountedToken" in str(text), str(text))
+        error, result = call_tool(c, agent_token, "send_agent_trade", {"quote_id": "t1", "signature": "0xab"})
+        check("send_agent_trade passes the signature on", not error and seen.get("send") == (user_id, "t1", "0xab"),
+              str(result))
+    finally:
+        agents.setup, agent_trades.prepare_trade, agent_trades.send_trade = saved
+
+    frozen = {"action": "Agent trade: transfer on USDC", "calls": [], "cost": {}, "lp_pool": None, "direction": None,
+              "slippage_bps": None, "charged_usd": None, "agent": "0x" + "55" * 20, "epoch": 1, "deadline": 1,
+              "quote": {"calldata": "0x", "call_gas": 1, "call_gas_used": 1, "verification_gas": 1,
+                        "verification_gas_used": 1, "pre_verification_gas": 1, "max_fee": 1, "tip": 1, "base_fee": 1,
+                        "outer_gas": 1, "simulated_gas": None, "chain_name": "sepolia"}}
+    db.open_sign_request("agent-t1", user_id, 11155111, signing.AGENT, _json.dumps(frozen), int(time.time()) + 300)
+    error, status = call_tool(c, agent_token, "get_transaction_status", {"quote_id": "agent-t1"})
+    check("get_transaction_status follows an agent's trade: waiting for its signature",
+          not error and status["status"] == "waiting_for_signature" and status["agent"] == "0x" + "55" * 20, str(status))
+    error, status = call_tool(c, agent_token, "cancel_transaction", {"quote_id": "agent-t1"})
+    check("cancel_transaction cancels one not yet sent", not error and status["status"] == "cancelled", str(status))
+
+
 def test_approved_on_a_wallet():
     print("\n[12] Approved on a wallet: one unreadable chain doesn't decide")
     saved = routes.passkeys._approves, routes.passkeys.get_wallet_chains
@@ -1143,4 +1225,5 @@ if __name__ == "__main__":
         test_connections(client)
         test_passkey_signin(client)
         test_personal_tokens(client)
+        test_agent_tools(client)
     finish("All MCP sign-in, /mcp and passkey sign-in checks passed.")

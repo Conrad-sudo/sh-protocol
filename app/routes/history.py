@@ -13,6 +13,7 @@ import tx_history
 from auth import get_current_user
 from db import (
     TransactionFilter,
+    get_agent_row,
     get_movement_tickers,
     get_transaction,
     get_transactions,
@@ -54,8 +55,12 @@ def _web3_or_none(chain_id: int) -> Web3 | None:
 
 
 def _transaction_json(row: dict) -> dict:
-    """A transactions row as the History tab sees it. The fields that find a lost op stay inside."""
-    return {
+    """
+    A transactions row as the History tab sees it. The fields that find a lost op stay inside. A trading
+    agent's trade (source 'agent') also names its agent: {"address", "name"}, the name as the owner calls
+    it now (None for one never named, or since removed).
+    """
+    shown = {
         "id": row["id"],
         "chain_id": row["chain_id"],
         "source": row["source"],
@@ -66,6 +71,10 @@ def _transaction_json(row: dict) -> dict:
         "mined_at": row["mined_at"],
         "direction": row["direction"],
     }
+    if row.get("agent"):
+        named = get_agent_row(row["chain_id"], row["wallet"], row["agent"])
+        shown["agent"] = {"address": row["agent"], "name": named["name"] if named else None}
+    return shown
 
 
 @router.get("/api/transactions")

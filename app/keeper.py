@@ -1,5 +1,5 @@
 """
-The keeper: pays each recurring payment when it falls due.
+The keeper: pays each recurring payment when it falls due, and watches what trading agents spend.
 
 A recurring payment is a schedule the wallet's OWNER created on the wallet's RecurringPaymentModule.
 Nothing on chain runs by itself, so this process calls the module's run(wallet, id) for every
@@ -28,6 +28,11 @@ Each pass, per chain:
 
 "Due" is judged by the chain's latest block time, not this machine's clock: that is the time the
 module checks, and on a local fork the two differ.
+
+Each pass also reads every trading agent's record (agents.check_agents) and tells the owner on Telegram
+when an agent spent more than Mitfah's own trades of it account for: trades it made outside Mitfah,
+with its own key. Every few minutes, with the schedules, it looks for agents added outside the app
+(agents.sync_chain). It sends nothing for agents and holds no key of theirs.
 """
 import argparse
 import logging
@@ -42,6 +47,7 @@ from web3 import Web3
 
 load_dotenv()
 
+import agents  # noqa: E402
 import recurring  # noqa: E402
 import telegram_notify  # noqa: E402
 import tx_sender  # noqa: E402
@@ -236,13 +242,16 @@ def sync_chain(w3: Web3, chain_id: int) -> int:
 
 def run_once(chain_id: int, account: LocalAccount, sync: bool = False) -> dict[str, int]:
     """
-    One pass over one chain: optionally look for new schedules, then pay every due one.
+    One pass over one chain: optionally look for new schedules and agents, then pay every due schedule,
+    then look at what each agent spent.
 
-    @return  How many schedules came out each way: {"paid", "refused", "not_due", "gone", "error"}.
+    @return  How many schedules came out each way: {"paid", "refused", "not_due", "gone", "error"}, and
+             how many agents were found to have spent outside Mitfah, "agents_outside".
     """
     w3, chain_name = _web3(chain_id)
     if sync:
         sync_chain(w3, chain_id)
+        agents.sync_chain(w3, chain_id)
     outcome = {"paid": 0, "refused": 0, "not_due": 0, "gone": 0, "error": 0}
     now = w3.eth.get_block("latest")["timestamp"]
     due = get_due_schedules(chain_id, now)
@@ -254,6 +263,10 @@ def run_once(chain_id: int, account: LocalAccount, sync: bool = False) -> dict[s
         except Exception as exc:  # noqa: BLE001 -- an RPC failure or a stuck send: try the next one
             outcome["error"] += 1
             log.warning("chain %s: schedule %s of %s: %s", chain_id, row["schedule_id"], row["wallet"], redact(exc))
+    watched = agents.check_agents(w3, chain_id, _tell_owner)
+    if watched["outside"] or watched["error"]:
+        log.info("chain %s: agents %s", chain_id, watched)
+    outcome["agents_outside"] = watched["outside"]
     return outcome
 
 

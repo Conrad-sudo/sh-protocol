@@ -13,7 +13,7 @@ from db import get_db
 # Plain storage. What gets recorded, and when, is tx_history.py's business.
 _TRANSACTION_COLUMNS = (
     "id, user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash, op_nonce, "
-    "from_block, created_at, mined_at, direction, movements_read"
+    "from_block, created_at, mined_at, direction, movements_read, agent"
 )
 
 
@@ -32,27 +32,35 @@ def add_transaction(
     mined_at: int | None = None,
     direction: str | None = None,
     movements: list | None = None,
+    agent: str | None = None,
 ) -> int | None:
     """
     Records a transaction for the History tab.
 
-    @param source     'assistant', 'app' (an AI app's quote), 'owner', 'recurring' or 'outside'.
+    @param source     'assistant', 'app' (an AI app's quote), 'agent' (a trading agent's trade),
+                      'owner', 'recurring' or 'outside'.
     @param status     'pending', 'confirmed', 'failed' or 'dropped'.
     @param direction  'in', 'out' or 'none', when already known; see save_movements.
     @param movements  What it moved (tx_movements.Moved), when already known. The row is then
                       marked read, so tx_history.read_movements leaves it alone.
+    @param agent      For an 'agent' row, the agent's address. Written only when given, so a
+                      database from before migration 13 still records every other kind of row.
     @return           The new row's id, or None if this op or transaction is already recorded.
     """
     db = get_db()
+    columns = (
+        "user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash, op_nonce, from_block, "
+        "created_at, mined_at, direction"
+    )
+    values = [
+        user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash,
+        None if op_nonce is None else str(op_nonce), from_block, int(time.time()), mined_at, direction,
+    ]
+    if agent is not None:
+        columns += ", agent"
+        values.append(agent)
     cur = db.execute(
-        "INSERT OR IGNORE INTO transactions (user_id, chain_id, wallet, source, action, status, "
-        "tx_hash, user_op_hash, op_nonce, from_block, created_at, mined_at, direction) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            user_id, chain_id, wallet, source, action, status, tx_hash, user_op_hash,
-            None if op_nonce is None else str(op_nonce), from_block, int(time.time()), mined_at,
-            direction,
-        ),
+        f"INSERT OR IGNORE INTO transactions ({columns}) VALUES ({', '.join('?' * len(values))})", values
     )
     row_id = cur.lastrowid if cur.rowcount else None
     if row_id is not None and movements is not None:

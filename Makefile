@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test mcp-e2e chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test mcp-e2e agents-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
 
 
 
@@ -145,12 +145,18 @@ chat-memory-test:
 recurring-test:
 	.venv/bin/python3 app/tests/test_recurring.py
 
+# Trading agents' backend: what an agent signs (pinned to the same known answer as AgentModuleTest), how
+# its signature is checked, its trades kept out of the passkey flows and sent once, and the account of
+# what each agent spends that lets the keeper report trades made outside Mitfah. Offline.
+agents-test:
+	.venv/bin/python3 app/tests/test_agents.py
+
 # One read-only lookup of a real Basename through mainnet and its gateway. Not part of py-test.
 ens-live:
 	.venv/bin/python3 app/tests/test_ens_names.py --live
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test mcp-test
+py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test agents-test mcp-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia

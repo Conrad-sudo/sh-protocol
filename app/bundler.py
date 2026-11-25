@@ -32,6 +32,7 @@ The order of work is part of the security model:
 """
 import dataclasses
 import os
+import secrets
 import threading
 from collections import Counter, deque
 from collections.abc import Callable, Iterator
@@ -50,6 +51,7 @@ from web3.contract import Contract
 from web3.exceptions import ContractLogicError
 from web3.logs import DISCARD
 
+import agent_ops
 from contract_errors import describe_revert_data, failed_op_index
 from contracts import load_entry_point
 from network_config import load_network_config
@@ -949,6 +951,234 @@ def check_signed_user_op(
     check_bundler_funds(user_id, priced, bundler, outer_gas, balance=first["bundler_balance"])
     fees = {"maxFeePerGas": final.max_fee, "maxPriorityFeePerGas": final.tip}
     return PreparedUserOp(signed, final.user_op_hash, outer_gas, fees, first["from_block"])
+
+
+# ── Agent ops: trades an agent signs with its own key (AgentModule, agents.py) ──
+#
+# Priced as a passkey's op is (quote_user_op), with the agent's shape (agent_ops.py) and two
+# differences in how it is measured:
+#
+#   - Validation is walked with a THROWAWAY agent, an Ethereum key made for the one quote and planted
+#     as one of the wallet's agents on AgentModule by a state override, as the passkey probe is planted
+#     on the wallet. With it the estimate runs the module's whole check -- the signature, the wallet's
+#     config, the rules over every call -- and a call that breaks a rule is refused HERE, by name,
+#     before the agent has signed anything. Without a planted agent the module turns the op away at
+#     its first look and the estimate misses all of that.
+#   - Execution is estimated as executeUserOp, which the EntryPoint will call: AgentModule's
+#     preExecute, the wallet's execute (its guard, the fee, the spending-limit hook), then postExecute
+#     -- with the REAL agent named, since neither hook checks a signature. So a trade that would take
+#     the agent past its own limit, or the wallet past its own, or that names an agent the wallet no
+#     longer has, fails the quote rather than the chain.
+#
+# There is no separate "build for approval" step: an agent signs at once, so the op is built with its
+# fees and nonce right away, and the one call returns both the quote and the op to sign.
+
+# What the throwaway agent is planted with: a limit nothing reaches, an expiry far off (the passkey
+# probe's), epoch 1 and a place in the list. Its spend starts at nothing, in no window.
+AGENT_PROBE_LIMIT = 2**127
+AGENT_PROBE_EPOCH = 1
+
+# What the module's check adds to validation, for a node that refuses state overrides, where the
+# throwaway agent can't be planted and the module returns at its first look: an ecrecover, the
+# wallet's config (its watched list included) and the rules over every call. Measured at 30-40k with
+# a few watched tokens; over-sizing validation costs the user nothing (it is refunded in full).
+AGENT_VALIDATION_FALLBACK_GAS = 60_000
+
+
+def _agent_override(module: str, wallet: str, probe: str) -> dict:
+    """A state override that makes `probe` one of `wallet`'s agents on AgentModule, for one call."""
+    slot = agent_ops.record_slot(wallet, probe)
+    first, second = agent_ops.record_words(AGENT_PROBE_LIMIT, OVERRIDE_SESSION_VALID_UNTIL, AGENT_PROBE_EPOCH, 1)
+    return {
+        Web3.to_checksum_address(module): {
+            "stateDiff": {
+                "0x" + slot.to_bytes(32, "big").hex(): "0x" + first.to_bytes(32, "big").hex(),
+                "0x" + (slot + 1).to_bytes(32, "big").hex(): "0x" + second.to_bytes(32, "big").hex(),
+            }
+        }
+    }
+
+
+def _agent_override_honoured(module: Contract, wallet: str, probe: str, override: dict) -> bool:
+    """
+    Whether the node applies `override` -- and whether agent_ops.AGENTS_SLOT still holds the module's
+    agents: getAgent reads the very slots the override writes, so a moved mapping reads "no agent".
+    """
+    try:
+        info, _spent, _remaining, active = module.functions.getAgent(wallet, probe).call(state_override=override)
+    except Exception:  # noqa: BLE001 -- any refusal means overrides are unusable here
+        return False
+    # info: (limitUsd, spentUsd, validUntil, windowStart, epoch, position)
+    return bool(active) and info[4] == AGENT_PROBE_EPOCH and info[5] == 1
+
+
+def _sign_digest(account: LocalAccount, digest: bytes) -> bytes:
+    """A throwaway key's 65-byte signature of a raw digest (r | s | v, v 27 or 28)."""
+    return bytes(account.unsafe_sign_hash(digest).signature)
+
+
+def estimate_agent_execution(w3: Web3, entry_point: Contract, session_handler: Contract, op: tuple) -> int:
+    """
+    Execution gas for an agent op: the wallet's executeUserOp, estimated as the EntryPoint calls it.
+
+    Runs AgentModule's preExecute, the calls through the wallet's execute, and postExecute, which
+    charges the agent -- so a revert names the reason a trade would fail in execution: the agent's own
+    limit (AgentModule_AgentLimitExceeded), the wallet's, a call that fails, an agent the wallet no
+    longer has. `op` must carry the agent and epoch at the head of its signature (agent_ops.pack_signature):
+    the hooks read them there. Its ECDSA part is never checked here, so the op the agent is about to
+    sign and the one it signed estimate alike.
+
+    @return  The gas, less the intrinsic cost of this standalone call's calldata (see
+             _estimate_call_gas). Unbuffered.
+    @raises RuntimeError  If it would revert, naming the error.
+    """
+    data = session_handler.encode_abi(abi_element_identifier="executeUserOp", args=[op, b"\x00" * 32])
+    gas = _estimate(w3, {"from": entry_point.address, "to": session_handler.address, "data": data}, "This trade")
+    return gas - _intrinsic_gas(bytes.fromhex(data[2:]))
+
+
+def _estimate_agent_validation(
+    w3: Web3,
+    entry_point: Contract,
+    session_handler: Contract,
+    module: str,
+    chain_id: int,
+    nonce: int,
+    call_data: bytes,
+    probe: LocalAccount,
+    deadline: int,
+    override: dict | None,
+) -> int:
+    """
+    Validation gas for an agent op: the wallet's validateUserOp as the EntryPoint calls it, signed by
+    the throwaway agent `override` plants. Mirrors _estimate_verification_gas: a zero hash, zero gas
+    fields (so maxOpGasCost prices it at nothing) and a 1-wei prefund.
+
+    A rule the op breaks reverts here with the module's error. With no override (`override` None) the
+    module returns at its first look and AGENT_VALIDATION_FALLBACK_GAS stands in for the rest.
+    """
+    zero = b"\x00" * 32
+    digest = agent_ops.operation_digest(module, chain_id, zero, deadline, AGENT_PROBE_EPOCH)
+    signature = agent_ops.pack_signature(probe.address, AGENT_PROBE_EPOCH, deadline, _sign_digest(probe, digest))
+    op = (session_handler.address, nonce, b"", call_data, zero, 0, zero, b"", signature)
+    data = session_handler.encode_abi(abi_element_identifier="validateUserOp", args=[op, zero, 1])
+    gas = _estimate(
+        w3,
+        {"from": entry_point.address, "to": session_handler.address, "data": data},
+        "Checking this trade",
+        state_override=override,
+    )
+    return gas if override is not None else gas + AGENT_VALIDATION_FALLBACK_GAS
+
+
+def quote_agent_op(
+    user_id: int,
+    session_handler: Contract,
+    entry_point: Contract,
+    module: Contract,
+    calldata: str,
+    agent: str,
+    epoch: int,
+    deadline: int,
+    bundler: LocalAccount,
+) -> tuple[UserOpQuote, FinalUserOp]:
+    """
+    Prices an agent's trade and builds the op it will sign, with no key of the agent's at all.
+
+    The agent counterpart of quote_user_op and finalize_user_op in one: both gas limits measured as
+    the EntryPoint will spend them (see the section's notes), preVerificationGas counted for the
+    agent's 95-byte signature, the fee cap clamped to the wallet's maxOpGasCost, and the whole bundle
+    simulated with the throwaway agent planted. Then the op itself: a fresh nonce key naming the
+    module (agent_ops.agent_nonce), fees taken now, and its hash -- which, with `deadline` and
+    `epoch`, is what the agent signs (agent_ops.operation_digest).
+
+    @param module    The wallet's AgentModule, bound.
+    @param calldata  The wallet's execute() calldata, hex: the calls the trade makes.
+    @param agent     The agent, one of the wallet's: its address goes into the op's signature.
+    @param epoch     The agent's epoch, from AgentModule.getAgent.
+    @param deadline  The last moment the op may run (Unix seconds).
+    @param bundler   The account that will sign and pay for handleOps.
+    @return          (the quote, as a passkey quote's; the op to sign, with its hash).
+    @raises RuntimeError  If the trade would fail -- a rule, a limit, a failing call -- or the gas
+                          price is past what the wallet allows.
+    """
+    w3, chain_id, chain_name = load_network_config(user_id)
+    probe = Account.create()
+    override = _agent_override(module.address, session_handler.address, probe.address)
+    call_data = agent_ops.agent_call_data(bytes.fromhex(calldata[2:]))
+    lane = secrets.randbits(32)
+    key = agent_ops.nonce_key(module.address, lane)
+    zero = b"\x00" * 32
+    # The real agent and epoch at the head of the signature, for the hooks: nothing checks the rest.
+    as_agent = agent_ops.pack_signature(agent, epoch, deadline, b"\x01" * agent_ops.ECDSA_LENGTH)
+    execution_probe = (session_handler.address, key << 64, b"", call_data, zero, 0, zero, b"", as_agent)
+
+    first = read_all({
+        # First, so that when the trade would fail, its revert is the error raised.
+        "call_gas_used": lambda: estimate_agent_execution(w3, entry_point, session_handler, execution_probe),
+        # A lane nobody has used reads sequence 0; read anyway, it costs nothing in this round.
+        "nonce": lambda: entry_point.functions.getNonce(session_handler.address, key).call(),
+        "block": lambda: w3.eth.get_block("latest"),
+        "tip": lambda: _priority_fee(w3),
+        "max_op_gas_cost": session_handler.functions.maxOpGasCost().call,
+        "override_honoured": lambda: _agent_override_honoured(module, session_handler.address, probe.address, override),
+    })
+    nonce = first["nonce"]
+    honoured = first["override_honoured"]
+    base_fee = first["block"]["baseFeePerGas"]
+
+    call_gas_used = first["call_gas_used"]
+    verification_gas_used = _estimate_agent_validation(
+        w3, entry_point, session_handler, module.address, chain_id, nonce, call_data, probe, deadline,
+        override if honoured else None,
+    )
+    call_gas = int(call_gas_used * CALL_GAS_BUFFER)
+    verification_gas = int(verification_gas_used * VERIFICATION_GAS_BUFFER)
+    hex_call_data = "0x" + call_data.hex()
+
+    def build(pre_verification_gas: int, fee_cap: int, priority_fee: int, signature: bytes) -> tuple:
+        return _pack_op(
+            session_handler, hex_call_data, nonce, call_gas, verification_gas,
+            pre_verification_gas, fee_cap, priority_fee, signature,
+        )
+
+    pre_verification_gas, max_fee, tip = _fees(
+        w3, chain_name, entry_point, build, base_fee, first["tip"], first["max_op_gas_cost"],
+        call_gas, verification_gas, bundler.address, agent_ops.budget_signature(agent, epoch, deadline),
+    )
+    unsigned = build(pre_verification_gas, max_fee, tip, b"")
+    user_op_hash = hash_user_op(unsigned, entry_point, chain_id)
+
+    # The whole bundle, signed by the throwaway agent over the op's REAL hash and simulated with it
+    # planted: validation by the module's own rules, the gas budget, the pause, and what the outer
+    # transaction burns. (A revert in execution doesn't revert handleOps; the execution estimate
+    # above is what catches those.)
+    simulated_gas = None
+    if honoured:
+        probe_digest = agent_ops.operation_digest(module.address, chain_id, user_op_hash, deadline, AGENT_PROBE_EPOCH)
+        probe_op = build(
+            pre_verification_gas, max_fee, tip,
+            agent_ops.pack_signature(probe.address, AGENT_PROBE_EPOCH, deadline, _sign_digest(probe, probe_digest)),
+        )
+        simulated_gas = _simulate_handle_ops(w3, entry_point, probe_op, bundler, override)
+    op_gas = verification_gas + call_gas + pre_verification_gas
+    outer_gas = int(simulated_gas * OUTER_GAS_BUFFER) if simulated_gas else op_gas
+
+    quote = UserOpQuote(
+        calldata=hex_call_data,
+        call_gas=call_gas,
+        call_gas_used=call_gas_used,
+        verification_gas=verification_gas,
+        verification_gas_used=verification_gas_used,
+        pre_verification_gas=pre_verification_gas,
+        max_fee=max_fee,
+        tip=tip,
+        base_fee=base_fee,
+        outer_gas=outer_gas,
+        simulated_gas=simulated_gas,
+        chain_name=chain_name,
+    )
+    return quote, FinalUserOp(unsigned, user_op_hash, max_fee, tip)
 
 
 def find_user_op_receipt(w3: Web3, entry_point: Contract, user_op_hash: bytes, from_block: int):

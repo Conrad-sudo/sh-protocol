@@ -17,6 +17,7 @@ from starlette.routing import Route
 
 import routes.access_tokens
 import routes.added_tokens
+import routes.agents
 import routes.allowlist
 import routes.catalog
 import routes.chat
@@ -111,6 +112,7 @@ app.include_router(routes.wallet.router)
 app.include_router(routes.owner.router)
 app.include_router(routes.allowlist.router)
 app.include_router(routes.recurring.router)
+app.include_router(routes.agents.router)
 app.include_router(routes.passkeys.router)
 app.include_router(routes.access_tokens.router)
 app.include_router(routes.sign.router)

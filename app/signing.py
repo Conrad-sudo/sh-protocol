@@ -68,8 +68,10 @@ from passkey import (
 from userop import OP_DEADLINE_GRACE_SECS, read_sessions
 
 # Where a quote was offered, and so where its outcome goes. MCP: an AI app's tool call
-# (mcp_tools.py), whose quote is approved through a link like Telegram's.
-WEB, TELEGRAM, MCP = "web", "telegram", "mcp"
+# (mcp_tools.py), whose quote is approved through a link like Telegram's. AGENT: a trading agent's own
+# trade (agents.py), frozen here like a quote but signed by the agent's key: it gets no link, is no
+# card, and nothing in this module's passkey flow will open or approve one.
+WEB, TELEGRAM, MCP, AGENT = "web", "telegram", "mcp", "agent"
 
 # The origins whose cards are approved through a /c/<token> link rather than a signed-in page.
 _LINKED = (TELEGRAM, MCP)
@@ -244,7 +246,7 @@ def find_by_quote(user_id: int, chain_id: int, quote_id: str) -> dict:
     @raises Expired  If there is none, or it can no longer be approved.
     """
     request = get_sign_request_by_quote(user_id, chain_id, quote_id)
-    if not is_live(request):
+    if not is_live(request) or request["origin"] == AGENT:
         raise Expired()
     return request
 
@@ -256,7 +258,7 @@ def find_by_sign_id(sign_id: str) -> dict:
     @raises Expired  If there is none, or it can no longer be approved.
     """
     request = get_sign_request_by_sign_id(sign_id)
-    if not is_live(request):
+    if not is_live(request) or request["origin"] == AGENT:
         raise Expired()
     return request
 
@@ -275,7 +277,7 @@ class Started:
     summary: dict
 
 
-def _op_json(final: FinalUserOp) -> str:
+def op_json(final: FinalUserOp) -> str:
     """A built op as the request keeps it: every field of the PackedUserOperation, bytes as hex."""
     sender, nonce, init_code, call_data, gas_limits, pvg, gas_fees, paymaster, _ = final.op
     return json.dumps({
@@ -341,6 +343,8 @@ def start(request: dict) -> Started:
     @raises NoPasskey   If none of the user's passkeys is approved on the wallet.
     @raises WouldFail   If the op can't be priced: the base fee is past what the wallet will pay.
     """
+    if request["origin"] == AGENT:   # an agent's trade: its key signs it, never a passkey
+        raise Expired()
     user_id, chain_id = request["user_id"], request["chain_id"]
     try:
         network = network_name(chain_id)
@@ -364,7 +368,7 @@ def start(request: dict) -> Started:
     if not allowed:
         raise NoPasskey()
     sign_id = secrets.token_urlsafe(16)
-    if not save_sign_build(request["id"], sign_id, _op_json(final), "0x" + final.user_op_hash.hex()):
+    if not save_sign_build(request["id"], sign_id, op_json(final), "0x" + final.user_op_hash.hex()):
         raise Expired()
     return Started(sign_id, final.user_op_hash, allowed, request["expires_at"], summary(request, frozen))
 
@@ -418,7 +422,8 @@ def approve(request: dict, credential: dict) -> Approved:
     @raises Rejected   If the approval fails a check. The request stays open.
     @raises Expired    If the request was built again, used or cancelled meanwhile.
     """
-    if not request.get("op") or not request.get("challenge") or not request.get("sign_id"):
+    if not request.get("op") or not request.get("challenge") or not request.get("sign_id") \
+            or request["origin"] == AGENT:
         raise Expired()
     user_id = request["user_id"]
     challenge = bytes.fromhex(request["challenge"][2:])

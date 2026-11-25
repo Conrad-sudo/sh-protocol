@@ -18,6 +18,7 @@ the tables, so `from db import get_wallet_address` works wherever it did before 
   signin        refresh tokens and the single-use sign-in nonces
   transactions  the History tab's records
   recurring     recurring payments: the schedules on each wallet's RecurringPaymentModule
+  agents        trading agents: each wallet's agents' names, and what they were last seen spending
   feedback      what users tell the team about the app (the bot's /feedback)
 """
 import json
@@ -243,4 +244,16 @@ from db.sign_requests import (  # noqa: E402 -- after get_db, which these module
     save_sign_build,
     set_sign_request_message,
     set_sign_request_token,
+)
+from db.agents import (  # noqa: E402 -- after get_db, which these modules import
+    add_agent_row,
+    agent_trade_in_flight,
+    delete_agent_row,
+    get_agent_row,
+    get_agent_rows,
+    get_agents_on_chain,
+    add_relayed,
+    rebase_agent,
+    rename_agent,
+    touch_agent,
 )

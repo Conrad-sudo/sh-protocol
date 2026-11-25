@@ -716,6 +716,19 @@ contract AgentModuleTest is Test {
         );
     }
 
+    /// @notice A known answer that the app's own EIP-712 code (app/agent_ops.py) is pinned to as well,
+    ///         in app/tests/test_agents.py: the module at a fixed address on chain 1. If either side
+    ///         changes how it hashes, its own test fails against this one constant.
+    function test_hashOperation_knownAnswer() public {
+        address at = 0x000000000000000000000000000000000000A6e7;
+        vm.chainId(1);
+        deployCodeTo("AgentModule.sol:AgentModule", at);
+        assertEq(
+            AgentModule(at).hashOperation(keccak256("mitfah agent KAT"), 1_800_000_000, 7),
+            0xcb2dfac9c9459ad66f846fc7c8ee70ebc5d7aa2f116bfd45768409668f13519e
+        );
+    }
+
     /// @notice An agent can never sign a message for the wallet (ERC-1271): not through the module's
     ///         prefix, not with a perfectly good agent signature.
     function test_sig_agentCantSignMessages() public view {

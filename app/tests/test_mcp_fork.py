@@ -5,8 +5,10 @@ An app connects through the real OAuth flow, reads the wallet over /mcp, quotes 
 and hands the user a link; the user approves it there with their passkey, as Mitfah's page does
 (/api/sign/start and /finish with the link's token, no session); the app follows it to confirmed.
 Also: a newer quote replaces an older one, cancel_transaction stops a link working, a used link
-can't send twice, and a personal access token made with the wallet's passkey reads the chain
-read-only until revoked.
+can't send twice, a personal access token made with the wallet's passkey reads the chain read-only
+until revoked, and a trading agent the owner adds trades with its own key and no passkey -- held to
+the module's rules and its own limit, its trades made outside Mitfah reported by the keeper's look --
+until the owner removes it.
 
 Everything goes to the API over HTTP, as an app and a browser would, so this process never sends
 with the API's bundler keys (two processes counting the same keys' nonces collide). What it does
@@ -349,6 +351,183 @@ def test_personal_token(c: httpx.Client, headers: dict, key: SoftPasskey, wallet
     check("it stops working at once", mcp(c, token, "tools/list").status_code == 401)
 
 
+def owner_action(c: httpx.Client, headers: dict, owner, path: str, body: dict, confirm: str, **confirm_body):
+    """An owner action as the web app runs it: prepared, signed and sent by the owner, then confirmed."""
+    r = c.post(path, headers=headers, json={"chain_id": CHAIN_ID, **body})
+    if r.status_code != 200:
+        raise AssertionError(f"{path}: {r.status_code} {r.text[:300]}")
+    tx_hash = sign_and_send(owner, r.json()["tx"])
+    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    for _ in range(60):
+        r = c.post(confirm, headers=headers, json={"chain_id": CHAIN_ID, "tx_hash": tx_hash, **confirm_body})
+        if r.status_code != 202:
+            break
+        time.sleep(1)
+    return r
+
+
+def follow(c: httpx.Client, access: str, quote_id: str) -> dict:
+    """get_transaction_status until it settles (or two minutes pass)."""
+    status, deadline = {}, time.time() + 120
+    while time.time() < deadline:
+        status = status_of(c, access, quote_id)
+        if status.get("status") not in ("sending", "sent", "waiting_for_approval", "waiting_for_signature"):
+            break
+        time.sleep(1)
+    return status
+
+
+def test_trading_agent(c: httpx.Client, headers: dict, owner, key: SoftPasskey, wallet: str, payee: str):
+    """
+    The user's own trading agent: added by the owner, trading through its own token with its own key, held
+    to the module's rules and its own limit, every trade made outside Mitfah reported by the keeper's look,
+    and stopped by the owner's removal.
+    """
+    print("\n[7] a trading agent: its own key, its own limit, no passkey")
+    import agent_ops
+    import agents
+    import signing
+    from abi import ientry_point
+    from db import get_json, get_sign_request_by_quote
+
+    usdc = w3.eth.contract(address=Web3.to_checksum_address(get_token_address(CHAIN_ID, "usdc")), abi=ERC20_ABI)
+    one = 10 ** usdc.functions.decimals().call()
+    user_id = c.get("/api/me", headers=headers).json()["user_id"]
+    agent = Account.create()
+
+    def wallet_abi_contract():
+        return w3.eth.contract(address=Web3.to_checksum_address(wallet),
+                               abi=get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+
+    r = c.post("/api/tokens/options", headers=headers)
+    credential = key.assertion(base64url_to_bytes(r.json()["challenge"]))
+    r = c.post("/api/tokens", headers=headers,
+               json={"name": "e2e agent", "days": 7, "access": "prepare", "credential": credential})
+    check("the agent gets a token that can read and prepare", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    token = r.json()["token"]
+    names = {t["name"] for t in mcp(c, token, "tools/list").json()["result"]["tools"]}
+    check("...which lists the agent tools", {"get_agent_setup", "prepare_agent_trade", "send_agent_trade"} <= names,
+          str(sorted(names)))
+
+    r = owner_action(c, headers, owner, "/api/wallet/agents/prepare",
+                     {"action": "add", "agent": agent.address, "limit_usd": "5", "days": 7},
+                     "/api/wallet/agents/confirm", name="e2e bot")
+    listed = r.json().get("agents", {}).get("agents", []) if r.status_code == 200 else []
+    check("the owner adds the agent: $5 a period, 7 days, named in Mitfah",
+          r.status_code == 200 and [(a["address"], a["name"], a["limit_usd"], a["active"]) for a in listed]
+          == [(agent.address, "e2e bot", 5.0, True)], f"{r.status_code} {r.text[:300]}")
+    error, setup = call_tool(c, token, "get_agent_setup", {"network": NETWORK_NAME})
+    check("get_agent_setup shows it, and that the limit counts the native asset",
+          not error and setup["counts_native"] is True and [a["name"] for a in setup["agents"]] == ["e2e bot"], str(setup))
+
+    transfer = lambda amount: [{"to": usdc.address, "data": usdc.encode_abi("transfer", args=[payee, amount])}]  # noqa: E731
+    error, text = call_tool(c, token, "prepare_agent_trade",
+                            {"network": NETWORK_NAME, "agent": agent.address, "calls": transfer(one)})
+    check("moving a token the limit doesn't count is refused before anything is signed",
+          error and "doesn't count it" in str(text), str(text))
+    r = owner_action(c, headers, owner, "/api/wallet/watched-tokens/prepare", {"token": "usdc", "action": "add"},
+                     "/api/wallet/tx/confirm")
+    check("the owner has the limit count USDC", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+
+    def prepared(calls=None, quote_id=None) -> dict:
+        arguments = {"network": NETWORK_NAME, "agent": agent.address}
+        arguments |= {"calls": calls} if calls is not None else {"quote_id": quote_id}
+        error, result = call_tool(c, token, "prepare_agent_trade", arguments)
+        if error:
+            raise AssertionError(f"prepare_agent_trade refused: {result}")
+        return result
+
+    trade = prepared(transfer(one))
+    check("a trade is prepared, waiting for the agent's signature, with its typed data",
+          trade["status"] == "waiting_for_signature" and trade["typed_data"]["primaryType"] == "AgentOperation"
+          and trade["agent_limit_left"] == "$5.00", str({k: v for k, v in trade.items() if k != "typed_data"}))
+    from userop import _v07_user_op_hash
+    shown = trade["user_op"]
+    as_op = (shown["sender"], int(shown["nonce"], 16), b"", bytes.fromhex(shown["callData"][2:]),
+             bytes.fromhex(shown["accountGasLimits"][2:]), int(shown["preVerificationGas"], 16),
+             bytes.fromhex(shown["gasFees"][2:]), b"", b"")
+    recomputed = "0x" + _v07_user_op_hash(as_op, shown["entryPoint"], shown["chainId"]).hex()
+    execute_call = wallet_abi_contract().encode_abi("execute", args=[b"\x00" * 32, bytes.fromhex(
+        usdc.address[2:] + "00" * 32 + transfer(one)[0]["data"][2:])])
+    check("the agent can check what it signs: the op's own hash, and calls it can decode",
+          recomputed == trade["typed_data"]["message"]["userOpHash"]
+          and shown["callData"] == "0x8dd7712f" + execute_call[2:], f"{recomputed} {shown['callData'][:80]}")
+    stranger = Account.create().sign_typed_data(full_message=trade["typed_data"]).signature.hex()
+    error, text = call_tool(c, token, "send_agent_trade", {"quote_id": trade["quote_id"], "signature": stranger})
+    check("someone else's signature is refused", error and "not by the agent" in str(text), str(text))
+    signature = agent.sign_typed_data(full_message=trade["typed_data"]).signature.hex()
+    before = usdc.functions.balanceOf(payee).call()
+    error, sent = call_tool(c, token, "send_agent_trade", {"quote_id": trade["quote_id"], "signature": signature})
+    check("the agent's own signature sends it, no passkey", not error and sent["status"] == "sending", str(sent))
+    status = follow(c, token, trade["quote_id"])
+    print(f"  status: {status}")
+    check("get_transaction_status follows it to confirmed", status.get("status") == "confirmed" and status.get("tx_hash"),
+          str(status))
+    check("the payee got exactly 1 USDC", usdc.functions.balanceOf(payee).call() - before == one)
+    module = agents.module_contract(w3, setup["signing"]["domain"]["verifyingContract"])
+    state = agents.read_agent(module, Web3.to_checksum_address(wallet), agent.address)
+    print(f"  agent spent ${state.spent / 1e18:.4f} of ${state.limit / 1e18:.2f}")
+    check("it counted toward the agent's own limit (the dollar and Mitfah's fee)", 1e18 <= state.spent < 2e18, str(state))
+    error, text = call_tool(c, token, "send_agent_trade", {"quote_id": trade["quote_id"], "signature": signature})
+    check("a trade is sent once", error and "already sent" in str(text), str(text))
+    rows = c.get(f"/api/transactions?chain_id={CHAIN_ID}&limit=50", headers=headers).json()["transactions"]
+    row = next((t for t in rows if t["tx_hash"] == status.get("tx_hash", "").lower()), None)
+    check("the History tab lists it as the agent's, by name",
+          row is not None and row["source"] == "agent" and row.get("agent") == {"address": agent.address, "name": "e2e bot"},
+          str(row))
+
+    error, text = call_tool(c, token, "prepare_agent_trade",
+                            {"network": NETWORK_NAME, "agent": agent.address, "calls": transfer(5 * one)})
+    check("a trade past the agent's own limit is refused before anything is signed",
+          error and "past its own limit" in str(text), str(text))
+
+    error, quoted = call_tool(c, token, "transfer_erc20",
+                              {"network": NETWORK_NAME, "token": "usdc", "recipient": "payee", "amount": 1})
+    check("the agent's token can quote, as an app's can", not error and "approve_url" in quoted, str(quoted))
+    link = token_of(quoted["approve_url"])
+    taken = prepared(quote_id=quoted["quote_id"])
+    check("a quote runs as the agent's trade", taken["action"] == quoted["action"], str(taken.get("action")))
+    check("...and its approve link stops working", c.post("/api/sign/start", json={"token": link}).status_code == 404)
+    signature = agent.sign_typed_data(full_message=taken["typed_data"]).signature.hex()
+    error, sent = call_tool(c, token, "send_agent_trade", {"quote_id": taken["quote_id"], "signature": signature})
+    status = follow(c, token, taken["quote_id"])
+    check("...and is sent with the agent's signature", not error and status.get("status") == "confirmed", str(status))
+
+    # Outside Mitfah: the agent signs a trade and sends it to the EntryPoint itself, from an account of its own.
+    outside = prepared(transfer(one // 2))
+    request = get_sign_request_by_quote(user_id, CHAIN_ID, outside["quote_id"])
+    frozen, final = signing.thaw(request), signing.built_op(request)
+    ecdsa = bytes.fromhex(agent.sign_typed_data(full_message=outside["typed_data"]).signature.hex().removeprefix("0x"))
+    op = final.op[:-1] + (agent_ops.pack_signature(agent.address, frozen["epoch"], frozen["deadline"], ecdsa),)
+    wallet_contract = w3.eth.contract(address=Web3.to_checksum_address(wallet),
+                                      abi=get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"])
+    entry_point = w3.eth.contract(address=wallet_contract.functions.ENTRY_POINT().call(), abi=ientry_point)
+    relayer = Account.create()
+    w3.provider.make_request("anvil_setBalance", [relayer.address, hex(10**18)])
+    tx = entry_point.functions.handleOps([op], relayer.address).build_transaction({
+        "from": relayer.address, "nonce": 0, "gas": 2_000_000, "chainId": CHAIN_ID,
+        "maxFeePerGas": final.max_fee * 2, "maxPriorityFeePerGas": final.tip})
+    landed = w3.eth.wait_for_transaction_receipt(
+        w3.eth.send_raw_transaction(relayer.sign_transaction(tx).raw_transaction), timeout=120)
+    check("the agent's key can trade without Mitfah, too", landed["status"] == 1)
+    told: list = []
+    agents.check_agents(w3, CHAIN_ID, lambda user, chain, text: told.append((user, text)))
+    ours = [text for user, text in told if user == user_id]
+    print(f"  keeper: {ours}")
+    check("the keeper's next look tells the owner it spent outside Mitfah, once",
+          len(ours) == 1 and "outside Mitfah" in ours[0] and "“e2e bot”" in ours[0], str(told))
+    told.clear()
+    agents.check_agents(w3, CHAIN_ID, lambda user, chain, text: told.append((user, text)))
+    check("...and the look after says nothing", not [t for u, t in told if u == user_id], str(told))
+
+    r = owner_action(c, headers, owner, "/api/wallet/agents/prepare", {"action": "remove", "agent": agent.address},
+                     "/api/wallet/agents/confirm")
+    check("the owner removes the agent", r.status_code == 200 and r.json()["agents"]["agents"] == [], f"{r.status_code} {r.text[:200]}")
+    error, text = call_tool(c, token, "prepare_agent_trade",
+                            {"network": NETWORK_NAME, "agent": agent.address, "calls": transfer(one)})
+    check("...and it can trade no more", error and "not one of this wallet's agents" in str(text), str(text))
+
+
 if __name__ == "__main__":
     print("=== preflight ===")
     with httpx.Client(base_url=API_URL, timeout=180) as client:
@@ -367,5 +546,6 @@ if __name__ == "__main__":
         test_replace_and_cancel(client, access_token)
         test_approve_through_link(client, access_token, auth_headers, phone, deployed, payee_address)
         test_personal_token(client, auth_headers, phone, deployed)
+        test_trading_agent(client, auth_headers, owner, phone, deployed, payee_address)
 
     finish(f"All AI-app fork checks passed on {NETWORK}.")

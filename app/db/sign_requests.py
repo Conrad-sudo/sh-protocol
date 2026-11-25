@@ -89,12 +89,18 @@ def get_sign_request_by_sign_id(sign_id: str) -> dict | None:
 
 
 def get_open_sign_requests(user_id: int, chain_id: int, origin: str | None = None) -> list[dict]:
-    """The account's requests on `chain_id` still waiting for an approval, newest first."""
+    """
+    The account's requests on `chain_id` still waiting for an approval, newest first. A trading
+    agent's prepared trades (origin 'agent') only when asked for by that origin: they are no card,
+    and nothing that answers cards -- one card per network, a typed "yes", /cancel -- may touch them.
+    """
     query = "SELECT * FROM sign_requests WHERE user_id = ? AND chain_id = ? AND status = ? AND expires_at >= ?"
     params: list = [user_id, chain_id, OPEN, int(time.time())]
     if origin is not None:
         query += " AND origin = ?"
         params.append(origin)
+    else:
+        query += " AND origin != 'agent'"
     rows = get_db().execute(query + " ORDER BY created_at DESC, id DESC", params).fetchall()
     return [dict(row) for row in rows]
 
