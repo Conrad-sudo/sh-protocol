@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Form, Placeholder, SelectPicker, Text } from 'rsuite'
 import type { Chain, Token } from '../../api/types'
+import { useAgents } from '../../hooks/useAgents'
 import { useTokens } from '../../hooks/useTokens'
 import { limitApplies } from '../../lib/spending'
 import { AddressText } from '../AddressText'
@@ -133,12 +134,20 @@ function NativeRow({
   // "ETH and WETH count", "CELO counts".
   const s = wrapped ? '' : 's'
   const apart = followers.some(t => watched.has(t.address.toLowerCase()) !== metered)
+  // Agents trade only while the native token counts: turning it off stops them.
+  const agents = useAgents(wallet.chain_id)
+  const trading = metered && (agents.data?.agents ?? []).some(agent => agent.active)
 
   const count = (success: string) => start({ key, action: { kind: 'native-metering', metered: true }, success })
   const stop = (what: string, success: string) =>
     ask({
       title: `Stop counting ${what}?`,
-      body: <Text>The assistant will be able to move {what} out of this wallet without any limit.</Text>,
+      body: (
+        <Text>
+          The assistant will be able to move {what} out of this wallet without any limit.
+          {trading && ' Your trading agents will stop trading until it counts again.'}
+        </Text>
+      ),
       confirmLabel: `Stop counting ${what}`,
       request: { key, action: { kind: 'native-metering', metered: false }, success },
     })

@@ -1,5 +1,15 @@
 import { expect, test, type Page } from '@playwright/test'
-import { expectNoSidewaysScroll, expectTheme, isApiUrl, ME, passkey, TOKEN, walletState } from './helpers.ts'
+import {
+  agentsListing,
+  expectNoSidewaysScroll,
+  expectTheme,
+  isAgentsPath,
+  isApiUrl,
+  ME,
+  passkey,
+  TOKEN,
+  walletState,
+} from './helpers.ts'
 
 /*
  * Every page at the widths real screens come in, from a small phone to a wide desktop. The other
@@ -50,6 +60,7 @@ test.beforeEach(({}, testInfo) => {
 async function mockServer(page: Page) {
   await page.route(isApiUrl, route => {
     const path = new URL(route.request().url()).pathname
+    if (isAgentsPath(path)) return route.fulfill({ json: agentsListing() })
     if (path.startsWith('/api/wallet/')) return route.fulfill({ json: walletState(SEPOLIA, ADDRESS) })
     switch (path) {
       case '/api/auth/refresh':

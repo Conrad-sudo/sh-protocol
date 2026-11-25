@@ -113,6 +113,35 @@ export async function addPasskeyAuthenticator(page: Page, { credentialId }: { cr
   }
 }
 
+/** Whether `path` is GET /api/wallet/{chain_id}/agents (every other /api/wallet/ path is the wallet's state). */
+export const isAgentsPath = (path: string) => /^\/api\/wallet\/\d+\/agents$/.test(path)
+
+/**
+ * A GET /api/wallet/{chain_id}/agents answer: one named, active agent with $12.50 of $50 spent, so
+ * Controls shows a full agent row and the form to add another.
+ */
+export function agentsListing() {
+  return {
+    available: true,
+    module: '0x8b1cB45E2E7a101F9DafDf732acf616352069D7f',
+    native_metered: true,
+    max_agents: 3,
+    max_days: 90,
+    agents: [
+      {
+        address: '0x4444444444444444444444444444444444444444',
+        name: 'Grid bot',
+        limit_usd: 50,
+        spent_usd: 12.5,
+        left_usd: 37.5,
+        valid_until: Math.floor(Date.now() / 1000) + 60 * 86_400,
+        expires: 'in 60 days',
+        active: true,
+      },
+    ],
+  }
+}
+
 /** One of the account's passkeys, as GET /api/passkeys lists it. */
 export function passkey(overrides: Record<string, unknown> = {}) {
   return { key_id: PASSKEY_ID, credential_id: PASSKEY_CREDENTIAL, device_name: 'iPhone', created_at: 1_790_000_000, ...overrides }

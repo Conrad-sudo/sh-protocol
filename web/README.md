@@ -169,6 +169,15 @@ a lawyer read `/terms` and `/privacy` — they are drafts, and say so on the pag
   (`WINDOW_CHOICES`; the contract's ceiling is about 194 days). The site approves a passkey for
   90 days (`ASSISTANT_KEY_DAYS`), the contract's most.
 
+- **Trading agents** (`src/components/controls/AgentsPanel.tsx`): the user's own bots, each with its
+  own key and dollar limit. Adding, changing and removing are owner-wallet transactions confirmed
+  through `/api/wallet/agents/confirm` (`useOwnerAction`'s `confirmWith: 'agents'`, which keeps an added
+  agent's name with the stored hash so a reload still sends it). While the owner wallet can't sign,
+  each agent offers "Stop with passkey" instead of Remove (`src/hooks/useAgentStop.tsx`): the first tap
+  has the API quote the wallet's own removal, the second opens the passkey prompt (a confirmation is
+  started before it, as a chat card's is), then the History row is followed until it lands. "Make one
+  here" makes an agent's key in the browser and shows it once; it is never sent anywhere.
+
 - `src/styles/tokens.css` — brand colours and fonts, layered over RSuite's CSS variables. Any token
   written as `var(--mf-…)` must also be re-declared in the `.rs-theme-dark` block. Colour carries
   meaning: navy (light) or steel (dark) is the owner's own action, green only ever means the wallet

@@ -3,6 +3,7 @@ import { Button } from 'rsuite'
 import type { WalletState } from '../api/types'
 import { useSelectedChain } from '../chain/useSelectedChain'
 import { AdvancedPanel } from '../components/controls/AdvancedPanel'
+import { AgentsPanel } from '../components/controls/AgentsPanel'
 import { ConnectedAppsPanel } from '../components/controls/ConnectedAppsPanel'
 import { DevicesPanel } from '../components/controls/DevicesPanel'
 import { EmergencyPanel } from '../components/controls/EmergencyPanel'
@@ -24,8 +25,9 @@ const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the 
 
 /**
  * Everything the owner can change about the wallet: the brake, the devices that approve payments,
- * the limit, what it counts, and the payments it makes by itself. Plus the AI apps connected to the
- * account, which are the account's rather than one wallet's, so they show even with no wallet yet.
+ * the trading agents, the limit, what it counts, and the payments it makes by itself. Plus the AI
+ * apps connected to the account, which are the account's rather than one wallet's, so they show even
+ * with no wallet yet.
  */
 export function ControlsPage() {
   const view = useWalletView()
@@ -78,6 +80,7 @@ function Controls({ wallet }: { wallet: WalletState }) {
         <EmergencyPanel {...panel} />
         <DevicesPanel {...panel} />
         <ConnectedAppsPanel />
+        <AgentsPanel {...panel} chain={chain} />
         <SpendingPanel {...panel} />
         <TokensPanel {...panel} chain={chain} />
         <TokenCapsPanel {...panel} />

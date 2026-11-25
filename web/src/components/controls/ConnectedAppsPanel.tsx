@@ -55,7 +55,8 @@ export function ConnectedAppsPanel() {
     <GlassPanel bordered header={<h2>Connected apps</h2>} className="mf-card">
       <Text muted size="sm">
         AI apps you allowed, and tokens you made for your own scripts and agents. They can see your wallets and, if you
-        allow it, prepare transactions; only your passkey sends them.
+        allow it, prepare transactions; only your passkey sends them. The one exception is a trading agent you added
+        below: it signs its own trades with its own key, within its limit.
       </Text>
       {apps.data && apps.data.length > 0 && (
         <ul className="mf-device-list" aria-label="Connected apps and tokens">

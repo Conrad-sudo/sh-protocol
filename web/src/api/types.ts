@@ -328,8 +328,8 @@ export interface SignStart extends PasskeyPrompt {
     /** The network's name, e.g. "Base". */
     network: string
     chain_id: number
-    /** Where it was asked for: a Telegram card, an AI app over MCP, or the web chat. */
-    origin?: 'telegram' | 'mcp' | 'web'
+    /** Where it was asked for: a Telegram card, an AI app over MCP, the web chat, or Controls. */
+    origin?: 'telegram' | 'mcp' | 'web' | 'controls'
     cost: SignCost
   }
   /**
@@ -443,6 +443,15 @@ export type OwnerAction =
       endAt?: number
     }
   | { kind: 'recurring'; action: 'cancel'; scheduleId: number }
+  /**
+   * A trading agent, signed on the wallet's agent module. `add` lets the key at `agent` trade up to
+   * `limitUsd` (a decimal string) per period of the wallet's limit, for `days` from now; `update`
+   * changes both for one already added; `remove` takes it off. `name` is for an add: kept in Mitfah's
+   * database once the transaction is confirmed, never sent to the chain.
+   */
+  | { kind: 'agent'; action: 'add'; agent: string; limitUsd: string; days: number; name?: string }
+  | { kind: 'agent'; action: 'update'; agent: string; limitUsd: string; days: number }
+  | { kind: 'agent'; action: 'remove'; agent: string }
 
 /** One recurring payment, from GET /api/wallet/{chain_id}/recurring. */
 export interface RecurringPayment {
@@ -491,6 +500,57 @@ export interface RecurringPayments {
 export type RecurringTxConfirmResult =
   | { status: 'pending'; tx_hash: string; seen?: boolean }
   | { status: 'confirmed'; tx_hash: string; recurring: RecurringPayments }
+
+/** One trading agent of the wallet, from GET /api/wallet/{chain_id}/agents. */
+export interface Agent {
+  /** The address of the key it signs its trades with. */
+  address: string
+  /** What the owner calls it, kept in Mitfah's database only; null when it has no name. */
+  name: string | null
+  /** What it may spend per period of the wallet's limit, in US dollars. */
+  limit_usd: number
+  /** What it has spent this period. */
+  spent_usd: number
+  /** What it may still spend this period, before the wallet's own limit. */
+  left_usd: number
+  /** Unix seconds: when it stops working. */
+  valid_until: number
+  /** The server's wording of valid_until. */
+  expires: string
+  /** One of the wallet's agents, and not expired. */
+  active: boolean
+}
+
+/**
+ * GET /api/wallet/{chain_id}/agents: the wallet's trading agents, read from the chain. A wallet made
+ * before agents existed has no agent module: `available` is false and `note` says so.
+ */
+export interface Agents {
+  available: boolean
+  /** The wallet's agent module, or null without one. */
+  module: string | null
+  /** Whether the limit counts ETH/BNB. Agents can be added, and trade, only while it does. */
+  native_metered: boolean | null
+  max_agents: number
+  max_days: number
+  agents: Agent[]
+  note?: string
+}
+
+/** POST /api/wallet/agents/confirm: like /api/wallet/tx/confirm, answering with the agents once mined. */
+export type AgentTxConfirmResult =
+  | { status: 'pending'; tx_hash: string; seen?: boolean }
+  | { status: 'confirmed'; tx_hash: string; agents: Agents }
+
+/**
+ * POST /api/wallet/agents/stop: the passkey op that removes an agent, quoted and waiting for the
+ * passkey (POST /api/sign/start and /finish, as a chat card is). `replaced` is how many other
+ * confirmations waiting on the network it cancelled: one at a time per network.
+ */
+export interface AgentStop {
+  quote: QuoteOffer
+  replaced: number
+}
 
 /** One contract on, or worth adding to, the wallet's contract allowlist. */
 export interface AllowlistEntry {
@@ -611,11 +671,14 @@ export interface Transaction {
   chain_id: number
   /**
    * Who sent it: the assistant (from the web chat or Telegram), a connected AI app (quoted over
-   * MCP, approved by the owner's passkey), the owner in the browser, Mitfah paying one of the
-   * owner's recurring payments, or someone or something outside Mitfah, as a block explorer
-   * reported it.
+   * MCP, approved by the owner's passkey), one of the wallet's trading agents (signed with its own
+   * key), the owner's passkey from Controls (stopping an agent), the owner in the browser, Mitfah
+   * paying one of the owner's recurring payments, or someone or something outside Mitfah, as a
+   * block explorer reported it.
    */
-  source: 'assistant' | 'app' | 'owner' | 'outside' | 'recurring'
+  source: 'assistant' | 'app' | 'agent' | 'controls' | 'owner' | 'outside' | 'recurring'
+  /** For an agent's trade: which agent, and what the owner calls it (null when it has no name). */
+  agent?: { address: string; name: string | null }
   /** What it does, written by the server from the transaction itself. */
   action: string
   /** `dropped`: never mined, and now never will be. */

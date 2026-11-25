@@ -31,14 +31,22 @@ import { chainName, explorerName, explorerUrl } from '../wallet/chains'
 
 const TITLE = 'History'
 const DESCRIPTION =
-  'Every transaction on your Mitfah wallet: what your assistant or a connected AI app sent, what you signed, and what happened outside Mitfah.'
+  'Every transaction on your Mitfah wallet: what your assistant, a connected AI app or your trading agents sent, what you signed, and what happened outside Mitfah.'
 
 const SOURCE: Record<Transaction['source'], string> = {
   assistant: 'By your assistant',
   app: 'By an AI app',
+  agent: 'By your agent',
+  controls: 'By you, with your passkey',
   owner: 'By you',
   outside: 'Outside Mitfah',
   recurring: 'Recurring payment',
+}
+
+/** Who sent it, as its row says: an agent's trade names the agent, as the owner calls it. */
+function sourceText(tx: Pick<Transaction, 'source' | 'agent'>): string {
+  if (tx.source === 'agent' && tx.agent?.name) return `By your agent “${tx.agent.name}”`
+  return SOURCE[tx.source] ?? 'Mitfah'
 }
 
 const STATUS: Record<Transaction['status'], { label: string; tone: StatusTone }> = {
@@ -255,7 +263,7 @@ function TransactionRow({ tx, nameOf }: { tx: Transaction; nameOf: (address: str
         <span aria-hidden="true"> · </span>
         <span>{chainName(tx.chain_id)}</span>
         <span aria-hidden="true"> · </span>
-        <span>{SOURCE[tx.source]}</span>
+        <span>{sourceText(tx)}</span>
       </p>
       <div className="mf-tx-status">
         <StatusTag tone={status.tone}>{status.label}</StatusTag>

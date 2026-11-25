@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent, { type UserEvent } from '@testing-library/user-event'
 import { resetClientForTests } from '../api/client'
+import { privateKeyToAccount } from 'viem/accounts'
 import type {
+  Agent,
+  Agents,
   Allowlist,
   AllowlistEntry,
   Contact,
@@ -10,6 +13,7 @@ import type {
   RecurringPayment,
   RecurringPayments,
   RegisteredPasskey,
+  SignStart,
   WalletState,
 } from '../api/types'
 import { routes } from '../routes'
@@ -93,6 +97,41 @@ const RENT: RecurringPayment = {
   summary: '20 USDC to landlord every 30 days',
 }
 
+/** The wallet's agent module, and its agents as GET /api/wallet/{chain_id}/agents lists them. */
+const AGENT_MODULE = '0x8b1cB45E2E7a101F9DafDf732acf616352069D7f'
+const NO_AGENTS: Agents = {
+  available: true,
+  module: AGENT_MODULE,
+  native_metered: true,
+  max_agents: 3,
+  max_days: 90,
+  agents: [],
+}
+const withAgents = (...agents: Agent[]): Agents => ({ ...NO_AGENTS, agents })
+const BOT_ADDRESS = '0x4444444444444444444444444444444444444444'
+/** An agent that works for another 60 days. */
+const BOT: Agent = {
+  address: BOT_ADDRESS,
+  name: 'Bot',
+  limit_usd: 50,
+  spent_usd: 12.5,
+  left_usd: 37.5,
+  valid_until: Math.floor(Date.now() / 1000) + 60 * 86_400,
+  expires: 'in 60 days',
+  active: true,
+}
+const NEW_AGENT_ADDRESS = '0x5555555555555555555555555555555555555555'
+/** POST /api/wallet/agents/stop's quote: the wallet's own removal, waiting for a passkey. */
+const STOP_QUOTE = {
+  quote_id: 'q-stop_1',
+  chain_id: SEPOLIA,
+  action: 'Remove agent “Bot”',
+  fees: '$0.12',
+  expires_at: Math.floor(Date.now() / 1000) + 300,
+}
+/** The History row a passkey's stop is followed by. */
+const STOP_TX_ID = 91
+
 /** A passkey made on this device during a test, as the server saves it. */
 const NEW_CREDENTIAL = b64url('work-laptop-passkey')
 const NEW_PASSKEY: RegisteredPasskey = {
@@ -145,6 +184,15 @@ interface ServerOptions {
   recurring?: RecurringPayments[]
   /** GET /api/contacts. */
   contacts?: Contact[]
+  /**
+   * The wallet's agents: the first until an agent change is confirmed (an owner's, or a passkey's stop
+   * landing), then the next one; the last one stays.
+   */
+  agents?: Agents[]
+  /** POST /api/wallet/agents/stop refuses with this 400 detail. */
+  refuseStop?: string
+  /** How the stop's History row reads, in order; the last one repeats. */
+  stopStatuses?: ('pending' | 'confirmed' | 'failed')[]
 }
 
 interface Prepared {
@@ -169,8 +217,22 @@ function stubServer({
   tokensReady = Promise.resolve(),
   recurring = [NO_RECURRING],
   contacts = [],
+  agents = [NO_AGENTS],
+  refuseStop,
+  stopStatuses = ['pending', 'confirmed'],
 }: ServerOptions = {}) {
   const prepared: Prepared[] = []
+  const agentConfirms: Record<string, unknown>[] = []
+  const agentRenames: Record<string, unknown>[] = []
+  const stops: Record<string, unknown>[] = []
+  const signStarts: Record<string, unknown>[] = []
+  const signFinishes: Record<string, unknown>[] = []
+  const signCancels: Record<string, unknown>[] = []
+  // Everything the page sent, to check what it never sends.
+  const bodies: string[] = []
+  let agentChanges = 0
+  let stopReads = 0
+  const currentAgents = () => agents[Math.min(agentChanges, agents.length - 1)]
   const confirms: Record<string, unknown>[] = []
   const sessionConfirms: Record<string, unknown>[] = []
   const recurringConfirms: Record<string, unknown>[] = []
@@ -189,6 +251,7 @@ function stubServer({
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
       if (isRpc(url)) {
+        if (init?.body) bodies.push(String(init.body))
         return walletPrompt.then(() =>
           answerRpc(init, {
             eth_sendTransaction: ([tx]) => {
@@ -200,6 +263,7 @@ function stubServer({
           }),
         )
       }
+      if (init?.body) bodies.push(String(init.body))
       const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
       if (url === '/api/auth/refresh') return Promise.resolve(json(200, TOKEN))
       if (url === '/api/me') return Promise.resolve(json(200, { ...ME, owner_addr: WALLET, wallet_chains: walletChains }))
@@ -267,6 +331,62 @@ function stubServer({
         return Promise.resolve(json(200, answer))
       }
       if (url === '/api/contacts') return Promise.resolve(json(200, { contacts }))
+      if (/^\/api\/wallet\/\d+\/agents$/.test(url)) return Promise.resolve(json(200, currentAgents()))
+      if (url === '/api/wallet/agents/confirm') {
+        agentConfirms.push(body)
+        if (agentConfirms.length % 2 === 1) return Promise.resolve(json(202, { status: 'pending', tx_hash: body.tx_hash }))
+        agentChanges += 1
+        return Promise.resolve(json(200, { status: 'confirmed', tx_hash: body.tx_hash, agents: currentAgents() }))
+      }
+      if (url === '/api/wallet/agents/rename') {
+        agentRenames.push(body)
+        return Promise.resolve(json(200, { agent: body.agent, name: body.name }))
+      }
+      if (url === '/api/wallet/agents/stop') {
+        stops.push(body)
+        if (refuseStop) return Promise.resolve(json(400, { detail: refuseStop }))
+        return Promise.resolve(json(200, { quote: STOP_QUOTE, replaced: 0 }))
+      }
+      if (url === '/api/sign/start') {
+        signStarts.push(body)
+        const start: SignStart = {
+          sign_id: `sign-${signStarts.length}`,
+          challenge: b64url('the user operation hash, 32 b!!!'),
+          rp_id: 'localhost',
+          allow_credentials: [{ type: 'public-key', id: PASSKEY_CREDENTIAL }],
+          user_verification: 'required',
+          timeout_ms: 60_000,
+          expires_at: STOP_QUOTE.expires_at,
+          summary: { action: STOP_QUOTE.action, network: 'Sepolia', chain_id: SEPOLIA, origin: 'controls', cost: {} },
+        }
+        return Promise.resolve(json(200, start))
+      }
+      if (url === '/api/sign/finish') {
+        signFinishes.push(body)
+        return Promise.resolve(json(200, { status: 'sent', outcome: 'Sending — Remove agent “Bot”', transaction_id: STOP_TX_ID }))
+      }
+      if (url === '/api/sign/cancel') {
+        signCancels.push(body)
+        return Promise.resolve(json(200, { outcome: 'Cancelled. Nothing was sent.' }))
+      }
+      if (url === `/api/transactions/${STOP_TX_ID}`) {
+        const status = stopStatuses[Math.min(stopReads, stopStatuses.length - 1)]
+        stopReads += 1
+        if (status === 'confirmed' && stopReads === stopStatuses.indexOf('confirmed') + 1) agentChanges += 1
+        return Promise.resolve(
+          json(200, {
+            id: STOP_TX_ID,
+            chain_id: SEPOLIA,
+            source: 'controls',
+            action: STOP_QUOTE.action,
+            status,
+            tx_hash: status === 'pending' ? null : TX_HASH,
+            created_at: 1_790_000_000,
+            mined_at: status === 'pending' ? null : 1_790_000_012,
+            direction: 'none',
+          }),
+        )
+      }
       if (url === '/api/wallet/recurring/confirm') {
         recurringConfirms.push(body)
         return Promise.resolve(
@@ -309,6 +429,14 @@ function stubServer({
     confirms,
     sessionConfirms,
     recurringConfirms,
+    agentConfirms,
+    agentRenames,
+    stops,
+    signStarts,
+    signFinishes,
+    signCancels,
+    bodies,
+    stopReads: () => stopReads,
     sent,
     sentTo,
     registered,
@@ -1650,5 +1778,324 @@ describe('ControlsPage — recurring payments', () => {
 
     expect(await screen.findByText(/This wallet can't make recurring payments/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set up payment' })).toBeNull()
+  })
+})
+
+describe('ControlsPage — trading agents', () => {
+  beforeEach(() => {
+    resetClientForTests()
+    localStorage.clear()
+    sessionStorage.clear()
+    setViewportWidth(1280)
+  })
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  /** An agent's row, once the list has loaded. */
+  const agentRow = async (title: string) =>
+    (await screen.findByRole('heading', { name: title, level: 3 })).closest('.mf-control-row') as HTMLElement
+
+  it('lists each agent with what it has spent, until when it works, and its address to copy', async () => {
+    const quiet: Agent = { ...BOT, address: NEW_AGENT_ADDRESS, name: null, active: false, valid_until: 1_790_000_000 }
+    stubServer({ agents: [withAgents(BOT, quiet)] })
+    await renderRoutes(routes, '/controls')
+
+    const list = await screen.findByRole('list', { name: 'Trading agents' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    const bot = within(await agentRow('“Bot”'))
+    expect(bot.getByText('Active')).toBeInTheDocument()
+    expect(bot.getByText(/^\$12\.50 of \$50\.00 spent this period\. Works until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
+    expect(bot.getByText(BOT_ADDRESS)).toBeInTheDocument()
+    expect(bot.getByRole('button', { name: "Copy agent's address" })).toBeInTheDocument()
+    // One the owner never named goes by its short address.
+    const unnamed = within(await agentRow('0x5555…5555'))
+    expect(unnamed.getByText('Expired')).toBeInTheDocument()
+    expect(unnamed.getByText(/^Stopped working on \w{3} \d{1,2}, \d{4}\./)).toBeInTheDocument()
+  })
+
+  it('adds an agent after asking, and keeps its name with the confirm', async () => {
+    const added: Agent = { ...BOT, address: NEW_AGENT_ADDRESS, name: 'Scalper', limit_usd: 25, spent_usd: 0 }
+    const server = stubServer({ agents: [NO_AGENTS, withAgents(added)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    expect(await screen.findByText('No agents yet.')).toBeInTheDocument()
+    await user.type(screen.getByLabelText("Agent's name"), 'Scalper')
+    await user.type(screen.getByLabelText("Agent's address"), NEW_AGENT_ADDRESS.toLowerCase())
+    await user.type(screen.getByLabelText("Agent's limit per period"), '25')
+    await user.click(screen.getByRole('button', { name: 'Add agent' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('Add “Scalper” as a trading agent?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(/without your passkey, on any exchange or protocol, up to \$25\.00 every 24 hours until/)
+    expect(dialog).toHaveTextContent(/already has in other protocols, such as pool positions or deposits, are outside the limit/)
+    expect(dialog).toHaveTextContent("Revoking its access token won't stop it.")
+    await user.click(within(dialog).getByRole('button', { name: 'Add agent' }))
+
+    expect(await screen.findByText('“Scalper” can trade now, up to $25.00 every 24 hours.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/agents/prepare',
+        body: { chain_id: SEPOLIA, action: 'add', agent: NEW_AGENT_ADDRESS, limit_usd: '25', days: 30 },
+      },
+    ])
+    // The name goes with the confirm, which records it: never to the chain.
+    expect(server.agentConfirms).toEqual([
+      { chain_id: SEPOLIA, tx_hash: TX_HASH, name: 'Scalper' },
+      { chain_id: SEPOLIA, tx_hash: TX_HASH, name: 'Scalper' },
+    ])
+    expect(await agentRow('“Scalper”')).toBeInTheDocument()
+    // A fresh form for the next one.
+    expect(screen.getByLabelText("Agent's name")).toHaveValue('')
+  })
+
+  it("makes the agent's key in the browser, shows it once, and never sends it anywhere", async () => {
+    const server = stubServer({ agents: [NO_AGENTS, withAgents(BOT)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.type(await screen.findByLabelText("Agent's name"), 'Bot')
+    await user.click(screen.getByRole('button', { name: 'No key yet? Make one here' }))
+    const note = (await screen.findByText(/^Your agent's private key\./)).closest('.rs-message') as HTMLElement
+    const key = within(note).getByText(/^0x[0-9a-f]{64}$/).textContent as `0x${string}`
+    const address = privateKeyToAccount(key).address
+    expect(screen.getByLabelText("Agent's address")).toHaveValue(address)
+    expect(within(note).getByRole('button', { name: 'Copy private key' })).toBeInTheDocument()
+    await user.type(screen.getByLabelText("Agent's limit per period"), '10')
+
+    // Not added until the key is somewhere: an agent nobody holds the key of is no use.
+    const add = screen.getByRole('button', { name: 'Add agent' })
+    expect(add).toBeDisabled()
+    await user.click(within(note).getByRole('checkbox', { name: "I've put this key in my agent" }))
+    expect(add).toBeEnabled()
+    await user.click(add)
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Add agent' }))
+
+    expect(await screen.findByText('“Bot” can trade now, up to $10.00 every 24 hours.')).toBeInTheDocument()
+    expect(server.prepared[0].body.agent).toBe(address)
+    // Nothing the page sent, to Mitfah or to the browser wallet, carried the key.
+    expect(server.bodies.length).toBeGreaterThan(0)
+    expect(server.bodies.some(sent => sent.toLowerCase().includes(key.slice(2)))).toBe(false)
+    // And it is gone from the page once the agent is added.
+    expect(screen.queryByText(key)).toBeNull()
+  })
+
+  it('forgets a key made here once another address is typed', async () => {
+    stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.click(await screen.findByRole('button', { name: 'No key yet? Make one here' }))
+    expect(await screen.findByText(/^Your agent's private key\./)).toBeInTheDocument()
+    const address = screen.getByLabelText("Agent's address")
+    await user.clear(address)
+    await user.type(address, NEW_AGENT_ADDRESS)
+    expect(screen.queryByText(/^Your agent's private key\./)).toBeNull()
+  })
+
+  it("refuses the wallet's own address or its owner's as an agent", async () => {
+    stubServer()
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await user.type(await screen.findByLabelText("Agent's address"), WALLET)
+    expect(screen.getByText("An agent needs a key of its own, not the wallet's or its owner's.")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add agent' })).toBeDisabled()
+  })
+
+  it('counts ETH first: no agent can be added, or trade, while the limit leaves it out', async () => {
+    const wallet = makeWalletState()
+    const notCounted = makeWalletState({ spending: { ...wallet.spending, native_metered: false } })
+    const server = stubServer({ wallets: [notCounted, wallet], agents: [{ ...NO_AGENTS, native_metered: false }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    expect(await screen.findByText(/^Agents can trade only while the limit counts ETH/)).toBeInTheDocument()
+    expect(screen.queryByLabelText("Agent's name")).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Count ETH' }))
+
+    expect(await screen.findByText('ETH now counts toward your limit.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/native-metering/prepare', body: { chain_id: SEPOLIA, metered: true } },
+    ])
+    expect(await screen.findByLabelText("Agent's name")).toBeInTheDocument()
+  })
+
+  it('offers no form once the wallet has as many agents as it can', async () => {
+    const two = { ...BOT, address: NEW_AGENT_ADDRESS, name: 'Two' }
+    const three = { ...BOT, address: '0x6666666666666666666666666666666666666666', name: 'Three' }
+    stubServer({ agents: [withAgents(BOT, two, three)] })
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText('This wallet has 3 agents, the most it can have. Remove one to add another.')).toBeInTheDocument()
+    expect(screen.queryByLabelText("Agent's name")).toBeNull()
+  })
+
+  it("says so for a wallet made before agents existed", async () => {
+    stubServer({ agents: [{ ...NO_AGENTS, available: false, module: null, native_metered: null }] })
+    await renderRoutes(routes, '/controls')
+
+    expect(await screen.findByText(/^This wallet can't have trading agents: it was created before they existed\./)).toBeInTheDocument()
+    expect(screen.queryByLabelText("Agent's name")).toBeNull()
+  })
+
+  it('removes an agent with the owner wallet in one click', async () => {
+    const server = stubServer({ agents: [withAgents(BOT), NO_AGENTS] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    const bot = within(await agentRow('“Bot”'))
+    // With the owner wallet here, it is the owner's Remove, not the passkey's stop.
+    expect(bot.queryByRole('button', { name: 'Stop “Bot” with your passkey' })).toBeNull()
+    await user.click(bot.getByRole('button', { name: 'Remove “Bot”' }))
+
+    expect(await screen.findByText('“Bot” can no longer trade from this wallet.')).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      { path: '/api/wallet/agents/prepare', body: { chain_id: SEPOLIA, action: 'remove', agent: BOT_ADDRESS } },
+    ])
+    expect(server.agentConfirms).toEqual([
+      { chain_id: SEPOLIA, tx_hash: TX_HASH },
+      { chain_id: SEPOLIA, tx_hash: TX_HASH },
+    ])
+    await waitFor(() => expect(screen.queryByRole('heading', { name: '“Bot”', level: 3 })).toBeNull())
+  })
+
+  it('asks before giving an agent more, and not before giving it less', async () => {
+    const server = stubServer({ agents: [withAgents(BOT)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    // Less: a lower limit, and 7 days, sooner than it runs out now.
+    let bot = within(await agentRow('“Bot”'))
+    await user.click(bot.getByRole('button', { name: 'Change “Bot”' }))
+    let limit = bot.getByLabelText('New limit per period')
+    await user.clear(limit)
+    await user.type(limit, '20')
+    await user.click(bot.getByRole('radio', { name: '7 days' }))
+    await user.click(bot.getByRole('button', { name: 'Save' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(await screen.findByText(/^“Bot” may now spend up to \$20\.00 every 24 hours, until/)).toBeInTheDocument()
+    expect(server.prepared).toEqual([
+      {
+        path: '/api/wallet/agents/prepare',
+        body: { chain_id: SEPOLIA, action: 'update', agent: BOT_ADDRESS, limit_usd: '20', days: 7 },
+      },
+    ])
+
+    // More: a higher limit asks first.
+    bot = within(await agentRow('“Bot”'))
+    await user.click(bot.getByRole('button', { name: 'Change “Bot”' }))
+    limit = bot.getByLabelText('New limit per period')
+    await user.clear(limit)
+    await user.type(limit, '80')
+    await user.click(bot.getByRole('radio', { name: '7 days' }))
+    await user.click(bot.getByRole('button', { name: 'Save' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('Give “Bot” more?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(/up to \$80\.00 every 24 hours, until \w{3} \d{1,2}, \d{4}, without your passkey/)
+    await user.click(within(dialog).getByRole('button', { name: 'Change agent' }))
+    await waitFor(() => expect(server.prepared).toHaveLength(2))
+    expect(server.prepared[1].body).toEqual({ chain_id: SEPOLIA, action: 'update', agent: BOT_ADDRESS, limit_usd: '80', days: 7 })
+  })
+
+  it("renames an agent in Mitfah only, with nothing to sign", async () => {
+    const server = stubServer({ agents: [withAgents(BOT)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    const bot = within(await agentRow('“Bot”'))
+    await user.click(bot.getByRole('button', { name: 'Rename “Bot”' }))
+    const name = bot.getByLabelText('New name')
+    await user.clear(name)
+    await user.type(name, 'Grid bot')
+    await user.click(bot.getByRole('button', { name: 'Save' }))
+
+    expect(await agentRow('“Grid bot”')).toBeInTheDocument()
+    expect(server.agentRenames).toEqual([{ chain_id: SEPOLIA, agent: BOT_ADDRESS, name: 'Grid bot' }])
+    expect(server.prepared).toEqual([])
+  })
+
+  it('stops an agent with a passkey when the owner wallet is away', async () => {
+    const browser = installPasskeys()
+    browser.get.mockResolvedValue(signedCredential(PASSKEY_CREDENTIAL))
+    const server = stubServer({ agents: [withAgents(BOT), NO_AGENTS] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    // No owner wallet connected: the owner's Remove can't be signed, so the passkey's stop is offered.
+    const bot = within(await agentRow('“Bot”'))
+    expect(bot.queryByRole('button', { name: 'Remove “Bot”' })).toBeNull()
+    await user.click(bot.getByRole('button', { name: 'Stop “Bot” with your passkey' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText('Stop “Bot” with your passkey?')).toBeInTheDocument()
+    expect(await within(dialog).findByText(/^It costs \$0\.12 in fees, paid from the wallet/)).toBeInTheDocument()
+    // The confirmation is started before the tap, so the tap opens the passkey prompt at once.
+    const approve = within(dialog).getByRole('button', { name: 'Approve with passkey' })
+    await waitFor(() => expect(approve).toBeEnabled())
+    await user.click(approve)
+
+    expect(await screen.findByText('“Bot” can no longer trade from this wallet.')).toBeInTheDocument()
+    expect(server.stops).toEqual([{ chain_id: SEPOLIA, agent: BOT_ADDRESS }])
+    expect(server.signStarts).toEqual([{ chain_id: SEPOLIA, quote_id: STOP_QUOTE.quote_id }])
+    expect(browser.get).toHaveBeenCalledTimes(1)
+    expect(server.signFinishes).toEqual([
+      { sign_id: 'sign-1', credential: expect.objectContaining({ id: PASSKEY_CREDENTIAL }) },
+    ])
+    // Followed until it landed: pending, then confirmed.
+    expect(server.stopReads()).toBe(2)
+    expect(server.signCancels).toEqual([])
+    await waitFor(() => expect(screen.queryByRole('heading', { name: '“Bot”', level: 3 })).toBeNull())
+    expect(server.prepared).toEqual([])
+  })
+
+  it('drops the confirmation when the stop dialog is closed, and sends nothing', async () => {
+    installPasskeys()
+    const server = stubServer({ agents: [withAgents(BOT)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await user.click(within(await agentRow('“Bot”')).getByRole('button', { name: 'Stop “Bot” with your passkey' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await within(dialog).findByText(/^It costs \$0\.12/)
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(server.signCancels).toEqual([{ chain_id: SEPOLIA, quote_id: STOP_QUOTE.quote_id }]))
+    expect(server.signFinishes).toEqual([])
+  })
+
+  it("says why a passkey can't stop it, and offers nothing to approve", async () => {
+    installPasskeys()
+    const reason =
+      "Your wallet's contract allowlist is on and doesn't list the agent module, so a passkey can't reach it. Remove the agent with your owner wallet instead."
+    stubServer({ agents: [withAgents(BOT)], refuseStop: reason })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await user.click(within(await agentRow('“Bot”')).getByRole('button', { name: 'Stop “Bot” with your passkey' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByText(reason)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Approve with passkey' })).toBeDisabled()
+  })
+
+  it('warns that agents stop trading when ETH stops counting', async () => {
+    stubServer({ agents: [withAgents(BOT)] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/controls')
+
+    await connect(user)
+    await agentRow('“Bot”')
+    await user.click(screen.getByRole('button', { name: 'Stop counting ETH and WETH' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Your trading agents will stop trading until it counts again.')
   })
 })

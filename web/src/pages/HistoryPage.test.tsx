@@ -161,6 +161,25 @@ describe('HistoryPage', () => {
     expect(only).not.toHaveTextContent('By your assistant')
   })
 
+  it('names the trading agent that traded, and says when a passkey stopped one', async () => {
+    const agent = '0x4444444444444444444444444444444444444444'
+    stubServer({
+      transactions: [
+        tx(3, { source: 'controls', action: 'Remove agent “Scalper”' }),
+        tx(2, { source: 'agent', action: 'Swap 10 USDC for WETH', agent: { address: agent, name: 'Scalper' } }),
+        tx(1, { source: 'agent', action: 'Swap 5 USDC for WETH', agent: { address: agent, name: null } }),
+      ],
+    })
+    await renderRoutes(routes, '/history')
+
+    const [stopped, named, unnamed] = await rows()
+    expect(stopped).toHaveTextContent('By you, with your passkey')
+    expect(named).toHaveTextContent('By your agent “Scalper”')
+    // An agent the owner never named is still said to be theirs.
+    expect(unnamed).toHaveTextContent('By your agent')
+    expect(unnamed).not.toHaveTextContent('“')
+  })
+
   it("links each hash to its network's live explorer, a local fork's included", async () => {
     stubServer({
       transactions: [

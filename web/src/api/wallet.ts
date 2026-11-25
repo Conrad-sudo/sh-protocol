@@ -1,5 +1,8 @@
 import { ApiError, apiFetch } from './client'
 import type {
+  Agents,
+  AgentStop,
+  AgentTxConfirmResult,
   Allowlist,
   CustomToken,
   DeployConfirmResult,
@@ -123,6 +126,13 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
             },
           ]
         : ['/api/wallet/recurring/cancel/prepare', { chain_id, schedule_id: action.scheduleId }]
+    case 'agent':
+      return action.action === 'remove'
+        ? ['/api/wallet/agents/prepare', { chain_id, action: 'remove', agent: action.agent }]
+        : [
+            '/api/wallet/agents/prepare',
+            { chain_id, action: action.action, agent: action.agent, limit_usd: action.limitUsd, days: action.days },
+          ]
   }
 }
 
@@ -156,4 +166,35 @@ export function confirmRecurringTx(body: { chain_id: number; tx_hash: string }, 
  */
 export function confirmSessionTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
   return apiFetch<SessionTxConfirmResult>('/api/wallet/session/confirm', { method: 'POST', body, signal })
+}
+
+/** The wallet's trading agents, read from the chain, with the names the owner gave them. */
+export function fetchAgents(chainId: number, signal?: AbortSignal) {
+  return apiFetch<Agents>(`/api/wallet/${chainId}/agents`, { signal })
+}
+
+/**
+ * confirmOwnerTx for adding, changing or removing a trading agent. Once mined it answers with the
+ * agents as they are now. `name` is an added agent's: Mitfah keeps it, the chain never sees it.
+ */
+export function confirmAgentTx(body: { chain_id: number; tx_hash: string; name?: string }, signal?: AbortSignal) {
+  return apiFetch<AgentTxConfirmResult>('/api/wallet/agents/confirm', { method: 'POST', body, signal })
+}
+
+/** Renames an agent, in Mitfah's database only. */
+export function renameAgent(chainId: number, agent: string, name: string) {
+  return apiFetch<{ agent: string; name: string }>('/api/wallet/agents/rename', {
+    method: 'POST',
+    body: { chain_id: chainId, agent, name },
+  })
+}
+
+/**
+ * Quotes stopping an agent with a passkey: the wallet's own call that removes it, approved like a chat
+ * card (startSign and finishSign, naming the quote). Nothing is sent yet. The server answers 400 with
+ * the reason when a passkey can't do it (a paused wallet, no passkey on it, an allowlist that leaves
+ * the agent module out), and 409 while the assistant is answering a message.
+ */
+export function stopAgent(chainId: number, agent: string, signal?: AbortSignal) {
+  return apiFetch<AgentStop>('/api/wallet/agents/stop', { method: 'POST', body: { chain_id: chainId, agent }, signal })
 }

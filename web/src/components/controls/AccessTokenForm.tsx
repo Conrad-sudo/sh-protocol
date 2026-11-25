@@ -154,7 +154,7 @@ export function AccessTokenForm({ onCreated, onCancel }: AccessTokenFormProps) {
         <Form.Text>
           {access === 'read'
             ? 'See your wallets, balances, prices and contacts. Nothing else.'
-            : 'Also prepare transactions. Nothing is sent until you approve each one with your passkey, through a link.'}
+            : 'Also prepare transactions. Nothing is sent until you approve each one with your passkey, through a link, unless the script also holds the key of a trading agent you added: it can then trade as that agent, within its limit.'}
         </Form.Text>
       </Form.Group>
       <Form.Group controlId="token-days">

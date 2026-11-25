@@ -1,7 +1,7 @@
 import { AxeBuilder } from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import { installFakeWallet } from './fakeWallet.ts'
-import { isApiUrl, ME, passkey, TOKEN, walletState } from './helpers.ts'
+import { agentsListing, isAgentsPath, isApiUrl, ME, passkey, TOKEN, walletState } from './helpers.ts'
 
 /*
  * An axe scan of every page a person actually uses, at each screen size and in both themes
@@ -55,6 +55,7 @@ async function mockServer(page: Page) {
   })
   await page.route(isApiUrl, route => {
     const path = new URL(route.request().url()).pathname
+    if (isAgentsPath(path)) return route.fulfill({ json: agentsListing() })
     if (path.startsWith('/api/wallet/')) {
       const wallet = walletState(SEPOLIA, ADDRESS)
       const pepe = { ticker: 'pepe', address: PEPE, native: false, custom: true, name: 'Pepe', decimals: 18, raw: '5000000000000000000', amount: 5 }
