@@ -269,31 +269,97 @@ contract SHTreasury is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Registers or repoints a price feed on an SHOracle this treasury owns. Only callable
-     *         by the owner.
-     * @dev `oracle` is an argument rather than the registry's current oracle so that a REPLACEMENT
-     *      oracle can be given its full feed set while it is still pending in the
-     *      {SHRegistry-ORACLE_TIMELOCK}, and so a feed can be corrected on the live oracle either
-     *      way. Feeds take effect on the live oracle immediately, with no delay — the timelock
-     *      governs WHICH oracle wallets read, not what any oracle contains (THREAT_MODEL §3.8).
+     * @notice Proposes registering or repointing a price feed on an SHOracle this treasury owns,
+     *         starting its {SHOracle-FEED_TIMELOCK}. Only callable by the owner.
+     * @dev `oracle` is an argument rather than the registry's current oracle so a feed can be
+     *      corrected on any oracle this treasury owns. No feed change binds before its delay: prices
+     *      decide what the spending cap charges and what the PayeeGuard's trade floors allow
+     *      (THREAT_MODEL §3.8).
      * @param oracle    The SHOracle to write to. Must be owned by this treasury.
      * @param token     Token to price. Use address(0) for native.
      * @param priceFeed Chainlink USD aggregator for it. Must not be address(0).
      * @param heartbeat That feed's Chainlink-published heartbeat, in seconds. Must be > 0.
      */
-    function setFeed(address oracle, address token, address priceFeed, uint256 heartbeat) external onlyOwner {
-        SHOracle(oracle).setFeed(token, priceFeed, heartbeat);
+    function proposeOracleFeed(address oracle, address token, address priceFeed, uint256 heartbeat)
+        external
+        onlyOwner
+    {
+        SHOracle(oracle).proposeFeed(token, priceFeed, heartbeat);
     }
 
     /**
-     * @notice Deregisters a token from an SHOracle this treasury owns. Only callable by the owner.
+     * @notice Proposes deregistering a token from an SHOracle this treasury owns, starting its
+     *         {SHOracle-FEED_TIMELOCK}. Only callable by the owner.
      * @dev The oracle refuses to remove the native feed. Accounts watching `token` will revert on
-     *      their next transaction that moves it — have them unwatch it first.
+     *      their next transaction that moves it once this is committed — have them unwatch it first.
      * @param oracle The SHOracle to write to. Must be owned by this treasury.
      * @param token  The token to stop pricing. Must not be address(0).
      */
-    function removeOracleFeed(address oracle, address token) external onlyOwner {
-        SHOracle(oracle).removeFeed(token);
+    function proposeOracleFeedRemoval(address oracle, address token) external onlyOwner {
+        SHOracle(oracle).proposeFeedRemoval(token);
+    }
+
+    /**
+     * @notice Applies a pending feed change on an SHOracle this treasury owns, once its delay has
+     *         passed. Only callable by the owner.
+     * @param oracle The SHOracle to write to.
+     * @param token  The token whose pending change to apply.
+     */
+    function commitOracleFeed(address oracle, address token) external onlyOwner {
+        SHOracle(oracle).commitFeed(token);
+    }
+
+    /**
+     * @notice Withdraws a pending feed change on an SHOracle this treasury owns. Only callable by
+     *         the owner.
+     * @param oracle The SHOracle to write to.
+     * @param token  The token whose pending change to withdraw.
+     */
+    function cancelOracleFeed(address oracle, address token) external onlyOwner {
+        SHOracle(oracle).cancelFeed(token);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             APP CHECKS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Proposes the check the PayeeGuard uses for calls a passkey or agent makes to `app`,
+     *         starting the {SHRegistry-APP_CHECK_TIMELOCK}. Only callable by the owner.
+     * @dev Adding or replacing a check can only widen what wallets may do, so it waits two days, in
+     *      public, before it binds on every wallet.
+     * @param app   The contract the check is for (a router, say).
+     * @param check The IAppCheck contract whose {IAppCheck-app} is `app`.
+     */
+    function proposeAppCheck(address app, address check) external onlyOwner registrySet {
+        REGISTRY.proposeAppCheck(app, check);
+    }
+
+    /**
+     * @notice Applies the pending check for `app` once its delay has passed. Only callable by the owner.
+     * @param app The contract whose pending check to apply.
+     */
+    function commitAppCheck(address app) external onlyOwner registrySet {
+        REGISTRY.commitAppCheck(app);
+    }
+
+    /**
+     * @notice Withdraws the pending check for `app` before it is committed. Only callable by the owner.
+     * @param app The contract whose pending check to withdraw.
+     */
+    function cancelAppCheck(address app) external onlyOwner registrySet {
+        REGISTRY.cancelAppCheck(app);
+    }
+
+    /**
+     * @notice Removes the live check for `app` at once, so passkeys and agents can no longer call it.
+     *         Only callable by the owner.
+     * @dev Instant on purpose: removing only ever takes ability away, so it is the emergency switch for
+     *      a check found to have a bug. A check still pending for `app` is left alone; cancel it too.
+     * @param app The contract whose check to remove.
+     */
+    function removeAppCheck(address app) external onlyOwner registrySet {
+        REGISTRY.removeAppCheck(app);
     }
 
     /*//////////////////////////////////////////////////////////////

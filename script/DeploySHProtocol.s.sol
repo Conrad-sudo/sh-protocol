@@ -12,6 +12,12 @@ import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol
 import {SpendingLimitModule} from "../src/SpendingLimitModule.sol";
 import {RecurringPaymentModule} from "../src/RecurringPaymentModule.sol";
 import {AgentModule} from "../src/AgentModule.sol";
+import {PayeeGuard} from "../src/PayeeGuard.sol";
+import {SwapRouter02Check} from "../src/appchecks/SwapRouter02Check.sol";
+import {V3PositionManagerCheck} from "../src/appchecks/V3PositionManagerCheck.sol";
+import {V2RouterCheck} from "../src/appchecks/V2RouterCheck.sol";
+import {WrappedNativeCheck} from "../src/appchecks/WrappedNativeCheck.sol";
+import {ReputationCheck} from "../src/appchecks/ReputationCheck.sol";
 import "./Constants.s.sol";
 
 /**
@@ -188,6 +194,11 @@ contract DeploySHProtocol is Script {
         // 3. Register the protocol's agent, whose id the registry records.
         uint256 agentId = IIdentityRegistry(config.identityRegistry).register(AGENT_URI);
 
+        // 3b. The app checks wallets start with: the apps Mitfah's passkeys and agents may call on this
+        //     chain. Registered by the registry's constructor with no delay; every later one waits
+        //     SHRegistry.APP_CHECK_TIMELOCK.
+        SHRegistry.AppCheckEntry[] memory appChecks = _deployAppChecks(config);
+
         // 4. Config registry, owned by the treasury and paying fees to it. It carries every address
         //    a deployed wallet needs, so the factory below stores none of them itself.
         SHRegistry registry = new SHRegistry(
@@ -199,7 +210,8 @@ contract DeploySHProtocol is Script {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            agentId
+            agentId,
+            appChecks
         );
 
         // 5. Wire the registry back into the treasury. Write-once, so this fixes the pairing.
@@ -209,7 +221,10 @@ contract DeploySHProtocol is Script {
         //    priceOracle() off the registry to fail loudly on a mis-wired deployment. That is exactly
         //    why the module is not a registry constructor argument — the two would be mutually
         //    undeployable. It is registered in the step below instead.
-        SpendingLimitModule module = new SpendingLimitModule(address(registry));
+        //    The PayeeGuard it calls holds passkeys' and agents' executions to each wallet's contacts;
+        //    it reads the app checks and the oracle off the registry, so it comes after it too.
+        PayeeGuard payeeGuard = new PayeeGuard(address(registry));
+        SpendingLimitModule module = new SpendingLimitModule(address(registry), address(payeeGuard));
         treasury.setSpendingLimitModule(address(module));
 
         // 6b. The recurring-payment executor, installed on every wallet the factory deploys. It
@@ -236,6 +251,53 @@ contract DeploySHProtocol is Script {
         treasury.setFactory(address(factory));
 
         vm.stopBroadcast();
+    }
+
+    /**
+     * @notice Deploys this chain's app checks and returns them as the registry's starting entries.
+     * @dev Every chain gets its wrapped native token's check (WBNB on BSC, WETH elsewhere, where there
+     *      is one) and the ERC-8004 Reputation Registry's. The exchange Mitfah trades on gets its own:
+     *      SwapRouter02 and the V3 position manager on the Uniswap V3 chains, PancakeSwap's V2 router on
+     *      BSC. A bare Anvil node has no exchange. The checks read their app at construction, so this
+     *      must run on the chain (or a fork of it), never against a guess.
+     */
+    function _deployAppChecks(HelperConfig.NetworkConfig memory config)
+        internal
+        returns (SHRegistry.AppCheckEntry[] memory entries)
+    {
+        entries = new SHRegistry.AppCheckEntry[](5);
+        uint256 count;
+        address wrappedNative = block.chainid == BSC_CHAIN_ID ? config.wbnb : config.weth;
+        if (wrappedNative != address(0)) {
+            entries[count++] = _entry(address(new WrappedNativeCheck(wrappedNative)));
+        }
+        entries[count++] = _entry(address(new ReputationCheck(config.reputationRegistry)));
+        (address swapRouter, address positionManager, address v2Router) = _exchangeContracts();
+        if (swapRouter != address(0)) entries[count++] = _entry(address(new SwapRouter02Check(swapRouter)));
+        if (positionManager != address(0)) {
+            entries[count++] = _entry(address(new V3PositionManagerCheck(positionManager)));
+        }
+        if (v2Router != address(0)) entries[count++] = _entry(address(new V2RouterCheck(v2Router)));
+        assembly ("memory-safe") {
+            mstore(entries, count)
+        }
+    }
+
+    /// @dev The registry entry for `check`, under the app it reads.
+    function _entry(address check) internal view returns (SHRegistry.AppCheckEntry memory) {
+        return SHRegistry.AppCheckEntry({app: WrappedNativeCheck(check).app(), check: check});
+    }
+
+    /// @dev The exchange contracts Mitfah's app trades through on this chain (app/constants.py
+    ///      get_exchange): SwapRouter02 and the position manager on a V3 chain, the PancakeSwap V2
+    ///      router on BSC, none on a bare Anvil node.
+    function _exchangeContracts() internal view returns (address swapRouter, address positionManager, address v2Router) {
+        if (block.chainid == MAINNET_CHAIN_ID) return (MNT_UNISWAP_V3_SWAP_ROUTER_02, MNT_UNISWAP_V3_POSITION_MANAGER, address(0));
+        if (block.chainid == SEPOLIA_CHAIN_ID) return (SPO_UNISWAP_V3_SWAP_ROUTER_02, SPO_UNISWAP_V3_POSITION_MANAGER, address(0));
+        if (block.chainid == ARB_CHAIN_ID) return (ARB_UNISWAP_V3_SWAP_ROUTER_02, ARB_UNISWAP_V3_POSITION_MANAGER, address(0));
+        if (block.chainid == BASE_CHAIN_ID) return (BASE_UNISWAP_V3_SWAP_ROUTER_02, BASE_UNISWAP_V3_POSITION_MANAGER, address(0));
+        if (block.chainid == BSC_CHAIN_ID) return (address(0), address(0), PANCAKE_V2_ROUTER_02);
+        return (address(0), address(0), address(0));
     }
 
     /**

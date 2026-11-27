@@ -5,6 +5,7 @@ pragma solidity 0.8.33;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {SHOracle} from "./SHOracle.sol";
+import {IAppCheck} from "./interfaces/IAppCheck.sol";
 
 /**
  * @title SHRegistry
@@ -84,6 +85,17 @@ contract SHRegistry is Ownable {
     error SHRegistry_InvalidReputationRegistry();
     /// @dev Thrown when address(0) is passed as the ERC-4337 EntryPoint address.
     error SHRegistry_InvalidEntryPoint();
+    /// @dev Thrown when an app check is registered for address(0), names no code, or reports a
+    ///      different {IAppCheck-app} from the one it is registered under.
+    /// @param app   The app named.
+    /// @param check The check named.
+    error SHRegistry_InvalidAppCheck(address app, address check);
+    /// @dev Thrown when an app check change is committed or cancelled for an app with none pending.
+    /// @param app The app named.
+    error SHRegistry_NoPendingAppCheck(address app);
+    /// @dev Thrown when an app check is removed from an app that has none.
+    /// @param app The app named.
+    error SHRegistry_NoAppCheck(address app);
 
     /*//////////////////////////////////////////////////////////////
                              STATE VARIABLES
@@ -118,6 +130,12 @@ contract SHRegistry is Ownable {
     ///      observable before it binds. The cost: a genuinely broken live oracle cannot be replaced
     ///      for this long — wallet owners can {SessionHandler-pause} in the meantime.
     uint256 public constant ORACLE_TIMELOCK = 2 days;
+
+    /// @notice Delay between proposing an app check and being able to commit it.
+    /// @dev An app check decides which calls passkeys and agents may make to an app on EVERY wallet,
+    ///      so adding or replacing one waits as long as an oracle change does, in public. Removing one
+    ///      ({removeAppCheck}) is instant: it only takes ability away.
+    uint256 public constant APP_CHECK_TIMELOCK = 2 days;
 
     // Storage is ordered to pack: each uint below is sized to share a slot with the address it is
     // read alongside. Slot 0 is Ownable's `_owner`; `forge inspect SHRegistry storageLayout` shows
@@ -187,6 +205,21 @@ contract SHRegistry is Ownable {
     ///      would do nothing for any wallet.
     address public immutable ENTRY_POINT;
 
+    /// @notice app => the IAppCheck the PayeeGuard asks about every call a passkey or an agent makes to
+    ///         it. address(0) for an app with none, which the guard refuses outright.
+    /// @dev Read live by the guard on each call, so a change here reaches every deployed wallet at once
+    ///      — which is why adding or replacing an entry waits {APP_CHECK_TIMELOCK}.
+    mapping(address app => address check) public appCheck;
+
+    /// @notice A proposed app check, waiting out {APP_CHECK_TIMELOCK}. `eta == 0` means none.
+    struct PendingAppCheck {
+        address check; // the IAppCheck to register for the app
+        uint48 eta; // when it may be committed
+    }
+
+    /// @notice app => its pending app check, if any.
+    mapping(address app => PendingAppCheck) public pendingAppCheck;
+
     /// @notice Reputation Registry baked into every SessionHandler deployed from this registry.
     address public immutable REPUTATION_REGISTRY;
     /// @notice ERC-8004 Identity Registry baked into every SessionHandler deployed from this registry.
@@ -250,6 +283,23 @@ contract SHRegistry is Ownable {
     /// @param newModule The new module.
     event AgentModuleUpdated(address indexed oldModule, address indexed newModule);
 
+    /// @notice Emitted when an app check is proposed, starting its {APP_CHECK_TIMELOCK}.
+    /// @param app   The app the check is for.
+    /// @param check The check proposed.
+    /// @param eta   When it may be committed.
+    event AppCheckProposed(address indexed app, address indexed check, uint256 eta);
+
+    /// @notice Emitted when a pending app check is withdrawn before it was committed.
+    /// @param app   The app the check was for.
+    /// @param check The check withdrawn.
+    event AppCheckProposalCancelled(address indexed app, address indexed check);
+
+    /// @notice Emitted when an app's live check changes: registered at deploy, committed, or removed.
+    /// @param app      The app.
+    /// @param oldCheck Its check before, or address(0).
+    /// @param newCheck Its check now, or address(0) once removed.
+    event AppCheckUpdated(address indexed app, address indexed oldCheck, address indexed newCheck);
+
     /*//////////////////////////////////////////////////////////////
                                   TYPES
     //////////////////////////////////////////////////////////////*/
@@ -267,6 +317,12 @@ contract SHRegistry is Ownable {
         uint256 initial;
         uint256 min;
         uint256 max;
+    }
+
+    /// @notice An app and its check, as the constructor takes them.
+    struct AppCheckEntry {
+        address app;
+        address check;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -301,6 +357,8 @@ contract SHRegistry is Ownable {
      * @param entryPointAddress  Canonical ERC-4337 EntryPoint. Must not be address(0).
      * @param initialAgentId     Id of the SessionHandler agent on the ERC-8004 Identity Registry. Zero is
      *        a VALID id — ERC-8004 registries mint from 0, so the first agent registered holds id 0.
+     * @param initialAppChecks   The app checks wallets start with, registered at once (see
+     *        {proposeAppCheck} for every later one). Each must pass the same checks a proposal does.
      */
     constructor(
         address initialOwner,
@@ -311,7 +369,8 @@ contract SHRegistry is Ownable {
         address reputationRegistry,
         address identityRegistry,
         address entryPointAddress,
-        uint256 initialAgentId
+        uint256 initialAgentId,
+        AppCheckEntry[] memory initialAppChecks
     ) Ownable(initialOwner) {
         if (protocolFeeBounds.min == 0) revert SHRegistry_InvalidFeeBounds();
         _checkFeeBounds(protocolFeeBounds);
@@ -334,6 +393,13 @@ contract SHRegistry is Ownable {
         treasury = initialTreasury;
         priceOracle = initialOracle;
         agentId = initialAgentId;
+        // No delay here: before the factory exists there is no wallet for a check to bind.
+        for (uint256 i = 0; i < initialAppChecks.length; i++) {
+            AppCheckEntry memory entry = initialAppChecks[i];
+            _requireValidAppCheck(entry.app, entry.check);
+            appCheck[entry.app] = entry.check;
+            emit AppCheckUpdated(entry.app, address(0), entry.check);
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -493,6 +559,65 @@ contract SHRegistry is Ownable {
     }
 
     /**
+     * @notice Proposes `check` as the IAppCheck for calls passkeys and agents make to `app`, starting
+     *         the {APP_CHECK_TIMELOCK}. Only callable by the owner. Replaces any proposal already
+     *         pending for `app`, restarting the delay.
+     * @dev Validated now ({_requireValidAppCheck}) and again on commit, so a mis-wired check fails here
+     *      rather than two days later.
+     * @param app   The contract the check is for. Must not be address(0).
+     * @param check The IAppCheck. Must have code, and its {IAppCheck-app} must be `app`.
+     */
+    function proposeAppCheck(address app, address check) external onlyOwner {
+        _requireValidAppCheck(app, check);
+        uint48 eta = SafeCast.toUint48(block.timestamp + APP_CHECK_TIMELOCK);
+        pendingAppCheck[app] = PendingAppCheck({check: check, eta: eta});
+        emit AppCheckProposed(app, check, eta);
+    }
+
+    /**
+     * @notice Makes `app`'s pending check its live one, once the delay has passed. Only callable by the
+     *         owner.
+     * @dev Takes effect on every deployed wallet's next call to `app`. Clears the proposal, so
+     *      committing twice reverts with {SHRegistry_NoPendingAppCheck}.
+     * @param app The app whose pending check to commit.
+     */
+    function commitAppCheck(address app) external onlyOwner {
+        PendingAppCheck memory pending = pendingAppCheck[app];
+        if (pending.eta == 0) revert SHRegistry_NoPendingAppCheck(app);
+        if (block.timestamp < pending.eta) revert SHRegistry_TimelockNotElapsed(pending.eta);
+        _requireValidAppCheck(app, pending.check);
+        address oldCheck = appCheck[app];
+        appCheck[app] = pending.check;
+        delete pendingAppCheck[app];
+        emit AppCheckUpdated(app, oldCheck, pending.check);
+    }
+
+    /**
+     * @notice Withdraws `app`'s pending check before it is committed. Only callable by the owner.
+     * @param app The app whose pending check to withdraw.
+     */
+    function cancelAppCheck(address app) external onlyOwner {
+        address cancelled = pendingAppCheck[app].check;
+        if (pendingAppCheck[app].eta == 0) revert SHRegistry_NoPendingAppCheck(app);
+        delete pendingAppCheck[app];
+        emit AppCheckProposalCancelled(app, cancelled);
+    }
+
+    /**
+     * @notice Removes `app`'s live check at once: from the next call, passkeys and agents can't call
+     *         `app` at all. Only callable by the owner.
+     * @dev No delay, because removing only takes ability away. It is the switch for a check found to
+     *      have a bug. A check still pending for `app` is left as it is: cancel it too.
+     * @param app The app whose check to remove.
+     */
+    function removeAppCheck(address app) external onlyOwner {
+        address oldCheck = appCheck[app];
+        if (oldCheck == address(0)) revert SHRegistry_NoAppCheck(app);
+        delete appCheck[app];
+        emit AppCheckUpdated(app, oldCheck, address(0));
+    }
+
+    /**
      * @notice Updates the registered agentId for the SessionHandler Protocol on the ERC-8004 Identity Registry. Only callable by the owner.
      * @dev Unvalidated on purpose: 0 is a legitimate agent id (ERC-8004 registries mint from 0), so
      *      there is no sentinel to reject. An id with no corresponding token makes
@@ -565,5 +690,16 @@ contract SHRegistry is Ownable {
         // Safe: fee <= MAX_STORABLE_FEE = type(uint48).max gwei, checked by every caller's range check.
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint48(fee / 1 gwei);
+    }
+
+    /**
+     * @dev Reverts unless `check` can be registered for `app`: `app` is not address(0), `check` has
+     *      code, and `check` says it reads calls to `app`. The last catches the likely wiring mistake
+     *      of registering a router's check under the position manager's address.
+     */
+    function _requireValidAppCheck(address app, address check) internal view {
+        if (app == address(0) || check.code.length == 0 || IAppCheck(check).app() != app) {
+            revert SHRegistry_InvalidAppCheck(app, check);
+        }
     }
 }

@@ -33,6 +33,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  *      while the sequencer is down and for {SEQUENCER_GRACE_PERIOD} after it returns, giving the
  *      feeds time to publish post-outage prices. It is address(0) on chains with no sequencer
  *      (Ethereum mainnet, BSC, local Anvil), where the check is skipped outright.
+ *
+ *      Every feed change after deployment waits {FEED_TIMELOCK}: the owner proposes it ({proposeFeed}
+ *      or {proposeFeedRemoval}), and it binds only once committed after the delay ({commitFeed}).
+ *      Prices decide what the spending cap charges and what the PayeeGuard's trade floors allow, so
+ *      an instant repoint by a leaked operator key would undo both at once. Removing a feed waits too:
+ *      a token with no feed has no trade floor at all (THREAT_MODEL §3.8).
  */
 contract SHOracle is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -52,9 +58,9 @@ contract SHOracle is Ownable {
     /// @dev Reverts when the tokens and priceFeeds constructor arrays have different lengths
     error PriceOracle_ArrayLengthMismatch();
 
-    /// @dev Reverts when address(0) is supplied as a feed address to {setFeed}. Registering a zero
+    /// @dev Reverts when address(0) is supplied as a feed address to {proposeFeed}. Registering a zero
     ///      feed would leave the token reading as unpriced while looking registered; use
-    ///      {removeFeed} to deregister instead.
+    ///      {proposeFeedRemoval} to deregister instead.
     error PriceOracle_InvalidFeed();
 
     /// @dev Reverts when a heartbeat is 0 (every feed would read as stale) or exceeds the uint48
@@ -68,7 +74,7 @@ contract SHOracle is Ownable {
     /// @dev Reverts on any attempt to deregister the native (address(0)) feed. SpendingLimitModule
     ///      prices the account's native balance delta on EVERY metered transaction, so removing this
     ///      feed would revert every native-moving execution on every wallet installed against this
-    ///      oracle. Repoint it with {setFeed} instead, which overwrites in place.
+    ///      oracle. Repoint it with {proposeFeed} instead, which overwrites in place.
     error PriceOracle_CannotRemoveNativeFeed();
 
     /// @dev Reverts when this chain's L2 sequencer uptime feed reports the sequencer as DOWN, or
@@ -88,6 +94,15 @@ contract SHOracle is Ownable {
     ///      valuation the moment the oracle went live.
     error PriceOracle_InvalidSequencerFeed();
 
+    /// @dev Reverts when a feed change is committed or cancelled for a token with none pending.
+    /// @param token The token named.
+    error PriceOracle_NoPendingFeed(address token);
+
+    /// @dev Reverts when a feed change is committed before its {FEED_TIMELOCK} has passed.
+    /// @param token The token named.
+    /// @param eta   When the change may be committed.
+    error PriceOracle_FeedTimelockNotElapsed(address token, uint256 eta);
+
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
@@ -103,7 +118,7 @@ contract SHOracle is Ownable {
     ///      setter would be one more immediate-effect admin lever over cap integrity, which
     ///      THREAT_MODEL §3.8 already names as the protocol's top residual risk. If Chainlink ever
     ///      retires this aggregator, the fix is the route that already exists for a bad oracle:
-    ///      {SHRegistry-proposePriceOracle} a replacement, seeded via {SHTreasury-setFeed} while it
+    ///      {SHRegistry-proposePriceOracle} a replacement, deployed with its feeds in its constructor, while it
     ///      sits in the timelock.
     address public immutable SEQUENCER_UPTIME_FEED;
 
@@ -138,12 +153,30 @@ contract SHOracle is Ownable {
     ///      Using a uniform timeout would either flag stablecoin feeds as stale or mask genuinely stale volatile feeds.
     mapping(address => Feed) private sFeeds;
 
+    /// @notice Delay between proposing a feed change and being able to commit it. The same two days
+    ///         as {SHRegistry-ORACLE_TIMELOCK}, which governs WHICH oracle wallets read.
+    /// @dev The cost: a feed that genuinely breaks can't be repointed for this long. Valuations of that
+    ///      token revert meanwhile (stale), which blocks what moves it rather than mis-pricing it, and
+    ///      the owner can always {SessionHandler-withdraw}, which runs no hook.
+    uint256 public constant FEED_TIMELOCK = 2 days;
+
+    /// @notice A proposed feed change, waiting out {FEED_TIMELOCK}.
+    /// @dev `feed == address(0)` is a proposed REMOVAL. `eta == 0` means nothing is pending.
+    struct PendingFeed {
+        address feed; // the aggregator to register, or address(0) to deregister the token
+        uint48 heartbeat; // that aggregator's heartbeat in seconds (0 for a removal)
+        uint48 eta; // when the change may be committed
+    }
+
+    /// @notice token => its pending feed change, if any.
+    mapping(address token => PendingFeed) public pendingFeeds;
+
     /*//////////////////////////////////////////////////////////////
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Emitted when a feed is registered or repointed by the owner. One event covers both:
-    ///         {setFeed} overwrites in place, so there is no separate "added" vs "updated" case.
+    ///         {commitFeed} overwrites in place, so there is no separate "added" vs "updated" case.
     /// @param token     The token the feed prices (address(0) for native).
     /// @param feed      The Chainlink aggregator now registered for it.
     /// @param heartbeat That feed's staleness ceiling in seconds.
@@ -152,6 +185,17 @@ contract SHOracle is Ownable {
     /// @notice Emitted when a feed is deregistered by the owner.
     /// @param token The token that is no longer priced.
     event FeedRemoved(address indexed token);
+
+    /// @notice Emitted when a feed change is proposed, starting its {FEED_TIMELOCK}.
+    /// @param token     The token the change is for (address(0) for native).
+    /// @param feed      The aggregator proposed, or address(0) for a removal.
+    /// @param heartbeat Its heartbeat in seconds (0 for a removal).
+    /// @param eta       When the change may be committed.
+    event FeedProposed(address indexed token, address indexed feed, uint256 heartbeat, uint256 eta);
+
+    /// @notice Emitted when a pending feed change is withdrawn before it was committed.
+    /// @param token The token whose change was withdrawn.
+    event FeedProposalCancelled(address indexed token);
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -307,14 +351,13 @@ contract SHOracle is Ownable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Registers a price feed for `token`, or repoints an existing one in place.
-     * @dev Overwriting is deliberate and is the supported way to correct a wrong heartbeat or
-     *      migrate to a replacement aggregator without deregistering the token first — a
-     *      remove-then-add would leave every wallet unable to price that token in between.
-     *      Feeds registered here take effect on the next valuation, protocol-wide, with no delay;
-     *      the timelock protecting wallets from a bad oracle lives on
-     *      {SHRegistry-proposePriceOracle}, which governs WHICH oracle they read, not its contents.
-     *      The owner is therefore trusted for cap integrity either way (THREAT_MODEL §3.8).
+     * @notice Proposes registering a price feed for `token`, or repointing its existing one, starting
+     *         the {FEED_TIMELOCK}. Only callable by the owner. Replaces any change already pending
+     *         for `token`, restarting the delay.
+     * @dev Validated now, exactly as the commit will validate it (see {_feedRecord}), so a wrong
+     *      aggregator or heartbeat fails here rather than two days later. Repointing in place is the
+     *      supported way to migrate a token to a replacement aggregator: a remove-then-add would leave
+     *      it unpriced in between.
      * @dev The token's decimals and the feed's are both read on-chain rather than supplied by the
      *      caller: a wrong decimals value would silently mis-price every valuation of that token by a
      *      power of ten, with nothing on-chain to catch it.
@@ -323,27 +366,75 @@ contract SHOracle is Ownable {
      *                  most 18 decimals.
      * @param heartbeat That feed's Chainlink-published heartbeat, in seconds. Must be > 0.
      */
-    function setFeed(address token, address priceFeed, uint256 heartbeat) external onlyOwner {
-        _setFeed(token, priceFeed, heartbeat);
+    function proposeFeed(address token, address priceFeed, uint256 heartbeat) external onlyOwner {
+        _feedRecord(token, priceFeed, heartbeat);
+        // Safe: _feedRecord just refused any heartbeat past type(uint48).max.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        _propose(token, priceFeed, uint48(heartbeat));
     }
 
     /**
-     * @notice Deregisters `token`, after which {isPriced} reports false and {getPrice} reverts.
-     * @dev Refuses to remove the native (address(0)) feed — see {PriceOracle_CannotRemoveNativeFeed}.
-     *      Removing a token that accounts currently watch does NOT unwatch it: their next metered
-     *      transaction that moves it will revert in the hook's postCheck. Have accounts drop it from
-     *      their watched list first.
+     * @notice Proposes deregistering `token`, starting the {FEED_TIMELOCK}. Only callable by the owner.
+     * @dev Waits like any other change, because removing a feed LOOSENS a rule: a token with no feed
+     *      has no trade floor in the PayeeGuard. Refuses the native (address(0)) feed — see
+     *      {PriceOracle_CannotRemoveNativeFeed}. Accounts watching `token` will revert on their next
+     *      metered transaction that moves it once the removal is committed; have them unwatch it first.
      * @param token The token to stop pricing. Must not be address(0).
      */
-    function removeFeed(address token) external onlyOwner {
+    function proposeFeedRemoval(address token) external onlyOwner {
         if (token == ETH_TOKEN_ADDRESS) revert PriceOracle_CannotRemoveNativeFeed();
-        delete sFeeds[token];
-        emit FeedRemoved(token);
+        _propose(token, address(0), 0);
     }
 
-    /// @dev Shared write path for the constructor and {setFeed}, so both validate identically and
+    /**
+     * @notice Applies `token`'s pending feed change once its delay has passed. Only callable by the owner.
+     * @dev Takes effect on the next valuation, protocol-wide. A registration re-reads both decimals
+     *      here rather than trusting what was read at proposal time. Clears the proposal, so
+     *      committing twice reverts with {PriceOracle_NoPendingFeed}.
+     * @param token The token whose pending change to apply.
+     */
+    function commitFeed(address token) external onlyOwner {
+        PendingFeed memory pending = pendingFeeds[token];
+        if (pending.eta == 0) revert PriceOracle_NoPendingFeed(token);
+        if (block.timestamp < pending.eta) revert PriceOracle_FeedTimelockNotElapsed(token, pending.eta);
+        delete pendingFeeds[token];
+        if (pending.feed == address(0)) {
+            delete sFeeds[token];
+            emit FeedRemoved(token);
+        } else {
+            _setFeed(token, pending.feed, pending.heartbeat);
+        }
+    }
+
+    /**
+     * @notice Withdraws `token`'s pending feed change before it is committed. Only callable by the owner.
+     * @param token The token whose pending change to withdraw.
+     */
+    function cancelFeed(address token) external onlyOwner {
+        if (pendingFeeds[token].eta == 0) revert PriceOracle_NoPendingFeed(token);
+        delete pendingFeeds[token];
+        emit FeedProposalCancelled(token);
+    }
+
+    /// @dev Records a pending change for `token` and announces it.
+    function _propose(address token, address priceFeed, uint48 heartbeat) internal {
+        // Safe: a timestamp fits a uint48 for millions of years.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint48 eta = uint48(block.timestamp + FEED_TIMELOCK);
+        pendingFeeds[token] = PendingFeed({feed: priceFeed, heartbeat: heartbeat, eta: eta});
+        emit FeedProposed(token, priceFeed, heartbeat, eta);
+    }
+
+    /// @dev Shared write path for the constructor and {commitFeed}, so both validate identically and
     ///      both cache the token's own decimals rather than trusting a supplied value.
     function _setFeed(address token, address priceFeed, uint256 heartbeat) internal {
+        sFeeds[token] = _feedRecord(token, priceFeed, heartbeat);
+        emit FeedSet(token, priceFeed, heartbeat);
+    }
+
+    /// @dev The validated record for `priceFeed` pricing `token`, reverting on anything that can't be
+    ///      stored. Used by {proposeFeed} to fail early and by {_setFeed} to write.
+    function _feedRecord(address token, address priceFeed, uint256 heartbeat) internal view returns (Feed memory) {
         if (priceFeed == address(0)) revert PriceOracle_InvalidFeed();
         // A zero heartbeat reads as permanently stale; anything past uint48 would truncate on the
         // cast below into a far tighter ceiling than intended. Real feeds are hours-to-days.
@@ -354,8 +445,7 @@ contract SHOracle is Ownable {
         // does, and a wrong figure would mis-price every valuation by a power of ten.
         uint8 feedDecimals = AggregatorV3Interface(priceFeed).decimals();
         if (feedDecimals > 18) revert PriceOracle_InvalidFeedDecimals(feedDecimals);
-        sFeeds[token] =
-            Feed({feed: priceFeed, decimals: tokenDecimals, heartbeat: uint48(heartbeat), feedDecimals: feedDecimals});
-        emit FeedSet(token, priceFeed, heartbeat);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return Feed({feed: priceFeed, decimals: tokenDecimals, heartbeat: uint48(heartbeat), feedDecimals: feedDecimals});
     }
 }

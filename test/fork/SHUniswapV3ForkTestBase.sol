@@ -103,8 +103,8 @@ abstract contract SHUniswapV3ForkTestBase is SHForkTestBase {
         revert("no SwapRouter02 constant for this chain");
     }
 
-    function _swapCalldata(uint256 amountIn) internal view override returns (bytes memory) {
-        return _exactInputSingle(address(_tokenIn()), address(_tokenOut()), address(wallet), amountIn);
+    function _swapCalldataTo(uint256 amountIn, address recipient) internal view override returns (bytes memory) {
+        return _exactInputSingle(address(_tokenIn()), address(_tokenOut()), recipient, amountIn);
     }
 
     function _nativeInSwapCalldata(uint256 value) internal view override returns (bytes memory) {
@@ -132,7 +132,8 @@ abstract contract SHUniswapV3ForkTestBase is SHForkTestBase {
                     fee: _poolFee(),
                     recipient: recipient,
                     amountIn: amountIn,
-                    amountOutMinimum: 0,
+                    // Above the PayeeGuard's floor, below what the real pool pays.
+                    amountOutMinimum: _minOut(tokenIn, amountIn, tokenOut),
                     sqrtPriceLimitX96: 0
                 })
             )

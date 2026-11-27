@@ -8,7 +8,7 @@ The account (`SessionHandler`) validates its own UserOperations and manages its 
 
 ```
 src/
-├── SHFactory.sol              ← User-facing factory — deploys one SessionHandler per user, assigns sequential walletIds
+├── SHFactory.sol              ← User-facing factory — deploys one SessionHandler per user
 ├── SHTreasury.sol             ← Protocol admin root — owns SHRegistry, SHOracle, and SHFactory; fee sink
 ├── SHRegistry.sol             ← Central config store — every address a wallet needs (EntryPoint, both ERC-8004 registries, all three modules, oracle, treasury, both fees, agentId)
 ├── SHOracle.sol               ← Chainlink-based USD value converter
@@ -16,6 +16,14 @@ src/
 ├── SpendingLimitModule.sol   ← ERC-7579 Hook (type 4 only) — global USD spending cap (net-value metering)
 ├── RecurringPaymentModule.sol ← ERC-7579 Executor (type 2) — owner-approved recurring payments, run by a keeper
 ├── AgentModule.sol            ← ERC-7579 Validator (type 1) — trading agents with their own key and USD limit; on every wallet, empty until the owner adds one
+├── PayeeGuard.sol             ← Stateless rules the spending hook applies to passkeys' executions (not agents'): pay only owner-signed contacts, call only apps with a check, trade within 12% of the oracle
+├── appchecks/                 ← IAppCheck contracts, one per app, registered in SHRegistry behind a 2-day delay
+│   ├── AppCheckBase.sol          ← Shared report building, and "parking" (funds paid to the app itself must leave again in the same call)
+│   ├── SwapRouter02Check.sol     ← Uniswap SwapRouter02: the four V3 swaps, unwrapWETH9/sweepToken/refundETH, multicall
+│   ├── V3PositionManagerCheck.sol← Uniswap V3 positions: mint/increase/decrease/collect/burn, unwrap/sweep/refundETH, multicall
+│   ├── V2RouterCheck.sol         ← A Uniswap-V2-style router (PancakeSwap on BSC): swaps and liquidity, no permits
+│   ├── WrappedNativeCheck.sol    ← WETH9 / WBNB deposit and withdraw
+│   └── ReputationCheck.sol       ← ERC-8004 Reputation Registry reviews
 ├── utils/
 │   └── WebAuthnNative.sol        ← OpenZeppelin's WebAuthn verifier, calling the P-256 precompile only (no Solidity fallback)
 ├── interfaces/
@@ -23,6 +31,7 @@ src/
 │   ├── IERC20Extended.sol        ← IERC20 + IERC20Metadata, plus non-standard allowance functions (for selector matching only)
 │   ├── AggregatorV3Interface.sol ← Vendored Chainlink price-feed interface (used by SHOracle)
 │   ├── IUserOpHooks.sol          ← preExecute / postExecute: what the wallet calls on a validator around each op it approved
+│   ├── IAppCheck.sol             ← What an app check reports about one call: payees, trades, pool prices
 │   ├── IIdentityRegistry.sol     ← ERC-8004 IIdentityRegistry interface
 │   └── IReputationRegistry.sol   ← ERC-8004 IReputationRegistry interface
 └── mocks/
@@ -48,11 +57,15 @@ test/
 │   ├── SHAdminTest.t.sol               ← Admin surface: the SHTreasury ownership graph, the oracle timelock, feed admin (70 tests)
 │   ├── RecurringPaymentTest.t.sol      ← RecurringPaymentModule on a real wallet: who may create/cancel, when run pays, guard/fee/cap on each payment, gas (26 tests)
 │   ├── RegistryFeeTest.t.sol           ← The two fees in gwei beside the treasury, setKeeperFee, setRecurringPaymentModule (13 tests)
-│   ├── AgentModuleTest.t.sol           ← AgentModule on a real wallet: who adds/removes agents, signatures, the three rules, both limits, fees, the window (61 tests)
+│   ├── AgentModuleTest.t.sol           ← AgentModule on a real wallet: who adds/removes agents, signatures, the three rules, both limits, fees, the window, not held to contacts (85 tests)
+│   ├── PayeeGuardTest.t.sol            ← The contact rule and trade floors through the wallet: passes, void, token rules, app checks and their delay, who is held (47 tests)
+│   ├── AppChecksTest.t.sol             ← Each app check's report and refusals, against mocks of the app (29 tests)
 │   └── SpendingLimitModuleHarness.sol ← Test harness exposing the module's internal calldata/approval helpers
 ├── utils/
 │   ├── PasskeyHelper.sol               ← A soft passkey: builds WebAuthn assertions the way a browser + authenticator do
-│   └── ConfiguredTokens.sol            ← Every ERC-20 a NetworkConfig names, to check the deploy script prices them all
+│   ├── ConfiguredTokens.sol            ← Every ERC-20 a NetworkConfig names, to check the deploy script prices them all
+│   ├── ContactPassHelper.sol           ← Signs contact passes and appends them to execute calldata, as the app does
+│   └── TestAppChecks.sol               ← OpenAppCheck (allows any call) and ScriptedAppCheck (a set report), for tests
 ├── fork/
 │   ├── SHForkTestBase.sol              ← Shared abstract fork suite (32 tests) parameterized per network; V2 venue hooks: swap calldata, _trustedSpenders(), liquidity round-trip, _depositBatch()
 │   ├── SHUniswapV3ForkTestBase.sol     ← Same suite on Uniswap V3: swaps through SwapRouter02, trusts it and the position manager, and a position round-trip (mint → half out → rest out + burn)
@@ -207,9 +220,18 @@ function proposePriceOracle(address newOracle) external onlyOwner;
 function commitPriceOracle() external onlyOwner;
 function cancelPriceOracle() external onlyOwner;
 
-// Oracle pass-through admin (target passed in, so a pending oracle can be seeded)
-function setFeed(address oracle, address token, address priceFeed, uint256 heartbeat) external onlyOwner;
-function removeOracleFeed(address oracle, address token) external onlyOwner;
+// Oracle pass-through admin (target passed in). Every feed change waits SHOracle.FEED_TIMELOCK (2 days).
+function proposeOracleFeed(address oracle, address token, address priceFeed, uint256 heartbeat) external onlyOwner;
+function proposeOracleFeedRemoval(address oracle, address token) external onlyOwner;
+function commitOracleFeed(address oracle, address token) external onlyOwner;
+function cancelOracleFeed(address oracle, address token) external onlyOwner;
+
+// App checks (registry pass-through). Adding or replacing waits SHRegistry.APP_CHECK_TIMELOCK (2 days);
+// removing is instant (it only takes ability away).
+function proposeAppCheck(address app, address check) external onlyOwner;
+function commitAppCheck(address app) external onlyOwner;
+function cancelAppCheck(address app) external onlyOwner;
+function removeAppCheck(address app) external onlyOwner;
 
 // Factory pass-through admin (target passed in, so multiple factories are supported)
 function pauseFactory(address factory) external onlyOwner;
@@ -239,7 +261,7 @@ address public REGISTRY;          // write-once via setRegistry
 
 **Wallets are deployed with CREATE2.** The salt is `keccak256(abi.encode(msg.sender, deployCount[msg.sender]))`, so `predictWalletAddress(owner)` returns the address that owner's *next* deploy will produce, before it exists. Binding the owner into the salt is what makes that prediction safe to publish: no other caller can reach the same salt, so a predicted address cannot be squatted.
 
-The nonce is a **per-owner** counter held by the factory, not a caller-supplied value and not a global one. A global counter (`totalWallets`, say) would make a predicted address depend on how many wallets *everyone else* had deployed, so any other user's deploy landing first would move it — which would defeat the point: the app uses the predicted address to find the deploy even when the user's wallet replaced the transaction (sped it up, say) and the original hash never mines. Two consequences worth knowing:
+The nonce is a **per-owner** counter held by the factory, not a caller-supplied value and not a global one. A global counter would make a predicted address depend on how many wallets *everyone else* had deployed, so any other user's deploy landing first would move it — which would defeat the point: the app uses the predicted address to find the deploy even when the user's wallet replaced the transaction (sped it up, say) and the original hash never mines. Two consequences worth knowing:
 
 - A prediction is only valid for **one factory instance** — the deployer is baked into a CREATE2 address, so redeploying `SHFactory` invalidates every previously shown address.
 - Calling `deployWallet` again simply consumes the next nonce and yields another wallet — one EOA may own several. A salt can never repeat, so there is no collision case and no "already deployed" error. **Enforcing one-wallet-per-user is the caller's job**: read `deployCount(owner)` and refuse when it is non-zero, which is a free view rather than a reverted transaction the user pays for. That check means "does this USER have a wallet" only when the user is `msg.sender` — i.e. when they sign their own deploy. A caller deploying on users' behalf from one shared EOA (as `app/deploy_wallet.py` does) sees a counter covering all its users and must track per-user ownership itself.
@@ -287,13 +309,10 @@ function unpause() external onlyOwner;    // via SHTreasury.unpauseFactory
 
 SHRegistry public immutable REGISTRY;
 address public immutable IMPLEMENTATION;
-uint64 public totalWallets;                // next walletId to assign (wallet IDs start at 0); packed beside _owner/_paused
-mapping(uint256 => address) public wallets;
-
-event WalletDeployed(address indexed walletAddress, address indexed owner, uint256 indexed walletId);
+event WalletDeployed(address indexed walletAddress, address indexed owner);
 ```
 
-> `setSpendingLimitModule` moved to `SHRegistry` — every factory reads the module from there, so one call now covers them all. Note also that `totalWallets` starts at **0**, so the first wallet has id `0`; `wallets[0]` is a real wallet, not an "unset" sentinel.
+> `setSpendingLimitModule` moved to `SHRegistry` — every factory reads the module from there, so one call now covers them all. There is no wallet counter or id list: nothing on chain needs one, and both can be rebuilt from `WalletDeployed` logs.
 
 ---
 
@@ -323,6 +342,14 @@ function isPriced(address token) external view returns (bool);
 
 /// USD value of `amount` of `token`, 18 decimals, signed (int256 for arithmetic parity with the module).
 function getPrice(address token, uint256 amount) external view returns (int256);
+
+/// Feed admin (owner = SHTreasury). Nothing binds before FEED_TIMELOCK (2 days): prices decide what the cap
+/// charges and what PayeeGuard's floors allow. A removal waits too (an unpriced token has no floor).
+function proposeFeed(address token, address priceFeed, uint256 heartbeat) external onlyOwner;
+function proposeFeedRemoval(address token) external onlyOwner;   // never the native feed
+function commitFeed(address token) external onlyOwner;
+function cancelFeed(address token) external onlyOwner;
+function pendingFeeds(address token) external view returns (address feed, uint48 heartbeat, uint48 eta);
 ```
 
 ---
@@ -394,7 +421,6 @@ constructor(ProtocolAddresses memory protocol);
 /// after the hook would run a pointless preCheck/postCheck on every deploy.
 struct InitConfig {
     address owner;
-    uint64 walletId;
     address spendingLimitModule;
     address recurringPaymentModule;
     int256 dailyLimitUsd;
@@ -491,7 +517,7 @@ event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
 
-> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `WALLET_ID` (`uint64`) shares one with `SH_MODULE`. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts the `sessionValidUntil` mapping in slot 9 — `app/bundler.py`'s `SESSION_VALID_UNTIL_SLOT` must match, since a key's deadline lives at `keccak256(abi.encode(keyId, uint256(9)))` and the bundler overrides exactly that word (`PasskeyValidationTest.test_slot9_isSessionValidUntil` pins it). The key list (`_sessionKeys`, an `EnumerableSet`) takes slots 10–11, and the gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 12, after them, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `SH_MODULE` has a slot to itself. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts the `sessionValidUntil` mapping in slot 9 — `app/bundler.py`'s `SESSION_VALID_UNTIL_SLOT` must match, since a key's deadline lives at `keccak256(abi.encode(keyId, uint256(9)))` and the bundler overrides exactly that word (`PasskeyValidationTest.test_slot9_isSessionValidUntil` pins it). The key list (`_sessionKeys`, an `EnumerableSet`) takes slots 10–11, and the gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 12, after them, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
 
 > **Two gas ceilings.** `maxOpGasCost` bounds one UserOp: `_authenticate` prices the op's own gas fields against it, and `validateUserOp` bounds the prefund transfer too. `sessionGasBudget` bounds all of them: every UserOp the owner did not sign is charged its prefund top-up (`missingAccountFunds`) against a budget that refills every `SESSION_GAS_WINDOW` (24 hours), and validation reverts with `SessionHandler_SessionGasBudgetExceeded(spent, budget)` past it. Without it, a stolen key running its own bundler could pack many ops, each just under the per-op ceiling, into one `handleOps` and collect all their gas. The charge is the top-up, not the op's maximum price, so an ordinary op uses up about what it really cost. That is only safe because `_authenticate` refuses any op whose `callData` calls `validateUserOp` itself (`SessionHandler_SelfValidationCall`), the one way a key could otherwise have the account pay a prefund outside validation. The window reads `block.timestamp` during validation, which ERC-7562 bans for public bundlers; the protocol bundles every op itself (`app/bundler.py`), so it holds.
 
@@ -605,6 +631,41 @@ event SpendMetered(address indexed account, int256 netOutflowUsd, int256 spentIn
 **A wallet that counts nothing has no limit.** With native off and no watched token, every transfer is outside the meter, and the app allows a limit of 0 there. Adding a watched token or switching native on while the limit is 0 freezes those tokens until a limit is set, so the app asks for a limit first.
 
 **Deliberate v1 exclusions** (per design, not gaps): Permit2/permit-signature approvals and per-venue rate limits. Any unwatched ERC-20, and native when `nativeMetered` is off, sits outside the meter — the protection model is "count the tokens you care about".
+
+---
+
+## `PayeeGuard.sol` and the app checks
+
+Mitfah's server builds every op a passkey approves, and a passkey's prompt shows nothing about it, so the contact list is enforced by the wallet. `SpendingLimitModule.preCheck` calls `PayeeGuard.check(account, contactsVoidedAt, msgData)` for every execution whose caller is the EntryPoint (a passkey's op, or an owner-signed UserOp). Not checked: the owner's direct calls, installed executors, and trading agents' ops (the wallet calling itself from `executeUserOp`; the owner's call, 2026-11-27). The guard is stateless; its address is an immutable of the module. THREAT_MODEL §3.18.
+
+**Contact passes.** The owner signs EIP-712 `Contact(string name,address payee,uint64 issuedAt)` under domain `{name: "Mitfah", version: "2"}` (no chainId, no verifying contract: one signature, every wallet the owner has). Mitfah appends what an op needs after `execute`'s ABI arguments:
+
+```
+execute(mode, executionCalldata) || pass_1 .. pass_n || uint8 n || 0x4d465031 ("MFP1")
+pass = payee (20) | issuedAt (8, big-endian) | keccak256(name) (32) | r (32) | s (32) | v (1)   // 125 bytes, n <= 8
+```
+
+A pass is valid while its signer is the wallet's current `owner()`, `issuedAt > contactsVoidedAt(account)` and `issuedAt <= block.timestamp + 1 day`. It is only verified when a payee needs it (about 6,600 gas each, measured on a transfer).
+
+**Rules, per call** (anything else reverts):
+
+| Call | Rule |
+|---|---|
+| no calldata | target must be the wallet or a contact (`PayeeGuard_NotAContact`) |
+| `transfer`, `transferFrom`, ERC-721/1155 safe transfers (no value) | recipient must be the wallet or a contact |
+| `approve`, `increaseAllowance`, `increaseApproval` | spender must be a trusted spender, or address(0) (`PayeeGuard_UntrustedSpender`) |
+| `setApprovalForAll` | only `false` |
+| `removeAgent(wallet, agent)` | on a validator the wallet installed, for this wallet |
+| anything else | `SHRegistry.appCheck(target)` must exist; its report's payees, trades (out ≥ 88% of in at oracle prices) and pool prices (within 12%) are checked; unpriced tokens have no floor |
+
+```solidity
+function check(address account, uint64 voidedAt, bytes calldata msgData) external view;
+function contactDigest(address payee, uint64 issuedAt, bytes32 nameHash) external view returns (bytes32);
+```
+
+**Module additions:** `constructor(address registry, address payeeGuard)` (the EntryPoint is read from the registry); `voidContactPasses(address account)` — the account's owner only, calling directly — sets `contactsVoidedAt(account)` to now and emits `ContactPassesVoided`.
+
+**App checks** (`src/appchecks/`, `IAppCheck`): `app()` names the one contract a check reads, and `inspect(account, value, data)` returns `(address[] payees, Trade[] trades, PoolPrice[] prices)` or reverts for anything it doesn't fully understand. A check reports; the guard decides. `SHRegistry` keeps `appCheck(app)`, set by its constructor at deploy (`AppCheckEntry[]`) and afterwards only through `proposeAppCheck` → 2 days → `commitAppCheck` (or `cancelAppCheck`); `removeAppCheck` is instant. The deploy script registers, per chain: the wrapped native token's and the reputation registry's checks everywhere, SwapRouter02 and the V3 position manager on the Uniswap V3 chains, PancakeSwap's V2 router on BSC.
 
 ---
 
@@ -722,7 +783,7 @@ function getAgent(address account, address agent) external view
 
 **Who can do what.** As with recurring payments, adding an agent or changing its limit or expiry needs the owner's EOA calling the module directly; a passkey acts *as the wallet* and is refused. `removeAgent` also accepts the wallet itself, so a passkey can stop an agent without the owner wallet — and an op the agent already signed then fails when it runs, even later in the same bundle (`preExecute` re-checks). `onInstall` takes nothing, because anything acting as the wallet can call a module's `onInstall` directly. `addAgent` needs the module installed as a validator and native metering on. An agent can never sign a message for the wallet: `isValidSignatureWithSender` always answers "invalid" (ERC-1271 signatures such as Permit2 grants could move tokens around the limit).
 
-**What an agent's trade may do.** Anything a passkey may, on any exchange or protocol (the user's choice), plus three rules of its own, all checked in **validation**, so a rule-breaking op is refused before it costs anything, with the rule's error in the EntryPoint's `AA23 reverted`:
+**What an agent's trade may do.** Any call the wallet's guard allows a passkey, on any exchange or protocol and to any address (the user's choice: agents are not held to the PayeeGuard's contacts, app checks or floors), plus three rules of its own, all checked in **validation**, so a rule-breaking op is refused before it costs anything, with the rule's error in the EntryPoint's `AA23 reverted`:
 1. **Native ETH/BNB must be metered** (`Config.nativeMetered`), checked on every op, so an owner who turns it off stops their agents until it is back on.
 2. **No uncounted token leaves.** A call with a token-moving function — `transfer`, `transferFrom`, `approve`, `increaseAllowance`, `increaseApproval`, ERC-721's `safeTransferFrom` (×2) and `setApprovalForAll`, ERC-1155's `safeTransferFrom` and `safeBatchTransferFrom`, ERC-1363/677's `transferAndCall` (×2), `transferFromAndCall` (×2) and 2-argument `approveAndCall`, ERC-777's `send`, `operatorSend` and `authorizeOperator`, ERC-6909's `transfer`, `transferFrom`, `approve` and `setOperator`, and DSToken's `push` and `move` — to any target not on the wallet's watched list is refused (`AgentModule_UncountedToken`). Tokens capped in their own units aren't on the watched list, so they are refused too. The grants the hook can't track are refused by the hook for everyone.
 3. **No call to the module**, so an agent can't remove, add or raise agents, or touch the hooks' bookkeeping, through its own trade.
@@ -793,9 +854,10 @@ Orchestrates deployment of all shared infrastructure. Individual `SessionHandler
 2. Deploy `SHTreasury()` — the admin root, deployed **first** so its address can own everything below.
 3. Deploy `SHOracle(address(treasury), config.sequencerUptimeFeed, tokens, priceFeeds, heartbeats)` — born owned by the treasury.
 4. Call `IIdentityRegistry.register(AGENT_URI)` to mint the agent NFT and obtain `agentId`.
-5. Deploy `SHRegistry(address(treasury), protocolFeeBounds, keeperFeeBounds, address(treasury), address(oracle), …, agentId)` — owned by the treasury and paying fees to it.
+4b. Deploy this chain's app checks (`_deployAppChecks`): `WrappedNativeCheck` (WBNB on BSC, WETH elsewhere) and `ReputationCheck` everywhere; `SwapRouter02Check` and `V3PositionManagerCheck` on the Uniswap V3 chains; `V2RouterCheck` for PancakeSwap on BSC; nothing more on a bare Anvil node. Each reads its app at construction.
+5. Deploy `SHRegistry(address(treasury), protocolFeeBounds, keeperFeeBounds, address(treasury), address(oracle), …, agentId, appChecks)` — owned by the treasury and paying fees to it; the starting app checks are registered with no delay (no wallet exists yet).
 6. Call `treasury.setRegistry(address(registry))` — write-once, fixing the pairing.
-6b. Deploy `SpendingLimitModule(address(registry))` — wired to the **registry**, from which it resolves the current oracle on every valuation (no interpreter). Must come after the registry: its constructor reads `priceOracle()` off it.
+6b. Deploy `PayeeGuard(address(registry))`, then `SpendingLimitModule(address(registry), address(payeeGuard))` — wired to the **registry**, from which it resolves the current oracle on every valuation (no interpreter). Must come after the registry: its constructor reads `priceOracle()` off it.
 7. Call `treasury.setSpendingLimitModule(address(module))` — the module could not be a registry constructor argument (see the registry section), so it is registered here.
 7b. Deploy `RecurringPaymentModule()` (no constructor arguments) and call `treasury.setRecurringPaymentModule(address(recurringModule))`.
 7c. Deploy `AgentModule()` (no constructor arguments: it reads all it needs from each wallet) and call `treasury.setAgentModule(address(agentModule))`. Every wallet the factory deploys then installs it as a validator. The app reads its address off the registry (`agentModule()`).

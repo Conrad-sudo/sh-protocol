@@ -7,6 +7,7 @@ import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint
 import {MODULE_TYPE_EXECUTOR} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {SessionHandler} from "../../src/SessionHandler.sol";
+import {PayeeGuard} from "../../src/PayeeGuard.sol";
 import {RecurringPaymentModule} from "../../src/RecurringPaymentModule.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
@@ -152,8 +153,9 @@ contract RecurringPaymentTest is Test {
     }
 
     /// @notice The property the module rests on: a session key acts AS the wallet, and the wallet is
-    ///         not its owner, so a key cannot create a schedule that would outlive it. Direct form:
-    ///         the exact error, with the EntryPoint as the caller of execute().
+    ///         not its owner, so a key cannot create a schedule that would outlive it. Two layers, each
+    ///         checked on its own: through execute() the PayeeGuard refuses the call first (the module is
+    ///         no app a passkey may call), and the module itself refuses the wallet as caller.
     function test_create_sessionKeyCannot_exactError() public {
         bytes memory call = abi.encodeCall(
             RecurringPaymentModule.createSchedule,
@@ -161,11 +163,21 @@ contract RecurringPaymentTest is Test {
         );
         vm.expectRevert(
             abi.encodeWithSelector(
-                RecurringPaymentModule.RecurringPayment_NotOwner.selector, address(wallet), address(wallet)
+                PayeeGuard.PayeeGuard_CallNotAllowed.selector,
+                address(recurring),
+                RecurringPaymentModule.createSchedule.selector
             )
         );
         vm.prank(config.entryPoint);
         wallet.execute(bytes32(0), abi.encodePacked(address(recurring), uint256(0), call));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RecurringPaymentModule.RecurringPayment_NotOwner.selector, address(wallet), address(wallet)
+            )
+        );
+        vm.prank(address(wallet));
+        recurring.createSchedule(address(wallet), address(usdc), attacker, AMOUNT, INTERVAL, 0, 0);
     }
 
     /// @notice The same through a real passkey-signed UserOp: handleOps absorbs the inner revert, so

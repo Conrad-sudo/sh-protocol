@@ -23,6 +23,10 @@ import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {DECIMALS, ETH_USD_PRICE} from "../../script/Constants.s.sol";
 import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
+import {ContactPassHelper} from "../utils/ContactPassHelper.sol";
+import {OpenAppCheck} from "../utils/TestAppChecks.sol";
+import {IERC7579Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {PayeeGuard} from "../../src/PayeeGuard.sol";
 
 /**
  * @title SessionGuardTest
@@ -136,10 +140,13 @@ contract SessionGuardTest is Test {
         vm.deal(address(w), 10 ether);
         usdc.mint(address(w), 1_000e6);
 
-        (PackedUserOperation memory userOp, bytes32 hash) = sendPackedUserOp.generateUnsignedUserOp(
+        (PackedUserOperation memory userOp,) = sendPackedUserOp.generateUnsignedUserOp(
             address(w), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (attacker, 100e6)), _passkeyNonceKey()
         );
-        userOp.signature = sessionKey.sign(hash);
+        // This wallet's owner is kani, so kani signs the payee's contact pass.
+        (, uint256 kaniKey) = makeAddrAndKey("kani");
+        userOp.callData = ContactPassHelper.attach(userOp.callData, address(w), kaniKey);
+        userOp.signature = sessionKey.sign(IEntryPoint(config.entryPoint).getUserOpHash(userOp));
         _handleOps(userOp);
 
         assertEq(usdc.balanceOf(attacker), 100e6, "seeded session key could not spend");
@@ -155,14 +162,17 @@ contract SessionGuardTest is Test {
         return PasskeyHelper.nonceKey(PasskeyHelper.LATEST_OP_DEADLINE, 0);
     }
 
-    /// @dev A single-call UserOp from the wallet, signed by `key` as a passkey.
+    /// @dev A single-call UserOp from the wallet, signed by `key` as a passkey. Like Mitfah's app, it
+    ///      carries an owner-signed contact pass for every payee it names (PayeeGuard).
     function _passkeyOp(PasskeyHelper.Passkey memory key, address dest, uint256 value, bytes memory data)
         internal
         view
         returns (PackedUserOperation memory userOp, bytes32 hash)
     {
-        (userOp, hash) =
+        (userOp,) =
             sendPackedUserOp.generateUnsignedUserOp(address(wallet), config, dest, value, data, _passkeyNonceKey());
+        userOp = _withContacts(userOp);
+        hash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
         userOp.signature = key.sign(hash);
     }
 
@@ -172,9 +182,50 @@ contract SessionGuardTest is Test {
         view
         returns (PackedUserOperation memory userOp, bytes32 hash)
     {
-        (userOp, hash) =
-            sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        (userOp,) = sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        userOp = _withContacts(userOp);
+        hash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
         userOp.signature = key.sign(hash);
+    }
+
+    /// @dev `userOp` with the owner's contact passes for every payee its callData names (unsigned).
+    function _withContacts(PackedUserOperation memory userOp) internal view returns (PackedUserOperation memory) {
+        userOp.callData = ContactPassHelper.attach(userOp.callData, address(wallet), ANVIL_OWNER_KEY);
+        return userOp;
+    }
+
+    /// @dev An owner-signed (65-byte) UserOp paying through `data`, with contact passes, like a passkey's.
+    function _ownerOp(address dest, uint256 value, bytes memory data) internal view returns (PackedUserOperation memory) {
+        (PackedUserOperation memory userOp,,) =
+            sendPackedUserOp.generateSignedUserOp(address(wallet), config, dest, value, data, owner, ANVIL_OWNER_KEY);
+        return _resign(_withContacts(userOp), ANVIL_OWNER_KEY);
+    }
+
+    /// @dev execute(mode, executionCalldata) as the EntryPoint, with contact passes: what a passkey op
+    ///      runs, without the UserOp around it. Reverts bubble up, so vm.expectRevert works on it.
+    function _entryPointExecute(bytes32 mode, bytes memory executionCalldata) internal {
+        bytes memory callData = ContactPassHelper.attach(
+            abi.encodeCall(IERC7579Execution.execute, (mode, executionCalldata)), address(wallet), ANVIL_OWNER_KEY
+        );
+        vm.prank(config.entryPoint);
+        (bool ok, bytes memory ret) = address(wallet).call(callData);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+    }
+
+    /// @dev Registers an app check that allows every call to `app` (past the registry's delay, then
+    ///      back to now, re-stamping the feeds), so a mock contract can be called by a passkey.
+    function _allowApp(address app) internal {
+        uint256 start = vm.getBlockTimestamp();
+        vm.startPrank(owner);
+        treasury.proposeAppCheck(app, address(new OpenAppCheck(app)));
+        vm.warp(start + registry.APP_CHECK_TIMELOCK());
+        treasury.commitAppCheck(app);
+        vm.stopPrank();
+        vm.warp(start);
     }
 
     /// @dev Signs `userOp` again as `key` after its fields were changed (a passkey signs the op hash,
@@ -268,15 +319,7 @@ contract SessionGuardTest is Test {
     /// @notice An owner-signed UserOp through the EntryPoint also validates (owner is always an
     ///         authorized signer) and executes external calls fine.
     function test_ownerSignedOp_legitTransfer_succeeds() public {
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 500e6)),
-            owner,
-            ANVIL_OWNER_KEY
-        );
+        PackedUserOperation memory userOp = _ownerOp(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 500e6)));
         _handleOps(userOp);
         assertEq(usdc.balanceOf(kani), 500e6, "owner-signed transfer did not execute");
     }
@@ -648,15 +691,7 @@ contract SessionGuardTest is Test {
     function test_ownerOp_unaffectedByExpiry() public {
         _warpTo(uint256(wallet.sessionValidUntil(sessionKey.keyId())) + 365 days);
 
-        (PackedUserOperation memory userOp,,) = sendPackedUserOp.generateSignedUserOp(
-            address(wallet),
-            config,
-            address(usdc),
-            0,
-            abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)),
-            owner,
-            ANVIL_OWNER_KEY
-        );
+        PackedUserOperation memory userOp = _ownerOp(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)));
 
         uint256 before = usdc.balanceOf(kani);
         _handleOps(userOp);
@@ -1129,8 +1164,7 @@ contract SessionGuardTest is Test {
         // No keeper fee on the session-key path: the UserOp paid its own gas.
         vm.expectEmit(address(wallet));
         emit SessionHandler.ProtocolFeePaid(expectedFee, 0);
-        vm.prank(config.entryPoint);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
+        _entryPointExecute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
 
         assertEq(address(treasury).balance, treasuryBefore + expectedFee, "treasury did not receive the fee");
         assertEq(address(wallet).balance, walletBefore - expectedFee, "wallet paid something other than the fee");
@@ -1142,8 +1176,13 @@ contract SessionGuardTest is Test {
         uint256 feeAtBasePrice = _feeChargedByOneSessionExecution();
 
         MockV3Aggregator doubled = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 2);
-        vm.prank(owner);
-        treasury.setFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
+        uint256 start = vm.getBlockTimestamp();
+        vm.startPrank(owner);
+        treasury.proposeOracleFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
+        vm.warp(start + oracle.FEED_TIMELOCK());
+        treasury.commitOracleFeed(address(oracle), address(0));
+        vm.stopPrank();
+        vm.warp(start);
 
         assertEq(_feeChargedByOneSessionExecution(), feeAtBasePrice, "fee re-priced with ETH");
     }
@@ -1158,8 +1197,7 @@ contract SessionGuardTest is Test {
         uint256 fee = registry.getFee();
         assertGt(fee, 0, "fixture must actually charge a fee for this to prove anything");
 
-        vm.prank(config.entryPoint);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount))));
+        _entryPointExecute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, amount))));
 
         // The fee really did leave the account...
         assertEq(address(treasury).balance, fee, "fee was not paid");
@@ -1177,13 +1215,17 @@ contract SessionGuardTest is Test {
         assertEq(address(treasury).balance, 0, "owner path charged a fee");
     }
 
-    /// @dev Whether one execute() by `caller` reads the owner's storage slot.
+    /// @dev Whether one execute() by `caller` reads the owner's storage slot. The transfer goes to the
+    ///      wallet itself, which needs no contact pass: paying a contact reads the owner once more, in
+    ///      the PayeeGuard, to check the pass's signer -- a read execute() itself still never makes.
     function _executeReadsOwnerSlot(address caller) internal returns (bool) {
         // OwnableUpgradeable's ERC-7201 slot, where the owner lives.
         bytes32 ownerSlot = 0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300;
         vm.record();
         vm.prank(caller);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
+        wallet.execute(
+            bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (address(wallet), 1e6)))
+        );
         (bytes32[] memory reads,) = vm.accesses(address(wallet));
         for (uint256 i = 0; i < reads.length; i++) {
             if (reads[i] == ownerSlot) return true;
@@ -1226,8 +1268,7 @@ contract SessionGuardTest is Test {
         _staleNativeFeedOnly();
         uint256 fee = registry.getFee();
 
-        vm.prank(config.entryPoint);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
+        _entryPointExecute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
 
         assertEq(usdc.balanceOf(kani), 1e6, "transfer blocked by a feed the fee no longer reads");
         assertEq(address(treasury).balance, fee, "fee was not paid");
@@ -1249,8 +1290,7 @@ contract SessionGuardTest is Test {
     ///      exactly the fee — the call moves no native value of its own.
     function _feeChargedByOneSessionExecution() internal returns (uint256) {
         uint256 balanceBefore = address(wallet).balance;
-        vm.prank(config.entryPoint);
-        wallet.execute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
+        _entryPointExecute(bytes32(0), _encodeSingle(address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6))));
         return balanceBefore - address(wallet).balance;
     }
 
@@ -1560,6 +1600,10 @@ contract SessionGuardTest is Test {
         address recorder =
             vm.computeCreate2Address(salt, keccak256(type(CallRecorder).creationCode), address(recorderFactory));
         _enableAllowList(address(recorderFactory));
+        // Both contracts need app checks for the PayeeGuard to let a passkey call them at all; the
+        // edge is the ALLOWLIST's, so they get permissive ones here.
+        _allowApp(address(recorderFactory));
+        _allowApp(recorder);
 
         Execution[] memory execs = new Execution[](2);
         execs[0] = Execution({

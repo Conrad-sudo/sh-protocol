@@ -18,6 +18,7 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
+import {ContactPassHelper} from "../utils/ContactPassHelper.sol";
 import {SHTreasury} from "../../src/SHTreasury.sol";
 
 /// @dev Calls the library the way the account does, so a test can see what it does on its own.
@@ -122,9 +123,17 @@ contract PasskeyValidationTest is Test {
 
     /// @dev The same op on a nonce key of the test's choosing.
     function _transferOpOnKey(uint192 nonceKey) internal view returns (PackedUserOperation memory op, bytes32 hash) {
-        return sendPackedUserOp.generateUnsignedUserOp(
+        (op,) = sendPackedUserOp.generateUnsignedUserOp(
             address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), nonceKey
         );
+        return _withContacts(op);
+    }
+
+    /// @dev `op` carrying the owner's contact pass for every payee it names, as Mitfah's app sends it
+    ///      (PayeeGuard), and its new hash. Unsigned: sign the returned hash.
+    function _withContacts(PackedUserOperation memory op) internal view returns (PackedUserOperation memory, bytes32) {
+        op.callData = ContactPassHelper.attach(op.callData, address(wallet), ANVIL_OWNER_KEY);
+        return (op, IEntryPoint(config.entryPoint).getUserOpHash(op));
     }
 
     /// @dev The account-abstraction and OpenZeppelin PackedUserOperation structs are field-identical
@@ -721,7 +730,7 @@ contract PasskeyValidationTest is Test {
         PackedUserOperation[] memory ops = new PackedUserOperation[](2);
         for (uint144 i = 0; i < 2; i++) {
             // The higher lane first, so the bundle is not in nonce-key order either.
-            (PackedUserOperation memory op, bytes32 hash) = sendPackedUserOp.generateUnsignedUserOp(
+            (PackedUserOperation memory op,) = sendPackedUserOp.generateUnsignedUserOp(
                 address(wallet),
                 config,
                 address(usdc),
@@ -729,6 +738,8 @@ contract PasskeyValidationTest is Test {
                 abi.encodeCall(ERC20Mock.transfer, (kani, (i + 1) * 1e6)),
                 PasskeyHelper.nonceKey(uint48(block.timestamp + OP_TTL), 0xBEEF - i * 0x1000)
             );
+            bytes32 hash;
+            (op, hash) = _withContacts(op);
             assertEq(op.nonce & type(uint64).max, 0, "each key starts at sequence 0");
             op.signature = alice.sign(hash);
             ops[i] = op;
@@ -857,9 +868,12 @@ contract PasskeyValidationTest is Test {
     }
 
     function _ownerOp() internal view returns (PackedUserOperation memory op, bytes32 hash) {
-        (op, hash,) = sendPackedUserOp.generateSignedUserOp(
+        (op,,) = sendPackedUserOp.generateSignedUserOp(
             address(wallet), config, address(usdc), 0, abi.encodeCall(ERC20Mock.transfer, (kani, 1e6)), owner, ANVIL_OWNER_KEY
         );
+        (op, hash) = _withContacts(op);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ANVIL_OWNER_KEY, MessageHashUtils.toEthSignedMessageHash(hash));
+        op.signature = abi.encodePacked(r, s, v);
     }
 
     function _passkeyOpSigned() internal view returns (PackedUserOperation memory op, bytes32 hash) {

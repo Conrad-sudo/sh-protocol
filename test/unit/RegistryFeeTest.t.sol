@@ -292,7 +292,7 @@ contract RegistryFeeTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            0
+            0, new SHRegistry.AppCheckEntry[](0)
         );
     }
 }

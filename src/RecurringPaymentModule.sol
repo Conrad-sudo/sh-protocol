@@ -279,9 +279,10 @@ contract RecurringPaymentModule is IERC7579Module {
         }
         emit RecurringPaymentExecuted(account, id, dueAt, nextDue);
 
-        (address target, uint256 value, bytes memory data) = token == address(0)
-            ? (recipient, amount, bytes(""))
-            : (token, uint256(0), abi.encodeCall(IERC20.transfer, (recipient, amount)));
+
+        (address target, uint256 value, bytes memory data)= token== address(0)
+        ?(recipient,amount, bytes("")):
+        (token,uint256(0),abi.encodeWithSelector(IERC20.transfer.selector,recipient,amount));
 
         // ERC-7579 single-call encoding (what ERC7579Utils.encodeSingle builds, which only takes
         // calldata): target, value and call data, packed.

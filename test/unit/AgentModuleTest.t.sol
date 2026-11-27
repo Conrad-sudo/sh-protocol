@@ -29,6 +29,8 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
+import {ContactPassHelper} from "../utils/ContactPassHelper.sol";
+import {PayeeGuard} from "../../src/PayeeGuard.sol";
 
 /// @dev Some other protocol the agent deposits into: pulls the approved amount from the caller.
 contract MockVault {
@@ -237,11 +239,19 @@ contract AgentModuleTest is Test {
         bytes memory call = abi.encodeCall(
             AgentModule.addAgent, (address(wallet), stranger, AGENT_LIMIT, uint48(block.timestamp + 1 days))
         );
+        // Through execute the PayeeGuard refuses first: the agent module is no app a passkey may call
+        // (only its removeAgent is). The module's own check stands behind it.
         vm.expectRevert(
-            abi.encodeWithSelector(AgentModule.AgentModule_NotOwner.selector, address(wallet), address(wallet))
+            abi.encodeWithSelector(PayeeGuard.PayeeGuard_CallNotAllowed.selector, address(agents), bytes4(call))
         );
         vm.prank(config.entryPoint);
         wallet.execute(SINGLE, abi.encodePacked(address(agents), uint256(0), call));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AgentModule.AgentModule_NotOwner.selector, address(wallet), address(wallet))
+        );
+        vm.prank(address(wallet));
+        agents.addAgent(address(wallet), stranger, AGENT_LIMIT, uint48(block.timestamp + 1 days));
     }
 
     /// @notice The same through a real passkey-signed UserOp: handleOps absorbs the revert, so the
@@ -360,10 +370,16 @@ contract AgentModuleTest is Test {
             AgentModule.updateAgent, (address(wallet), agent, type(uint128).max, uint48(block.timestamp + 1 days))
         );
         vm.expectRevert(
-            abi.encodeWithSelector(AgentModule.AgentModule_NotOwner.selector, address(wallet), address(wallet))
+            abi.encodeWithSelector(PayeeGuard.PayeeGuard_CallNotAllowed.selector, address(agents), bytes4(call))
         );
         vm.prank(config.entryPoint);
         wallet.execute(SINGLE, abi.encodePacked(address(agents), uint256(0), call));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AgentModule.AgentModule_NotOwner.selector, address(wallet), address(wallet))
+        );
+        vm.prank(address(wallet));
+        agents.updateAgent(address(wallet), agent, type(uint128).max, uint48(block.timestamp + 1 days));
     }
 
     function test_update_strangerAndUnknownRefused() public {
@@ -882,6 +898,8 @@ contract AgentModuleTest is Test {
             abi.encodeCall(IERC20.transfer, (payee, 1e6)),
             _keyFor(address(yes), 0)
         );
+        op.callData = ContactPassHelper.attach(op.callData, address(wallet), ANVIL_OWNER_KEY);
+        hash = IEntryPoint(config.entryPoint).getUserOpHash(op);
         op.signature = _ownerSign(hash);
         _send(op);
         assertEq(usdc.balanceOf(payee), 1e6);
@@ -1400,6 +1418,46 @@ contract AgentModuleTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+              CONTACTS: AGENTS ARE NOT HELD TO THE PAYEEGUARD
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice An agent's op may pay an address that is no contact, with no pass: the PayeeGuard only
+    ///         checks ops from the EntryPoint, and an agent's runs as the wallet calling itself (the
+    ///         owner's call, 2026-11-27). Its own USD limit is what bounds it, and it is charged.
+    function test_payee_agentMayPayANonContact() public {
+        _run(SINGLE, _transferUsdc(stranger, 1e6));
+        assertEq(usdc.balanceOf(stranger), 1e6, "the agent's payment did not land");
+        assertGt(_agentSpent(), _usd(address(usdc), 1e6) - 1, "the agent was not charged");
+    }
+
+    /// @notice An agent may call a protocol that has no app check, which a passkey may not.
+    function test_payee_agentMayCallAnAppWithoutACheck() public {
+        MockVault unknown = new MockVault();
+        assertEq(registry.appCheck(address(unknown)), address(0));
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(usdc), 0, abi.encodeCall(IERC20.approve, (address(unknown), 1e6)));
+        execs[1] = Execution(address(unknown), 0, abi.encodeCall(MockVault.deposit, (IERC20(address(usdc)), 1e6)));
+        _run(BATCH, ERC7579Utils.encodeBatch(execs));
+        assertEq(usdc.balanceOf(address(unknown)), 1e6, "the agent's deposit did not land");
+    }
+
+    /// @notice The same payment as a passkey's op, with no pass, is refused: only agents are exempt.
+    function test_payee_passkeyStillCantPayANonContact() public {
+        (PackedUserOperation memory op,) = sendPackedUserOp.generateUnsignedUserOp(
+            address(wallet),
+            config,
+            address(usdc),
+            0,
+            abi.encodeCall(IERC20.transfer, (stranger, 1e6)),
+            PasskeyHelper.nonceKey(PasskeyHelper.LATEST_OP_DEADLINE, ++_lane)
+        );
+        bytes32 hash = IEntryPoint(config.entryPoint).getUserOpHash(op);
+        op.signature = sessionKey.sign(hash);
+        _expectExecutionRevert(op, hash, abi.encodeWithSelector(PayeeGuard.PayeeGuard_NotAContact.selector, stranger));
+        assertEq(usdc.balanceOf(stranger), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                HELPERS
     //////////////////////////////////////////////////////////////*/
 
@@ -1416,7 +1474,8 @@ contract AgentModuleTest is Test {
         return _keyFor(address(agents), lane);
     }
 
-    /// @dev An agent op's callData: executeUserOp's selector, then the wallet's execute call.
+    /// @dev An agent op's callData: executeUserOp's selector, then the wallet's execute call. No
+    ///      contact passes: the PayeeGuard doesn't check agents.
     function _agentCallData(bytes32 mode, bytes memory calls) internal pure returns (bytes memory) {
         return abi.encodePacked(
             IAccountExecute.executeUserOp.selector, abi.encodeCall(IERC7579Execution.execute, (mode, calls))
@@ -1597,9 +1656,11 @@ contract AgentModuleTest is Test {
         internal
         returns (PackedUserOperation memory op, bytes32 hash)
     {
-        (op, hash) = sendPackedUserOp.generateUnsignedUserOp(
+        (op,) = sendPackedUserOp.generateUnsignedUserOp(
             address(wallet), config, dest, 0, data, PasskeyHelper.nonceKey(PasskeyHelper.LATEST_OP_DEADLINE, ++_lane)
         );
+        op.callData = ContactPassHelper.attach(op.callData, address(wallet), ANVIL_OWNER_KEY);
+        hash = IEntryPoint(config.entryPoint).getUserOpHash(op);
         op.signature = sessionKey.sign(hash);
     }
 

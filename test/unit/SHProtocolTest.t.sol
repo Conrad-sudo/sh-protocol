@@ -21,6 +21,7 @@ import {P256} from "@openzeppelin/contracts/utils/cryptography/P256.sol";
 //Local imports
 import {SessionHandler} from "../../src/SessionHandler.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
+import {PayeeGuard} from "../../src/PayeeGuard.sol";
 import {AgentModule} from "../../src/AgentModule.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
@@ -115,7 +116,7 @@ contract SHProtocolTest is Test {
         wallet =
             SessionHandler(payable(factory.deployWallet(DAILY_LIMIT, WINDOW, watched, true, bytes32(0), bytes32(0), 0, new address[](0))));
 
-        harness = new SpendingLimitModuleHarness(address(feeRegistry));
+        harness = new SpendingLimitModuleHarness(address(feeRegistry), address(module.PAYEE_GUARD()));
         spender = new MockSpender();
 
         vm.deal(address(wallet), 10 ether);
@@ -178,7 +179,7 @@ contract SHProtocolTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            1
+            1, new SHRegistry.AppCheckEntry[](0)
         );
         SHFactory bareFactory = new SHFactory(
             address(this),
@@ -203,9 +204,9 @@ contract SHProtocolTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            1
+            1, new SHRegistry.AppCheckEntry[](0)
         );
-        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry))));
+        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry), address(new PayeeGuard(address(bareRegistry))))));
         SHFactory bareFactory = new SHFactory(
             address(this),
             address(bareRegistry),
@@ -237,9 +238,9 @@ contract SHProtocolTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            1
+            1, new SHRegistry.AppCheckEntry[](0)
         );
-        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry))));
+        bareRegistry.setSpendingLimitModule(address(new SpendingLimitModule(address(bareRegistry), address(new PayeeGuard(address(bareRegistry))))));
         bareRegistry.setRecurringPaymentModule(feeRegistry.recurringPaymentModule());
         SHFactory bareFactory = new SHFactory(
             address(this),
@@ -316,7 +317,6 @@ contract SHProtocolTest is Test {
         wallet.initialize(
             SessionHandler.InitConfig({
                 owner: rando,
-                walletId: 9,
                 spendingLimitModule: address(module),
                 recurringPaymentModule: recurringModule,
                 agentModule: agentModule,
@@ -1181,9 +1181,9 @@ contract SHProtocolTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            1
+            1, new SHRegistry.AppCheckEntry[](0)
         );
-        SpendingLimitModule freshModule = new SpendingLimitModule(address(bigRegistry));
+        SpendingLimitModule freshModule = new SpendingLimitModule(address(bigRegistry), address(new PayeeGuard(address(bigRegistry))));
 
         address account = makeAddr("eoaAccount");
         address[] memory first32 = new address[](32);

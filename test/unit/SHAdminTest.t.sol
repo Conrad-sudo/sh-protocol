@@ -10,6 +10,7 @@ import {SHRegistry} from "../../src/SHRegistry.sol";
 import {SHFactory} from "../../src/SHFactory.sol";
 import {SHTreasury} from "../../src/SHTreasury.sol";
 import {SpendingLimitModule} from "../../src/SpendingLimitModule.sol";
+import {PayeeGuard} from "../../src/PayeeGuard.sol";
 import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
 import {MockV3Aggregator} from "../../src/mocks/MockV3Aggregator.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
@@ -107,7 +108,10 @@ contract SHAdminTest is Test {
         registry.setProtocolFee(minFee);
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, owner));
-        oracle.removeFeed(config.usdc);
+        oracle.proposeFeedRemoval(config.usdc);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, owner));
+        registry.proposeAppCheck(config.weth, makeAddr("check"));
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, owner));
         factory.pause();
@@ -144,9 +148,21 @@ contract SHAdminTest is Test {
         vm.expectRevert(err);
         treasury.cancelPriceOracle();
         vm.expectRevert(err);
-        treasury.setFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, config.usdcHeartbeat);
+        treasury.proposeOracleFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, config.usdcHeartbeat);
         vm.expectRevert(err);
-        treasury.removeOracleFeed(address(oracle), config.usdc);
+        treasury.proposeOracleFeedRemoval(address(oracle), config.usdc);
+        vm.expectRevert(err);
+        treasury.commitOracleFeed(address(oracle), config.usdc);
+        vm.expectRevert(err);
+        treasury.cancelOracleFeed(address(oracle), config.usdc);
+        vm.expectRevert(err);
+        treasury.proposeAppCheck(config.weth, makeAddr("check"));
+        vm.expectRevert(err);
+        treasury.commitAppCheck(config.weth);
+        vm.expectRevert(err);
+        treasury.cancelAppCheck(config.weth);
+        vm.expectRevert(err);
+        treasury.removeAppCheck(config.weth);
         vm.expectRevert(err);
         treasury.pauseFactory(address(factory));
         vm.expectRevert(err);
@@ -202,7 +218,7 @@ contract SHAdminTest is Test {
     ///      into its own storage at initialize, so an existing wallet keeps what it installed.
     function test_moduleSwapDoesNotTouchExistingWallets() public {
         address oldModule = address(wallet.SH_MODULE());
-        SpendingLimitModule fresh = new SpendingLimitModule(address(registry));
+        SpendingLimitModule fresh = new SpendingLimitModule(address(registry), address(new PayeeGuard(address(registry))));
 
         vm.prank(owner);
         treasury.setSpendingLimitModule(address(fresh));
@@ -277,7 +293,7 @@ contract SHAdminTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            0
+            0, new SHRegistry.AppCheckEntry[](0)
         );
     }
 
@@ -655,10 +671,9 @@ contract SHAdminTest is Test {
     function test_getFee_doesNotMoveWithEthPrice() public {
         uint256 feeBefore = registry.getFee();
 
-        // Repoint native at 2x the price. setFeed is immediate and not timelocked (THREAT_MODEL 3.8).
+        // Repoint native at 2x the price.
         MockV3Aggregator doubled = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 2);
-        vm.prank(owner);
-        treasury.setFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
+        _commitFeedNow(address(0), address(doubled), config.ethHeartbeat);
 
         assertEq(registry.getFee(), feeBefore, "fee moved with the ETH price");
     }
@@ -733,7 +748,7 @@ contract SHAdminTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            0
+            0, new SHRegistry.AppCheckEntry[](0)
         );
     }
 
@@ -755,7 +770,7 @@ contract SHAdminTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            0
+            0, new SHRegistry.AppCheckEntry[](0)
         );
     }
 
@@ -804,7 +819,7 @@ contract SHAdminTest is Test {
             config.reputationRegistry,
             config.identityRegistry,
             config.entryPoint,
-            0
+            0, new SHRegistry.AppCheckEntry[](0)
         );
     }
 
@@ -823,8 +838,7 @@ contract SHAdminTest is Test {
         MockV3Aggregator feed = new MockV3Aggregator(DECIMALS, 2e8); // $2.00
 
         assertFalse(oracle.isPriced(address(token)));
-        vm.prank(owner);
-        treasury.setFeed(address(oracle), address(token), address(feed), 1 days);
+        _commitFeedNow(address(token), address(feed), 1 days);
 
         assertTrue(oracle.isPriced(address(token)));
         // 1000 tokens at 6 decimals, $2.00 each => $2000 with 18 decimals.
@@ -836,8 +850,7 @@ contract SHAdminTest is Test {
     function test_addFeed_repointsAnExistingFeed() public {
         MockV3Aggregator replacement = new MockV3Aggregator(DECIMALS, 3000e8);
 
-        vm.prank(owner);
-        treasury.setFeed(address(oracle), address(0), address(replacement), 1 days);
+        _commitFeedNow(address(0), address(replacement), 1 days);
 
         assertEq(oracle.getPrice(address(0), 1 ether), 3000e18);
     }
@@ -845,19 +858,19 @@ contract SHAdminTest is Test {
     function test_addFeed_revertsOnZeroFeed() public {
         vm.prank(owner);
         vm.expectRevert(SHOracle.PriceOracle_InvalidFeed.selector);
-        treasury.setFeed(address(oracle), config.usdc, address(0), 1 days);
+        treasury.proposeOracleFeed(address(oracle), config.usdc, address(0), 1 days);
     }
 
     function test_addFeed_revertsOnZeroHeartbeat() public {
         vm.prank(owner);
         vm.expectRevert(SHOracle.PriceOracle_InvalidHeartbeat.selector);
-        treasury.setFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, 0);
+        treasury.proposeOracleFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, 0);
     }
 
     function test_addFeed_revertsOnHeartbeatPastUint48() public {
         vm.prank(owner);
         vm.expectRevert(SHOracle.PriceOracle_InvalidHeartbeat.selector);
-        treasury.setFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, uint256(type(uint48).max) + 1);
+        treasury.proposeOracleFeed(address(oracle), config.usdc, config.usdcUsdPriceFeed, uint256(type(uint48).max) + 1);
     }
 
     /// @dev The feed's decimals are read, not assumed: an 18-decimal feed (Chainlink's ETH-quoted
@@ -868,28 +881,25 @@ contract SHAdminTest is Test {
         MockV3Aggregator eighteenDecimals = new MockV3Aggregator(18, 2e18); // $2.00
         MockV3Aggregator zeroDecimals = new MockV3Aggregator(0, 2); // $2
 
-        vm.startPrank(owner);
-        treasury.setFeed(address(oracle), address(token), address(eightDecimals), 1 days);
+        _commitFeedNow(address(token), address(eightDecimals), 1 days);
         assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "8-decimal feed");
-        treasury.setFeed(address(oracle), address(token), address(eighteenDecimals), 1 days);
+        _commitFeedNow(address(token), address(eighteenDecimals), 1 days);
         assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "18-decimal feed");
-        treasury.setFeed(address(oracle), address(token), address(zeroDecimals), 1 days);
+        _commitFeedNow(address(token), address(zeroDecimals), 1 days);
         assertEq(oracle.getPrice(address(token), 1000e6), 2000e18, "0-decimal feed");
-        vm.stopPrank();
     }
 
     function test_addFeed_revertsOnFeedFinerThan18Decimals() public {
         MockV3Aggregator tooFine = new MockV3Aggregator(19, 2e19);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(SHOracle.PriceOracle_InvalidFeedDecimals.selector, uint8(19)));
-        treasury.setFeed(address(oracle), config.usdc, address(tooFine), 1 days);
+        treasury.proposeOracleFeed(address(oracle), config.usdc, address(tooFine), 1 days);
     }
 
     function test_removeFeed_deregistersToken() public {
         assertTrue(oracle.isPriced(config.usdc));
 
-        vm.prank(owner);
-        treasury.removeOracleFeed(address(oracle), config.usdc);
+        _commitFeedNow(config.usdc, address(0), 0);
 
         assertFalse(oracle.isPriced(config.usdc));
         vm.expectRevert(SHOracle.PriceOracle_UnsupportedToken.selector);
@@ -901,7 +911,95 @@ contract SHAdminTest is Test {
     function test_removeFeed_revertsForNative() public {
         vm.prank(owner);
         vm.expectRevert(SHOracle.PriceOracle_CannotRemoveNativeFeed.selector);
-        treasury.removeOracleFeed(address(oracle), address(0));
+        treasury.proposeOracleFeedRemoval(address(oracle), address(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           FEED TIMELOCK
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Proposes a feed change (address(0) = removal), waits it out, commits it, and puts the clock
+    ///      back, so the mock feeds stay inside their heartbeats for the rest of the test.
+    function _commitFeedNow(address token, address feed, uint256 heartbeat) internal {
+        uint256 start = vm.getBlockTimestamp();
+        vm.startPrank(owner);
+        if (feed == address(0)) treasury.proposeOracleFeedRemoval(address(oracle), token);
+        else treasury.proposeOracleFeed(address(oracle), token, feed, heartbeat);
+        vm.warp(start + oracle.FEED_TIMELOCK());
+        treasury.commitOracleFeed(address(oracle), token);
+        vm.stopPrank();
+        vm.warp(start);
+    }
+
+    /// @dev A proposal changes nothing until it is committed after the delay: the old price holds.
+    function test_feedProposal_bindsOnlyAfterTheDelay() public {
+        MockV3Aggregator doubled = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 2);
+        int256 before = oracle.getPrice(address(0), 1 ether);
+        uint256 start = vm.getBlockTimestamp();
+
+        vm.prank(owner);
+        treasury.proposeOracleFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
+        assertEq(oracle.getPrice(address(0), 1 ether), before, "a proposal moved the price");
+        (address pendingFeed,, uint48 eta) = oracle.pendingFeeds(address(0));
+        assertEq(pendingFeed, address(doubled));
+        assertEq(eta, start + oracle.FEED_TIMELOCK());
+
+        vm.warp(start + oracle.FEED_TIMELOCK() - 1);
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(SHOracle.PriceOracle_FeedTimelockNotElapsed.selector, address(0), uint256(eta))
+        );
+        treasury.commitOracleFeed(address(oracle), address(0));
+
+        vm.warp(start + oracle.FEED_TIMELOCK());
+        vm.prank(owner);
+        treasury.commitOracleFeed(address(oracle), address(0));
+        (pendingFeed,, eta) = oracle.pendingFeeds(address(0));
+        assertEq(eta, 0, "commit left the proposal pending");
+        vm.warp(start);
+        assertEq(oracle.getPrice(address(0), 1 ether), before * 2, "commit did not repoint");
+    }
+
+    /// @dev A removal waits like a registration: a token with no feed has no trade floor.
+    function test_feedRemoval_waitsTheDelay() public {
+        vm.prank(owner);
+        treasury.proposeOracleFeedRemoval(address(oracle), config.usdc);
+        assertTrue(oracle.isPriced(config.usdc), "a proposed removal took effect");
+
+        vm.warp(vm.getBlockTimestamp() + oracle.FEED_TIMELOCK() - 1);
+        vm.prank(owner);
+        vm.expectRevert();
+        treasury.commitOracleFeed(address(oracle), config.usdc);
+        assertTrue(oracle.isPriced(config.usdc));
+    }
+
+    function test_feedProposal_canBeCancelled() public {
+        MockV3Aggregator doubled = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 2);
+        vm.startPrank(owner);
+        treasury.proposeOracleFeed(address(oracle), address(0), address(doubled), config.ethHeartbeat);
+        treasury.cancelOracleFeed(address(oracle), address(0));
+        vm.warp(vm.getBlockTimestamp() + oracle.FEED_TIMELOCK());
+        vm.expectRevert(abi.encodeWithSelector(SHOracle.PriceOracle_NoPendingFeed.selector, address(0)));
+        treasury.commitOracleFeed(address(oracle), address(0));
+        vm.expectRevert(abi.encodeWithSelector(SHOracle.PriceOracle_NoPendingFeed.selector, address(0)));
+        treasury.cancelOracleFeed(address(oracle), address(0));
+        vm.stopPrank();
+    }
+
+    /// @dev A second proposal replaces the first and restarts the clock, so the operator can't pre-age
+    ///      a harmless proposal and swap in a harmful one at the last moment.
+    function test_feedProposal_replacingRestartsTheDelay() public {
+        MockV3Aggregator first = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE);
+        MockV3Aggregator second = new MockV3Aggregator(DECIMALS, ETH_USD_PRICE * 3);
+        uint256 start = vm.getBlockTimestamp();
+        vm.startPrank(owner);
+        treasury.proposeOracleFeed(address(oracle), address(0), address(first), config.ethHeartbeat);
+        vm.warp(start + oracle.FEED_TIMELOCK() - 1);
+        treasury.proposeOracleFeed(address(oracle), address(0), address(second), config.ethHeartbeat);
+        vm.warp(start + oracle.FEED_TIMELOCK());
+        vm.expectRevert();
+        treasury.commitOracleFeed(address(oracle), address(0));
+        vm.stopPrank();
     }
 
     /*//////////////////////////////////////////////////////////////

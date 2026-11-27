@@ -27,25 +27,19 @@ contract SHFactory is Ownable, Pausable {
     /// @notice The SessionHandler every wallet is an EIP-1167 clone of.
     address public immutable IMPLEMENTATION;
 
-    /// @notice Total number of wallets deployed. Doubles as the next walletId to assign.
-    /// @dev uint64 (~1.8e19 wallets) so it shares slot 0 with Ownable's `_owner` and Pausable's
-    ///      `_paused`. {deployWallet} reads `_paused` first (whenNotPaused), so reading and bumping
-    ///      this counter then costs no extra cold storage read.
-    uint64 public totalWallets;
-    /// @notice Maps each sequential walletId to its deployed wallet address.
-    mapping(uint256 => address) public wallets;
-
     /// @notice How many wallets an address has deployed. Doubles as that owner's next CREATE2 salt
     ///         nonce, and as a "does this user already have a wallet?" view a front end can read
     ///         BEFORE asking anyone to sign — cheaper than a reverted transaction.
-    /// @dev Per-OWNER rather than global on purpose. A global counter (e.g. {totalWallets}) would
-    ///      make a predicted address depend on how many wallets everyone else had deployed, so any
-    ///      other user's deploy landing first would move it — and {predictWalletAddress} exists
+    /// @dev The factory keeps no global wallet count or id list: nothing on chain needs one, and
+    ///      both can be rebuilt from {WalletDeployed} logs.
+    /// @dev Per-OWNER rather than global on purpose. A global counter would make a predicted address
+    ///      depend on how many wallets everyone else had deployed, so any other user's deploy
+    ///      landing first would move it — and {predictWalletAddress} exists
     ///      precisely so the address can be shown, and the user's funding sent to it, before the
     ///      deploy is signed. Keyed by owner, only that owner's own deploys move it.
     mapping(address owner => uint256) public deployCount;
 
-    event WalletDeployed(address indexed walletAddress, address indexed owner, uint256 indexed walletId);
+    event WalletDeployed(address indexed walletAddress, address indexed owner);
 
     /**
      * @notice Deploys the factory and the SessionHandler implementation it clones from.
@@ -162,25 +156,14 @@ contract SHFactory is Ownable, Pausable {
         address agentModule = REGISTRY.agentModule();
         if (agentModule == address(0)) revert SHFactory_AgentModuleNotSet();
 
+        // The counter is bumped BEFORE the external initialize() call (checks-effects-interactions).
         bytes32 salt = _salt(msg.sender, deployCount[msg.sender]++);
-
-        uint64 walletId = totalWallets;
         address walletInstance = Clones.cloneDeterministic(IMPLEMENTATION, salt);
-
-        // Bookkeeping BEFORE the external initialize() call (checks-effects-interactions). The
-        // wallet's own address is fixed by CREATE2, so writing it early is safe. This matters
-        // because initialize() calls the registry-configured modules, which the operator can change:
-        // a module that re-entered deployWallet would otherwise read a stale totalWallets and give
-        // two wallets the same walletId, losing one from `wallets` and leaving the counter short.
-        // No such module exists today; this removes the dependency on that staying true.
-        wallets[walletId] = walletInstance;
-        totalWallets = walletId + 1;
 
         SessionHandler(payable(walletInstance))
             .initialize(
                 SessionHandler.InitConfig({
                     owner: msg.sender,
-                    walletId: walletId,
                     spendingLimitModule: module,
                     recurringPaymentModule: recurringModule,
                     agentModule: agentModule,
@@ -200,7 +183,7 @@ contract SHFactory is Ownable, Pausable {
             revert SHFactory_FundTransferFailed();
         }
 
-        emit WalletDeployed(walletInstance, msg.sender, walletId);
+        emit WalletDeployed(walletInstance, msg.sender);
         return walletInstance;
     }
 }

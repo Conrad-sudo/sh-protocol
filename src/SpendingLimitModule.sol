@@ -12,6 +12,12 @@ import {ERC7579Utils, Mode, CallType} from "@openzeppelin/contracts/account/util
 import {IERC20Extended, IERC20} from "./interfaces/IERC20Extended.sol";
 import {SHOracle} from "./SHOracle.sol";
 import {SHRegistry} from "./SHRegistry.sol";
+import {PayeeGuard} from "./PayeeGuard.sol";
+
+/// @dev Who owns a wallet, as {SpendingLimitModule-voidContactPasses} asks it.
+interface IOwnedWallet {
+    function owner() external view returns (address);
+}
 
 /**
  * @title SpendingLimitModule
@@ -25,6 +31,9 @@ import {SHRegistry} from "./SHRegistry.sol";
  *      preCheck:  (0) reject outright any execution that tries to reconfigure THIS module through
  *                     the account's execute path (see _isAdminCallDataExec) — checked first, so a
  *                     blocked transaction pays for nothing below it.
+ *                 (0b) for a passkey's or an agent's execution (the caller is the EntryPoint or the
+ *                     account itself), hold every call to the account's contacts and trade floors
+ *                     ({PayeeGuard}). The owner's direct calls and installed executors are not held.
  *                 (1) collect any allowance-granting sub-calls — `approve` and legacy
  *                     `increaseAllowance` / `increaseApproval` (rejecting unlimited approvals, unpriced
  *                     tokens and grants it can't track up front); snapshot the account's native
@@ -249,6 +258,12 @@ contract SpendingLimitModule is IERC7579Hook {
     ///         SHRegistry: a non-registry address has no priceOracle() to call, so it reverts here
     ///         rather than bricking every hook call after deployment.
     error SpendingLimitModule_OracleNotSet();
+    /// @notice Thrown at construction when the PayeeGuard address has no code.
+    error SpendingLimitModule_InvalidPayeeGuard();
+    /// @notice Thrown when {voidContactPasses} is called by anyone but the account's owner.
+    /// @param account The account named.
+    /// @param caller  Who called.
+    error SpendingLimitModule_NotOwner(address account, address caller);
 
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
@@ -272,6 +287,15 @@ contract SpendingLimitModule is IERC7579Hook {
     ///      indirection is the whole point (fix an oracle bug for every deployed account at once) and
     ///      it is also the module's one trust assumption; see the contract-level NatSpec.
     address public immutable REGISTRY;
+
+    /// @notice The PayeeGuard that holds passkeys' executions to the account's contacts.
+    /// @dev Immutable: its rules are fixed for every wallet on this module. Only which apps have
+    ///      checks ({SHRegistry-appCheck}) can change, behind the registry's delay.
+    PayeeGuard public immutable PAYEE_GUARD;
+
+    /// @notice The EntryPoint, read off the registry once at construction. An execution it calls is a
+    ///         passkey's (or an owner-signed UserOp's), and is held to the PayeeGuard.
+    address public immutable ENTRY_POINT;
 
     /// @dev Per-account settings and running spend state. One entry per installing account.
     /// @dev Field order is chosen for storage packing: the two flags, the two window fields,
@@ -339,6 +363,10 @@ contract SpendingLimitModule is IERC7579Hook {
     ///      the target check) for the overwhelming majority of sub-calls, which aim elsewhere.
     mapping(bytes4 => bool) private _isAdminSelector;
 
+    /// @dev account => when its owner last voided every contact pass ({voidContactPasses}), or 0. Kept
+    ///      across uninstall and reinstall on purpose: a void is never undone.
+    mapping(address account => uint64) private _contactsVoidedAt;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -390,6 +418,11 @@ contract SpendingLimitModule is IERC7579Hook {
     /// @param spentInWindow The token's running window total AFTER adding `amount`.
     event TokenCapSpendMetered(address indexed account, address indexed token, uint256 amount, uint256 spentInWindow);
 
+    /// @notice Emitted when an account's owner voids every contact pass issued until now.
+    /// @param account  The account.
+    /// @param voidedAt The time from which only passes issued later are accepted.
+    event ContactPassesVoided(address indexed account, uint64 voidedAt);
+
     /**
      * @notice Deploys the module and wires it to the registry it resolves its price oracle from.
      * @dev Also registers this module's own admin selectors, which preCheck uses to refuse
@@ -399,10 +432,15 @@ contract SpendingLimitModule is IERC7579Hook {
      *      reverts on the call, failing loudly at deploy instead of after every wallet is live.
      * @param registry Address of the deployed SHRegistry — the protocol's single source of truth for
      *        the current price oracle. NOT the SHOracle address itself.
+     * @param payeeGuard The PayeeGuard that holds passkeys' executions to the account's contacts.
+     *        Must have code.
      */
-    constructor(address registry) {
+    constructor(address registry, address payeeGuard) {
         if (SHRegistry(registry).priceOracle() == address(0)) revert SpendingLimitModule_OracleNotSet();
+        if (payeeGuard.code.length == 0) revert SpendingLimitModule_InvalidPayeeGuard();
         REGISTRY = registry;
+        PAYEE_GUARD = PayeeGuard(payeeGuard);
+        ENTRY_POINT = SHRegistry(registry).ENTRY_POINT();
         _isAdminSelector[this.setDailyLimit.selector] = true;
         _isAdminSelector[this.setWindowDuration.selector] = true;
         _isAdminSelector[this.setNativeMetering.selector] = true;
@@ -720,6 +758,37 @@ contract SpendingLimitModule is IERC7579Hook {
     }
 
     /*//////////////////////////////////////////////////////////////
+                             CONTACT PASSES
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Voids every contact pass issued for `account` until now: from this moment its passkeys can
+     *         only pay contacts whose pass is issued later. Only callable by the account's
+     *         owner, directly.
+     * @dev For when the owner no longer trusts someone they once signed for. A deleted contact's old
+     *      signature still exists wherever it was kept, so deleting it in the app alone can't stop a
+     *      hacked Mitfah from attaching it. The owner then re-signs the contacts to keep (free, off
+     *      chain); a pass is valid on every chain, but a void is per wallet, so each chain needs its own.
+     * @dev The owner calls this module directly, as AgentModule's owner functions are called: the
+     *      account's passkeys can't reach it (the account blocks every non-owner call to this module),
+     *      and it is no admin selector, so it needs no passthrough on the account.
+     * @param account The account whose passes to void.
+     */
+    function voidContactPasses(address account) external {
+        if (!_configs[account].installed) revert SpendingLimitModule_NotInstalled();
+        address owner = IOwnedWallet(account).owner();
+        if (msg.sender != owner || owner == account) revert SpendingLimitModule_NotOwner(account, msg.sender);
+        uint64 voidedAt = uint64(block.timestamp);
+        _contactsVoidedAt[account] = voidedAt;
+        emit ContactPassesVoided(account, voidedAt);
+    }
+
+    /// @notice When `account`'s owner last voided its contact passes ({voidContactPasses}), or 0.
+    function contactsVoidedAt(address account) external view returns (uint64) {
+        return _contactsVoidedAt[account];
+    }
+
+    /*//////////////////////////////////////////////////////////////
                        IERC7579Hook (module type 4)
     //////////////////////////////////////////////////////////////*/
 
@@ -729,7 +798,10 @@ contract SpendingLimitModule is IERC7579Hook {
      *         (if it meters native) and the raw balance of every watched token this execution could
      *         move for postCheck to diff -- no oracle calls happen here.
      * @dev `msg.sender` is the installing account itself (it calls its installed hook directly).
-     *      The two leading interface parameters (original caller and msg.value) are unused here.
+     *      `msgSender` is who called the account: the EntryPoint (a passkey's op) gets the
+     *      PayeeGuard; anyone else (the owner, an executor, the account itself running an agent's op)
+     *      doesn't.
+     *      The msg.value parameter is unused.
      *      First rolls the spending window if it has expired. Only `execute` and
      *      `executeFromExecutor` calldata is decoded; any other calldata skips that but still gets a
      *      balance snapshot so postCheck can meter the outflow.
@@ -749,7 +821,7 @@ contract SpendingLimitModule is IERC7579Hook {
      *         address and raw balance of each metered token read (see {_snapshotBalances}); plus the
      *         (token, spender) pairs approved in this transaction.
      */
-    function preCheck(address, uint256, bytes calldata msgData) external returns (bytes memory hookData) {
+    function preCheck(address msgSender, uint256, bytes calldata msgData) external returns (bytes memory hookData) {
         address account = msg.sender;
 
         Config storage config = _configs[account]; // loads the config of the specific account
@@ -763,6 +835,12 @@ contract SpendingLimitModule is IERC7579Hook {
         (bool isExecute, Mode mode, bytes calldata executionCalldata) = _decodeExecuteCalldata(msgData);
 
         if (_isAdminCallDataExec(isExecute, mode, executionCalldata)) revert SpendingLimitModule_AdminExecution();
+        // A passkey's op (or an owner-signed UserOp) arrives from the EntryPoint and may only pay the
+        // account's contacts. An agent's arrives as the account calling itself from executeUserOp and
+        // is not checked (the owner's call, 2026-11-27): its own USD limit is its fence.
+        if (msgSender == ENTRY_POINT) {
+            PAYEE_GUARD.check(account, _contactsVoidedAt[account], msgData);
+        }
         if (config.cappedTokenCount != 0) _checkTokenCapCalls(account, isExecute, mode, executionCalldata);
 
         (address[] memory approvedTokens, address[] memory approvedSpenders) =

@@ -277,9 +277,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @dev Per-wallet storage, NOT an immutable like the four above: the operator can change the
     ///      registry's module, and each wallet keeps the one that was current when it was deployed.
     SpendingLimitModule public SH_MODULE;
-    /// @notice Sequential id assigned by the factory. Bookkeeping only.
-    /// @dev uint64 (~1.8e19 wallets), the same type as SHFactory's {SHFactory-totalWallets}.
-    uint64 public WALLET_ID;
 
     /// @dev Targets a session key may call while {sessionAllowlistEnabled} is true. OFF by default.
     ///      Confines a key to a fixed set of venues — mainly to keep it away from protocols where the
@@ -407,7 +404,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      *      factory's call names every field.
      * @param owner               Account owner. SHFactory passes its own msg.sender, so the user
      *                            who signs the deploy owns the wallet.
-     * @param walletId            Sequential id assigned by the factory. Bookkeeping only.
      * @param spendingLimitModule SpendingLimitModule to install as MODULE_TYPE_HOOK.
      * @param recurringPaymentModule RecurringPaymentModule to install as MODULE_TYPE_EXECUTOR.
      * @param agentModule         AgentModule to install as MODULE_TYPE_VALIDATOR.
@@ -427,7 +423,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     struct InitConfig {
         address owner;
-        uint64 walletId;
         address spendingLimitModule;
         address recurringPaymentModule;
         address agentModule;
@@ -451,7 +446,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
      */
     function initialize(InitConfig calldata cfg) external initializer {
         __Ownable_init(cfg.owner);
-        WALLET_ID = cfg.walletId;
         SH_MODULE = SpendingLimitModule(cfg.spendingLimitModule);
         // Safe: both defaults arrived in the constructor as uint80s.
         // forge-lint: disable-next-line(unsafe-typecast)

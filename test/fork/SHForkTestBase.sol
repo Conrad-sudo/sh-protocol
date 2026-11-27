@@ -32,6 +32,7 @@ import {DeploySHProtocol} from "../../script/DeploySHProtocol.s.sol";
 import {SendPackedUserOp} from "../../script/SendPackedUserOp.s.sol";
 import {configuredTokens} from "../utils/ConfiguredTokens.sol";
 import {PasskeyHelper} from "../utils/PasskeyHelper.sol";
+import {ContactPassHelper} from "../utils/ContactPassHelper.sol";
 
 /**
  * @title SHForkTestBase
@@ -79,6 +80,8 @@ abstract contract SHForkTestBase is Test {
     uint256 constant WINDOW = 1 days;
 
     address owner;
+    /// @dev The owner's key, which signs the contact passes PayeeGuard reads.
+    uint256 ownerKey;
     /// @dev The wallet's session key: a soft passkey, seeded through deployWallet in setUp. The fork
     ///      suites sign with it the way the app's users do, through the REAL EntryPoint.
     PasskeyHelper.Passkey sessionKey;
@@ -130,7 +133,8 @@ abstract contract SHForkTestBase is Test {
         (factory, treasury, config, oracle) = deployer.run();
         feeRegistry = treasury.REGISTRY();
         module = SpendingLimitModule(feeRegistry.spendingLimitModule());
-        owner = config.account;
+        // A test owner whose key can sign contact passes (the deployer's key is not the tests' to use).
+        (owner, ownerKey) = makeAddrAndKey("forkOwner");
         v2Router = IUniswapV2Router01(_v2RouterForChain());
         swapRouter = _swapRouterForChain();
 
@@ -200,21 +204,44 @@ abstract contract SHForkTestBase is Test {
         return address(v2Router);
     }
 
-    /// @dev Sells exactly `amountIn` of _tokenIn() along _swapPath(), output to the wallet, no minimum.
-    function _swapCalldata(uint256 amountIn) internal view virtual returns (bytes memory) {
+    /// @dev Sells exactly `amountIn` of _tokenIn() along _swapPath(), output to the wallet, with a
+    ///      minimum the PayeeGuard's trade floor accepts ({_minOut}).
+    function _swapCalldata(uint256 amountIn) internal view returns (bytes memory) {
+        return _swapCalldataTo(amountIn, address(wallet));
+    }
+
+    /// @dev The same swap with its output paid to `recipient`.
+    function _swapCalldataTo(uint256 amountIn, address recipient) internal view virtual returns (bytes memory) {
         return abi.encodeCall(
             IUniswapV2Router01.swapExactTokensForTokens,
-            (amountIn, 0, _swapPath(), address(wallet), block.timestamp + 1 hours)
+            (
+                amountIn,
+                _minOut(address(_tokenIn()), amountIn, address(_tokenOut())),
+                _swapPath(),
+                recipient,
+                block.timestamp + 1 hours
+            )
         );
     }
 
+    /// @dev 90% of what `amountIn` of `tokenIn` is worth in `tokenOut` at the oracle's prices: above the
+    ///      PayeeGuard's 88% floor, below what a real pool pays. 0 when either token has no feed (no floor
+    ///      then).
+    function _minOut(address tokenIn, uint256 amountIn, address tokenOut) internal view returns (uint256) {
+        if (!oracle.isPriced(tokenIn) || !oracle.isPriced(tokenOut)) return 0;
+        uint256 valueIn = uint256(oracle.getPrice(tokenIn, amountIn));
+        uint256 unitOut = uint256(oracle.getPrice(tokenOut, 10 ** IERC20Metadata(tokenOut).decimals()));
+        return valueIn * 90 / 100 * 10 ** IERC20Metadata(tokenOut).decimals() / unitOut;
+    }
+
     /// @dev Sells exactly the forwarded native value for _tokenOut(), output to the wallet.
-    function _nativeInSwapCalldata(uint256 /* value */ ) internal view virtual returns (bytes memory) {
+    function _nativeInSwapCalldata(uint256 value) internal view virtual returns (bytes memory) {
         address[] memory path = new address[](2);
         path[0] = v2Router.WETH(); // wrapped native (WETH/WBNB); the router wraps the forwarded value
         path[1] = address(_tokenOut()); // watched -> received amount is metered as a token inflow
         return abi.encodeCall(
-            IUniswapV2Router01.swapExactETHForTokens, (0, path, address(wallet), block.timestamp + 1 hours)
+            IUniswapV2Router01.swapExactETHForTokens,
+            (_minOut(path[0], value, path[1]), path, address(wallet), block.timestamp + 1 hours)
         );
     }
 
@@ -224,7 +251,8 @@ abstract contract SHForkTestBase is Test {
         path[0] = token;
         path[1] = v2Router.WETH();
         return abi.encodeCall(
-            IUniswapV2Router01.swapExactTokensForETH, (amount, 0, path, address(wallet), block.timestamp + 1 hours)
+            IUniswapV2Router01.swapExactTokensForETH,
+            (amount, _minOut(token, amount, path[1]), path, address(wallet), block.timestamp + 1 hours)
         );
     }
 
@@ -260,18 +288,17 @@ abstract contract SHForkTestBase is Test {
         view
         returns (PackedUserOperation memory userOp)
     {
-        bytes32 hash;
-        (userOp, hash) =
+        (userOp,) =
             sendPackedUserOp.generateUnsignedUserOp(address(wallet), config, dest, value, data, _passkeyNonceKey());
-        userOp.signature = sessionKey.sign(hash);
+        userOp.callData = ContactPassHelper.attach(userOp.callData, address(wallet), ownerKey);
+        userOp.signature = sessionKey.sign(IEntryPoint(config.entryPoint).getUserOpHash(userOp));
     }
 
     /// @dev A batch UserOp from the wallet, approved by the session passkey.
     function _sessionBatchOp(Execution[] memory execs) internal view returns (PackedUserOperation memory userOp) {
-        bytes32 hash;
-        (userOp, hash) =
-            sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
-        userOp.signature = sessionKey.sign(hash);
+        (userOp,) = sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        userOp.callData = ContactPassHelper.attach(userOp.callData, address(wallet), ownerKey);
+        userOp.signature = sessionKey.sign(IEntryPoint(config.entryPoint).getUserOpHash(userOp));
     }
 
     function _handleOps(PackedUserOperation memory userOp) internal {
@@ -600,17 +627,17 @@ abstract contract SHForkTestBase is Test {
     ///         transaction must revert with exactly that residual reported.
     function test_standingApprovalAfterSwap_reverts() public {
         uint256 amountIn = _swapAmount();
+        // Built first: the swap's minimum reads the oracle, and those calls must not take the prank.
+        bytes memory batch = ERC7579Utils.encodeBatch(_swapBatch(amountIn + 1, amountIn));
+        address tokenIn = address(_tokenIn());
 
         vm.prank(owner);
         vm.expectRevert(
             abi.encodeWithSelector(
-                SpendingLimitModule.SpendingLimitModule_StandingApprovalNotAllowed.selector,
-                address(_tokenIn()),
-                swapRouter,
-                uint256(1)
+                SpendingLimitModule.SpendingLimitModule_StandingApprovalNotAllowed.selector, tokenIn, swapRouter, uint256(1)
             )
         );
-        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn + 1, amountIn)));
+        wallet.execute(bytes32(uint256(0x01) << 248), batch);
     }
 
     function test_unlimitedApprove_rejectedOnFork() public {
@@ -728,8 +755,10 @@ abstract contract SHForkTestBase is Test {
         uint256 amountIn = _swapAmount();
         uint256 balanceBefore = IERC20(capped).balanceOf(address(wallet));
 
+        // Built first: the swap's minimum reads the oracle, and those calls must not take the prank.
+        bytes memory batch = ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn));
         vm.prank(owner);
-        wallet.execute(bytes32(uint256(0x01) << 248), ERC7579Utils.encodeBatch(_swapBatch(amountIn, amountIn)));
+        wallet.execute(bytes32(uint256(0x01) << 248), batch);
 
         assertGt(IERC20(capped).balanceOf(address(wallet)), balanceBefore, "the swap bought nothing");
         assertEq(_spentInWindow(), oracle.getPrice(address(_tokenIn()), amountIn), "not charged in full");
@@ -801,6 +830,34 @@ abstract contract SHForkTestBase is Test {
             )
         );
         wallet.execute(bytes32(0), abi.encodePacked(link, uint256(0), call));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              CONTACTS (PayeeGuard) ON THE REAL EXCHANGE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice A passkey's swap on the real exchange whose output goes to an address the owner never
+    ///         signed for executes nothing; with the owner's pass for that address the same swap goes
+    ///         through. This is the app check reading the real router's recipient.
+    function test_payeeGuard_swapPayingANonContactIsRefused() public {
+        uint256 amountIn = _swapAmount();
+        Execution[] memory execs = new Execution[](2);
+        execs[0] = Execution(address(_tokenIn()), 0, abi.encodeCall(IERC20.approve, (swapRouter, amountIn)));
+        execs[1] = Execution(swapRouter, 0, _swapCalldataTo(amountIn, sink));
+        uint256 sinkBefore = _tokenOut().balanceOf(sink);
+
+        // No pass for sink: the helper only signs for plain sends and token transfers.
+        _handleOps(_sessionBatchOp(execs));
+        assertEq(_tokenOut().balanceOf(sink), sinkBefore, "a swap paid a non-contact");
+
+        (PackedUserOperation memory op,) =
+            sendPackedUserOp.generateUnsignedBatchUserOp(address(wallet), config, execs, _passkeyNonceKey());
+        bytes[] memory passes = new bytes[](1);
+        passes[0] = ContactPassHelper.pass(ownerKey, sink);
+        op.callData = ContactPassHelper.append(op.callData, passes);
+        op.signature = sessionKey.sign(IEntryPoint(config.entryPoint).getUserOpHash(op));
+        _handleOps(op);
+        assertGt(_tokenOut().balanceOf(sink), sinkBefore, "a swap could not pay a contact");
     }
 
     /*//////////////////////////////////////////////////////////////

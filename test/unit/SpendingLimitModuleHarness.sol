@@ -14,7 +14,7 @@ import {Mode} from "@openzeppelin/contracts/account/utils/draft-ERC7579Utils.sol
  */
 contract SpendingLimitModuleHarness is SpendingLimitModule {
     /// @param registry The SHRegistry the module reads its price oracle from (NOT the oracle itself).
-    constructor(address registry) SpendingLimitModule(registry) {}
+    constructor(address registry, address payeeGuard) SpendingLimitModule(registry, payeeGuard) {}
 
     /// @notice Exposes _decodeExecuteCalldata: recovers (isExecute, mode, executionCalldata) from
     ///         raw outer account calldata.
