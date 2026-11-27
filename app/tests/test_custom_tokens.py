@@ -37,6 +37,7 @@ from web3 import Web3                       # noqa: E402
 
 import api                                  # noqa: E402
 import routes.added_tokens  # noqa: E402
+import routes.allowlist  # noqa: E402
 import routes.deps  # noqa: E402
 import routes.wallet  # noqa: E402
 import contracts                            # noqa: E402
@@ -1275,11 +1276,11 @@ def test_allowlist_suggests_pools():
     wallet = SimpleNamespace(address=WALLET, functions=SimpleNamespace(
         sessionAllowlistEnabled=lambda: value(False),
         getAllowedTargets=lambda: value(list(listed)),
-        REPUTATION_REGISTRY=lambda: value("0x" + "0" * 40),
     ))
-    original = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain
+    original = routes.deps._resolve_chain, routes.deps._load_wallet_for_chain, routes.allowlist._review_registry
     set_everywhere(api, "_resolve_chain", lambda chain_id: (SimpleNamespace(eth=SimpleNamespace(contract=contract)), NETWORK))
     set_everywhere(api, "_load_wallet_for_chain", lambda _w3, user_id, chain_id: wallet)
+    set_everywhere(api, "_review_registry", lambda _w3, _wallet: "0x" + "0" * 40)
     routes.wallet._v2_factories.clear()
     try:
         c, headers, uid = _client_for()
@@ -1312,6 +1313,7 @@ def test_allowlist_suggests_pools():
     finally:
         set_everywhere(api, "_resolve_chain", original[0])
         set_everywhere(api, "_load_wallet_for_chain", original[1])
+        set_everywhere(api, "_review_registry", original[2])
 
 
 def test_deposits_name_their_pool():

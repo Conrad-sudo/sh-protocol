@@ -102,8 +102,8 @@ The `SHRegistry` is the central configuration store. Deployed `SessionHandler` w
 | `recurringPaymentModule` | `address` | Executor installed on wallets deployed from here on. Owner-settable like `spendingLimitModule` (the user's choice, for symmetry); changing it never touches existing wallets. More sensitive than the hook setter: an executor can move funds (within the guard and the cap), a hook can only refuse. |
 | `agentModule` | `address` | Validator (`AgentModule`) installed on wallets deployed from here on. Owner-settable the same way; changing it never touches existing wallets. As sensitive as the executor setter: a validator approves UserOps for the wallet (AgentModule only ops signed by an agent the wallet's owner added). |
 | `ENTRY_POINT` | `address` (immutable) | Canonical ERC-4337 EntryPoint; `SHFactory` bakes it into the `SessionHandler` implementation, so every wallet shares it |
-| `REPUTATION_REGISTRY` | `address` (immutable) | Reputation Registry, baked into the implementation the same way |
-| `IDENTITY_REGISTRY` | `address` (immutable) | ERC-8004 Identity Registry, baked into the implementation the same way |
+| `REPUTATION_REGISTRY` | `address` (immutable) | ERC-8004 Reputation Registry the protocol's agent (`agentId`) is rated on. Config for the app only: no wallet reads it |
+| `IDENTITY_REGISTRY` | `address` (immutable) | ERC-8004 Identity Registry the protocol's agent is registered on. Config for the app only, like `REPUTATION_REGISTRY` |
 | `factory` | `address` | The SHFactory deploying against this registry. Off-chain discoverability only — no contract reads it. |
 
 ```solidity
@@ -403,12 +403,10 @@ Within its window a key is still a bare signer with no per-key target/selector s
 **Nothing is trusted unless the deployer says so.** `initialize` grants exactly the `trustedSpenders` the caller passed — an empty array leaves the list empty, and every approval of a token the oracle can't price (a BSC LP token for `removeLiquidity`, a token added by address for a swap or a deposit) then fails until the owner grants a spender. This is *not* a return to the old deploy-time auto-trust of `SHRegistry.router()`: that was protocol config choosing the venue, whereas this list comes from the deploying caller. Which venue a wallet trades on stays the owner's choice.
 
 ```solidity
-/// Passed ONCE, when SHFactory's constructor creates the implementation. The four become
+/// Passed ONCE, when SHFactory's constructor creates the implementation. The two become
 /// immutables of the implementation's code, which every clone runs, so no wallet stores them.
 struct ProtocolAddresses {
     address entryPoint;
-    address reputationRegistry;
-    address identityRegistry;
     address registry;
 }
 constructor(ProtocolAddresses memory protocol);
@@ -478,10 +476,10 @@ function pause() external onlyOwner;
 function unpause() external onlyOwner;
 function withdraw(address token, uint256 amount, address to) external onlyOwner;   // ERC20 or ETH; bypasses the hook
 
-// ERC-8004
-function getAgentId() public view returns (uint256);
-function getAgentIdentity() public view returns (bool registered, uint256 agentId, string memory agentUri);
-function getAgentReputation() public view returns (uint256 agentId, uint64 feedbackCount, int128 summaryValue, uint8 summaryValueDecimals);
+// No ERC-8004 (or any other outside protocol) surface: the wallet is protocol-agnostic. A review
+// is an ordinary execute() call to the Reputation Registry; the app reads the registry addresses
+// and the protocol's agent id from SHRegistry. (getAgentId/getAgentIdentity/getAgentReputation and
+// the REPUTATION_REGISTRY/IDENTITY_REGISTRY immutables were removed 2026-11-27.)
 
 // Gas ceilings (THREAT_MODEL 3.12) - the cap cannot see gas, these bound it. Defaults are set per
 // chain when the factory builds the implementation (HelperConfig: maxOpGasCost, sessionGasBudget).
@@ -517,7 +515,7 @@ event AllowedTargetAdded(address indexed target);
 event AllowedTargetRemoved(address indexed target);
 ```
 
-> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT`, `REPUTATION_REGISTRY`, `IDENTITY_REGISTRY` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `SH_MODULE` has a slot to itself. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts the `sessionValidUntil` mapping in slot 9 — `app/bundler.py`'s `SESSION_VALID_UNTIL_SLOT` must match, since a key's deadline lives at `keccak256(abi.encode(keyId, uint256(9)))` and the bundler overrides exactly that word (`PasskeyValidationTest.test_slot9_isSessionValidUntil` pins it). The key list (`_sessionKeys`, an `EnumerableSet`) takes slots 10–11, and the gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 12, after them, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
+> **Shared values are immutables; per-wallet values are packed storage.** `ENTRY_POINT` and `REGISTRY` are the same for every wallet a factory deploys, so they are immutables of the implementation (set via `ProtocolAddresses`) and cost nothing to read. `SH_MODULE` stays in each wallet's storage because the operator can change the registry's module, and each wallet keeps the one it was deployed with. The rest is packed: `sessionAllowlistEnabled` and `maxOpGasCost` (`uint80`) share a slot with the inherited `_hook` and `_paused`, and `SH_MODULE` has a slot to itself. A session-key UserOp therefore reads two of these slots instead of five (allowlist lookups aside). The allowlist is an OpenZeppelin `EnumerableSet` so `getAllowedTargets` can return it whole; it takes two slots, which puts the `sessionValidUntil` mapping in slot 9 — `app/bundler.py`'s `SESSION_VALID_UNTIL_SLOT` must match, since a key's deadline lives at `keccak256(abi.encode(keyId, uint256(9)))` and the bundler overrides exactly that word (`PasskeyValidationTest.test_slot9_isSessionValidUntil` pins it). The key list (`_sessionKeys`, an `EnumerableSet`) takes slots 10–11, and the gas budget's three fields (`sessionGasSpent`, `sessionGasWindowStart`, `sessionGasBudget`) share slot 12, after them, so slot 9 doesn't move. `forge inspect SessionHandler storageLayout` shows the assignment.
 
 > **Two gas ceilings.** `maxOpGasCost` bounds one UserOp: `_authenticate` prices the op's own gas fields against it, and `validateUserOp` bounds the prefund transfer too. `sessionGasBudget` bounds all of them: every UserOp the owner did not sign is charged its prefund top-up (`missingAccountFunds`) against a budget that refills every `SESSION_GAS_WINDOW` (24 hours), and validation reverts with `SessionHandler_SessionGasBudgetExceeded(spent, budget)` past it. Without it, a stolen key running its own bundler could pack many ops, each just under the per-op ceiling, into one `handleOps` and collect all their gas. The charge is the top-up, not the op's maximum price, so an ordinary op uses up about what it really cost. That is only safe because `_authenticate` refuses any op whose `callData` calls `validateUserOp` itself (`SessionHandler_SelfValidationCall`), the one way a key could otherwise have the account pay a prefund outside validation. The window reads `block.timestamp` during validation, which ERC-7562 bans for public bundlers; the protocol bundles every op itself (`app/bundler.py`), so it holds.
 
@@ -817,7 +815,7 @@ The project integrates the **ERC-8004** standard for on-chain agent identity and
 
 > BSC currently reuses the Mainnet ERC-8004 registry addresses — confirm before relying on it in production.
 
-`src/mocks/MockIdentityRegistry.sol` and `MockReputationRegistry.sol` are full non-upgradeable mocks for Anvil and unit tests. `DeploySHProtocol.s.sol` calls `IIdentityRegistry.register(AGENT_URI)` during deployment, minting the agent's identity NFT; the returned `agentId` is stored in `SHRegistry` and readable from any `SessionHandler` via `getAgentId()`.
+`src/mocks/MockIdentityRegistry.sol` and `MockReputationRegistry.sol` are full non-upgradeable mocks for Anvil and unit tests. `DeploySHProtocol.s.sol` calls `IIdentityRegistry.register(AGENT_URI)` during deployment, minting the agent's identity NFT; the returned `agentId` is stored in `SHRegistry` (`SHRegistry.agentId()`), alongside the two registry addresses. No `SessionHandler` reads any of them: they are config for the app, which posts a review as an ordinary `execute()` call that PayeeGuard lets through via `ReputationCheck`.
 
 Session-key calls to the Reputation Registry (`giveFeedback`) work without any special registration: `giveFeedback` moves no value, and the target is not a watched token, so the net-value meter simply charges nothing. (The old `addUnpricedSessionKey` escape hatch no longer exists — there's nothing per-target to exempt.)
 

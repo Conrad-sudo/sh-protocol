@@ -30,7 +30,7 @@ from langchain_uniswap_v2 import UniswapV2Toolkit
 from langchain_uniswap_v3 import UniswapV3Toolkit
 
 from constants import ETH_SENTINEL, get_exchange, get_native_wrapped_ticker, get_router, get_v3_network
-from contracts import load_session_handler
+from contracts import load_registry, load_session_handler
 from db import get_supported_tokens, get_supported_tokens_by_chain_id, get_token_address
 from network_config import load_network_config
 
@@ -194,15 +194,18 @@ def get_erc8004_tools(user_id: int) -> dict[str, BaseTool]:
     key = (user_id, chain_id)
     if key not in _erc8004_tools_cache:
         wallet = load_session_handler(user_id)
+        registry = load_registry(user_id)
         toolkit = ERC8004Toolkit(
             rpc_url=w3.provider.endpoint_uri,
-            # Both addresses come off the WALLET, never from the package's chain table. The
-            # canonical 0x8004... pair is right on Sepolia/BSC, but on Anvil the protocol
-            # deploys MockIdentityRegistry/MockReputationRegistry -- and chain 31337 is not in
-            # KNOWN_NETWORKS at all. Reading them from the account the UserOp executes from is
-            # the only way the toolkit's calldata and the wallet's view cannot disagree.
-            identity_registry=wallet.functions.IDENTITY_REGISTRY().call(),
-            reputation_registry=wallet.functions.REPUTATION_REGISTRY().call(),
+            # Both addresses come off the SHRegistry the wallet reads its config from, never from
+            # the package's chain table. The canonical 0x8004... pair is right on Sepolia/BSC, but
+            # on Anvil the protocol deploys MockIdentityRegistry/MockReputationRegistry -- and
+            # chain 31337 is not in KNOWN_NETWORKS at all. The registry is also where the
+            # protocol's agent id lives, so the toolkit and get_agent_id cannot disagree. (The
+            # wallet itself no longer carries either address: SessionHandler knows no outside
+            # protocol.)
+            identity_registry=registry.functions.IDENTITY_REGISTRY().call(),
+            reputation_registry=registry.functions.REPUTATION_REGISTRY().call(),
             # Omitted deliberately: ERC-8004's Validation Registry has no canonical deployment
             # on any chain, and this protocol deploys none. Leaving it unset makes the toolkit
             # withhold its seven tools rather than offer ones that can only fail.

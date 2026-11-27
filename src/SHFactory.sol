@@ -17,9 +17,8 @@ contract SHFactory is Ownable, Pausable {
     /// @dev Thrown by deployWallet when no AgentModule has been configured yet.
     error SHFactory_AgentModuleNotSet();
 
-    /// @notice The SHRegistry this factory's wallets are wired to. Its EntryPoint and ERC-8004
-    ///         registries are baked into {IMPLEMENTATION} at construction; its SpendingLimitModule is
-    ///         read on every {deployWallet}.
+    /// @notice The SHRegistry this factory's wallets are wired to. Its EntryPoint is baked into
+    ///         {IMPLEMENTATION} at construction; its modules are read on every {deployWallet}.
     /// @dev Immutable: a factory is bound to one registry for life. Point wallets at a different
     ///      registry by deploying a new factory and recording it with SHRegistry.setFactory.
     SHRegistry public immutable REGISTRY;
@@ -43,11 +42,11 @@ contract SHFactory is Ownable, Pausable {
 
     /**
      * @notice Deploys the factory and the SessionHandler implementation it clones from.
-     * @dev The EntryPoint and both ERC-8004 registries are read from the registry ONCE, here, and
-     *      become immutables of the implementation (see {SessionHandler-ProtocolAddresses}). They are
-     *      immutable on the registry too, so there is no later change for wallets to miss. The
-     *      SpendingLimitModule is the exception: the operator can change it, so {deployWallet} reads
-     *      it fresh for every wallet. The registry must therefore already be deployed.
+     * @dev The EntryPoint is read from the registry ONCE, here, and becomes an immutable of the
+     *      implementation (see {SessionHandler-ProtocolAddresses}). It is immutable on the registry
+     *      too, so there is no later change for wallets to miss. The modules are the exception: the
+     *      operator can change them, so {deployWallet} reads them fresh for every wallet. The registry
+     *      must therefore already be deployed.
      * @param owner       Address that will own this factory — the SHTreasury, the protocol's
      *                    single admin root. Supplied rather than taken from msg.sender so no
      *                    follow-up transferOwnership is needed; the operator reaches
@@ -62,8 +61,6 @@ contract SHFactory is Ownable, Pausable {
             new SessionHandler(
                 SessionHandler.ProtocolAddresses({
                     entryPoint: SHRegistry(_registry).ENTRY_POINT(),
-                    reputationRegistry: SHRegistry(_registry).REPUTATION_REGISTRY(),
-                    identityRegistry: SHRegistry(_registry).IDENTITY_REGISTRY(),
                     registry: _registry
                 }),
                 gasCeilings

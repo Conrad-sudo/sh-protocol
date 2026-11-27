@@ -496,7 +496,7 @@ Two distinct risks arrive with the ERC-8004 tools.
 **Mitigations in place:**
 - **The tools do not exist.** `app/tools/` has no wrapper for any identity or agent-wallet write (they were defined but withheld until 2026-10-08, then removed as dead code), so no prompt can reach one. Only reads and the four *reputation* writes are on the agent's surface. A deployment that adds identity writes back should refuse any write resolving to `SHRegistry.agentId` before calldata is built, as the removed `_reject_protocol_agent_write` did.
 - **On-chain, the wallet is neither owner nor approved operator**, so the registry rejects it independently of anything the app does — verified on a Sepolia fork: `isAuthorizedOrOwner(userWallet, agentId)` is `false`.
-- A user's SessionHandler also cannot acquire an agent of its own: with no ERC-7579 fallback handler for `onERC721Received`, any mint or `safeTransferFrom` to the account reverts.
+- A user's SessionHandler also cannot acquire an agent of its own: with no ERC-7579 fallback handler for `onERC721Received`, any mint or `safeTransferFrom` to the account reverts. The wallet carries no ERC-8004 code at all: the registry addresses and the agent id are `SHRegistry` config the app reads, and a review is an ordinary `execute()` call. Installing an NFT-receiving fallback module would end this bullet's protection for that wallet; revisit this section before offering one.
 
 **Residual risk:** If an operator ever grants a user's wallet `setApprovalForAll` on the identity registry, the on-chain layer stops refusing and only the app-side guard remains: the absence of the tools. Don't. Changing the protocol's agent belongs to the operator's own key, off this path entirely.
 

@@ -20,6 +20,7 @@ from db import (
     get_all_contacts,
     get_custom_tokens,
     get_dashboard_tokens,
+    get_json,
     get_supported_tokens_by_chain_id,
     get_wallet_address,
 )
@@ -33,6 +34,8 @@ from routes.owner import _prepare_owner_tx
 from routes.wallet import _known_pools
 
 router = APIRouter()
+
+REGISTRY_ABI_PATH = "./out/SHRegistry.sol/SHRegistry.json"
 
 
 #
@@ -145,6 +148,17 @@ def _listed_targets(wallet) -> list[str] | None:
         return None
 
 
+def _review_registry(w3: Web3, wallet) -> str:
+    """
+    The ERC-8004 Reputation Registry the protocol's agent is rated on -- where the assistant posts a
+    user's review -- read off the SHRegistry the wallet points at. The wallet itself names no
+    outside protocol, so this is two reads: the wallet's REGISTRY, then that registry's address.
+    Both are immutable, and every wallet has a REGISTRY getter, old or new.
+    """
+    registry = w3.eth.contract(address=wallet.functions.REGISTRY().call(), abi=get_json(REGISTRY_ABI_PATH)["abi"])
+    return registry.functions.REPUTATION_REGISTRY().call()
+
+
 @router.get("/api/wallet/{chain_id}/allowlist")
 def get_allowlist(chain_id: int, user_id: int = Depends(get_current_user)):
     """
@@ -221,7 +235,7 @@ def get_allowlist(chain_id: int, user_id: int = Depends(get_current_user)):
     reads = read_all({
         "enabled": wallet.functions.sessionAllowlistEnabled().call,
         "targets": lambda: _listed_targets(wallet),
-        "registry": wallet.functions.REPUTATION_REGISTRY().call,
+        "registry": lambda: _review_registry(w3, wallet),
         **{
             f"code:{contact['address']}": (lambda address=contact["address"]: w3.eth.get_code(address))
             for contact in contacts

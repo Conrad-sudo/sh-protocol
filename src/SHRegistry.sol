@@ -11,15 +11,14 @@ import {IAppCheck} from "./interfaces/IAppCheck.sol";
  * @title SHRegistry
  * @author Conrad Japhet
  * @notice Central configuration registry for the SessionHandler Protocol. Stores the
- *         protocol fee, keeper fee, treasury address, price oracle, and agent identity used across
- *         all deployed SessionHandler wallets.
- * @dev SessionHandler wallets read the MUTABLE parameters here (fees, treasury, price oracle, agent
- *      id) at execution time rather than storing them, so an update propagates instantly to every
+ *         protocol fee, keeper fee, treasury address and price oracle used across all deployed
+ *         SessionHandler wallets, and the protocol's ERC-8004 agent identity, which the app reads.
+ * @dev SessionHandler wallets read the MUTABLE parameters here (fees, treasury, price oracle) at
+ *      execution time rather than storing them, so an update propagates instantly to every
  *      deployed wallet without redeployment. Two kinds of address do not work that way: the
- *      EntryPoint and both ERC-8004 registries are immutable here and baked into the SessionHandler
- *      implementation by SHFactory, and the two modules (SpendingLimitModule, RecurringPaymentModule)
- *      are installed into each wallet when it is deployed, so changing either only affects wallets
- *      deployed afterwards.
+ *      EntryPoint is immutable here and baked into the SessionHandler implementation by SHFactory,
+ *      and the two modules (SpendingLimitModule, RecurringPaymentModule) are installed into each
+ *      wallet when it is deployed, so changing either only affects wallets deployed afterwards.
  *
  *      The protocol fee is a flat amount of native token, in wei, and is charged as stored — no
  *      oracle read on the fee path. That keeps a session execution from paying for a Chainlink read
@@ -199,10 +198,9 @@ contract SHRegistry is Ownable {
     address public factory;
 
     /// @notice The canonical ERC-4337 EntryPoint that deployed wallets validate UserOps against.
-    /// @dev Immutable, like the two ERC-8004 registries below. SHFactory's constructor bakes all three
-    ///      into its SessionHandler implementation as immutables, so a later change here could never
-    ///      reach a wallet anyway. Making that permanence explicit is more honest than a setter that
-    ///      would do nothing for any wallet.
+    /// @dev Immutable. SHFactory's constructor bakes it into its SessionHandler implementation as an
+    ///      immutable, so a later change here could never reach a wallet anyway. Making that
+    ///      permanence explicit is more honest than a setter that would do nothing for any wallet.
     address public immutable ENTRY_POINT;
 
     /// @notice app => the IAppCheck the PayeeGuard asks about every call a passkey or an agent makes to
@@ -220,9 +218,13 @@ contract SHRegistry is Ownable {
     /// @notice app => its pending app check, if any.
     mapping(address app => PendingAppCheck) public pendingAppCheck;
 
-    /// @notice Reputation Registry baked into every SessionHandler deployed from this registry.
+    /// @notice ERC-8004 Reputation Registry this deployment's agent ({agentId}) is rated on.
+    /// @dev Protocol configuration for the app, NOT wallet code: no SessionHandler reads it. A wallet
+    ///      posts a review with an ordinary {SessionHandler-execute} call, which PayeeGuard lets
+    ///      through only via the registry's ReputationCheck app check.
     address public immutable REPUTATION_REGISTRY;
-    /// @notice ERC-8004 Identity Registry baked into every SessionHandler deployed from this registry.
+    /// @notice ERC-8004 Identity Registry this deployment's agent ({agentId}) is registered on.
+    /// @dev Protocol configuration for the app, like {REPUTATION_REGISTRY}: no SessionHandler reads it.
     address public immutable IDENTITY_REGISTRY;
 
     /*//////////////////////////////////////////////////////////////
@@ -352,8 +354,10 @@ contract SHRegistry is Ownable {
      * @param initialTreasury    Address that will receive protocol fees. Must not be address(0).
      * @param initialOracle      Address of the deployed SHOracle. Must not be address(0), and must be
      *        able to price native — see the native-feed check below.
-     * @param reputationRegistry Reputation Registry baked into every wallet. Must not be address(0).
-     * @param identityRegistry   ERC-8004 Identity Registry baked into every wallet. Must not be address(0).
+     * @param reputationRegistry ERC-8004 Reputation Registry the protocol's agent is rated on. Must not
+     *        be address(0).
+     * @param identityRegistry   ERC-8004 Identity Registry the protocol's agent is registered on. Must
+     *        not be address(0).
      * @param entryPointAddress  Canonical ERC-4337 EntryPoint. Must not be address(0).
      * @param initialAgentId     Id of the SessionHandler agent on the ERC-8004 Identity Registry. Zero is
      *        a VALID id — ERC-8004 registries mint from 0, so the first agent registered holds id 0.
@@ -620,8 +624,8 @@ contract SHRegistry is Ownable {
     /**
      * @notice Updates the registered agentId for the SessionHandler Protocol on the ERC-8004 Identity Registry. Only callable by the owner.
      * @dev Unvalidated on purpose: 0 is a legitimate agent id (ERC-8004 registries mint from 0), so
-     *      there is no sentinel to reject. An id with no corresponding token makes
-     *      {SessionHandler-getAgentIdentity} report `registered == false` rather than revert.
+     *      there is no sentinel to reject. An id with no corresponding token is simply
+     *      an agent the app finds unregistered (the Identity Registry's ownerOf reverts for it).
      * @param newId The new agentId.
      */
     function setAgentId(uint256 newId) external onlyOwner {

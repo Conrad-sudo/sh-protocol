@@ -402,11 +402,6 @@ abstract contract SHForkTestBase is Test {
         }
     }
 
-    function test_agentIdentityViews_doNotRevert() public view {
-        wallet.getAgentIdentity();
-        wallet.getAgentId();
-    }
-
     /*//////////////////////////////////////////////////////////////
                         NET-VALUE METERING (live oracle)
     //////////////////////////////////////////////////////////////*/

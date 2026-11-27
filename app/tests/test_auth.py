@@ -645,12 +645,13 @@ def test_allowlist_suggests_what_the_assistant_trades_through():
     wallet = SimpleNamespace(address=wallet_address, functions=SimpleNamespace(
         sessionAllowlistEnabled=lambda: value(False),
         getAllowedTargets=lambda: value(list(listed)),
-        REPUTATION_REGISTRY=lambda: value("0x" + "0" * 40),
     ))
     # No chain at all: every pool's address is already saved, so nothing is read off one.
     original = (
         set_everywhere(api, "_resolve_chain", lambda chain_id: (SimpleNamespace(eth=SimpleNamespace()), "test")),
         set_everywhere(api, "_load_wallet_for_chain", lambda _w3, _user_id, _chain_id: wallet),
+        # No review registry, so it is not suggested.
+        set_everywhere(api, "_review_registry", lambda _w3, _wallet: "0x" + "0" * 40),
     )
 
     def read(chain_id: int) -> dict:
@@ -681,6 +682,7 @@ def test_allowlist_suggests_what_the_assistant_trades_through():
     finally:
         set_everywhere(api, "_resolve_chain", original[0])
         set_everywhere(api, "_load_wallet_for_chain", original[1])
+        set_everywhere(api, "_review_registry", original[2])
 
 
 def test_wrapped_native_follows_the_native_asset():

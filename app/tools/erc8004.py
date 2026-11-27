@@ -6,6 +6,7 @@ from langchain.tools import ToolRuntime, tool
 
 from agent_context import AgentContext
 from contracts import (
+    load_registry,
     load_session_handler,
 )
 from network_config import load_network_config
@@ -21,7 +22,7 @@ _agent_id_cache: dict[int, int] = {}
 //////////////////////////////////////////////////////////////*/
 """
 def get_agent_id(user_id: int) -> int:
-    """The PROTOCOL's ERC-8004 agent id, read from SHRegistry via the SessionHandler.
+    """The PROTOCOL's ERC-8004 agent id, read from the SHRegistry the user's wallet points at.
 
     One agent per deployment, shared by every wallet on the chain — `SHRegistry.agentId` is
     protocol configuration, set at deploy time and changeable only by the protocol owner
@@ -30,7 +31,7 @@ def get_agent_id(user_id: int) -> int:
     """
     _, chain_id, _ = load_network_config(user_id)
     if chain_id not in _agent_id_cache:
-        _agent_id_cache[chain_id] = load_session_handler(user_id).functions.getAgentId().call()
+        _agent_id_cache[chain_id] = load_registry(user_id).functions.agentId().call()
     return _agent_id_cache[chain_id]
 
 
@@ -466,9 +467,9 @@ def get_agent_reputation(
     # aggregate_feedback requires an explicit reviewer set: there is no such thing as an
     # unattributed score in this registry. When the caller names none, the reviewers are
     # discovered first and the result is flagged unfiltered — rather than silently answering a
-    # narrower question. (The old implementation called SessionHandler.getAgentReputation(),
-    # which hardcodes clients[0] = address(this) and so only ever read back feedback the wallet
-    # itself had given.)
+    # narrower question. (The old implementation called SessionHandler.getAgentReputation(), since
+    # removed from the wallet, which hardcoded clients[0] = address(this) and so only ever read
+    # back feedback the wallet itself had given.)
     filtered = clients is not None
     if not filtered:
         discovered = _erc8004(user_id, "get_feedback_clients", {"agent": agent_ref})

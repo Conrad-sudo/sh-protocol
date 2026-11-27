@@ -2327,10 +2327,6 @@ contract SHProtocolTest is Test {
         assertEq(wallet.getUsdValue(address(usdc), 1000e6), oracle.getPrice(address(usdc), 1000e6));
     }
 
-    function test_registryViews() public view {
-        assertEq(wallet.getAgentId(), feeRegistry.agentId());
-    }
-
     function test_withdraw_erc20AndEth() public {
         vm.startPrank(owner);
         wallet.withdraw(address(usdc), 1000e6, kani);

@@ -27,8 +27,6 @@ import {SHOracle} from "./SHOracle.sol";
 import {SHRegistry} from "./SHRegistry.sol";
 import {SpendingLimitModule} from "./SpendingLimitModule.sol";
 import {WebAuthnNative} from "./utils/WebAuthnNative.sol";
-import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
-import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IUserOpHooks} from "./interfaces/IUserOpHooks.sol";
 import {Context} from "@openzeppelin/contracts/utils/Context.sol";
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
@@ -39,8 +37,9 @@ import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Cont
  * @notice ERC-7579 smart account guarded by a USD-denominated spending cap. The cap and all
  *         USD-value enforcement live entirely in the installed SpendingLimitModule (installed as
  *         a hook); this contract keeps only the account-level concerns that aren't cap-specific
- *         (ownership, ETH/ERC20 withdrawal, pausing, spending-cap configuration passthroughs, and
- *         the ERC-8004 identity/reputation lookups).
+ *         (ownership, ETH/ERC20 withdrawal, pausing, and spending-cap configuration passthroughs).
+ *         It knows nothing of any outside protocol: an app such as an ERC-8004 registry is reached
+ *         with an ordinary {execute} call, like any other contract.
  * @dev Session-key auth is built into the account itself: {_authenticate} accepts a UserOp signed by
  *      the owner (a 65-byte ECDSA signature) OR by a PASSKEY the owner has authorized (any other
  *      length: a WebAuthn assertion carrying the passkey's public key). A session key IS a passkey: a
@@ -234,17 +233,13 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     /// @notice This deployment's ERC-4337 EntryPoint. Overrides Account's default (OZ's canonical v0.8
     ///         singleton), since this project uses a v0.7 EntryPoint (see HelperConfig.s.sol).
-    /// @dev This and the next three are immutables of the IMPLEMENTATION, set once when SHFactory
+    /// @dev This and {REGISTRY} are immutables of the IMPLEMENTATION, set once when SHFactory
     ///      constructs it (see {ProtocolAddresses}). A wallet is an EIP-1167 clone that runs the
     ///      implementation's code, so every wallet reads these same values out of that code: no wallet
     ///      stores them, and no two wallets from one factory can differ. That is only correct because
-    ///      all four are the same for every wallet — anything per-wallet stays in storage below.
+    ///      both are the same for every wallet — anything per-wallet stays in storage below.
     address public immutable ENTRY_POINT;
-    /// @notice ERC-8004 reputation registry, read by {getAgentReputation}.
-    address public immutable REPUTATION_REGISTRY;
-    /// @notice ERC-8004 identity registry, read by {getAgentIdentity}.
-    address public immutable IDENTITY_REGISTRY;
-    /// @notice SHRegistry this wallet resolves the fee, treasury, oracle and agent id from, per call.
+    /// @notice SHRegistry this wallet resolves the fee, treasury and oracle from, per call.
     SHRegistry public immutable REGISTRY;
 
     // Storage below is ordered to pack. The inherited layout ends with a slot holding
@@ -274,7 +269,7 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
 
     /// @notice SpendingLimitModule installed as this wallet's hook in {initialize}; enforces the
     ///         account's USD spending cap.
-    /// @dev Per-wallet storage, NOT an immutable like the four above: the operator can change the
+    /// @dev Per-wallet storage, NOT an immutable like the two above: the operator can change the
     ///      registry's module, and each wallet keeps the one that was current when it was deployed.
     SpendingLimitModule public SH_MODULE;
 
@@ -344,21 +339,17 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice The four protocol addresses every wallet shares. SHFactory passes them once, when it
+     * @notice The two protocol addresses every wallet shares. SHFactory passes them once, when it
      *         constructs the implementation that all of its wallets are cloned from.
      * @dev Kept out of {InitConfig} because they are identical for every wallet a factory deploys, so
      *      they become immutables of the implementation instead of per-wallet storage. Nothing is lost
-     *      by fixing them: SHRegistry holds the EntryPoint and both ERC-8004 registries as immutables
-     *      too, and a factory is bound to one registry for life.
-     * @param entryPoint         This deployment's ERC-4337 EntryPoint (v0.7).
-     * @param reputationRegistry ERC-8004 reputation registry.
-     * @param identityRegistry   ERC-8004 identity registry.
-     * @param registry           SHRegistry every wallet reads protocol config from.
+     *      by fixing them: SHRegistry holds the EntryPoint as an immutable too, and a factory is bound
+     *      to one registry for life.
+     * @param entryPoint This deployment's ERC-4337 EntryPoint (v0.7).
+     * @param registry   SHRegistry every wallet reads protocol config from.
      */
     struct ProtocolAddresses {
         address entryPoint;
-        address reputationRegistry;
-        address identityRegistry;
         address registry;
     }
 
@@ -383,8 +374,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
             revert SessionHandler_InvalidGasCeilings();
         }
         ENTRY_POINT = protocol.entryPoint;
-        REPUTATION_REGISTRY = protocol.reputationRegistry;
-        IDENTITY_REGISTRY = protocol.identityRegistry;
         REGISTRY = SHRegistry(protocol.registry);
         DEFAULT_MAX_OP_GAS_COST = gasCeilings.maxOpGasCost;
         DEFAULT_SESSION_GAS_BUDGET = gasCeilings.sessionGasBudget;
@@ -1482,34 +1471,6 @@ contract SessionHandler is AccountERC7579Hooked, OwnableUpgradeable, Pausable {
     /// @notice Returns the USD value (18 decimals) of `amount` of `token`, via the registered SHOracle.
     function getUsdValue(address token, uint256 amount) public view returns (int256) {
         return SHOracle(REGISTRY.priceOracle()).getPrice(token, amount);
-    }
-
-    function getAgentId() public view returns (uint256) {
-        return REGISTRY.agentId();
-    }
-
-    /// @notice Returns the agent's ERC-8004 on-chain   identity.
-    function getAgentIdentity() public view returns (bool registered, uint256 agentId, string memory agentUri) {
-        agentId = getAgentId();
-        try IIdentityRegistry(IDENTITY_REGISTRY).ownerOf(agentId) returns (address) {
-            agentUri = IIdentityRegistry(IDENTITY_REGISTRY).tokenURI(agentId);
-            registered = true;
-        } catch {
-            registered = false;
-        }
-    }
-
-    /// @notice Returns the agent's on-chain reputation from the Reputation Registry, scoped to this wallet.
-    function getAgentReputation()
-        public
-        view
-        returns (uint256 agentId, uint64 feedbackCount, int128 summaryValue, uint8 summaryValueDecimals)
-    {
-        agentId = getAgentId();
-        address[] memory clients = new address[](1);
-        clients[0] = address(this);
-        (feedbackCount, summaryValue, summaryValueDecimals) =
-            IReputationRegistry(REPUTATION_REGISTRY).getSummary(agentId, clients, "", "");
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -179,13 +179,11 @@ contract SHAdminTest is Test {
                        REGISTRY-SOURCED WALLET CONFIG
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The first four are read off the registry once, when the factory builds the implementation,
+    /// @dev The first two are read off the registry once, when the factory builds the implementation,
     ///      and every clone shares them as immutables; the module is read per deploy and stored in the
     ///      wallet. Either way, what a wallet reports must match what the registry held.
     function test_walletInheritsAddressesFromRegistry() public view {
         assertEq(wallet.ENTRY_POINT(), registry.ENTRY_POINT());
-        assertEq(wallet.REPUTATION_REGISTRY(), registry.REPUTATION_REGISTRY());
-        assertEq(wallet.IDENTITY_REGISTRY(), registry.IDENTITY_REGISTRY());
         assertEq(address(wallet.REGISTRY()), address(registry));
         assertEq(address(wallet.SH_MODULE()), registry.spendingLimitModule());
     }

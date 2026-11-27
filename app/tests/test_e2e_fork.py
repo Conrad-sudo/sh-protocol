@@ -154,6 +154,12 @@ def new_funded_account(eth: int = 100):
     return acct
 
 
+def _registry_of(sh):
+    """The SHRegistry a wallet reads its config from: where the ERC-8004 addresses and agent id live."""
+    return w3.eth.contract(address=sh.functions.REGISTRY().call(),
+                           abi=db.get_json("./out/SHRegistry.sol/SHRegistry.json")["abi"])
+
+
 def sign_and_send(acct, tx: dict) -> str:
     """Signs a prepared transaction with `acct` and broadcasts it, returning the hash."""
     payload = {
@@ -775,7 +781,7 @@ def test_allowlist(c: TestClient, acct, headers: dict, wallet: str):
               str(suggested))
     check("USDC, on the dashboard, is suggested by name", suggested.get(usdc) == "USDC", str(suggested))
     check("a listed token that isn't on the dashboard is not", dai not in suggested, str(suggested))
-    check("the review registry is suggested", sh.functions.REPUTATION_REGISTRY().call() in suggested)
+    check("the review registry is suggested", _registry_of(sh).functions.REPUTATION_REGISTRY().call() in suggested)
     check("a contact with a plain wallet is not", payee not in suggested)
 
     owner_action(c, headers, acct, "/api/wallet/allowlist/prepare", {"action": "enable", "targets": [usdc]})
@@ -1300,8 +1306,9 @@ def test_bundler_pool(c: TestClient):
 
     sh_abi = db.get_json("./out/SessionHandler.sol/SessionHandler.json")["abi"]
     first_sh = w3.eth.contract(address=wallets[0]["wallet"], abi=sh_abi)
-    reputation = w3.eth.contract(address=first_sh.functions.REPUTATION_REGISTRY().call(), abi=REPUTATION_REGISTRY_ABI)
-    agent_id = first_sh.functions.getAgentId().call()
+    sh_registry = _registry_of(first_sh)
+    reputation = w3.eth.contract(address=sh_registry.functions.REPUTATION_REGISTRY().call(), abi=REPUTATION_REGISTRY_ABI)
+    agent_id = sh_registry.functions.agentId().call()
 
     def effect(item: dict) -> int:
         """The one figure this wallet's transaction should move."""
