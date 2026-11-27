@@ -744,7 +744,7 @@ def test_tools_only_reach_tokens_the_owner_chose():
     db.save_user_network(uid, NETWORK)
     for chain_id in (CHAIN, BSC):
         db.save_custom_token(uid, chain_id, PEPE, "pepe", "Pepe", 18)
-    db.save_contact(uid, "payee", _addr(0xFEE))
+    db.save_contact(uid, "payee", _addr(0xFEE), 1, "0x" + "11" * 65)
     runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
     package = _StandInPackage({"get_position": lambda _args: _POSITION})
     original = (set_everywhere(tools, "get_erc20_tools", lambda _uid: package),
@@ -1321,7 +1321,7 @@ def test_deposits_name_their_pool():
     db.save_user_network(uid, NETWORK)
     for chain_id in (CHAIN, BSC):
         db.save_custom_token(uid, chain_id, PEPE, "pepe", "Pepe", 18)
-    db.save_contact(uid, "payee", _addr(0xFEE))
+    db.save_contact(uid, "payee", _addr(0xFEE), 1, "0x" + "11" * 65)
     runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
     plan = {"calls": [], "summary": {
         # PancakeSwap V2's add_liquidity(_eth) and remove_liquidity(_eth)
@@ -1394,8 +1394,8 @@ def test_send_all_settles_to_the_balance():
     print("\n[10] \"send all\": the balance read back through a float sends exactly the balance")
     uid = db.create_user()
     db.save_user_network(uid, NETWORK)
-    db.save_contact(uid, "payee", _addr(0xFEE))
-    db.save_contact(uid, "sandy", _addr(0x5A))
+    db.save_contact(uid, "payee", _addr(0xFEE), 1, "0x" + "11" * 65)
+    db.save_contact(uid, "sandy", _addr(0x5A), 1, "0x" + "11" * 65)
     runtime = SimpleNamespace(context=SimpleNamespace(user_id=uid, turn_id=1))
     _with_tool_fakes(uid, watched={USDC, WETH})
     held = {"balance": 0, "allowance": 0}

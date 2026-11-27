@@ -36,7 +36,7 @@ from tools.common import (
     _resolve_legs,
     _with_tickers,
 )
-from userop import build_execute_calldata
+from userop import TooManyPayees, build_execute_calldata
 
 
 def _transaction_cost(chain_id: int, quote, fee_wei: int, native_price) -> dict:
@@ -164,7 +164,10 @@ def _quote_executions(
     # The database first, on this thread (see parallel.py).
     w3, chain_id, _ = load_network_config(user_id)
     bundler = _resolve_bundler()
-    session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
+    try:
+        session_handler, entry_point, calldata = build_execute_calldata(user_id, executions)
+    except TooManyPayees as err:
+        raise ToolException(f"This would pay too many people at once: {err}. Split it up.") from err
     resolved = _resolve_legs(user_id, legs or [])
     registry = load_registry(user_id)
     # What the calls carry in the native asset. The fee and the gas come out of the same balance.

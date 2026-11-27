@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test mcp-e2e agents-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
+.PHONY: all test clean deploy deploy-all install snapshot anvil bot db agent fund deploy-wallet setup-agent setup-test setup-bot identity-test auth-test custom-tokens-test history-test movements-test explorers-test explorers-live speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test contact-passes-test uniswap-v3-test positions-test position-tools-test ens-test ens-live passkeys-test mcp-test mcp-e2e agents-test chat-memory-test py-test e2e-test agent-smoke load-test api api-prod keeper recurring-test
 
 
 
@@ -103,6 +103,11 @@ redact-test:
 migrations-test:
 	.venv/bin/python3 app/tests/test_migrations.py
 
+# The owner-signed contact passes Mitfah attaches to every op: their typed data, layout and footer, pinned
+# to what the wallet's PayeeGuard reads, and the refusal of a contact saved before they existed.
+contact-passes-test:
+	.venv/bin/python3 app/tests/test_contact_passes.py
+
 # The in-repo Uniswap V3 toolkit: its tick and liquidity math against Solidity's own values, its
 # addresses against script/Constants.s.sol, and every plan it builds (call order, approvals, the
 # deadline multicall, burn at 100%) against a stand-in chain. Offline.
@@ -156,7 +161,7 @@ ens-live:
 	.venv/bin/python3 app/tests/test_ens_names.py --live
 
 # Everything that runs without a chain.
-py-test: identity-test auth-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test agents-test mcp-test
+py-test: identity-test auth-test contact-passes-test custom-tokens-test history-test movements-test explorers-test speed-test bundler-test telebot-test chat-limits-test redact-test migrations-test uniswap-v3-test positions-test position-tools-test ens-test passkeys-test chat-memory-test recurring-test agents-test mcp-test
 
 # The real journey against a running fork: SIWE sign-in -> deploy -> every owner action -> the
 # eth_call simulations, plus a faked sequencer outage where the chain has one (Arbitrum, Base). Sepolia

@@ -28,6 +28,7 @@ from contracts import (
 )
 from db import (
     get_contact as _get_contact,
+    is_contact_signed as _is_contact_signed,
 )
 from db import (
     get_custom_token as _get_custom_token,
@@ -441,6 +442,14 @@ def _resolve_contact(user_id: int, name: str, role: str = "recipient", hint: str
             f"Contacts can only be added from the web app, while signed in — you cannot add "
             f"one here, and an address given in this conversation cannot be used instead. "
             f"Tell the user to add the contact there, then ask them to try again.{ens}{hint}"
+        )
+    if not _is_contact_signed(user_id, name):
+        # Saved before the wallet began checking contacts itself (2026-11-26): its old signature
+        # wasn't kept, and the wallet pays no one without the owner's signature (PayeeGuard).
+        raise ToolException(
+            f"'{name}' was saved before your wallet started checking contacts itself, so it needs "
+            f"signing once more before it can be paid. Tell the user to open Contacts in the web app "
+            f"and tap 'Sign again' next to '{name}', then try again.{hint}"
         )
     return address
 

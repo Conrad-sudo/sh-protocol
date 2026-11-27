@@ -33,12 +33,10 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from db import (
-    consume_contact_nonce,
     get_refresh_token,
     get_user_by_id,
     revoke_all_refresh_tokens,
     revoke_refresh_token,
-    save_contact_nonce,
     save_refresh_token,
     save_siwe_nonce,
     consume_siwe_nonce,
@@ -56,8 +54,12 @@ ACCESS_TOKEN_TTL_SECS = 15 * 60
 REFRESH_TOKEN_TTL_SECS = 30 * 86_400
 # How long a SIWE nonce stays redeemable. Long enough to read the message and click sign.
 SIWE_NONCE_TTL_SECS = 10 * 60
-# How long the nonce in a contact's typed data stays redeemable. The same reasoning.
-CONTACT_NONCE_TTL_SECS = 10 * 60
+# How far a contact signature's issuedAt may lie behind the server's clock when it is saved: long
+# enough to read the wallet's prompt and sign. It replaces the old single-use nonce (2026-11-26).
+CONTACT_SIGNATURE_MAX_AGE_SECS = 10 * 60
+# How far ahead of the server's clock it may lie (a fast device clock). The wallet itself refuses one
+# more than a day ahead (PayeeGuard.MAX_ISSUE_AHEAD).
+CONTACT_SIGNATURE_MAX_SKEW_SECS = 2 * 60
 # How long a Telegram deep link stays redeemable.
 TELEGRAM_NONCE_TTL_SECS = 10 * 60
 
@@ -360,76 +362,77 @@ def verify_siwe(message: str, signature: str, nonce: str) -> str:
 # ── Signed contacts (EIP-712) ─────────────────────────────────────────────────
 
 
-# The contact list is the allowlist of destinations for the wallet's funds (see the note above the
-# contacts routes in api.py), so adding to it takes the owner wallet's signature over the exact name
-# and address, not just a session. A stolen session alone -- a token lifted by an XSS bug, a browser
-# left signed in -- can then add no payee, and the wallet shows the user the address they are
-# approving.
+# The contact list is the allowlist of destinations for the wallet's funds, and since 2026-11-26 the
+# WALLET enforces it: its PayeeGuard (src/PayeeGuard.sol) lets a passkey's or an agent's op pay only an
+# address the owner signed for, from the signature below. So adding a contact takes the owner wallet's
+# signature over the exact name and address -- free, no transaction -- and Mitfah keeps it to attach to
+# every op that pays that contact (userop.contact_passes). Mitfah can't make one, so even a hacked
+# Mitfah can only pay people the owner signed for.
 #
-# No chainId in the domain: a contact belongs to the account, not to one network, and wallets refuse
-# typed data whose chainId differs from the network they are on. Replay is stopped by the nonce
-# instead, which is single-use and issued for one account, name and address.
-CONTACT_DOMAIN = {"name": "Mitfah", "version": "1"}
+# No chainId and no verifying contract in the domain: a contact belongs to the account, not to one
+# network or wallet, and one signature is valid on every wallet the owner has on every chain (the
+# wallet checks the signer is its owner). Wallets refuse typed data whose chainId differs from the
+# network they are on, which is the other reason. MUST match PayeeGuard: domain {Mitfah, 2} and
+# Contact(string name,address payee,uint64 issuedAt).
+CONTACT_DOMAIN = {"name": "Mitfah", "version": "2"}
 CONTACT_TYPES = {
-    "AddContact": [
+    "Contact": [
         {"name": "name", "type": "string"},
-        {"name": "address", "type": "address"},
-        {"name": "nonce", "type": "string"},
+        {"name": "payee", "type": "address"},
+        {"name": "issuedAt", "type": "uint64"},
     ],
 }
 _DOMAIN_TYPE = [{"name": "name", "type": "string"}, {"name": "version", "type": "string"}]
 
 
-def contact_typed_data(name: str, address: str, nonce: str) -> dict:
+def contact_typed_data(name: str, address: str, issued_at: int) -> dict:
     """
     The EIP-712 typed data the owner signs to save `name` as `address`.
 
     Shaped for viem's signTypedData and eth_signTypedData_v4: the domain's own type is left out of
     `types`, because both derive it from `domain`.
 
-    @param name     The contact name, already normalised (lowercase, trimmed).
-    @param address  The checksummed address.
-    @param nonce    From issue_contact_nonce.
+    @param name       The contact name, already normalised (lowercase, trimmed).
+    @param address    The checksummed address.
+    @param issued_at  Unix seconds; the wallet refuses a pass issued at or before its last void.
     """
     return {
         "domain": CONTACT_DOMAIN,
         "types": CONTACT_TYPES,
-        "primaryType": "AddContact",
-        "message": {"name": name, "address": address, "nonce": nonce},
+        "primaryType": "Contact",
+        "message": {"name": name, "payee": address, "issuedAt": issued_at},
     }
 
 
-def issue_contact_nonce(user_id: int, name: str, address: str) -> str:
+def verify_contact_signature(owner: str, name: str, address: str, issued_at: int, signature: str) -> str:
     """
-    Issues the nonce for one contact's typed data, bound to the account and to that name and address.
+    Checks that the account's owner signed contact_typed_data(name, address, issued_at), recently.
 
-    @return  The nonce, alphanumeric like a SIWE one.
-    """
-    nonce = secrets.token_hex(16)
-    save_contact_nonce(nonce, user_id, name, address, CONTACT_NONCE_TTL_SECS)
-    return nonce
-
-
-def verify_contact_signature(user_id: int, owner: str, name: str, address: str, nonce: str, signature: str):
-    """
-    Checks that the account's owner signed contact_typed_data(name, address, nonce).
-
-    The nonce is burned first, as in verify_siwe, so a captured signature cannot be replayed -- not
-    even to put back a contact the owner has since deleted.
+    Freshness stands in for the old single-use nonce: `issued_at` is part of what was signed, and it
+    must be within CONTACT_SIGNATURE_MAX_AGE_SECS of the server's clock, so a signature captured long
+    ago can't be saved again. (It would still be accepted by the wallet until the owner voids their
+    passes on it: that is what voiding is for.)
 
     @param owner  The account's owner address: the only signer accepted.
-    @raises HTTPException 400 if the nonce is unknown, stale or for another contact, or the
-            signature is not the owner's.
+    @return       The signature, normalised to 0x hex with v as 27 or 28, as it is to be stored.
+    @raises HTTPException 400 if the date is off, or the signature is not the owner's.
     """
-    if not consume_contact_nonce(nonce, user_id, name, address, CONTACT_NONCE_TTL_SECS):
+    now = int(time.time())
+    if not now - CONTACT_SIGNATURE_MAX_AGE_SECS <= issued_at <= now + CONTACT_SIGNATURE_MAX_SKEW_SECS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "That approval has expired or was for a different contact. Please try again.",
+            "That approval has expired, or its date is wrong. Please try again.",
         )
-    typed = contact_typed_data(name, address, nonce)
+    typed = contact_typed_data(name, address, issued_at)
     full = {**typed, "types": {"EIP712Domain": _DOMAIN_TYPE, **typed["types"]}}
     try:
-        signer = Account.recover_message(encode_typed_data(full_message=full), signature=signature)
+        raw = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
+        if len(raw) != 65:
+            raise ValueError("not 65 bytes")
+        # Some wallets give v as 0/1; the wallet's ecrecover wants 27/28.
+        if raw[64] < 27:
+            raw = raw[:64] + bytes([raw[64] + 27])
+        signer = Account.recover_message(encode_typed_data(full_message=full), signature=raw)
     except Exception:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not verify that signature")
     if signer.lower() != owner.lower():
@@ -437,3 +440,4 @@ def verify_contact_signature(user_id: int, owner: str, name: str, address: str, 
             status.HTTP_400_BAD_REQUEST,
             f"That was signed by {signer}, not by your wallet's owner {owner}.",
         )
+    return "0x" + raw.hex()

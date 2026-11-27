@@ -193,7 +193,7 @@ def test_owner_transactions_are_described_from_their_calldata():
     """
     print("\n[1] owner transactions are described from their own calldata")
     user = _create(OWNER)
-    db.save_contact(user, "sam", SAM)
+    db.save_contact(user, "sam", SAM, 1, "0x" + "11" * 65)
     db.save_custom_token(user, CHAIN, PEPE, "pepe", "Pepe", 6)
     w3 = FakeW3()
 

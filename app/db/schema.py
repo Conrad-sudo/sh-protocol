@@ -541,6 +541,27 @@ def _migrate_agents(db: sqlite3.Connection):
     db.commit()
 
 
+def _migrate_contact_passes(db: sqlite3.Connection):
+    """
+    Keeps each contact's owner signature (2026-11-26): the wallet itself now checks it (PayeeGuard), so
+    a passkey's or an agent's op may only pay an address the owner signed for. `signature` is the
+    owner's EIP-712 signature over Contact(name, payee, issuedAt) (auth.contact_typed_data), 65 bytes
+    as 0x hex, and `issued_at` its issuedAt. Both NULL for a contact saved before this: it was signed
+    in the old AddContact form, which the wallet doesn't read and wasn't kept, so it must be signed
+    again before it can be paid.
+
+    The contact nonces go: the signed issuedAt, which the server holds to its own clock when saving,
+    does their job, and a pass signed once has to stay usable on every chain.
+    """
+    columns = [row[1] for row in db.execute("PRAGMA table_info(contacts)").fetchall()]
+    if "issued_at" not in columns:
+        db.execute("ALTER TABLE contacts ADD COLUMN issued_at INTEGER")
+    if "signature" not in columns:
+        db.execute("ALTER TABLE contacts ADD COLUMN signature TEXT")
+    db.execute("DROP TABLE IF EXISTS contact_nonces")
+    db.commit()
+
+
 def _create_schema(db: sqlite3.Connection):
     """
     Every table and index, as they stood when the migrations were numbered (2026-10-08). Frozen
@@ -849,6 +870,7 @@ MIGRATIONS = (
     _migrate_ai_apps,                # 11: AI apps over MCP, and passkey sign-in
     _migrate_personal_tokens,        # 12: personal access tokens for /mcp
     _migrate_agents,                 # 13: trading agents, and which agent made a trade
+    _migrate_contact_passes,         # 14: each contact's owner signature, which the wallet checks
 )
 
 

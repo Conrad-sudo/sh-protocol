@@ -459,10 +459,31 @@ def resolve_harness_user() -> int:
     raise SystemExit("Set APP_USER_ID (or a linked TELEGRAM_CHAT_ID) to say which account to deploy for.")
 
 
+def save_signed_test_contact(user_id: int, chain_name: str, name: str, address: str) -> None:
+    """
+    Saves a contact signed by this network's deployer key, which owns the wallet the harness deploys:
+    the wallet pays only contacts its owner signed for (PayeeGuard), so an unsigned one would be
+    unpayable. Skipped, with a note, when the key isn't set.
+    """
+    from eth_account import Account
+
+    import auth
+
+    key = os.getenv(_private_key_env(chain_name)) or ""
+    if not key:
+        print(f"[harness] no {_private_key_env(chain_name)}; not saving the test contact {name}")
+        return
+    issued_at = int(time.time())
+    typed = auth.contact_typed_data(name, address, issued_at)
+    signature = Account.sign_typed_data(key, typed["domain"], typed["types"], typed["message"]).signature.hex()
+    save_contact(user_id=user_id, name=name, address=address, issued_at=issued_at,
+                 signature="0x" + signature.removeprefix("0x"))
+
+
 if __name__ == "__main__":
     user_id = resolve_harness_user()
-    save_contact(user_id=user_id,name="tim",address="0x9f4d8D3f66C47c75b95325f01861d1643825Bffc")
     network = sys.argv[1] if len(sys.argv) > 1 else "anvil"
+    save_signed_test_contact(user_id, network, "tim", "0x9f4d8D3f66C47c75b95325f01861d1643825Bffc")
     # One transaction. add_default_session() and trust_default_spenders() are no longer part of the
     # happy path — deployWallet seeds both — and are kept above only as recovery/re-grant helpers.
     deploy(user_id=user_id, network=network)

@@ -2,23 +2,40 @@
 The contact list: the only destinations the assistant may pay, written only by the owner.
 """
 import logging
+import time
 
 from ens.exceptions import InvalidName
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from web3 import Web3
+from web3.exceptions import TimeExhausted, TransactionNotFound
+from web3.logs import DISCARD
 
 import auth
 import ens_names
 from auth import get_current_user
 from db import (
+    add_transaction,
     delete_contact,
+    get_json,
     get_all_contacts,
     get_contact,
     save_contact,
 )
 from redact import redact
-from routes.deps import _require_owner, limiter
+from routes.deps import (
+    CONFIRM_POLL_TIMEOUT_SECS,
+    _failed_tx_detail,
+    _load_wallet_for_chain,
+    _require_owner,
+    _resolve_chain,
+    _tx_seen,
+    limiter,
+)
+from routes.owner import TxConfirmRequest, _prepare_owner_tx
+
+# The wallet's spending-limit module, where an owner voids their contact passes.
+LIMIT_MODULE_ABI_PATH = "./out/SpendingLimitModule.sol/SpendingLimitModule.json"
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -56,10 +73,15 @@ class ContactRequest(BaseModel):
     address: str
 
 
-class SignedContactRequest(ContactRequest):
-    """Body of POST /api/contacts: the contact, and the owner's signature over its typed data."""
+class SignedContactRequest(BaseModel):
+    """
+    Body of POST /api/contacts: the message of POST /api/contacts/prepare's typed data, as signed, and
+    the owner's signature over it.
+    """
 
-    nonce: str = Field(max_length=64)
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[^/\\\x00-\x1f]+$")
+    payee: str
+    issuedAt: int = Field(ge=0, lt=2**64)
     signature: str = Field(max_length=200)
 
 
@@ -139,15 +161,15 @@ def prepare_contact(request: Request, req: ContactRequest, user_id: int = Depend
     Checks a contact and returns the EIP-712 typed data the owner wallet signs to save it.
 
     Checked first, so a name or address that would be refused fails before the wallet is asked to
-    sign anything. The typed data carries the name and address exactly as they will be stored, and a
-    nonce issued for this account and this contact alone.
+    sign anything. The typed data carries the name and address exactly as they will be stored, dated
+    now: the wallet accepts the signature on every chain, until the owner voids their passes there.
 
     @return  {"domain", "types", "primaryType", "message"}, for viem's signTypedData as it is.
     """
-    # An account with no owner could never produce the signature: refuse before issuing a nonce.
+    # An account with no owner could never produce the signature: refuse before asking for one.
     _require_owner(user_id)
     name, address = _normalise_contact(req)
-    return auth.contact_typed_data(name, address, auth.issue_contact_nonce(user_id, name, address))
+    return auth.contact_typed_data(name, address, int(time.time()))
 
 
 @router.post("/api/contacts", status_code=status.HTTP_201_CREATED)
@@ -156,15 +178,19 @@ def create_contact(req: SignedContactRequest, user_id: int = Depends(get_current
     Saves or updates a contact for the signed-in account, given the owner's signature over it.
     See the note above on why this is here, and why it takes a signature and not just a session.
 
-    @param req  The contact, the nonce from POST /api/contacts/prepare, and the owner wallet's
-                EIP-712 signature over that typed data.
+    The signature is kept: Mitfah attaches it to every op that pays this contact, and the wallet pays
+    no one without one (PayeeGuard). Saving an existing name again (to re-sign it, or to give it a new
+    address) replaces the old signature.
+
+    @param req  The typed data's message as signed (name, payee, issuedAt), and the owner wallet's
+                EIP-712 signature over it.
     @return     The stored contact, with the address in checksummed form.
     """
     owner = _require_owner(user_id)
-    name, address = _normalise_contact(req)
-    auth.verify_contact_signature(user_id, owner, name, address, req.nonce, req.signature)
-    save_contact(user_id, name, address)
-    return {"name": name, "address": address}
+    name, address = _normalise_contact(ContactRequest(name=req.name, address=req.payee))
+    signature = auth.verify_contact_signature(owner, name, address, req.issuedAt, req.signature)
+    save_contact(user_id, name, address, req.issuedAt, signature)
+    return {"name": name, "address": address, "signed": True, "issued_at": req.issuedAt}
 
 
 @router.get("/api/contacts")
@@ -188,3 +214,93 @@ def remove_contact(name: str, user_id: int = Depends(get_current_user)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"'{name}' is not a saved contact")
     delete_contact(user_id, name)
     return {"status": "deleted", "name": name}
+
+
+# ── Cancelling old contact signatures ─────────────────────────────────────────
+#
+# A signature can't be taken back, and deleting a contact here only stops Mitfah from attaching it: a
+# copy of it (in a backup of wallet.db, say, or a hacked server) still pays that address. So the owner
+# can void, on one network's wallet, every pass issued until now (SpendingLimitModule.voidContactPasses),
+# then sign again the contacts to keep -- free, and good on every network. The void is one transaction
+# from the owner's own wallet, per network.
+
+
+class VoidContactsRequest(BaseModel):
+    """Body of POST /api/contacts/void/prepare."""
+
+    chain_id: int
+
+
+def _limit_module(w3: Web3, wallet):
+    """The wallet's SpendingLimitModule, or a 400 for a wallet whose module has no contact passes."""
+    module = w3.eth.contract(
+        address=wallet.functions.SH_MODULE().call(), abi=get_json(LIMIT_MODULE_ABI_PATH)["abi"]
+    )
+    try:
+        module.functions.contactsVoidedAt(wallet.address).call()
+    except Exception:  # noqa: BLE001 -- a module from before contact passes has no such getter
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This wallet doesn't check contacts on chain yet.")
+    return module
+
+
+@router.post("/api/contacts/void/prepare")
+def prepare_void_contacts(req: VoidContactsRequest, user_id: int = Depends(get_current_user)):
+    """
+    Builds the unsigned voidContactPasses transaction for the owner's wallet on `chain_id`: from when it
+    mines, that wallet pays no contact whose signature is older. Re-sign the contacts to keep after.
+
+    @return  {"tx", "action": "void_contacts", "voided_at"}: `voided_at` is the wallet's current void
+             time (0 if never), so the page can show what changes.
+    """
+    owner = _require_owner(user_id)
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    module = _limit_module(w3, wallet)
+    fn = module.functions.voidContactPasses(wallet.address)
+    voided_at = module.functions.contactsVoidedAt(wallet.address).call()
+    return {**_prepare_owner_tx(w3, owner, fn, req.chain_id), "action": "void_contacts", "voided_at": voided_at}
+
+
+@router.post("/api/contacts/void/confirm")
+def confirm_void_contacts(req: TxConfirmRequest, response: Response, user_id: int = Depends(get_current_user)):
+    """
+    Waits for a void to mine and records it in the History tab. Only a transaction to this wallet's
+    module that voided THIS wallet's passes is accepted. Answers 202 while pending, like
+    /api/wallet/tx/confirm.
+
+    @return  {"status": "confirmed", "tx_hash", "voided_at"}: contacts signed at or before `voided_at`
+             need signing again before this wallet pays them.
+    """
+    _require_owner(user_id)
+    w3, _ = _resolve_chain(req.chain_id)
+    wallet = _load_wallet_for_chain(w3, user_id, req.chain_id)
+    module = _limit_module(w3, wallet)
+
+    if not _tx_seen(w3, req.tx_hash):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": False}
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(req.tx_hash, timeout=CONFIRM_POLL_TIMEOUT_SECS)
+    except (TimeExhausted, TransactionNotFound):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {"status": "pending", "tx_hash": req.tx_hash, "seen": True}
+
+    if receipt["to"] is None or w3.to_checksum_address(receipt["to"]) != module.address:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Transaction {req.tx_hash} was not sent to your wallet's spending-limit module on chain {req.chain_id}.",
+        )
+    if receipt["status"] != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _failed_tx_detail(w3, req.tx_hash, receipt, "That transaction"))
+    events = module.events.ContactPassesVoided().process_receipt(receipt, errors=DISCARD)
+    ours = [e["args"] for e in events if e["args"]["account"] == wallet.address]
+    if not ours:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Transaction {req.tx_hash} didn't void this wallet's contacts.")
+
+    mined_at = w3.eth.get_block(receipt["blockNumber"])["timestamp"]
+    add_transaction(
+        user_id, req.chain_id, wallet.address, "owner", "Cancel every contact signature made before now",
+        "confirmed", tx_hash=req.tx_hash if req.tx_hash.startswith("0x") else f"0x{req.tx_hash}",
+        mined_at=mined_at, direction="none",
+    )
+    return {"status": "confirmed", "tx_hash": req.tx_hash, "voided_at": ours[0]["voidedAt"]}

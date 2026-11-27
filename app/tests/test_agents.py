@@ -490,7 +490,9 @@ def test_reasons():
 def test_schema_and_rename():
     print("\n[10] Migration 13, and renaming an agent")
     conn = db.get_db()
-    check("a fresh database runs every migration", db.schema_version(conn) == len(db.MIGRATIONS) == 13)
+    # 14 since contact passes (2026-11-26); migration 13 is still the agents one.
+    check("a fresh database runs every migration", db.schema_version(conn) == len(db.MIGRATIONS) >= 13)
+    check("migration 13 is still the agents table", db.MIGRATIONS[12].__name__ == "_migrate_agents")
     columns = {r[1] for r in conn.execute("PRAGMA table_info(agents)")}
     check("agents keeps names and accounts",
           {"user_id", "chain_id", "wallet", "address", "name", "seen_epoch", "seen_window", "seen_spent", "relayed"}

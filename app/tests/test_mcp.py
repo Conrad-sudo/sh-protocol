@@ -447,8 +447,8 @@ def test_read_tools(c: TestClient):
     db.save_wallet_address(user_a, 1, "0x00000000000000000000000000000000000000A1")
     db.save_wallet_address(user_a, 42161, "0x00000000000000000000000000000000000000A2")
     db.save_wallet_address(user_b, 11155111, "0x00000000000000000000000000000000000000B1")
-    db.save_contact(user_a, "Sandy", "0x0000000000000000000000000000000000005a01")
-    db.save_contact(user_b, "Bob", "0x00000000000000000000000000000000000000b0")
+    db.save_contact(user_a, "Sandy", "0x0000000000000000000000000000000000005a01", 1, "0x" + "11" * 65)
+    db.save_contact(user_b, "Bob", "0x00000000000000000000000000000000000000b0", 1, "0x" + "11" * 65)
     access_a = connect(c, headers_a)["access_token"]
     access_b = connect(c, headers_b)["access_token"]
     access_n = connect(c, headers_n)["access_token"]

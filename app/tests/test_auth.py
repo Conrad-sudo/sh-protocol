@@ -31,7 +31,7 @@ db.init_db()
 from fastapi.testclient import TestClient   # noqa: E402
 from eth_abi import encode as abi_encode    # noqa: E402
 from eth_account import Account             # noqa: E402
-from eth_account.messages import encode_defunct  # noqa: E402
+from eth_account.messages import encode_defunct, encode_typed_data  # noqa: E402
 from eth_utils import keccak                # noqa: E402
 from web3 import Web3                       # noqa: E402
 
@@ -829,7 +829,7 @@ def test_contacts_are_web_only_and_per_account():
     # Unauthenticated, on every verb.
     check("preparing needs a token", c.post("/api/contacts/prepare", json=contact).status_code == 401)
     check("adding needs a token",
-          c.post("/api/contacts", json={**contact, "nonce": "abc", "signature": "0x00"}).status_code == 401)
+          c.post("/api/contacts", json={"name": "mallory", "payee": ADDR, "issuedAt": 1, "signature": "0x00"}).status_code == 401)
     check("listing needs a token", c.get("/api/contacts").status_code == 401)
     check("deleting needs a token", c.delete("/api/contacts/mallory").status_code == 401)
 
@@ -837,10 +837,14 @@ def test_contacts_are_web_only_and_per_account():
     r = c.post("/api/contacts/prepare", headers=a_headers, json={"name": " Sandy ", "address": ADDR.lower()})
     check("preparing answers the typed data", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
     typed = r.json()
-    check("it is an AddContact for Mitfah",
-          typed["primaryType"] == "AddContact" and typed["domain"] == {"name": "Mitfah", "version": "1"}, str(typed))
+    check("it is a Contact for Mitfah, version 2 (what the wallet's PayeeGuard checks)",
+          typed["primaryType"] == "Contact" and typed["domain"] == {"name": "Mitfah", "version": "2"}, str(typed))
+    check("its type is the wallet's: Contact(string name,address payee,uint64 issuedAt)",
+          typed["types"]["Contact"] == [{"name": "name", "type": "string"}, {"name": "payee", "type": "address"},
+                                        {"name": "issuedAt", "type": "uint64"}], str(typed["types"]))
     check("it carries the name and address as they will be stored",
-          typed["message"]["name"] == "sandy" and typed["message"]["address"] == ADDR, str(typed["message"]))
+          typed["message"]["name"] == "sandy" and typed["message"]["payee"] == ADDR, str(typed["message"]))
+    check("it is dated now", abs(typed["message"]["issuedAt"] - time.time()) < 5, str(typed["message"]))
     check("preparing saves nothing", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])
 
     # A session alone is not enough: no signature, or anybody's but the owner's, saves nothing.
@@ -857,10 +861,20 @@ def test_contacts_are_web_only_and_per_account():
     typed = r.json()
     signature = Account.sign_typed_data(alice.key, typed["domain"], typed["types"], typed["message"]).signature.hex()
     other = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "address": other, "signature": signature})
+    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "payee": other, "signature": signature})
     check("a signature for one address can't save another", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
-    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "signature": signature})
-    check("its nonce was burned by that attempt", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    r = c.post("/api/contacts", headers=a_headers, json={**typed["message"], "issuedAt": typed["message"]["issuedAt"] + 1,
+                                                         "signature": signature})
+    check("nor a date it wasn't signed with", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+
+    # Freshness stands in for the old nonce: a signature dated long ago (captured, say) can't be saved
+    # again, and nor can one dated in the future.
+    for label, offset in [("an hour old", -3600), ("ten minutes ahead", 600)]:
+        message = {**typed["message"], "issuedAt": int(time.time()) + offset}
+        old = Account.sign_typed_data(alice.key, typed["domain"], typed["types"], message).signature.hex()
+        r = c.post("/api/contacts", headers=a_headers, json={**message, "signature": old})
+        check(f"a signature dated {label} -> 400", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
+    check("none of those saved anything", c.get("/api/contacts", headers=a_headers).json()["contacts"] == [])
 
     # The happy path, and the checksumming.
     r = add_contact(c, a_headers, alice, "Sandy", ADDR.lower())
@@ -869,7 +883,18 @@ def test_contacts_are_web_only_and_per_account():
     check("the address is checksummed", r.json()["address"] == ADDR, r.text[:80])
 
     r = c.get("/api/contacts", headers=a_headers)
-    check("it comes back in the list", r.json()["contacts"] == [{"name": "sandy", "address": ADDR}], r.text[:120])
+    listed = r.json()["contacts"]
+    check("it comes back in the list, signed",
+          [(x["name"], x["address"], x["signed"]) for x in listed] == [("sandy", ADDR, True)], r.text[:160])
+    passes = db.get_contact_passes(db.get_user_by_owner_addr(alice.address)["id"])
+    check("its signature is kept, for the wallet's contact pass",
+          len(passes) == 1 and passes[0]["address"] == ADDR and len(bytes.fromhex(passes[0]["signature"][2:])) == 65,
+          str(passes)[:160])
+    message = {"name": "sandy", "payee": ADDR, "issuedAt": passes[0]["issued_at"]}
+    full = {"domain": typed["domain"], "types": {"EIP712Domain": [{"name": "name", "type": "string"},
+            {"name": "version", "type": "string"}], **typed["types"]}, "primaryType": "Contact", "message": message}
+    signer = Account.recover_message(encode_typed_data(full_message=full), signature=passes[0]["signature"])
+    check("and it is the owner's signature over exactly what is stored", signer == alice.address, signer)
 
     # Cross-account isolation, which is the property that matters most here.
     check("another account does not see it", c.get("/api/contacts", headers=b_headers).json()["contacts"] == [])
@@ -907,7 +932,7 @@ def test_contacts_are_web_only_and_per_account():
     # Re-saving a name updates it rather than duplicating -- with a signature of its own.
     add_contact(c, a_headers, alice, "sandy", other)
     contacts = c.get("/api/contacts", headers=a_headers).json()["contacts"]
-    check("re-saving updates in place", contacts == [{"name": "sandy", "address": other}], str(contacts))
+    check("re-saving updates in place", [(x["name"], x["address"]) for x in contacts] == [("sandy", other)], str(contacts))
 
     # The web app deletes by the name run through encodeURIComponent, so a name with spaces and
     # URL characters must survive that round trip.
@@ -923,7 +948,7 @@ def test_contacts_are_web_only_and_per_account():
     check("deleting an unknown contact is a 404",
           c.delete("/api/contacts/sandy", headers=a_headers).status_code == 404)
 
-    # An account with no owner address could never sign, so it is refused before a nonce is issued.
+    # An account with no owner address could never sign, so it is refused before it is asked to.
     r = c.post("/api/contacts/prepare", headers=headers_for_account_without_address(), json=contact)
     check("an account with no owner address can't prepare one -> 403", r.status_code == 403, f"{r.status_code}")
 

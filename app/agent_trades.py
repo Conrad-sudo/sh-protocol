@@ -256,7 +256,8 @@ def prepare_trade(
         # The database first, on this thread (see parallel.py); then the chain, all at once.
         w3, _, _ = load_network_config(user_id)
         bundler = resolve_bundler()
-        wallet, entry_point, calldata = build_execute_calldata(user_id, executions)
+        # No contact passes: the wallet doesn't hold agents to the contacts (the owner's call, 2026-11-27).
+        wallet, entry_point, calldata = build_execute_calldata(user_id, executions, with_passes=False)
         registry = load_registry(user_id)
         module = module_for_wallet(w3, wallet)
         if module is None:

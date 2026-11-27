@@ -103,6 +103,8 @@ from db.contacts import (  # noqa: E402 -- after get_db, which these modules imp
     delete_contact,
     get_all_contacts,
     get_contact,
+    get_contact_passes,
+    is_contact_signed,
     save_contact,
 )
 from db.feedback import (  # noqa: E402 -- after get_db, which these modules import
@@ -127,14 +129,12 @@ from db.seed import (  # noqa: E402 -- after get_db, which these modules import
     seed_reference_data,
 )
 from db.signin import (  # noqa: E402 -- after get_db, which these modules import
-    consume_contact_nonce,
     consume_siwe_nonce,
     consume_telegram_link_nonce,
     get_refresh_token,
     purge_expired_refresh_tokens,
     revoke_all_refresh_tokens,
     revoke_refresh_token,
-    save_contact_nonce,
     save_refresh_token,
     save_siwe_nonce,
     save_telegram_link_nonce,

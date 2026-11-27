@@ -1232,8 +1232,8 @@ def test_read_commands():
         check("/contacts with none: says so, and where to add them",
               replies == ["<b>Base</b>\n\nNo contacts yet. I can only pay people saved in the web app.\n"
                           "Add or remove contacts in the web app (/web)."], str(replies))
-        db.save_contact(user, "Sam", SAM)
-        db.save_contact(user, "<i>eve</i>", SAM)
+        db.save_contact(user, "Sam", SAM, 1, "0x" + "11" * 65)
+        db.save_contact(user, "<i>eve</i>", SAM, 1, "0x" + "11" * 65)
         replies, _ = run(telebot.contacts_cmd, 8001)
         check("with some: each with its address, names escaped",
               replies == [f"<b>Base</b>\n\n• &lt;i&gt;eve&lt;/i&gt;: <code>{SAM}</code>\n• sam: <code>{SAM}</code>\n"
@@ -1266,8 +1266,8 @@ def test_read_commands():
 def test_send_and_swap():
     print("\n[13] /send and /swap are checked before the assistant hears them, in fixed words")
     user = make_user(8101, wallet_chains=(BASE,))
-    db.save_contact(user, "Sam", SAM)
-    db.save_contact(user, "Mary Ann", SAM)
+    db.save_contact(user, "Sam", SAM, 1, "0x" + "11" * 65)
+    db.save_contact(user, "Mary Ann", SAM, 1, "0x" + "11" * 65)
     usdc = _token(0x05DC)
 
     def ask(command, args, chat_id=8101):
@@ -1323,7 +1323,7 @@ def test_send_and_swap():
         check(f"/swap {' '.join(args)!r}: refused", replies == [expected] and asked == [], f"{replies} {asked}")
 
     bsc_user = make_user(8102, wallet_chains=(BSC,))
-    db.save_contact(bsc_user, "Sam", SAM)
+    db.save_contact(bsc_user, "Sam", SAM, 1, "0x" + "11" * 65)
     replies, asked = ask(telebot.send_cmd, ["1", "ETH", "to", "Sam"], chat_id=8102)
     check("on BSC, ETH is not the native coin: refused rather than sent as BNB",
           asked == [] and replies[0].startswith("I don't know a token called ETH on BNB Smart Chain"), str(replies))
@@ -1366,7 +1366,7 @@ def _request_for(link: str) -> dict:
 def test_quote_card():
     print("\n[14] a turn that raised one quote is answered by a card the code writes alone: a passkey link and Cancel")
     user = make_user(8201, wallet_chains=(BASE,))
-    db.save_contact(user, "Sam", SAM)
+    db.save_contact(user, "Sam", SAM, 1, "0x" + "11" * 65)
     action = f"Transfer 10 USDC to {SAM}"
     try:
         quotes_for_turns[:] = [{"action": action, "cost": {"total_usd": 0.3512, "max_total_usd": 0.5}}]

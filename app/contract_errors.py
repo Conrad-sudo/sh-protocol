@@ -25,6 +25,11 @@ _ARTIFACTS = (
     # Trading agents: the owner's add/update/remove are simulated before signing, and an agent's trade
     # is refused by the module's rules in validation or by its own limit in execution.
     "./out/AgentModule.sol/AgentModule.json",
+    # The wallet's contact rule and trade floors (2026-11-26), and the app checks it asks: a payment to
+    # someone the owner never signed for, a trade too far off the oracle, a call to an app with no check.
+    "./out/PayeeGuard.sol/PayeeGuard.json",
+    "./out/AppCheckBase.sol/AppCheckBase.json",
+    "./out/V3PositionManagerCheck.sol/V3PositionManagerCheck.json",
 )
 
 # Error(string): what a plain `require(cond, "message")` reverts with -- Uniswap's router, for one.
@@ -55,6 +60,39 @@ _TOKEN_CAP_SELECTOR = keccak(text="SpendingLimitModule_TokenCapExceeded(address,
 # An agent's trade refused by AgentModule: explained, because an agent's author reads these, and the
 # names alone don't say what to do next.
 _AGENT_LIMIT_SELECTOR = keccak(text="AgentModule_AgentLimitExceeded(uint256,uint256)")[:4]
+_NOT_A_CONTACT_SELECTOR = keccak(text="PayeeGuard_NotAContact(address)")[:4]
+_CALL_NOT_ALLOWED_SELECTOR = keccak(text="PayeeGuard_CallNotAllowed(address,bytes4)")[:4]
+_TRADE_FLOOR_SELECTOR = keccak(text="PayeeGuard_TradeBelowFloor(address,address,int256,int256)")[:4]
+_POOL_PRICE_SELECTOR = keccak(text="PayeeGuard_PoolPriceOff(address,address,int256,int256)")[:4]
+_UNTRUSTED_SPENDER_SELECTOR = keccak(text="PayeeGuard_UntrustedSpender(address,address)")[:4]
+
+
+def _explain_not_a_contact(payee: str) -> str:
+    """Why the wallet refused to pay `payee`, and what the owner can do."""
+    return (
+        f"the wallet refused to send anything to {payee}: it isn't one of the owner's signed contacts. "
+        "The wallet itself checks this, so not even Mitfah can pay someone the owner never signed for. "
+        "The owner can add them in Contacts on the web app (or tap 'Sign again' if they are already listed)."
+    )
+
+
+def _explain_call_not_allowed(target: str) -> str:
+    """Why the wallet refused to let a passkey or an agent call `target`."""
+    return (
+        f"the wallet won't let a passkey or a trading agent call {target}: it only lets them use the apps "
+        "Mitfah has checked (its exchange, wrapped ETH, reviews). The owner can still do it from their own "
+        "wallet."
+    )
+
+
+def _explain_trade_floor(usd_in: int, usd_out: int) -> str:
+    """Why the wallet refused a trade that returns too little at oracle prices."""
+    return (
+        f"the trade would return at most ${usd_out / 10**18:,.2f} for ${usd_in / 10**18:,.2f} at the market "
+        "price, which is more than 12% short. The wallet refuses trades like that. Try a smaller amount, "
+        "allow less slippage, or wait for the pool's price to settle."
+    )
+
 _AGENT_UNCOUNTED_SELECTOR = keccak(text="AgentModule_UncountedToken(address,bytes4)")[:4]
 _AGENT_NATIVE_SELECTOR = keccak(text="AgentModule_NativeNotMetered(address)")[:4]
 
@@ -256,6 +294,32 @@ def describe_revert_data(data: bytes) -> str:
             pass
     if data[:4] == _AGENT_NATIVE_SELECTOR:
         return _AGENT_NATIVE_TEXT
+    if data[:4] == _NOT_A_CONTACT_SELECTOR:
+        try:
+            return _explain_not_a_contact(to_checksum_address(decode(["address"], data[4:])[0]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _CALL_NOT_ALLOWED_SELECTOR:
+        try:
+            return _explain_call_not_allowed(to_checksum_address(decode(["address", "bytes4"], data[4:])[0]))
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _TRADE_FLOOR_SELECTOR:
+        try:
+            _, _, usd_in, usd_out = decode(["address", "address", "int256", "int256"], data[4:])
+            return _explain_trade_floor(usd_in, usd_out)
+        except Exception:  # noqa: BLE001 -- malformed payload; named by its signature below
+            pass
+    if data[:4] == _POOL_PRICE_SELECTOR:
+        return (
+            "the pool's price is more than 12% away from the market price, so the wallet won't deposit "
+            "into it or withdraw from it right now. Try again once the price has settled."
+        )
+    if data[:4] == _UNTRUSTED_SPENDER_SELECTOR:
+        return (
+            "the wallet won't let a passkey or an agent give an allowance to that address: only to the "
+            "exchanges the wallet trusts."
+        )
     if not data:
         return "no revert data"
     # Matched on the leading 4 bytes only: an error's arguments could contain another selector.

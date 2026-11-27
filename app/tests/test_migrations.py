@@ -241,6 +241,28 @@ def test_conversations_leave():
     check("running it again changes nothing", not {"checkpoints", "writes"} & _tables(conn))
 
 
+def test_contact_passes():
+    print("\n[9] migration 14 keeps each contact's signature, and an old contact unsigned")
+    _use_new_file()
+    conn = db.get_db()
+    for version, migrate in enumerate(db.MIGRATIONS[:13], start=1):
+        migrate(conn)
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    conn.execute("INSERT INTO users (id, owner_addr, created_at) VALUES (1, '0xabc', 0)")
+    conn.execute("INSERT INTO contacts (user_id, name, address) VALUES (1, 'sam', '0x00000000000000000000000000000000000000aa')")
+    conn.commit()
+    db.init_db()
+    check("it is the latest version", db.schema_version(conn) == len(db.MIGRATIONS))
+    check("contacts gain issued_at and signature", {"issued_at", "signature"} <= _columns(conn, "contacts"),
+          str(_columns(conn, "contacts")))
+    check("the contact nonces are gone", "contact_nonces" not in _tables(conn))
+    listed = db.get_all_contacts(1)
+    check("the old contact survives, marked unsigned",
+          [(c["name"], c["signed"]) for c in listed] == [("sam", False)], str(listed))
+    check("and gets no pass", db.get_contact_passes(1) == [])
+
+
 if __name__ == "__main__":
     try:
         test_new_database()
@@ -251,6 +273,7 @@ if __name__ == "__main__":
         test_feedback_table()
         test_passkeys()
         test_conversations_leave()
+        test_contact_passes()
     finally:
         if hasattr(db._local, "db"):
             db._local.db.close()

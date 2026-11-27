@@ -25,7 +25,7 @@ from contracts import (
     load_session_handler,
     pack_execution_calldata,
 )
-from db import get_passkeys
+from db import get_contact_passes, get_passkeys
 from tx_sender import ATTEMPT_TIMEOUT_SECS, MAX_FEE_BUMPS
 
 
@@ -59,20 +59,88 @@ def passkey_nonce(op_deadline: int) -> int:
     return ((op_deadline << 144) | secrets.randbits(144)) << 64
 
 
+# ── Contact passes (PayeeGuard) ───────────────────────────────────────────────
+#
+# The wallet pays nobody a passkey or an agent names unless the owner signed for them (src/PayeeGuard.sol).
+# The proof travels at the END of the execute() calldata, after its ABI-encoded arguments, which the
+# contract's decoder ignores:
+#   execute(mode, executionCalldata) || pass_1 .. pass_n || uint8 n || "MFP1"
+# Each pass is payee (20) | issuedAt (8, big-endian) | keccak256(name) (32) | r (32) | s (32) | v (1).
+# These constants MUST match PayeeGuard's.
+PASSES_MAGIC = bytes.fromhex("4d465031")  # "MFP1"
+PASS_LENGTH = 125
+MAX_PASSES = 8
+
+
+class TooManyPayees(ValueError):
+    """An op naming more signed contacts than one op can carry passes for (MAX_PASSES)."""
+
+
+def encode_contact_pass(address: str, issued_at: int, name: str, signature: str) -> bytes:
+    """
+    One contact's pass, as PayeeGuard reads it.
+
+    @param address    The contact's address, as signed.
+    @param issued_at  The issuedAt signed.
+    @param name       The contact's name, as signed (lowercase).
+    @param signature  The owner's 65-byte signature (r | s | v), 0x hex.
+    """
+    sig = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
+    if len(sig) != 65:
+        raise ValueError("a contact signature is 65 bytes")
+    return (
+        bytes.fromhex(address[2:])
+        + int(issued_at).to_bytes(8, "big")
+        + keccak(text=name)
+        + sig
+    )
+
+
+def contact_passes(user_id: int, executions: list[tuple[str, int, bytes]]) -> bytes:
+    """
+    The passes footer for an op that runs `executions`: one pass for every signed contact whose
+    address the calls contain anywhere (as a call's target, or inside its calldata, where a transfer's
+    recipient or a swap's sits), then the count and the magic.
+
+    Matching on the raw address is deliberately generous: a pass the wallet doesn't need costs only its
+    125 bytes of calldata, while a missing one refuses the whole op. What the wallet actually checks is
+    decided on chain, from the calls themselves, never from this list.
+
+    @raises TooManyPayees  If more than MAX_PASSES signed contacts appear in the calls.
+    """
+    haystacks = [bytes.fromhex(target[2:].lower()) + data for target, _value, data in executions]
+    chosen = []
+    for contact in get_contact_passes(user_id):
+        needle = bytes.fromhex(contact["address"][2:].lower())
+        if any(needle in haystack for haystack in haystacks):
+            chosen.append(
+                encode_contact_pass(contact["address"], contact["issued_at"], contact["name"], contact["signature"])
+            )
+    if len(chosen) > MAX_PASSES:
+        raise TooManyPayees(f"one transaction can pay at most {MAX_PASSES} contacts")
+    return b"".join(chosen) + bytes([len(chosen)]) + PASSES_MAGIC
+
+
 def build_execute_calldata(
-    user_id: int, executions: list[tuple[str, int, bytes]]
+    user_id: int, executions: list[tuple[str, int, bytes]], *, with_passes: bool = True
 ) -> tuple[Contract, Contract, str]:
     """
     The bound SessionHandler and EntryPoint, and the SessionHandler.execute(mode, executionCalldata)
-    calldata that carries `executions`.
+    calldata that carries `executions`, followed by the contact passes they need (contact_passes).
 
     One call goes out as an ERC-7579 single execution. Anything longer is a batch, which is not an
     optimisation -- it is the only way an approval can be granted and consumed without tripping
     SpendingLimitModule's no-standing-approval rule, so [approve, spend, (reset)] lands atomically.
 
-    @param user_id     The application user ID.
-    @param executions  [(target_address, value_wei, calldata_bytes), ...], in order.
+    The wallet holds a passkey's op to the contacts the owner signed (PayeeGuard), so a passkey's
+    calldata carries their passes, inside what the passkey signs. An agent's op is not checked (the
+    owner's call, 2026-11-27), so agent trades build without them (`with_passes=False`).
+
+    @param user_id      The application user ID.
+    @param executions   [(target_address, value_wei, calldata_bytes), ...], in order.
+    @param with_passes  Whether to append the contact passes; False for an agent's op.
     @return            (session_handler, entry_point, calldata_hex).
+    @raises TooManyPayees  If the calls name more signed contacts than one op can carry passes for.
     """
     session_handler = load_session_handler(user_id=user_id)
     if len(executions) == 1:
@@ -80,6 +148,8 @@ def build_execute_calldata(
     else:
         mode, execution_calldata = ERC7579_BATCH_CALL_MODE, encode_batch_execution_calldata(executions)
     calldata = session_handler.encode_abi(abi_element_identifier="execute", args=[mode, execution_calldata])
+    if with_passes:
+        calldata += contact_passes(user_id, executions).hex()
     return session_handler, load_entry_point(user_id=user_id), calldata
 
 
