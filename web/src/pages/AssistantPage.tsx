@@ -37,7 +37,7 @@ export function AssistantPage() {
         description={
           mode === 'mobile'
             ? undefined
-            : 'Ask about your wallet, or ask it to pay a contact or swap tokens. It can only spend within your limit.'
+            : 'Ask about your wallet, pay a contact or swap tokens, within your limit.'
         }
         actions={
           view.wallet && (

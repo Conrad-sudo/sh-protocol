@@ -50,32 +50,29 @@ export function WalletHeader({ wallet }: { wallet: WalletState }) {
 
       {wallet.paused && (
         <Message type="error" showIcon className="mf-settings-note">
-          This wallet is paused, so no transactions can go out, including the assistant's. You can still
-          withdraw. Unpause it in Controls when you're ready.
+          This wallet is paused: nothing can go out except your withdrawals. Unpause it in Controls.
         </Message>
       )}
       {!wallet.spending.hook_installed && (
         <Message type="error" showIcon className="mf-settings-note">
-          The spending limit isn't switched on for this wallet, so nothing caps what the assistant can
-          spend. Pause the wallet or revoke its devices in Controls until it's fixed.
+          The spending limit is off, so nothing caps what the assistant spends. Pause the wallet or revoke its
+          devices in Controls.
         </Message>
       )}
       {assistant === 'expiring' && (
         <Message type="warning" showIcon className="mf-settings-note">
-          The assistant's access runs out in {formatTimeLeft(expiresAt - now)}. Renew it in Controls to keep it
-          working.
+          The assistant's access runs out in {formatTimeLeft(expiresAt - now)}. Renew it in Controls.
         </Message>
       )}
       {assistant === 'expired' && (
         <Message type="warning" showIcon className="mf-settings-note">
-          The assistant's access ran out on {formatDate(expiresAt)}, so it can't send anything. Renew it in Controls
-          to switch it back on.
+          The assistant's access ran out on {formatDate(expiresAt)}. Renew it in Controls.
         </Message>
       )}
       {!wallet.is_owner && (
         <Message type="info" showIcon className="mf-settings-note">
-          Changes to this wallet must be signed by its owner, <AddressText address={wallet.owner} />, and your
-          account isn't linked to that address. You can still see and fund the wallet here.
+          Only the owner, <AddressText address={wallet.owner} />, can change this wallet. You can still see and fund
+          it.
         </Message>
       )}
     </GlassPanel>

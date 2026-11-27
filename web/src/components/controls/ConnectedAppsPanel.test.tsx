@@ -169,8 +169,12 @@ describe('ConnectedAppsPanel', () => {
     await user.click(await screen.findByRole('option', { name: 'Read and prepare transactions' }))
     await user.click(screen.getByRole('button', { name: 'Create with passkey' }))
 
-    expect(await screen.findByText(MADE.token)).toBeInTheDocument()
-    expect(screen.getByText(/Copy it now: Mitfah won't show it again/)).toBeInTheDocument()
+    expect(await screen.findByText(/Copy it now: Mitfah won't show it again/)).toBeInTheDocument()
+    // Hidden: only the copy button has it.
+    expect(screen.getByLabelText('Token, hidden')).toBeInTheDocument()
+    expect(screen.queryByText(MADE.token)).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Copy token' }))
+    expect(await navigator.clipboard.readText()).toBe(MADE.token)
     expect(stub.made).toHaveLength(1)
     expect(stub.made[0]).toMatchObject({ name: 'Script', days: 30, access: 'prepare' })
     expect((stub.made[0].credential as { id: string }).id).toBe(CREDENTIAL)
@@ -180,7 +184,7 @@ describe('ConnectedAppsPanel', () => {
     expect(await screen.findByRole('heading', { name: 'Script' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Done' }))
-    expect(screen.queryByText(MADE.token)).toBeNull()
+    expect(screen.queryByLabelText('Token, hidden')).toBeNull()
     expect(screen.getByRole('button', { name: 'Create a token' })).toBeInTheDocument()
   })
 

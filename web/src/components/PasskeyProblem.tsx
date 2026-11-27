@@ -17,7 +17,7 @@ export function PasskeyProblem({ error, onUseExisting, className = 'mf-tx-status
   if (isPasskeyError(error, 'exists')) {
     return (
       <Message type="info" showIcon className={className}>
-        This device already has one of your Mitfah passkeys, perhaps synced from another of your devices.{' '}
+        This device already has one of your Mitfah passkeys, maybe synced from another device.{' '}
         <Button appearance="link" size="sm" onClick={onUseExisting}>
           Use it
         </Button>

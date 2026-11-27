@@ -6,6 +6,7 @@ import type { ConnectedApp, CreatedToken } from '../../api/types'
 import { formatDate } from '../../lib/format'
 import { errorText } from '../../lib/tx'
 import { CopyButton } from '../CopyButton'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { AccessTokenForm, accessText, CreatedTokenNote } from './AccessTokenForm'
@@ -52,12 +53,15 @@ export function ConnectedAppsPanel() {
   }
 
   return (
-    <GlassPanel bordered header={<h2>Connected apps</h2>} className="mf-card">
-      <Text muted size="sm">
-        AI apps you allowed, and tokens you made for your own scripts and agents. They can see your wallets and, if you
-        allow it, prepare transactions; only your passkey sends them. The one exception is a trading agent you added
-        below: it signs its own trades with its own key, within its limit.
-      </Text>
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Connected apps">
+          AI apps you allowed, and tokens you made for your own scripts and agents.
+        </Explained>
+      }
+      className="mf-card"
+    >
       {apps.data && apps.data.length > 0 && (
         <ul className="mf-device-list" aria-label="Connected apps and tokens">
           {apps.data.map(app => (
@@ -96,27 +100,28 @@ export function ConnectedAppsPanel() {
         </Message>
       )}
       <div className="mf-settings-note">
-        <Text size="sm">To connect an app, add Mitfah to it as a custom connector with this address:</Text>
+        <Explained level={3} title="MCP">
+          Add Mitfah as a custom connector in Claude or ChatGPT.
+        </Explained>
         <div className="mf-connect-url">
           <code>{address}</code>
           <CopyButton value={address} label="Address" />
         </div>
       </div>
-      {created ? (
-        <CreatedTokenNote token={created} address={address} onDone={() => setCreated(null)} />
-      ) : creating ? (
-        <AccessTokenForm onCreated={onCreated} onCancel={() => setCreating(false)} />
-      ) : (
-        <div className="mf-settings-note">
-          <Text size="sm">
-            For your own script or agent, or an app that can't sign in to Mitfah, make a token. It works at the same
-            address.
-          </Text>
+      <div className="mf-settings-note">
+        <Explained level={3} title="Access token">
+          Gives an agent access to Mitfah's tools: check balances, send to a contact, swap etc., and have Mitfah send it.
+        </Explained>
+        {created ? (
+          <CreatedTokenNote token={created} address={address} onDone={() => setCreated(null)} />
+        ) : creating ? (
+          <AccessTokenForm onCreated={onCreated} onCancel={() => setCreating(false)} />
+        ) : (
           <Button appearance="ghost" size="sm" className="mf-tx-status" onClick={() => setCreating(true)}>
             Create a token
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </GlassPanel>
   )
 }

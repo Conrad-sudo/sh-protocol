@@ -5,6 +5,7 @@ import type { AllowlistEntry } from '../../api/types'
 import { useAllowlist } from '../../hooks/useAllowlist'
 import type { OwnerTxRequest } from '../../hooks/useOwnerAction'
 import { AddressText } from '../AddressText'
+import { FieldError, FieldLabel } from '../Explained'
 import { QueryError } from '../QueryError'
 import { StatusTag } from '../StatusTag'
 import { TxButton } from '../owner/TxButton'
@@ -36,7 +37,7 @@ export function AllowlistRow(props: ControlPanelProps & { open: boolean }) {
   else if (!targets)
     body = (
       <Text size="sm" muted>
-        This wallet was created before Mitfah could show its list, so its entries can't be shown or changed here.
+        This wallet's list can't be shown or changed here: the wallet is older than this feature.
       </Text>
     )
   else {
@@ -61,7 +62,7 @@ export function AllowlistRow(props: ControlPanelProps & { open: boolean }) {
     <ControlRow
       title="Contract allowlist"
       status={enabled ? <StatusTag tone="success">On</StatusTag> : <StatusTag tone="neutral">Off</StatusTag>}
-      help="When on, the assistant can only call the contracts on this list. Sending to a plain wallet address is never blocked."
+      help="When on, the assistant can only call listed contracts. Sending to a wallet address always works."
       action={
         enabled ? (
           <TxButton
@@ -76,7 +77,7 @@ export function AllowlistRow(props: ControlPanelProps & { open: boolean }) {
                 body: (
                   <Text>
                     The assistant will be able to call any contract again, within its spending limit. The list is
-                    kept, so you can turn it back on later.
+                    kept for later.
                   </Text>
                 ),
                 confirmLabel: 'Turn off',
@@ -162,8 +163,8 @@ function ListedTargets({ tx, locked, start, ask, enabled, targets }: ListProps) 
                         title: 'Remove the last contract?',
                         body: (
                           <Text>
-                            The list stays on, so the assistant won't be able to call any contract until you add one or
-                            turn the list off. Sending to plain wallet addresses still works.
+                            The list stays on, so the assistant can't call any contract until you add one or turn the
+                            list off. Sending to wallet addresses still works.
                           </Text>
                         ),
                         confirmLabel: 'Remove it',
@@ -212,8 +213,7 @@ function SuggestedTargets({
           <Text>The assistant will only be able to call {what}:</Text>
           <EntryList entries={after} />
           <Text className="mf-settings-note">
-            Sending to a plain wallet address isn't affected. Anything else the assistant tries is refused until you
-            add it here.
+            Sending to a wallet address still works. Anything else is refused until you add it here.
           </Text>
         </>
       ),
@@ -252,7 +252,15 @@ function SuggestedTargets({
       <Form.Group controlId="allowlist-suggested">
         {suggested.length > 0 && (
           <>
-            <Form.Label>{enabled ? 'Not on the list yet' : 'Contracts the assistant uses'}</Form.Label>
+            <FieldLabel
+              help={
+                enabled
+                  ? 'Tick what the assistant should be able to call.'
+                  : "Ticked ones are listed when you turn it on. The assistant can't use what you leave off."
+              }
+            >
+              {enabled ? 'Not on the list yet' : 'Contracts the assistant uses'}
+            </FieldLabel>
             <CheckboxGroup
               name="allowlist-suggested"
               aria-labelledby="allowlist-suggested-label"
@@ -266,11 +274,6 @@ function SuggestedTargets({
                 </Checkbox>
               ))}
             </CheckboxGroup>
-            <Form.Text>
-              {enabled
-                ? 'Tick what the assistant should be able to call.'
-                : "Ticked ones are listed when you turn it on. The assistant can't use anything you leave off, such as a token it would send or swap."}
-            </Form.Text>
           </>
         )}
         <div className="mf-inline-field">
@@ -355,7 +358,7 @@ function AddTarget({ wallet, tx, locked, start, ask, enabled, targets }: ListPro
             Add
           </TxButton>
         </div>
-        {problem && <Form.Text className="mf-error-text">{problem}</Form.Text>}
+        {problem && <FieldError>{problem}</FieldError>}
       </Form.Group>
       <TxStatus tx={tx} txKey="allowlist-add-address" />
     </Form>

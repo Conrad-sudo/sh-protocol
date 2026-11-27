@@ -87,7 +87,7 @@ describe('LoginPage', () => {
     await renderRoutes(routes, '/login')
     await connect()
 
-    expect(await screen.findByText('Welcome back.')).toBeInTheDocument()
+    expect(await screen.findByText(/^Welcome back\./)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Sign in with your wallet' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Sign up' })).toBeNull()
@@ -102,12 +102,12 @@ describe('LoginPage', () => {
     await renderRoutes(routes, '/login')
     const user = await connect()
 
-    expect(await screen.findByText(/to prove it's yours\. Signing is free and doesn't move any funds\./)).toBeInTheDocument()
+    expect(await screen.findByText(/to prove it's yours\. It's free and moves no funds\./)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Sign up with your wallet' })).toBeInTheDocument()
     expect(screen.getByText('This address is your Mitfah account.')).toBeInTheDocument()
-    expect(screen.getByText(/the only address that can pause your smart wallet, change its limits or withdraw\./)).toBeInTheDocument()
+    expect(screen.getByText(/Only it can sign in, change your wallet or withdraw\./)).toBeInTheDocument()
     expect(screen.queryByText(/can't recover your account/)).toBeNull()
-    expect(screen.queryByText('Welcome back.')).toBeNull()
+    expect(screen.queryByText(/^Welcome back\./)).toBeNull()
     expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
     expect(screen.queryByText(/First time\? Signing in creates your account\./)).toBeNull()
 

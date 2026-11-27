@@ -8,6 +8,7 @@ import { useLayoutMode } from '../../layouts/useLayoutMode'
 import { formatTokenAmount, isValidAmount } from '../../lib/format'
 import { AddressText } from '../AddressText'
 import { AmountInput } from '../AmountInput'
+import { FieldError, FieldLabel } from '../Explained'
 import { ConfirmModal } from './ConfirmModal'
 import { OwnerWalletBar } from './OwnerWalletBar'
 import { TxButton } from './TxButton'
@@ -96,8 +97,8 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
       </Drawer.Header>
       <Drawer.Body>
         <Text muted>
-          Move funds out of your Mitfah smart wallet. Withdrawals don't count toward the spending limit
-          {wallet.paused ? ', and they work while the wallet is paused.' : '.'}
+          Move funds out of your wallet. Withdrawals don't count toward the limit
+          {wallet.paused ? ' and work while it is paused.' : '.'}
         </Text>
         <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />
 
@@ -137,10 +138,25 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
                 clearResult()
               }}
             />
-            {amountError && <Form.Text className="mf-error-text">{amountError}</Form.Text>}
+            {amountError && <FieldError>{amountError}</FieldError>}
           </Form.Group>
           <Form.Group controlId="withdraw-to">
-            <Form.Label>Send to</Form.Label>
+            <FieldLabel
+              help={
+                toOwner ? (
+                  'Your owner wallet.'
+                ) : (
+                  <>
+                    Not your owner wallet.{' '}
+                    <Button appearance="link" size="sm" onClick={() => setTo(wallet.owner)}>
+                      Send to my owner wallet instead
+                    </Button>
+                  </>
+                )
+              }
+            >
+              Send to
+            </FieldLabel>
             <Input
               id="withdraw-to"
               className="mf-mono"
@@ -153,18 +169,7 @@ export function WithdrawDrawer({ open, onClose, wallet, chain, tx }: WithdrawDra
                 clearResult()
               }}
             />
-            {to !== '' && !toValid ? (
-              <Form.Text className="mf-error-text">Enter a full address starting with 0x.</Form.Text>
-            ) : toOwner ? (
-              <Form.Text>Your owner wallet.</Form.Text>
-            ) : (
-              <Form.Text>
-                Not your owner wallet.{' '}
-                <Button appearance="link" size="sm" onClick={() => setTo(wallet.owner)}>
-                  Send to my owner wallet instead
-                </Button>
-              </Form.Text>
-            )}
+            {to !== '' && !toValid && <FieldError>Enter a full address starting with 0x.</FieldError>}
           </Form.Group>
         </Form>
 

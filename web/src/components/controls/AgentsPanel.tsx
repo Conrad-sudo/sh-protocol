@@ -8,9 +8,11 @@ import { renameAgent } from '../../api/wallet'
 import { useAgentStop } from '../../hooks/useAgentStop'
 import { agentsKey, useAgents } from '../../hooks/useAgents'
 import { agentName } from '../../lib/agents'
+import { describedBy } from '../../lib/fields'
 import { formatDate, formatUsd, formatWindow } from '../../lib/format'
 import { errorText } from '../../lib/tx'
 import { CopyButton } from '../CopyButton'
+import { Explained, FieldError, FieldLabel } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { StatusTag } from '../StatusTag'
@@ -59,18 +61,22 @@ export function AgentsPanel(props: PanelProps) {
   const agents = useAgents(props.wallet.chain_id)
 
   return (
-    <GlassPanel bordered header={<h2>Trading agents</h2>} className="mf-card">
-      <Text muted size="sm">
-        Your own bots and AI agents that trade from this wallet without your passkey. Each signs its trades with its own
-        key and has its own dollar limit, inside the wallet's.
-      </Text>
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Trading agents">
+          Your bots and AI agents that trade from this wallet without your passkey, each with its own key and dollar limit.
+        </Explained>
+      }
+      className="mf-card"
+    >
       {agents.isPending ? (
         <Placeholder.Paragraph rows={2} active />
       ) : agents.isError ? (
         <QueryError what="the trading agents" onRetry={() => void agents.refetch()} className="mf-settings-note" />
       ) : !agents.data.available ? (
         <Text muted className="mf-settings-note">
-          This wallet can't have trading agents: it was created before they existed. A wallet created now can.
+          This wallet was created before trading agents existed. A new wallet can have them.
         </Text>
       ) : (
         <AgentList {...props} agents={agents.data} />
@@ -103,13 +109,9 @@ function AgentList(props: PanelProps & { agents: Agents }) {
         <AddAgent key={agents.agents.map(agent => agent.address).join()} {...props} />
       ) : (
         <Text size="sm" muted className="mf-settings-note">
-          This wallet has {agents.max_agents} agents, the most it can have. Remove one to add another.
+          A wallet can have {agents.max_agents} agents at most. Remove one to add another.
         </Text>
       )}
-      <Text size="sm" muted className="mf-settings-note">
-        An agent reaches Mitfah with a personal access token that can “read and prepare” (Connected apps, above). Revoking
-        the token doesn't stop it, since it holds its own key: removing it does, as do its expiry and pausing the wallet.
-      </Text>
       <StopAgentDialog stop={stop} chainId={wallet.chain_id} />
     </>
   )
@@ -123,11 +125,12 @@ function AgentRow({ wallet, tx, locked, start, ask, agent, onStop }: PanelProps 
   const changeKey = `agent-change:${agent.address}`
   const until = formatDate(agent.valid_until * 1_000)
 
+  const spent = `${formatUsd(agent.spent_usd)} of ${formatUsd(agent.limit_usd)} spent this period.`
   const help = wallet.paused
-    ? `The wallet is paused, so no agent can trade until you unpause it. ${formatUsd(agent.spent_usd)} of ${formatUsd(agent.limit_usd)} spent this period.`
+    ? `Paused with the wallet. ${spent}`
     : agent.active
-      ? `${formatUsd(agent.spent_usd)} of ${formatUsd(agent.limit_usd)} spent this period. Works until ${until}.`
-      : `Stopped working on ${until}. Change it to give it more time, or remove it.`
+      ? `${spent} Works until ${until}.`
+      : `Expired on ${until}. Change it to give it more time, or remove it.`
 
   return (
     <ControlRow
@@ -271,10 +274,10 @@ function ChangeAgentForm({
           disabled={locked}
           onChange={next => setLimit(next === null ? '' : String(next))}
         />
-        {problem && <Form.Text className="mf-error-text">{problem}</Form.Text>}
+        {problem && <FieldError>{problem}</FieldError>}
       </Form.Group>
       <Form.Group controlId={`agent-days-${agent.address}`}>
-        <Form.Label>Works for</Form.Label>
+        <FieldLabel help={`From today. Now it ends ${formatDate(agent.valid_until * 1_000)}.`}>Works for</FieldLabel>
         <SegmentedControl
           aria-label="Works for"
           data={DAY_CHOICES}
@@ -282,7 +285,6 @@ function ChangeAgentForm({
           disabled={locked}
           onChange={next => setDays(Number(next))}
         />
-        <Form.Text>From now. It works until {formatDate(agent.valid_until * 1_000)} as it is.</Form.Text>
       </Form.Group>
       <div className="mf-control-buttons">
         <TxButton tx={tx} txKey={txKey} type="submit" size="sm" appearance="primary" disabled={locked || !!problem || limit === ''}>
@@ -318,9 +320,9 @@ function RenameAgentForm({ wallet, agent, onDone }: { wallet: WalletState; agent
   }
 
   return (
-    <Form className="mf-control-form" onSubmit={save}>
+    <Form layout="vertical" className="mf-control-form" onSubmit={save}>
       <Form.Group controlId={id}>
-        <Form.Label>New name</Form.Label>
+        <FieldLabel help="Only Mitfah keeps it. Nothing changes on the wallet.">New name</FieldLabel>
         <div className="mf-inline-field">
           <Input
             id={id}
@@ -331,7 +333,7 @@ function RenameAgentForm({ wallet, agent, onDone }: { wallet: WalletState; agent
               setValue(next)
               rename.reset()
             }}
-            aria-describedby={`${id}-help-text`}
+            aria-describedby={describedBy(id, rename.isError)}
           />
           <Button type="submit" size="sm" appearance="primary" loading={rename.isPending} disabled={empty}>
             Save
@@ -340,19 +342,18 @@ function RenameAgentForm({ wallet, agent, onDone }: { wallet: WalletState; agent
             Cancel
           </Button>
         </div>
-        {rename.isError ? (
-          <Form.Text className="mf-error-text">Couldn't rename it: {errorText(rename.error)}</Form.Text>
-        ) : (
-          <Form.Text>Only Mitfah keeps the name: nothing changes on the wallet.</Form.Text>
-        )}
+        {rename.isError && <FieldError>Couldn't rename it: {errorText(rename.error)}</FieldError>}
       </Form.Group>
     </Form>
   )
 }
 
-/** A key made in this browser for a new agent: shown once, never sent to Mitfah. */
+/**
+ * A key made in this browser for a new agent: copied once, never shown or sent to Mitfah. The private
+ * key is forgotten (null) once the owner says it is in their agent; the address stays for the form.
+ */
 interface MadeKey {
-  privateKey: `0x${string}`
+  privateKey: `0x${string}` | null
   address: string
 }
 
@@ -366,17 +367,13 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
   const [name, setName] = useState('')
   const [address, setAddress] = useState('')
   const [made, setMade] = useState<MadeKey | null>(null)
-  const [saved, setSaved] = useState(false)
   const [limit, setLimit] = useState('')
   const [days, setDays] = useState(DEFAULT_DAYS)
 
   if (!wallet.spending.native_metered) {
     return (
       <Message type="info" showIcon className="mf-settings-note">
-        <Text>
-          Agents can trade only while the limit counts {native}, so none of it can leave unseen. Count {native} first,
-          then add an agent here.
-        </Text>
+        <Text>Agents need {native} to count toward the limit. Count it first.</Text>
         <TxButton
           tx={tx}
           txKey={NATIVE_KEY}
@@ -409,13 +406,12 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
           : null
   const problem = limitProblem(limit)
   const valid =
-    name.trim() !== '' && address !== '' && limit !== '' && !addressProblem && !problem && (!made || saved)
+    name.trim() !== '' && address !== '' && limit !== '' && !addressProblem && !problem && !made?.privateKey
 
   const makeKey = () => {
     const privateKey = generatePrivateKey()
     const made = { privateKey, address: privateKeyToAccount(privateKey).address }
     setMade(made)
-    setSaved(false)
     setAddress(made.address)
   }
 
@@ -429,16 +425,13 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
       body: (
         <>
           <Text>
-            {who} will be able to trade from this wallet without your passkey, on any exchange or protocol, up to{' '}
-            {formatUsd(Number(limit))} {periodText(wallet)} until {ends}. Its trades count toward the wallet's limit too.
+            {who} can trade without your passkey, on any exchange or protocol, up to {formatUsd(Number(limit))}{' '}
+            {periodText(wallet)} until {ends}. Its trades count toward the wallet's limit too.
           </Text>
           <Text className="mf-settings-note">
-            Funds the wallet already has in other protocols, such as pool positions or deposits, are outside the limit:
-            an agent could take them out anywhere.
+            Funds in other protocols, such as pool positions or deposits, are outside the limit: it could take them out.
           </Text>
-          <Text className="mf-settings-note">
-            Revoking its access token won't stop it. Removing it here will, as will its expiry or pausing the wallet.
-          </Text>
+          <Text className="mf-settings-note">Revoking its access token won't stop it. Removing it here will.</Text>
         </>
       ),
       confirmLabel: 'Add agent',
@@ -452,9 +445,12 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
 
   return (
     <Form fluid className="mf-control-form" disabled={locked} onSubmit={add}>
-      <h3>Add an agent</h3>
+      <Explained level={3} title="Add an agent">
+        It connects with a “read and prepare” access token from Connected apps. To stop it, remove it here: revoking the
+        token isn't enough.
+      </Explained>
       <Form.Group controlId="agent-name">
-        <Form.Label>Agent's name</Form.Label>
+        <FieldLabel help="So you can tell your agents apart. History and Telegram use it.">Agent's name</FieldLabel>
         <Input
           id="agent-name"
           value={name}
@@ -462,16 +458,25 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
           autoComplete="off"
           onChange={setName}
           disabled={locked}
-          aria-describedby="agent-name-help-text"
+          aria-describedby={describedBy('agent-name', nameProblem)}
         />
-        {nameProblem ? (
-          <Form.Text className="mf-error-text">{nameProblem}</Form.Text>
-        ) : (
-          <Form.Text>So you can tell your agents apart. History and Telegram use it.</Form.Text>
-        )}
+        {nameProblem && <FieldError>{nameProblem}</FieldError>}
       </Form.Group>
       <Form.Group controlId="agent-address">
-        <Form.Label>Agent's address</Form.Label>
+        <FieldLabel
+          help={
+            <>
+              The address of your agent's signing key. It needs no funds.{' '}
+              {!made && (
+                <Button appearance="link" size="sm" disabled={locked} onClick={makeKey}>
+                  No key yet? Make one here
+                </Button>
+              )}
+            </>
+          }
+        >
+          Agent's address
+        </FieldLabel>
         <Input
           id="agent-address"
           className="mf-mono"
@@ -485,24 +490,19 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
             if (made && value.trim() !== made.address) setMade(null)
           }}
           disabled={locked}
-          aria-describedby="agent-address-help-text"
+          aria-describedby={describedBy('agent-address', addressProblem)}
         />
-        {addressProblem ? (
-          <Form.Text className="mf-error-text">{addressProblem}</Form.Text>
-        ) : (
-          <Form.Text>
-            The address of the key your agent signs its trades with. It needs no funds: the wallet pays its gas.{' '}
-            {!made && (
-              <Button appearance="link" size="sm" disabled={locked} onClick={makeKey}>
-                No key yet? Make one here
-              </Button>
-            )}
-          </Form.Text>
-        )}
+        {addressProblem && <FieldError>{addressProblem}</FieldError>}
       </Form.Group>
-      {made && <MadeKeyNote made={made} saved={saved} onSaved={setSaved} />}
+      {made?.privateKey && (
+        <MadeKeyNote privateKey={made.privateKey} onSaved={() => setMade({ ...made, privateKey: null })} />
+      )}
       <Form.Group controlId="agent-limit">
-        <Form.Label>Agent's limit per period</Form.Label>
+        <FieldLabel
+          help={`The most it can spend ${periodText(wallet)}, fees included, within the wallet's ${formatUsd(wallet.spending.daily_limit_usd)} limit.`}
+        >
+          Agent's limit per period
+        </FieldLabel>
         <NumberInput
           id="agent-limit"
           prefix="$"
@@ -512,17 +512,10 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
           disabled={locked}
           onChange={next => setLimit(next === null ? '' : String(next))}
         />
-        {problem ? (
-          <Form.Text className="mf-error-text">{problem}</Form.Text>
-        ) : (
-          <Form.Text>
-            The most it can spend {periodText(wallet)}, fees included, inside the wallet's own limit of{' '}
-            {formatUsd(wallet.spending.daily_limit_usd)}.
-          </Form.Text>
-        )}
+        {problem && <FieldError>{problem}</FieldError>}
       </Form.Group>
       <Form.Group controlId="agent-days">
-        <Form.Label>Works for</Form.Label>
+        <FieldLabel help="Give it more time later, or remove it any time.">Works for</FieldLabel>
         <SegmentedControl
           aria-label="Works for"
           data={DAY_CHOICES}
@@ -530,7 +523,6 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
           disabled={locked}
           onChange={next => setDays(Number(next))}
         />
-        <Form.Text>You can give it more time later, or remove it at any time.</Form.Text>
       </Form.Group>
       <TxButton tx={tx} txKey={ADD_KEY} type="submit" appearance="primary" disabled={locked || !valid}>
         Add agent
@@ -541,23 +533,26 @@ function AddAgent({ wallet, tx, locked, start, ask, chain }: PanelProps) {
 }
 
 /**
- * The key just made for a new agent, shown this once with its copy button. It lives only in this
- * page: Mitfah never receives it, and it is gone once the agent is added or the page is left.
+ * The key just made for a new agent, hidden and only copyable. It lives only in this page: Mitfah
+ * never receives it. Once copied and ticked as in the agent, the note closes and the key is forgotten.
  */
-function MadeKeyNote({ made, saved, onSaved }: { made: MadeKey; saved: boolean; onSaved: (saved: boolean) => void }) {
+function MadeKeyNote({ privateKey, onSaved }: { privateKey: `0x${string}`; onSaved: () => void }) {
+  const [copied, setCopied] = useState(false)
   return (
     <Message type="warning" showIcon className="mf-settings-note">
       <Text>
-        Your agent's private key. Copy it into your agent now: Mitfah doesn't keep it and can't show it again. Anyone who
-        has it can trade from this wallet, within the agent's limit, until you remove the agent.
+        Your agent's private key. Copy it into your agent now: Mitfah can't show it again. Whoever has it can trade
+        within the agent's limit.
       </Text>
       <div className="mf-connect-url">
-        <code>{made.privateKey}</code>
-        <CopyButton value={made.privateKey} label="Private key" />
+        {/* Never on the page itself: dots, and the copy button holds the key. */}
+        <code aria-label="Private key, hidden">{'•'.repeat(32)}</code>
+        <CopyButton value={privateKey} label="Private key" onCopied={() => setCopied(true)} />
       </div>
-      <Checkbox checked={saved} onChange={(_value, checked) => onSaved(checked)}>
+      <Checkbox checked={false} disabled={!copied} onChange={(_value, checked) => checked && onSaved()}>
         I've put this key in my agent
       </Checkbox>
+      {!copied && <Text size="sm" muted>Copy the key first.</Text>}
     </Message>
   )
 }

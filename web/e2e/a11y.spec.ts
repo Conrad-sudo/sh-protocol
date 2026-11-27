@@ -174,7 +174,7 @@ test('no serious accessibility problems adding a listed token, or removing one t
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Token contract address').fill(USDT)
   await dialog.getByRole('button', { name: 'Continue' }).click()
-  await expect(dialog.getByText('Pricing is available for USDT.')).toBeVisible()
+  await expect(dialog.getByText('Pricing is available for USDT', { exact: true })).toBeVisible()
   expect(await scan(page)).toEqual([])
 
   await dialog.getByRole('button', { name: 'Back' }).click()

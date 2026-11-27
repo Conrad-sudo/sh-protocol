@@ -1,6 +1,7 @@
 import { Text } from 'rsuite'
 import type { PoolShare, Position } from '../../api/types'
 import { formatPrice, formatTokenAmount } from '../../lib/format'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
@@ -20,15 +21,20 @@ export function PositionsCard({ positions }: { positions: Position[] }) {
   if (positions.length === 0) return null
 
   return (
-    <GlassPanel bordered header={<h2>Liquidity positions</h2>} className="mf-card">
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Liquidity positions">
+          Ask the assistant to collect fees, add to a position or take one out.
+        </Explained>
+      }
+      className="mf-card"
+    >
       <ul className="mf-position-list" aria-label="Liquidity positions">
         {positions.map(position => (
           <PositionItem key={position.id} position={position} />
         ))}
       </ul>
-      <Text size="sm" muted>
-        To collect fees, add to a position or take one out, ask the assistant.
-      </Text>
     </GlassPanel>
   )
 }
@@ -70,7 +76,7 @@ function PositionItem({ position }: { position: Position }) {
       </dl>
       {!position.in_range && (
         <Text size="sm" muted className="mf-position-note">
-          It isn't earning fees until the price comes back into this range.
+          Not earning fees until the price is back in range.
         </Text>
       )}
     </li>

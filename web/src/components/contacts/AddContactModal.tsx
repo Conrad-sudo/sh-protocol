@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getAddress, type Address } from 'viem'
 import { useConnection, useSignTypedData } from 'wagmi'
@@ -10,8 +10,10 @@ import { CONTACTS_KEY } from '../../hooks/useContacts'
 import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { useMe } from '../../hooks/useMe'
 import { addressProblem, looksLikeEnsName, nameProblem, normalizeName } from '../../lib/contacts'
+import { describedBy } from '../../lib/fields'
 import { errorText, isUserRejection } from '../../lib/tx'
 import { AddressText } from '../AddressText'
+import { FieldError, FieldLabel } from '../Explained'
 import { FullAddress } from '../FullAddress'
 import { AccountMismatchBanner } from '../wallet/AccountMismatchBanner'
 import { ConnectDialog } from '../wallet/ConnectDialog'
@@ -110,7 +112,9 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
   const typedAddress = address !== '' && !ensInput && !addressError ? getAddress(address) : null
   const checksummed = ens ? getAddress(ens.address) : typedAddress
   const existing = nameError ? undefined : contacts.find(c => c.name === normalized)
-  const unchanged = !!existing && existing.address === checksummed
+  // The same contact again is a change only when it needs signing again (saved before the wallet checked
+  // contacts itself).
+  const unchanged = !!existing && existing.address === checksummed && existing.signed !== false
   const savedAs = checksummed ? contacts.find(c => c.address === checksummed && c.name !== normalized) : undefined
   const ready = contactName !== '' && !nameError && checksummed !== null && !unchanged
 
@@ -119,45 +123,40 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
     save.reset()
   }
 
-  let nameHelp
-  if (nameError) nameHelp = <Form.Text className="mf-error-text">{nameError}</Form.Text>
-  else if (unchanged) nameHelp = <Form.Text className="mf-error-text">{normalized} already has this address.</Form.Text>
-  else if (name === '' && ens) nameHelp = <Form.Text>Saved as “{normalized}” unless you type another name.</Form.Text>
-  else if (normalized !== '' && normalized !== name.trim()) nameHelp = <Form.Text>Saved as “{normalized}”.</Form.Text>
-  else nameHelp = <Form.Text>The name you'll use with your assistant, as in “send 10 USDC to sam”.</Form.Text>
+  const nameIssue = nameError ?? (unchanged ? `${normalized} already has this address.` : null)
+  let nameHelp: ReactNode = "What you'll call them: “send 10 USDC to sam”."
+  if (!nameIssue && name === '' && ens) nameHelp = `Saved as “${normalized}” unless you type another name.`
+  else if (!nameIssue && normalized !== '' && normalized !== name.trim()) nameHelp = `Saved as “${normalized}”.`
 
-  let addressHelp
-  if (addressError) addressHelp = <Form.Text className="mf-error-text">{addressError}</Form.Text>
-  else if (ens) {
+  const addressIssue = addressError ?? (!ens && looked && lookup.isError ? lookupProblem(address, lookup.error) : null)
+  let addressHelp: ReactNode = 'Their 0x address, or an ENS name such as sam.eth.'
+  if (!addressError && ens) {
     addressHelp = (
-      <Form.Text>
+      <>
         {ens.name} points to <AddressText address={ens.address} />.{savedAs && ` Already saved as ${savedAs.name}.`}
-      </Form.Text>
+      </>
     )
-  } else if (looked && lookup.isError) {
-    addressHelp = <Form.Text className="mf-error-text">{lookupProblem(address, lookup.error)}</Form.Text>
-  } else if (ensInput) addressHelp = <Form.Text>Looking up {address}…</Form.Text>
-  else if (savedAs) addressHelp = <Form.Text>Already saved as {savedAs.name}.</Form.Text>
-  else addressHelp = <Form.Text>Their 0x address, or an ENS name such as sam.eth.</Form.Text>
+  } else if (!addressIssue && ensInput) addressHelp = `Looking up ${address}…`
+  else if (!addressIssue && savedAs) addressHelp = `Already saved as ${savedAs.name}.`
 
   const fields = (
     <>
       <Form.Stack fluid>
         <Form.Group controlId="contact-name">
-          <Form.Label>Name</Form.Label>
+          <FieldLabel help={nameHelp}>Name</FieldLabel>
           <Input
             id="contact-name"
             autoComplete="off"
             spellCheck={false}
             value={name}
             onChange={change(setName)}
-            aria-describedby="contact-name-help-text"
-            aria-invalid={!!nameError || unchanged}
+            aria-describedby={describedBy('contact-name', nameIssue)}
+            aria-invalid={!!nameIssue}
           />
-          {nameHelp}
+          {nameIssue && <FieldError>{nameIssue}</FieldError>}
         </Form.Group>
         <Form.Group controlId="contact-address">
-          <Form.Label>Address</Form.Label>
+          <FieldLabel help={addressHelp}>Address</FieldLabel>
           <Input
             id="contact-address"
             className="mf-mono"
@@ -166,10 +165,10 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
             spellCheck={false}
             value={address}
             onChange={change(value => setAddress(value.trim()))}
-            aria-describedby="contact-address-help-text"
-            aria-invalid={!!addressError || (looked && lookup.isError)}
+            aria-describedby={describedBy('contact-address', addressIssue)}
+            aria-invalid={!!addressIssue}
           />
-          {addressHelp}
+          {addressIssue && <FieldError>{addressIssue}</FieldError>}
         </Form.Group>
       </Form.Stack>
       {existing && !unchanged && (
@@ -206,13 +205,13 @@ export function AddContactModal({ open, onClose, contacts, onSaved }: AddContact
       )}
       {review.ens ? (
         <Message type="warning" showIcon>
-          This is where {review.ens} points today. Make sure it's the right name: scammers register look-alike
-          names. If {review.ens} is pointed somewhere else later, this contact keeps this address.
+          This is where {review.ens} points today. Check the name: scammers register look-alikes. If it changes later,
+          this contact keeps this address.
         </Message>
       ) : (
         <Message type="warning" showIcon>
-          Please check {review.contact.name}'s address carefully and make sure all characters match.
-          Scam addresses often match only the first and last few characters.
+          Check every character of {review.contact.name}'s address. Scam addresses often match only the first and
+          last few.
         </Message>
       )}
       {owner && <SignerBar owner={owner} />}

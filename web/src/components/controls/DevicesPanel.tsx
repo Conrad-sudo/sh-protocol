@@ -15,11 +15,13 @@ import {
   useRegistrationOptions,
 } from '../../hooks/usePasskeys'
 import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS } from '../../lib/assistant'
+import { describedBy } from '../../lib/fields'
 import { limitApplies } from '../../lib/spending'
 import { formatDate, formatTimeLeft, formatUsd, formatWindow } from '../../lib/format'
 import { DEVICE_NAME_MAX, defaultDeviceName, deviceNameProblem, passkeysSupported } from '../../lib/passkey'
 import { errorText } from '../../lib/tx'
 import { chainName } from '../../wallet/chains'
+import { Explained, FieldError, FieldLabel } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { PasskeyProblem } from '../PasskeyProblem'
 import { QueryError } from '../QueryError'
@@ -41,8 +43,8 @@ function grantText(wallet: WalletState, who: string, renewing: boolean) {
   // A wallet that counts nothing has no spending limit to quote, whatever figure it holds.
   const upTo = limitApplies(wallet.spending) ? `up to ${formatUsd(limit)} every ${period}` : 'with no spending limit'
   const text = renewing
-    ? `${who} keeps approving the assistant's payments from this wallet for another ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
-    : `${who} will be able to approve the assistant's payments from this wallet for ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
+    ? `${who} keeps approving the assistant's payments for another ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
+    : `${who} can approve the assistant's payments for ${ASSISTANT_KEY_DAYS} days, until ${until}, ${upTo}.`
   return { text, until }
 }
 
@@ -83,13 +85,17 @@ export function DevicesPanel(props: ControlPanelProps) {
   const hereOnWallet = devicePasskey !== null && onWallet.has(devicePasskey.key_id)
 
   return (
-    <GlassPanel bordered header={<h2>Devices</h2>} className="mf-card">
-      <Text muted size="sm" className="mf-devices-intro">
-        {session.keys.length === 0
-          ? "No device can approve payments from this wallet yet, so the assistant can't send anything. "
-          : `${live} of ${session.max_keys} devices can approve payments. `}
-        Each device approves the assistant's payments with its own passkey: Face ID, a fingerprint or its PIN.
-      </Text>
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Devices">
+          {session.keys.length === 0
+            ? "Approve the assistant's payments with a passkey. None yet, so the assistant can't send anything."
+            : `Approve the assistant's payments with a passkey: Face ID, fingerprint or PIN. ${live} of ${session.max_keys} in use.`}
+        </Explained>
+      }
+      className="mf-card"
+    >
       {session.keys.length + others.length > 0 && (
         <ul className="mf-device-list" aria-label="Devices">
           {session.keys.map(key => (
@@ -130,11 +136,11 @@ function DeviceRow({ wallet, tx, locked, start, ask, sessionKey, here }: Control
   const revokeKey = `device-revoke:${keyId}`
 
   const help = !known
-    ? "Added to this wallet outside Mitfah, so it can't approve the assistant's payments here. Revoke it if you don't recognise it."
+    ? "Added outside Mitfah, so it can't approve payments here. Revoke it if you don't know it."
     : {
         active: `Approves payments until ${formatDate(until)}.`,
-        expiring: `Stops approving payments in ${formatTimeLeft(until - now)}. Renew it to keep it working.`,
-        expired: `Stopped approving payments on ${formatDate(until)}. Renew it to use it again.`,
+        expiring: `Expires in ${formatTimeLeft(until - now)}. Renew it to keep it.`,
+        expired: `Expired on ${formatDate(until)}. Renew it to use it again.`,
       }[state]
 
   const renew = () =>
@@ -242,9 +248,9 @@ function RenameForm({ keyId, current, onDone }: { keyId: string; current: string
   }
 
   return (
-    <Form className="mf-control-form" onSubmit={save}>
+    <Form layout="vertical" className="mf-control-form" onSubmit={save}>
       <Form.Group controlId={id}>
-        <Form.Label>New name</Form.Label>
+        <FieldLabel help="Shown on every network.">New name</FieldLabel>
         <div className="mf-inline-field">
           <Input
             id={id}
@@ -255,7 +261,7 @@ function RenameForm({ keyId, current, onDone }: { keyId: string; current: string
               setValue(next)
               rename.reset()
             }}
-            aria-describedby={`${id}-help-text`}
+            aria-describedby={describedBy(id, problem || rename.isError)}
             aria-invalid={!!problem}
           />
           <Button type="submit" size="sm" appearance="primary" loading={rename.isPending} disabled={!!problem}>
@@ -266,11 +272,9 @@ function RenameForm({ keyId, current, onDone }: { keyId: string; current: string
           </Button>
         </div>
         {problem ? (
-          <Form.Text className="mf-error-text">{problem}</Form.Text>
-        ) : rename.isError ? (
-          <Form.Text className="mf-error-text">Couldn't rename it: {errorText(rename.error)}</Form.Text>
+          <FieldError>{problem}</FieldError>
         ) : (
-          <Form.Text>The name shows wherever this device's passkey does, on every network.</Form.Text>
+          rename.isError && <FieldError>Couldn't rename it: {errorText(rename.error)}</FieldError>
         )}
       </Form.Group>
     </Form>
@@ -298,8 +302,8 @@ function OtherDeviceRow({ wallet, tx, locked, ask, passkey, full }: ControlPanel
       status={<StatusTag>Not on this wallet</StatusTag>}
       help={
         full
-          ? `This wallet already trusts ${wallet.session.max_keys} devices, the most it can. Revoke one to add ${name}.`
-          : `A passkey registered to your account on ${registered}. Add it to let it approve payments on ${chainName(wallet.chain_id)}, or remove it if you don't recognise it.`
+          ? `A wallet can have ${wallet.session.max_keys} devices at most. Revoke one to add ${name}.`
+          : `Registered to your account on ${registered}. Add it to approve payments on ${chainName(wallet.chain_id)}, or remove it if you don't know it.`
       }
       action={
         <div className="mf-control-buttons">
@@ -317,10 +321,7 @@ function OtherDeviceRow({ wallet, tx, locked, ask, passkey, full }: ControlPanel
                 body: (
                   <>
                     <Text>{grantText(wallet, name, false).text}</Text>
-                    <Text>
-                      Only add it if you registered this passkey yourself, on {registered}. If you don't recognise it,
-                      remove it instead.
-                    </Text>
+                    <Text>Only add it if you made this passkey yourself, on {registered}. Otherwise, remove it.</Text>
                   </>
                 ),
                 confirmLabel: 'Add device',
@@ -408,12 +409,10 @@ function AddThisDevice({
 
   const cannot = needsPasskey && !supported
   let help
-  if (cannot) help = "This browser can't make passkeys, so it can't approve payments. Add a phone or computer that can."
-  else if (full)
-    help = `This wallet already trusts ${wallet.session.max_keys} devices, the most it can. Revoke one to add this device.`
-  else if (devicePasskey)
-    help = `This device's passkey, “${devicePasskey.device_name}”, can approve payments here once your owner wallet adds it on ${network}.`
-  else help = `Create a passkey on this device, then your owner wallet adds it to this wallet on ${network}.`
+  if (cannot) help = "This browser can't make passkeys. Use a phone or computer that can."
+  else if (full) help = `A wallet can have ${wallet.session.max_keys} devices at most. Revoke one to add this one.`
+  else if (devicePasskey) help = `Your owner wallet adds this device's passkey, “${devicePasskey.device_name}”, on ${network}.`
+  else help = `Makes a passkey here, then your owner wallet adds it on ${network}.`
 
   return (
     <ControlRow
@@ -434,9 +433,9 @@ function AddThisDevice({
       }
     >
       {needsPasskey && !cannot && !full && (
-        <Form className="mf-control-form" onSubmit={add}>
+        <Form layout="vertical" className="mf-control-form" onSubmit={add}>
           <Form.Group controlId="device-name">
-            <Form.Label>Name for this device</Form.Label>
+            <FieldLabel help="So you can tell your devices apart.">Name for this device</FieldLabel>
             <Input
               id="device-name"
               className="mf-device-name"
@@ -445,14 +444,10 @@ function AddThisDevice({
               autoComplete="off"
               disabled={preparing}
               onChange={setName}
-              aria-describedby="device-name-help-text"
+              aria-describedby={describedBy('device-name', nameProblem)}
               aria-invalid={!!nameProblem}
             />
-            {nameProblem ? (
-              <Form.Text className="mf-error-text">{nameProblem}</Form.Text>
-            ) : (
-              <Form.Text>So you can tell your devices apart. You can rename it later.</Form.Text>
-            )}
+            {nameProblem && <FieldError>{nameProblem}</FieldError>}
           </Form.Group>
         </Form>
       )}
@@ -477,10 +472,7 @@ function AlsoAdd({ passkey, wallet, disabled }: { passkey: Passkey; wallet: Wall
 
   return (
     <section className="mf-also-add" aria-label="Add on your other wallets">
-      <Text>
-        Also let “{passkey.device_name}” approve payments from your other wallets? Each needs one signature in your
-        wallet, on its own network.
-      </Text>
+      <Text>Also add “{passkey.device_name}” to your other wallets? One signature each.</Text>
       <ul className="mf-token-list">
         {chains.map(chainId => (
           <li key={chainId}>
@@ -569,7 +561,7 @@ function RevokeAll({ wallet, tx, locked, start }: ControlPanelProps) {
   return (
     <ControlRow
       title="Revoke every device"
-      help="Every device stops approving payments at once, so the assistant can't send anything until you add one again. Your owner wallet keeps full control."
+      help="Stops every device at once. The assistant can't send until you add one again."
       action={
         <TxButton
           tx={tx}

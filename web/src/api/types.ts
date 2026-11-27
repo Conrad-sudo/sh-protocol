@@ -452,6 +452,11 @@ export type OwnerAction =
   | { kind: 'agent'; action: 'add'; agent: string; limitUsd: string; days: number; name?: string }
   | { kind: 'agent'; action: 'update'; agent: string; limitUsd: string; days: number }
   | { kind: 'agent'; action: 'remove'; agent: string }
+  /**
+   * Voids, on this network's wallet, every contact signature made until now: the wallet then pays only
+   * contacts signed again afterwards. Sent to the wallet's spending-limit module.
+   */
+  | { kind: 'void-contacts' }
 
 /** One recurring payment, from GET /api/wallet/{chain_id}/recurring. */
 export interface RecurringPayment {
@@ -624,17 +629,35 @@ export interface Contact {
   name: string
   /** Checksummed. */
   address: string
+  /**
+   * Whether Mitfah keeps the owner's signature over it. The wallet itself pays only signed contacts, so
+   * one saved before it checked them (false) needs signing again. Absent on an ENS lookup's answer.
+   */
+  signed?: boolean
+  /** When the signature was made (Unix seconds); null when unsigned. */
+  issued_at?: number | null
 }
 
 /**
  * POST /api/contacts/prepare: the EIP-712 typed data the owner wallet signs to save a contact. The
  * name and address are as they will be stored; the nonce works once, for this contact only.
  */
+/**
+ * What the owner's wallet signs to save a contact (POST /api/contacts/prepare): the wallet's own
+ * PayeeGuard checks this signature before paying anyone, so it is the same on every network.
+ */
 export interface ContactTypedData {
   domain: { name: string; version: string }
-  types: { AddContact: { name: string; type: string }[] }
-  primaryType: 'AddContact'
-  message: { name: string; address: string; nonce: string }
+  types: { Contact: { name: string; type: string }[] }
+  primaryType: 'Contact'
+  message: { name: string; payee: string; issuedAt: number }
+}
+
+/** POST /api/contacts/void/confirm once mined: contacts signed at or before `voided_at` need signing again. */
+export interface VoidContactsResult {
+  status: 'confirmed'
+  tx_hash: string
+  voided_at: number
 }
 
 /** One line of the conversation, from GET /api/chat/history. Tool traffic is never included. */

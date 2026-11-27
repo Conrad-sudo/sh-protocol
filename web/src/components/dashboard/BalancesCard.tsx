@@ -9,6 +9,7 @@ import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { formatTokenAmount } from '../../lib/format'
 import { errorText } from '../../lib/tx'
 import { chainName } from '../../wallet/chains'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 import { AddTokenModal } from './AddTokenModal'
@@ -104,7 +105,15 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
       bordered
       header={
         <div className="mf-section-head mf-card-head">
-          <h2>Balances</h2>
+          <Explained level={2} title="Balances">
+            {[
+              anyListedUnlimited && '“Not limited” tokens have no limit: set one in Controls.',
+              anyCustom && "“No price” tokens can't count in dollars: give one its own limit in Controls.",
+              anyLp && 'LP tokens are your share of a pool; under each is what it holds for you.',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          </Explained>
           <Button
             size="sm"
             appearance="ghost"
@@ -186,23 +195,6 @@ export function BalancesCard({ wallet, chain, tx }: BalancesCardProps) {
           })}
         </tbody>
       </table>
-      {anyListedUnlimited && (
-        <Text size="sm" muted>
-          Tokens marked "Not limited" have no limit. You can count them toward your spending limit, or give them a
-          limit of their own, in Controls.
-        </Text>
-      )}
-      {anyCustom && (
-        <Text size="sm" muted className={anyListedUnlimited ? 'mf-settings-note' : undefined}>
-          Tokens marked "No price" can't count toward your USD limit, because Mitfah has no price for them. You can
-          give one a limit of its own in Controls.
-        </Text>
-      )}
-      {anyLp && (
-        <Text size="sm" muted className={anyListedUnlimited || anyCustom ? 'mf-settings-note' : undefined}>
-          LP tokens are your share of an exchange pool. Under each is what it holds for you right now.
-        </Text>
-      )}
       <AddTokenModal
         // Prefixed: the two dialogs are siblings, and both counters reach the same numbers.
         key={`add-${addKey}`}

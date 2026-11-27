@@ -67,8 +67,8 @@ export function ClearChatButton({ chainId }: { chainId: number }) {
         onClose={() => setOpen(false)}
       >
         <Text>
-          Mitfah will forget this conversation on {chainName(chainId)}, including anything said on Telegram. Your
-          wallet, contacts, limits and transaction history stay as they are.
+          Mitfah forgets this conversation on {chainName(chainId)}, Telegram included. Your wallet, contacts, limits and
+          history stay.
         </Text>
       </ConfirmModal>
     </>

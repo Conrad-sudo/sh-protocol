@@ -3,7 +3,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Message, useToaster } from 'rsuite'
 import { useConnection, useSendTransaction, useSwitchChain } from 'wagmi'
 import { ApiError } from '../api/client'
-import { confirmAgentTx, confirmOwnerTx, confirmRecurringTx, confirmSessionTx, prepareOwnerAction } from '../api/wallet'
+import {
+  confirmAgentTx,
+  confirmOwnerTx,
+  confirmRecurringTx,
+  confirmSessionTx,
+  confirmVoidContactsTx,
+  prepareOwnerAction,
+} from '../api/wallet'
 import type { Agents, OwnerAction, RecurringPayments, SessionBlock, WalletState } from '../api/types'
 import { useAuth } from '../auth/useAuth'
 import {
@@ -61,7 +68,7 @@ interface PendingOwnerTx {
    * `session` for a device's passkey, `recurring` for a recurring payment and `agents` for a trading
    * agent, which have confirm endpoints of their own; absent for the rest.
    */
-  confirmWith?: 'session' | 'recurring' | 'agents'
+  confirmWith?: 'session' | 'recurring' | 'agents' | 'contacts'
   /** An added agent's name, sent with its confirm: kept here so a reload still names it. */
   name?: string
   /** When the wallet handed the hash back (ms). Every wait is measured from it, not from a page visit. */
@@ -101,6 +108,10 @@ async function confirmOnce(pending: PendingOwnerTx): Promise<{
   if (pending.confirmWith === 'agents') {
     const answer = await confirmAgentTx(pending.name ? { ...body, name: pending.name } : body, signal)
     return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true, agents: answer.agents }
+  }
+  if (pending.confirmWith === 'contacts') {
+    const answer = await confirmVoidContactsTx(body, signal)
+    return answer.status === 'pending' ? { mined: false, seen: answer.seen } : { mined: true }
   }
   if (pending.confirmWith !== 'session') {
     const answer = await confirmOwnerTx(body, signal)
@@ -306,6 +317,7 @@ export function useOwnerAction(chainId: number, owner: string) {
       pending = { chainId, txHash, key, success, sentAt: Date.now() }
       if (action.kind === 'session') pending.confirmWith = 'session'
       if (action.kind === 'recurring') pending.confirmWith = 'recurring'
+      if (action.kind === 'void-contacts') pending.confirmWith = 'contacts'
       if (action.kind === 'agent') {
         pending.confirmWith = 'agents'
         if (action.action === 'add' && action.name) pending.name = action.name

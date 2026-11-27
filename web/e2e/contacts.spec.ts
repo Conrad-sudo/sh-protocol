@@ -16,6 +16,8 @@ const NEW = '0x90F79bf6EB2c4f870365E785982E1f101E93b906'
 const LONG_NAME = 'the-landlord-of-the-flat-on-maple-street-who-is-paid-every-month'
 const SEPOLIA = 11155111
 const SIGNATURE = `0x${'cd'.repeat(65)}`
+/** The issuedAt the mock server dates its first typed data with, less one. */
+const ISSUED = 1_800_000_000
 
 interface Contact {
   name: string
@@ -24,11 +26,11 @@ interface Contact {
 
 async function mockServer(page: Page, contacts: Contact[]) {
   let saved = [...contacts]
-  let nonces = 0
-  const posted: (Contact & { nonce: string; signature: string })[] = []
+  let prepared = 0
+  const posted: { name: string; payee: string; issuedAt: number; signature: string }[] = []
   const deleted: string[] = []
   /** The typed data the wallet was asked to sign, as eth_signTypedData_v4 received it. */
-  const signed: { primaryType: string; message: Record<string, string> }[] = []
+  const signed: { primaryType: string; message: Record<string, string | number> }[] = []
 
   await installFakeWallet(page, {
     address: OWNER,
@@ -54,26 +56,26 @@ async function mockServer(page: Page, contacts: Contact[]) {
     }
     if (path === '/api/contacts/prepare' && method === 'POST') {
       const body = request.postDataJSON() as Contact
-      nonces += 1
+      prepared += 1
       return route.fulfill({
         json: {
-          domain: { name: 'Mitfah', version: '1' },
+          domain: { name: 'Mitfah', version: '2' },
           types: {
-            AddContact: [
+            Contact: [
               { name: 'name', type: 'string' },
-              { name: 'address', type: 'address' },
-              { name: 'nonce', type: 'string' },
+              { name: 'payee', type: 'address' },
+              { name: 'issuedAt', type: 'uint64' },
             ],
           },
-          primaryType: 'AddContact',
-          message: { name: body.name.trim().toLowerCase(), address: getAddress(body.address), nonce: `nonce${nonces}` },
+          primaryType: 'Contact',
+          message: { name: body.name.trim().toLowerCase(), payee: getAddress(body.address), issuedAt: ISSUED + prepared },
         },
       })
     }
     if (path === '/api/contacts' && method === 'POST') {
-      const body = request.postDataJSON() as Contact & { nonce: string; signature: string }
+      const body = request.postDataJSON() as { name: string; payee: string; issuedAt: number; signature: string }
       posted.push(body)
-      const contact = { name: body.name, address: body.address }
+      const contact = { name: body.name, address: body.payee, signed: true, issued_at: body.issuedAt }
       saved = [...saved.filter(c => c.name !== body.name), contact]
       return route.fulfill({ status: 201, json: contact })
     }
@@ -114,7 +116,7 @@ test('the contacts list, and adding someone after checking the address', async (
 
   await expect(page.getByRole('heading', { name: 'Contacts', level: 1 })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Your contacts (2)' })).toBeVisible()
-  await expect(page.getByText('Your assistant can only send money to accounts on this list.')).toBeVisible()
+  await expect(page.getByText('Your assistant can only pay accounts on this list.')).toBeVisible()
   await expectTheme(page, testInfo)
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'contacts-list')
@@ -146,9 +148,9 @@ test('the contacts list, and adding someone after checking the address', async (
   await expect(page.getByText('sam saved. Your assistant can now pay them.')).toBeVisible()
   await expect(dialog).toBeHidden()
   expect(signed).toEqual([
-    expect.objectContaining({ primaryType: 'AddContact', message: expect.objectContaining({ name: 'sam', nonce: 'nonce1' }) }),
+    expect.objectContaining({ primaryType: 'Contact', message: expect.objectContaining({ name: 'sam', issuedAt: ISSUED + 1 }) }),
   ])
-  expect(posted).toEqual([{ name: 'sam', address: SAM, nonce: 'nonce1', signature: SIGNATURE }])
+  expect(posted).toEqual([{ name: 'sam', payee: SAM, issuedAt: ISSUED + 1, signature: SIGNATURE }])
   await expect(page.getByRole('heading', { name: 'Your contacts (3)' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Remove sam' })).toBeVisible()
 })
@@ -173,12 +175,12 @@ test('replacing an address and removing a contact both ask first', async ({ page
   await connectWallet(page)
   await dialog.getByRole('button', { name: 'Replace address' }).click()
   await expect(page.getByText("sam's address updated.")).toBeVisible()
-  expect(posted).toEqual([{ name: 'sam', address: NEW, nonce: 'nonce1', signature: SIGNATURE }])
+  expect(posted).toEqual([{ name: 'sam', payee: NEW, issuedAt: ISSUED + 1, signature: SIGNATURE }])
 
   // Remove, with a name that needs encoding in the URL.
   await page.getByRole('button', { name: "Remove o'neil & co" }).click()
   const confirm = page.getByRole('alertdialog')
-  await expect(confirm).toContainText("won't be able to send money to o'neil & co any more")
+  await expect(confirm).toContainText("won't be able to pay o'neil & co any more")
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'contacts-remove')
   await confirm.getByRole('button', { name: 'Remove' }).click()

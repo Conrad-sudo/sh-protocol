@@ -77,7 +77,7 @@ function ContactNames({ contacts, failed }: { contacts: Contact[] | undefined; f
   if (contacts.length === 0) {
     return (
       <Text size="sm" muted>
-        No one yet. Add a contact before asking it to pay someone.
+        No one yet. Add a contact first.
       </Text>
     )
   }

@@ -66,7 +66,7 @@ describe('ConnectPage (the Allow page for AI apps)', () => {
 
     expect(await screen.findByRole('heading', { name: 'Connect Claude?' })).toBeInTheDocument()
     expect(screen.getByText(/can't send anything by itself/)).toBeInTheDocument()
-    expect(screen.getByText(/If someone sent you the link that brought you here, choose Deny/)).toBeInTheDocument()
+    expect(screen.getByText(/If someone sent you this link, choose Deny/)).toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Allow' }))
 
     await waitFor(() => expect(navigation.assign).toHaveBeenCalledWith(APPROVED))

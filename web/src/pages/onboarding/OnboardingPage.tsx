@@ -23,6 +23,7 @@ import type { Chain, Passkey, Token } from '../../api/types'
 import { useSelectedChain } from '../../chain/useSelectedChain'
 import { AddressText } from '../../components/AddressText'
 import { AmountInput } from '../../components/AmountInput'
+import { Explained, FieldError, FieldLabel } from '../../components/Explained'
 import { GlassPanel } from '../../components/Glass'
 import { PageHeader } from '../../components/PageHeader'
 import { PasskeyProblem } from '../../components/PasskeyProblem'
@@ -37,6 +38,7 @@ import { useDevicePasskey, useDevicePasskeyMaker, usePasskeys, useRegistrationOp
 import { useTokens } from '../../hooks/useTokens'
 import { useLayoutMode } from '../../layouts/useLayoutMode'
 import { ASSISTANT_KEY_DAYS, ASSISTANT_KEY_TTL_SECS } from '../../lib/assistant'
+import { describedBy } from '../../lib/fields'
 import { formatUsd, formatWindow, isValidAmount } from '../../lib/format'
 import { DEVICE_NAME_MAX, defaultDeviceName, deviceNameProblem, passkeysSupported } from '../../lib/passkey'
 import { WINDOW_CHOICES } from '../../lib/spending'
@@ -204,17 +206,16 @@ export function OnboardingPage() {
     )
   } else if (!isConnected || !address) {
     body = (
-      <StepBody title="Connect the wallet you signed in with">
-        <Text muted>
-          {owner ? (
+      <StepBody
+        title="Connect the wallet you signed in with"
+        intro={
+          owner && (
             <>
-              Your Mitfah smart wallet will be owned by <AddressText address={owner} />, so it signs the deploy. Connect it
-              to continue.
+              <AddressText address={owner} /> will own your Mitfah wallet, so it signs its creation.
             </>
-          ) : (
-            'Connect the wallet you signed in with to continue.'
-          )}
-        </Text>
+          )
+        }
+      >
         <Button appearance="primary" className="mf-step-action" onClick={() => setConnectOpen(true)}>
           Connect wallet
         </Button>
@@ -288,13 +289,10 @@ export function OnboardingPage() {
   } else if (step === 'fund') {
     const valid = isValidAmount(prefund)
     body = (
-      <StepBody title="Prefund your Mitfah smart wallet">
-        <Text muted>
-          This is your Mitfah smart wallet's starting balance. Your assistant pays for everything from it — payments,
-          swaps and every other transaction, plus their network fees.
-          {draft.countNative || draft.tickers.length > 0 ? ' It can only spend within your limit.' : ''} You can add
-          more or withdraw any time.
-        </Text>
+      <StepBody
+        title="Prefund your Mitfah smart wallet"
+        intro={`Its starting balance. The assistant pays for everything from it, network fees included${draft.countNative || draft.tickers.length > 0 ? ', within your limit' : ''}. Skip to start empty; add funds any time.`}
+      >
         <Form fluid className="mf-auth-form">
           <Form.Group controlId="prefund">
             <Form.Label>Amount to send now</Form.Label>
@@ -326,10 +324,6 @@ export function OnboardingPage() {
             </Button>
           </div>
         </div>
-        <Text size="sm" muted className="mf-settings-note">
-          Skipped, the wallet starts empty: the assistant can't pay for anything until you add funds from the
-          dashboard.
-        </Text>
       </StepBody>
     )
   } else if (step === 'passkey' && chainId !== null) {
@@ -387,10 +381,13 @@ export function OnboardingPage() {
   )
 }
 
-function StepBody({ title, children }: { title: string; children: ReactNode }) {
+/** A step: its title with what it's for beside it, then its fields. */
+function StepBody({ title, intro, children }: { title: string; intro?: ReactNode; children: ReactNode }) {
   return (
     <section aria-label={title}>
-      <h2 className="mf-step-title">{title}</h2>
+      <Explained level={2} title={title} titleClassName="mf-step-title">
+        {intro}
+      </Explained>
       {children}
     </section>
   )
@@ -449,7 +446,9 @@ function LimitsStep({
         </Form.Group>
 
         <Form.Group controlId="tokens">
-          <Form.Label>Tokens that count toward the limit</Form.Label>
+          <FieldLabel help={choosable.length > 0 && 'Unticked tokens can be moved without limit.'}>
+            Tokens that count toward the limit
+          </FieldLabel>
           {tokens.isPending ? (
             <Placeholder.Paragraph rows={2} active />
           ) : tokens.isError ? (
@@ -473,15 +472,12 @@ function LimitsStep({
               onChange={value => onChange({ tickers: value })}
             />
           )}
-          {choosable.length > 0 && (
-            <Form.Text>Tick any token you want limited: one you leave unticked can be moved without limit.</Form.Text>
-          )}
         </Form.Group>
 
         {limited ? (
           <>
             <Form.Group controlId="limit">
-              <Form.Label>Spending limit</Form.Label>
+              <FieldLabel help="The most the assistant can move out per period, in US dollars.">Spending limit</FieldLabel>
               <NumberInput
                 id="limit"
                 prefix="$"
@@ -493,31 +489,21 @@ function LimitsStep({
                   onChange({ limitUsd: value === '' || value === null || Number.isNaN(n) ? null : Math.floor(n) })
                 }}
               />
-              <Form.Text>
-                The most the assistant can move out of your wallet per period, in US dollars, across what counts
-                toward it.
-              </Form.Text>
-              {!limitValid && (
-                <Form.Text className="mf-error-text">Enter a whole number of dollars, at least $1.</Form.Text>
-              )}
+              {!limitValid && <FieldError>Enter a whole number of dollars, at least $1.</FieldError>}
             </Form.Group>
 
             <Form.Group controlId="window">
-              <Form.Label>Period</Form.Label>
+              <FieldLabel help="How often the limit refills.">Period</FieldLabel>
               <SegmentedControl
                 aria-label="Period"
                 data={WINDOW_CHOICES}
                 value={draft.windowSecs}
                 onChange={value => onChange({ windowSecs: Number(value) })}
               />
-              <Form.Text>The limit refills every {formatWindow(draft.windowSecs)}.</Form.Text>
             </Form.Group>
           </>
         ) : (
-          <Text muted>
-            A spending limit applies once something counts toward it. You can skip it for now and set one any time
-            in Controls.
-          </Text>
+          <Text muted>Nothing counts yet, so there's no limit. You can set one later in Controls.</Text>
         )}
       </Form>
       <StepNav onBack={onBack} onNext={onNext} nextDisabled={(limited && !limitValid) || tokens.isPending} />
@@ -650,20 +636,19 @@ function PasskeyStep({
   }
   if (devicePasskey) {
     return (
-      <StepBody title="Your passkey">
-        <Text muted>
-          This device already has a passkey, “{devicePasskey.device_name}”. It will approve each payment the assistant
-          prepares on {chainName(chainId)}.
-        </Text>
+      <StepBody
+        title="Your passkey"
+        intro={`This device's passkey, “${devicePasskey.device_name}”, will approve each payment the assistant prepares on ${chainName(chainId)}.`}
+      >
         <StepNav onBack={onBack} onNext={() => onDone(devicePasskey)} />
       </StepBody>
     )
   }
   return (
-    <StepBody title="Create your passkey">
-      <Text muted>
-        Your passkey approves each payment the assistant prepares, with Face ID, a fingerprint or this device's PIN.
-      </Text>
+    <StepBody
+      title="Create your passkey"
+      intro="It approves each payment the assistant prepares, with Face ID, a fingerprint or this device's PIN. Skip, and the assistant can't send until you add a device in Controls."
+    >
       {passkeys.isError && (
         <QueryError
           what="your passkeys"
@@ -675,7 +660,7 @@ function PasskeyStep({
       {supported ? (
         <Form fluid className="mf-auth-form" onSubmit={create}>
           <Form.Group controlId="device-name">
-            <Form.Label>Name for this device</Form.Label>
+            <FieldLabel help="So you can tell your devices apart.">Name for this device</FieldLabel>
             <Input
               id="device-name"
               value={name}
@@ -683,14 +668,10 @@ function PasskeyStep({
               autoComplete="off"
               disabled={busy}
               onChange={setName}
-              aria-describedby="device-name-help-text"
+              aria-describedby={describedBy('device-name', problem)}
               aria-invalid={!!problem}
             />
-            {problem ? (
-              <Form.Text className="mf-error-text">{problem}</Form.Text>
-            ) : (
-              <Form.Text>So you can tell your devices apart. You can rename it later.</Form.Text>
-            )}
+            {problem && <FieldError>{problem}</FieldError>}
           </Form.Group>
         </Form>
       ) : (
@@ -723,9 +704,6 @@ function PasskeyStep({
           )}
         </div>
       </div>
-      <Text size="sm" muted className="mf-settings-note">
-        Skipped, the wallet is yours alone: the assistant can't send anything until you add a device in Controls.
-      </Text>
     </StepBody>
   )
 }

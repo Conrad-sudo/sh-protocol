@@ -5,6 +5,7 @@ import { useAgents } from '../../hooks/useAgents'
 import { useTokens } from '../../hooks/useTokens'
 import { limitApplies } from '../../lib/spending'
 import { AddressText } from '../AddressText'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { TxButton } from '../owner/TxButton'
@@ -31,7 +32,15 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
   const needsLimit = wallet.spending.daily_limit_usd === 0 && !limitApplies(wallet.spending)
 
   return (
-    <GlassPanel bordered header={<h2>Tokens that count toward the limit</h2>} className="mf-card">
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Tokens that count toward the limit">
+          Tokens marked “No price” can't count. Give them their own limit below.
+        </Explained>
+      }
+      className="mf-card"
+    >
       {/* The token list says which token goes with the native one. Until it's here, WETH would show as
           a token of its own, with a Remove the server refuses. */}
       {tokens.isPending ? (
@@ -95,16 +104,12 @@ export function TokensPanel(props: ControlPanelProps & { chain: Chain | undefine
           </ul>
           {needsLimit && (
             <Text size="sm" muted className="mf-settings-note">
-              Set a spending limit above first. With a $0 limit, anything you count couldn't be spent at all.
+              Set a spending limit first: with $0, a counted token can't be spent at all.
             </Text>
           )}
           <AddToken key={watched.length} {...props} needsLimit={needsLimit} />
         </>
       )}
-      <Text size="sm" muted className="mf-settings-note">
-        Tokens marked "No price" on the Dashboard can't count toward this limit, because Mitfah has no price for
-        them. They can have a limit of their own below. A token you count here also shows on the Dashboard.
-      </Text>
     </GlassPanel>
   )
 }

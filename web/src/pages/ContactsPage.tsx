@@ -14,16 +14,21 @@ import { GlassLayer } from '../components/Glass'
 import { ConfirmModal } from '../components/owner/ConfirmModal'
 import { PageHeader } from '../components/PageHeader'
 import { QueryError } from '../components/QueryError'
+import { StatusTag } from '../components/StatusTag'
 import { CONTACTS_KEY, useContacts } from '../hooks/useContacts'
+import { useSignContact } from '../hooks/useSignContact'
+import { isUserRejection } from '../lib/tx'
 import { errorText } from '../lib/tx'
 
 const TITLE = 'Contacts'
-const DESCRIPTION = 'The accounts your assistant may pay. Ask it to “send 10 USDC to sam” using a name from this list.'
+const DESCRIPTION = 'The accounts your assistant may pay, by name: “send 10 USDC to sam”.'
 const REMOVE_KEY = ['contacts', 'remove'] as const
 
 /**
  * The account's contacts: the only addresses the assistant can send money to. The assistant reads
- * this list but can't change it, so adding someone happens only here.
+ * this list but can't change it, so adding someone happens only here. Each contact carries the owner's
+ * signature, and the wallet itself refuses to pay anyone without one: a contact saved before it checked
+ * (or after the owner cancelled old signatures in Controls) is paid again once signed again here.
  */
 export function ContactsPage() {
   const contacts = useContacts()
@@ -72,6 +77,23 @@ export function ContactsPage() {
     select: mutation => mutation.state.variables as string,
   })
 
+  const signer = useSignContact()
+  const resign = useMutation({
+    mutationFn: (contact: Contact) => signer.sign(contact),
+    onSuccess: saved => notify('success', `${saved.name} signed again. Your wallet will pay them.`),
+    onError: (error, contact) => {
+      if (isUserRejection(error)) return
+      notify('error', `Couldn't sign ${contact.name}: ${errorText(error)}`)
+    },
+  })
+  const signAgain = (contact: Contact) => {
+    if (!signer.ready) {
+      notify('error', 'Connect the wallet you signed in with to sign this contact.')
+      return
+    }
+    resign.mutate(contact)
+  }
+
   const openAdd = () => {
     setAddKey(k => k + 1)
     setAddOpen(true)
@@ -107,11 +129,29 @@ export function ContactsPage() {
             <ul className="mf-contact-list">
               {list.map(contact => (
                 <li key={contact.name} className="mf-contact" data-contact={contact.name}>
-                  <span className="mf-contact-name">{contact.name}</span>
+                  <span className="mf-contact-name">
+                    {contact.name}
+                    {contact.signed === false && (
+                      <>
+                        {' '}
+                        <StatusTag tone="warning">Needs signing</StatusTag>
+                      </>
+                    )}
+                  </span>
                   <span className="mf-contact-address">
                     <AddressText address={contact.address} />
                     <CopyButton value={contact.address} label={`Address of ${contact.name}`} />
                   </span>
+                  <Button
+                    appearance={contact.signed === false ? 'primary' : 'subtle'}
+                    size="sm"
+                    aria-label={`Sign ${contact.name} again`}
+                    loading={resign.isPending && resign.variables?.name === contact.name}
+                    disabled={resign.isPending}
+                    onClick={() => signAgain(contact)}
+                  >
+                    Sign again
+                  </Button>
                   <Button
                     appearance="subtle"
                     size="sm"
@@ -151,8 +191,10 @@ export function ContactsPage() {
       <PageHeader title={TITLE} description={DESCRIPTION} />
       <div className="mf-dashboard">
         <Message type="info" showIcon>
-          <strong>Your assistant can only send money to accounts on this list.</strong>{' '}
-          <Text as="span">Only you can add an account, and only here: the assistant can't change the list.</Text>
+          <strong>Your assistant can only pay accounts on this list.</strong>{' '}
+          <Text as="span">
+            Only you can change it, and your wallet itself checks it: each contact carries your signature.
+          </Text>
         </Message>
         {body}
       </div>
@@ -165,10 +207,7 @@ export function ContactsPage() {
           onConfirm={() => remove.mutate(toRemove.name)}
           onClose={() => setRemoveOpen(false)}
         >
-          <Text>
-            Your assistant won't be able to send money to {toRemove.name} any more. You can add them again at any
-            time.
-          </Text>
+          <Text>Your assistant won't be able to pay {toRemove.name} any more. You can add them again any time.</Text>
         </ConfirmModal>
       )}
     </>

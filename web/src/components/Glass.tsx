@@ -26,7 +26,7 @@ const LiquidGlass = lazy(() => import('quick-liquid/react').then(module => ({ de
 const RADIUS = { plate: 28, capsule: 999, disc: 999 }
 
 /** The plate colour (--mf-plate) in each theme, laid over the glass at 40%. */
-const TINT = { light: '213, 218, 224', dark: '13, 26, 43' }
+const TINT = { light: '228, 229, 231', dark: '13, 26, 43' }
 
 // The engine watches its element with a ResizeObserver, which jsdom (the unit tests) doesn't have.
 const SUPPORTED = typeof ResizeObserver !== 'undefined'

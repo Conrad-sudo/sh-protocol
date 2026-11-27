@@ -241,8 +241,8 @@ describe('DashboardPage', () => {
     expect(screen.getByText('Paused')).toBeInTheDocument()
     expect(screen.getByText('Assistant off')).toBeInTheDocument()
     expect(screen.getByText(/This wallet is paused/)).toBeInTheDocument()
-    expect(screen.getByText(/spending limit isn't switched on/)).toBeInTheDocument()
-    expect(screen.getByText(/must be signed by its owner/)).toBeInTheDocument()
+    expect(screen.getByText(/spending limit is off/)).toBeInTheDocument()
+    expect(screen.getByText(/can change this wallet/)).toBeInTheDocument()
     const unreadable = screen.getByText("Couldn't read")
     expect(unreadable).toHaveAttribute('title', 'no code at address')
     // The rest of the balances still show.
@@ -263,7 +263,7 @@ describe('DashboardPage', () => {
 
     await walletHeader()
     expect(screen.getByText('Assistant expired')).toBeInTheDocument()
-    expect(screen.getByText(/access ran out on \w{3} \d{1,2}, \d{4}, so it can't send anything/)).toBeInTheDocument()
+    expect(screen.getByText(/access ran out on \w{3} \d{1,2}, \d{4}\. Renew it in Controls/)).toBeInTheDocument()
   })
 
   it('counts an ended period as a full limit, though the stored spend is stale', async () => {
@@ -626,7 +626,7 @@ describe('DashboardPage', () => {
     expect(preview).toHaveTextContent('Pepe')
     expect(preview).toHaveTextContent('5 PEPE')
     expect(preview).toHaveTextContent("Your spending limit can't cover PEPE.")
-    expect(preview).toHaveTextContent('Buying it counts the full amount you pay.')
+    expect(preview).toHaveTextContent('Buying it counts what you pay.')
     // An unpriced token can't count, so there is nothing to tick.
     expect(within(preview).queryByRole('checkbox')).toBeNull()
     await user.click(within(preview).getByRole('button', { name: 'Add token' }))
@@ -637,7 +637,7 @@ describe('DashboardPage', () => {
     expect(row).toHaveTextContent('No price')
     expect(row).toHaveTextContent('Not limited')
     expect(row).toHaveTextContent('5')
-    expect(screen.getByText(`Tokens marked "No price" can't count toward your USD limit, because Mitfah has no price for them. You can give one a limit of its own in Controls.`)).toBeInTheDocument()
+    expect(screen.getByText(/“No price” tokens can't count in dollars: give one its own limit in Controls\./)).toBeInTheDocument()
     // Looked up by its checksummed address; added once.
     expect(requests).toEqual([
       { route: 'POST /api/tokens/custom/lookup', body: { chain_id: SEPOLIA, address: NOT_A_TOKEN } },
@@ -669,9 +669,7 @@ describe('DashboardPage', () => {
     // It comes and goes with the deposits, and the assistant can't send it anywhere.
     expect(row).not.toHaveTextContent('Not limited')
     expect(within(row).queryByRole('button', { name: /^Remove/ })).toBeNull()
-    expect(
-      screen.getByText('LP tokens are your share of an exchange pool. Under each is what it holds for you right now.'),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/LP tokens are your share of a pool; under each is what it holds for you\./)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Withdraw' }))
     const drawer = await screen.findByRole('dialog')
@@ -733,7 +731,7 @@ describe('DashboardPage', () => {
 
     expect(outOfRange.getByRole('heading', { name: 'LINK/ETH · 0.3%' })).toBeInTheDocument()
     expect(outOfRange.getByText('Out of range')).toBeInTheDocument()
-    expect(outOfRange.getByText("It isn't earning fees until the price comes back into this range.")).toBeInTheDocument()
+    expect(outOfRange.getByText('Not earning fees until the price is back in range.')).toBeInTheDocument()
     expect(fact(outOfRange, 'Range')).toHaveTextContent('0.0041234 – 0.0045678 ETH per LINK')
     expect(fact(outOfRange, 'Current price')).toHaveTextContent('0.0049876 ETH per LINK')
     expect(fact(outOfRange, 'Holds now')).toHaveTextContent('0 LINK + 2.5 ETH')
@@ -744,7 +742,7 @@ describe('DashboardPage', () => {
     expect(fact(fullRange, 'Current price')).toHaveTextContent('3,020.2 USDC per ETH')
     expect(fullRange.getByText('In range')).toBeInTheDocument()
 
-    expect(screen.getByText('To collect fees, add to a position or take one out, ask the assistant.')).toBeInTheDocument()
+    expect(screen.getByText('Ask the assistant to collect fees, add to a position or take one out.')).toBeInTheDocument()
   })
 
   it('removes a token the user added, after saying the tokens stay in the wallet', async () => {
@@ -770,7 +768,7 @@ describe('DashboardPage', () => {
     ])
     await user.click(screen.getByRole('button', { name: 'Remove PEPE from your dashboard' }))
     const confirm = await screen.findByRole('alertdialog', { name: 'Remove PEPE?' })
-    expect(confirm).toHaveTextContent('Any PEPE in the wallet stays there')
+    expect(confirm).toHaveTextContent('Any PEPE stays in the wallet')
     expect(confirm).not.toHaveTextContent('Step 1 of 2')
     await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
 
@@ -818,7 +816,7 @@ describe('DashboardPage', () => {
     await user.type(within(dialog).getByLabelText('Token contract address'), USDT)
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
     const preview = await screen.findByRole('dialog', { name: 'Add USDT?' })
-    expect(preview).toHaveTextContent('Pricing is available for USDT.')
+    expect(preview).toHaveTextContent('Pricing is available for USDT, so it can count toward your spending limit.')
     expect(preview).not.toHaveTextContent("Your spending limit can't cover USDT.")
     // Counting needs the owner's signature, so it waits for the owner wallet.
     const countIt = within(preview).getByRole('checkbox', { name: 'Count USDT toward my spending limit' })
@@ -868,7 +866,7 @@ describe('DashboardPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
     const preview = await screen.findByRole('dialog', { name: 'Add WETH?' })
     expect(preview).toHaveTextContent(
-      'It counts toward your spending limit exactly when ETH does. You can switch that in Controls.',
+      'It counts toward your limit when ETH does. Switch that in Controls.',
     )
     expect(within(preview).queryByRole('checkbox')).toBeNull()
     await user.click(within(preview).getByRole('button', { name: 'Add token' }))
@@ -907,7 +905,7 @@ describe('DashboardPage', () => {
     const preview = await screen.findByRole('dialog', { name: 'Add USDT?' })
     // Counting it against the $0 the wallet holds would stop the assistant spending it at all.
     expect(preview).toHaveTextContent(
-      'This wallet has no spending limit yet. Set one in Controls, then you can count USDT toward it.',
+      'Set a spending limit in Controls first, then you can count USDT.',
     )
     expect(within(preview).queryByRole('checkbox')).toBeNull()
     await user.click(within(preview).getByRole('button', { name: 'Add token' }))

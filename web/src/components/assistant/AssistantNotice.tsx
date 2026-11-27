@@ -14,19 +14,17 @@ export function AssistantNotice({ wallet }: { wallet: WalletState }) {
   const assistant = assistantStatus(wallet.session)
   let text: string | null = null
   let type: 'warning' | 'error' = 'warning'
-  if (wallet.paused) text = 'Your wallet is paused, so the assistant can answer questions but can’t send anything.'
+  if (wallet.paused) text = 'Your wallet is paused: the assistant can answer, but not send.'
   else if (assistant === 'expired')
-    text = 'The assistant’s access has run out, so it can answer questions but can’t send anything. Renew it in Controls.'
+    text = 'The assistant’s access has run out: it can answer, but not send. Renew it in Controls.'
   else if (assistant === 'off' || assistant === 'foreign')
-    text =
-      'No device can approve payments from this wallet yet, so the assistant can answer questions but can’t send anything. Add this device in Controls.'
+    text = 'No device can approve payments yet: the assistant can answer, but not send. Add this device in Controls.'
   else if (!wallet.spending.hook_installed) {
     type = 'error'
-    text =
-      'The spending limit isn’t switched on for this wallet, so nothing caps what the assistant can spend. Revoke its devices until it’s fixed.'
+    text = 'The spending limit is off, so nothing caps what the assistant spends. Revoke its devices until it’s fixed.'
   } else if (assistant === 'expiring') {
     const left = formatTimeLeft((assistantDeadline(wallet.session) ?? 0) - now)
-    text = `The assistant’s access runs out in ${left}. Renew it in Controls to keep it sending.`
+    text = `The assistant’s access runs out in ${left}. Renew it in Controls.`
   }
   if (!text) return null
 

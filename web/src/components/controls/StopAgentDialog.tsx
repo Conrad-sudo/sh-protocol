@@ -28,10 +28,7 @@ export function StopAgentDialog({ stop, chainId }: { stop: AgentStopHandle; chai
         <Modal.Title>Stop {name} with your passkey?</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <Text>
-          Your passkey removes {name} from this wallet, so it can't trade from it again. Only your owner wallet can add
-          it back.
-        </Text>
+        <Text>Your passkey removes {name} from this wallet. Only your owner wallet can add it back.</Text>
         {build.isPending ? (
           <Loader className="mf-settings-note" content="Getting it ready…" />
         ) : build.isError ? (
@@ -41,13 +38,13 @@ export function StopAgentDialog({ stop, chainId }: { stop: AgentStopHandle; chai
         ) : (
           quote && (
             <Text className="mf-settings-note">
-              It costs {quote.fees} in fees, paid from the wallet, like any change approved with a passkey.
+              It costs {quote.fees} in fees, paid from the wallet.
             </Text>
           )
         )}
         {replaced > 0 && (
           <Text size="sm" muted className="mf-settings-note">
-            A payment that was waiting for your approval on {chainName(chainId)} was cancelled to make way for this.
+            A payment waiting for your approval on {chainName(chainId)} was cancelled to make way for this.
           </Text>
         )}
         {sending && !approve.isError && (

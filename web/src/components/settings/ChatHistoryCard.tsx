@@ -5,6 +5,7 @@ import { deleteChatHistory } from '../../api/chat'
 import { ApiError } from '../../api/client'
 import type { ChatMessage } from '../../api/types'
 import { errorText } from '../../lib/tx'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { ConfirmModal } from '../owner/ConfirmModal'
 
@@ -41,11 +42,10 @@ export function ChatHistoryCard() {
     <GlassPanel bordered header="Chat history">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
-          <Text weight="medium">Conversations with Mitfah</Text>
-          <Text muted size="sm">
-            Kept per network so Mitfah can follow along, and cleared after each transaction. Deleting includes what
-            you said on Telegram. Your transaction history is kept.
-          </Text>
+          <Explained level="label" title="Conversations with Mitfah">
+            Kept per network and cleared after each transaction. Deleting includes Telegram; your transaction history
+            stays.
+          </Explained>
         </div>
         <div className="mf-settings-row-action">
           <Button color="red" appearance="ghost" loading={clear.isPending} onClick={() => setOpen(true)}>
@@ -62,8 +62,8 @@ export function ChatHistoryCard() {
         onClose={() => setOpen(false)}
       >
         <Text>
-          Mitfah will forget your conversations on every network, including anything said on Telegram. This can't be
-          undone. Your wallets, contacts, limits and transaction history stay as they are.
+          Mitfah forgets your conversations on every network, Telegram included. This can't be undone. Your wallets,
+          contacts, limits and history stay.
         </Text>
       </ConfirmModal>
     </GlassPanel>

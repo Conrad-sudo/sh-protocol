@@ -651,10 +651,12 @@ body:has(.mf-wallpaper) {
 
   /*
    * Sign-in on a phone: the form has the top of the screen (.mf-auth), so the dial sits low, its
-   * upper half rising below the form, index and all.
+   * upper half rising below the form, index and all. On a shorter screen it sits lower still, as its
+   * ring never starts above 500px, where the form (450–510px tall on a phone) ends. The ring's
+   * radius is 468/2880 of the image's side.
    */
   .mf-wallpaper[data-place='center'] {
-    --mf-ring-y: calc(100% - 90px);
+    --mf-ring-y: max(calc(100% - 90px), calc(500px + var(--mf-wallpaper-size) * 468 / 2880));
   }
 }
 
@@ -687,8 +689,8 @@ body:has(.mf-wallpaper) {
   --mf-safe-shadow: #062a4e;
   --mf-safe-shadow-alpha: 0.2;
   --mf-safe-seam: rgb(6 42 78 / 45%);
-  --mf-safe-face: #c3cbd4;
-  --mf-safe-grip: #aab4c0;
+  --mf-safe-face: #cfd2d6;
+  --mf-safe-grip: #b8bcc2;
   --mf-safe-groove: #8f9fb3;
   --mf-safe-crest: rgb(255 255 255 / 55%);
   --mf-safe-step: rgb(6 42 78 / 22%);
@@ -697,9 +699,9 @@ body:has(.mf-wallpaper) {
   --mf-safe-lit: 0.55;
   --mf-safe-shade: 0.14;
   --mf-safe-sheen: 0.55;
-  --mf-safe-under: #d9dee4;
+  --mf-safe-under: #e8e9eb;
   --mf-safe-under-alpha: 0.9;
-  --mf-safe-index: #d3d9e0;
+  --mf-safe-index: #e2e4e6;
   --mf-safe-index-edge: #062a4e;
   --mf-safe-glow: var(--mf-green);
 
@@ -964,9 +966,9 @@ body:has(.mf-wallpaper) :is(.rs-panel, .mf-glass-surface) .rs-btn {
   margin-top: 24px;
 }
 
+/* Lined up with the rest of the column: centred in the disc, on the left on a phone. */
 .mf-auth-alt {
   margin-top: 20px;
-  text-align: center;
 }
 
 /* The Allow page: what a connected AI app may do. */
@@ -1836,7 +1838,7 @@ main p a {
 /*
  * RSuite paints messages on a hard-coded white base (`.rs-message { background: #fff }`) and lays
  * the state tint over it. The tints are translucent, so both themes need the plate as the base:
- * white would be a bright patch on the slate page, and unreadable in dark.
+ * white would be a bright patch on the pewter page, and unreadable in dark.
  */
 .rs-message {
   background: var(--rs-bg-card);
@@ -2311,6 +2313,54 @@ main p a {
   gap: 6px;
 }
 
+/* ── Explanations beside their headings ───────────────────────────────── */
+
+/*
+ * "Name: So you can tell them apart." A heading or label and its explanation share a line and wrap
+ * like one paragraph (Explained.tsx).
+ */
+.mf-explained {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.mf-explained > :is(h1, h2, h3),
+.rs-form-group .mf-explained > .rs-form-control-label {
+  display: inline;
+  margin: 0;
+}
+
+.mf-explained-colon {
+  margin-right: 0.3em;
+}
+
+.mf-explained > .mf-explained-text,
+.rs-form-group .mf-explained > .rs-form-help-text {
+  display: inline;
+  min-height: 0;
+  color: var(--rs-text-secondary);
+  font-size: var(--rs-font-size-sm);
+  line-height: inherit;
+}
+
+/* A state between the heading and its explanation: "Wallet: Active Pausing stops…" */
+.mf-explained > .mf-tag {
+  margin-right: 0.4em;
+  vertical-align: 0.1em;
+}
+
+/* Beside a page's or a card's buttons, the heading line takes the room the buttons leave. */
+.mf-page-header > .mf-explained,
+.mf-section-head > .mf-explained {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+/* A step's title line, then its fields. */
+.mf-step-body section > .mf-explained {
+  margin-bottom: 12px;
+}
+
 /* ── Controls ───────────────────────────────────────────────────────────── */
 
 .mf-control-row {
@@ -2337,15 +2387,7 @@ main p a {
   min-width: 0;
 }
 
-.mf-control-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.mf-control-title h3 {
-  margin: 0;
+.mf-control-label h3 {
   font-size: 16px;
 }
 
@@ -2371,10 +2413,6 @@ main p a {
 
 /* ── Devices (the passkeys that approve payments) ───────────────────────── */
 
-.mf-devices-intro {
-  margin: 0 0 4px;
-}
-
 /* Each device is a control row; the list only rules them apart, like rows in a card. */
 .mf-device-list {
   margin: 0;
@@ -2383,13 +2421,12 @@ main p a {
 }
 
 .mf-device-list > li + li,
-.mf-device-list + .mf-control-row,
-.mf-devices-intro + .mf-control-row {
+.mf-device-list + .mf-control-row {
   border-top: 1px solid var(--rs-border-primary);
 }
 
 /* A device's name is the user's own words, up to 40 characters: it wraps rather than widening a phone. */
-.mf-device-list .mf-control-title h3 {
+.mf-device-list .mf-control-label h3 {
   overflow-wrap: anywhere;
 }
 

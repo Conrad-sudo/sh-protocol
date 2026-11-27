@@ -5,6 +5,7 @@ import { useSelectedChain } from '../chain/useSelectedChain'
 import { AdvancedPanel } from '../components/controls/AdvancedPanel'
 import { AgentsPanel } from '../components/controls/AgentsPanel'
 import { ConnectedAppsPanel } from '../components/controls/ConnectedAppsPanel'
+import { ContactSignaturesPanel } from '../components/controls/ContactSignaturesPanel'
 import { DevicesPanel } from '../components/controls/DevicesPanel'
 import { EmergencyPanel } from '../components/controls/EmergencyPanel'
 import { RecurringPanel } from '../components/controls/RecurringPanel'
@@ -21,7 +22,7 @@ import { useOwnerReadiness } from '../hooks/useOwnerReadiness'
 import { useWalletView } from '../hooks/useWalletView'
 
 const TITLE = 'Controls'
-const DESCRIPTION = 'Changes are signed by your owner wallet and apply once the network confirms them.'
+const DESCRIPTION = "Your wallet's rules. Your owner wallet signs every change."
 
 /**
  * Everything the owner can change about the wallet: the brake, the devices that approve payments,
@@ -85,6 +86,7 @@ function Controls({ wallet }: { wallet: WalletState }) {
         <TokensPanel {...panel} chain={chain} />
         <TokenCapsPanel {...panel} />
         <RecurringPanel {...panel} />
+        <ContactSignaturesPanel {...panel} />
         <AdvancedPanel {...panel} chain={chain} />
       </div>
       {confirmation && (

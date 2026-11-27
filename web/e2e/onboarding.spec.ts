@@ -170,7 +170,7 @@ test('creating a wallet, step by step', async ({ page }, testInfo) => {
     editLimits: async step => {
       // Nothing counts to begin with, ETH included, so there is no limit to set until something does.
       await expect(step.getByLabel('Spending limit', { exact: true })).toHaveCount(0)
-      await expect(step.getByText(/You can skip it for now and set one any time in Controls\./)).toBeVisible()
+      await expect(step.getByText(/You can set one later in Controls\./)).toBeVisible()
       await countNative(step)
       await expect(step.getByText('WETH counts with it.')).toBeVisible()
       await step.getByLabel('Spending limit', { exact: true }).fill('250')

@@ -385,8 +385,7 @@ function Body({
         <>
           <h1>No passkey here can approve this</h1>
           <p>
-            No passkey on this device is approved for this wallet. Open this link on a device you added, or add this one
-            in Mitfah under Controls.
+            Open this link on a device you added to this wallet, or add this one in Mitfah under Controls.
           </p>
           <a className="mfc-button mfc-secondary" href="/controls">
             Open Mitfah

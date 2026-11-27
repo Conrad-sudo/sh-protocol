@@ -12,6 +12,8 @@ const ALEX = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
 const NEW = '0x90F79bf6EB2c4f870365E785982E1f101E93b906'
 const OTHER = '0x9999999999999999999999999999999999999999'
 const SIGNATURE = `0x${'cd'.repeat(65)}`
+/** The issuedAt the mock server dates its first typed data with, less one. */
+const ISSUED = 1_800_000_000
 
 interface ServerOptions {
   contacts?: Contact[]
@@ -34,7 +36,7 @@ interface ServerOptions {
 /** What the mock wallet was asked to sign, as eth_signTypedData_v4 received it. */
 interface SignRequest {
   account: string
-  typedData: { domain: unknown; primaryType: string; message: Record<string, string> }
+  typedData: { domain: unknown; primaryType: string; message: Record<string, string | number> }
 }
 
 /** What an unhandled server error looks like: plain text, not JSON. */
@@ -81,16 +83,16 @@ function stubServer({
         nonces++
         return Promise.resolve(
           json(200, {
-            domain: { name: 'Mitfah', version: '1' },
+            domain: { name: 'Mitfah', version: '2' },
             types: {
-              AddContact: [
+              Contact: [
                 { name: 'name', type: 'string' },
-                { name: 'address', type: 'address' },
-                { name: 'nonce', type: 'string' },
+                { name: 'payee', type: 'address' },
+                { name: 'issuedAt', type: 'uint64' },
               ],
             },
-            primaryType: 'AddContact',
-            message: { name: body.name.trim().toLowerCase(), address: getAddress(body.address), nonce: `nonce${nonces}` },
+            primaryType: 'Contact',
+            message: { name: body.name.trim().toLowerCase(), payee: getAddress(body.address), issuedAt: ISSUED + nonces },
           }),
         )
       }
@@ -110,11 +112,16 @@ function stubServer({
         return Promise.resolve(json(200, { contacts: [...saved].sort((a, b) => (a.name < b.name ? -1 : 1)) }))
       }
       if (url === '/api/contacts' && method === 'POST') {
-        const body = JSON.parse(String(init?.body)) as Contact
+        const body = JSON.parse(String(init?.body)) as { name: string; payee: string; issuedAt: number }
         posted.push(body)
         return saveGate.then(() => {
           if (saveError) return json(saveError.status, { detail: saveError.detail })
-          const contact = { name: body.name.trim().toLowerCase(), address: getAddress(body.address) }
+          const contact = {
+            name: body.name.trim().toLowerCase(),
+            address: getAddress(body.payee),
+            signed: true,
+            issued_at: body.issuedAt,
+          }
           saved = [...saved.filter(c => c.name !== contact.name), contact]
           return json(201, contact)
         })
@@ -167,7 +174,12 @@ describe('ContactsPage', () => {
     vi.unstubAllGlobals()
   })
 
-  const signedSave = (name: string, address: string, nonce: string) => ({ name, address, nonce, signature: SIGNATURE })
+  const signedSave = (name: string, address: string, issuedAt: number) => ({
+    name,
+    payee: address,
+    issuedAt,
+    signature: SIGNATURE,
+  })
 
   it('lists the contacts, and says what the list is for', async () => {
     stubServer({ contacts: [{ name: 'sam', address: SAM }, { name: 'alex', address: ALEX }] })
@@ -175,12 +187,27 @@ describe('ContactsPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Your contacts (2)' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Contacts', level: 1 })).toBeInTheDocument()
-    expect(screen.getByText('Your assistant can only send money to accounts on this list.')).toBeInTheDocument()
+    expect(screen.getByText('Your assistant can only pay accounts on this list.')).toBeInTheDocument()
     expect(rows()).toEqual(['alex', 'sam'])
     const sam = document.querySelector<HTMLElement>('[data-contact="sam"]')!
     expect(within(sam).getByText(SAM)).toBeInTheDocument()
     expect(within(sam).getByRole('button', { name: 'Copy address of sam' })).toBeInTheDocument()
     expect(within(sam).getByRole('button', { name: 'Remove sam' })).toBeInTheDocument()
+  })
+
+  it('marks a contact saved before the wallet checked contacts, and signs it again', async () => {
+    const { posted, signed } = stubServer({ contacts: [{ name: 'sam', address: SAM, signed: false, issued_at: null }] })
+    const user = userEvent.setup()
+    await renderRoutes(routes, '/contacts')
+
+    const tag = await screen.findByText('Needs signing')
+    const sam = tag.closest<HTMLElement>('[data-contact="sam"]')!
+    expect(sam).not.toBeNull()
+    // Without the signed-in wallet connected, nothing is asked of any wallet.
+    await user.click(within(sam).getByRole('button', { name: 'Sign sam again' }))
+    expect(await screen.findByText('Connect the wallet you signed in with to sign this contact.')).toBeInTheDocument()
+    expect(signed).toHaveLength(0)
+    expect(posted).toEqual([])
   })
 
   it('invites the first contact when there are none', async () => {
@@ -236,13 +263,13 @@ describe('ContactsPage', () => {
     expect(signed).toHaveLength(1)
     expect(signed[0].account.toLowerCase()).toBe(WALLET)
     expect(signed[0].typedData).toMatchObject({
-      domain: { name: 'Mitfah', version: '1' },
-      primaryType: 'AddContact',
-      message: { name: 'sam', nonce: 'nonce1' },
+      domain: { name: 'Mitfah', version: '2' },
+      primaryType: 'Contact',
+      message: { name: 'sam', issuedAt: ISSUED + 1 },
     })
     // viem sends the address in lowercase; as an EIP-712 address it signs the same bytes.
-    expect(signed[0].typedData.message.address.toLowerCase()).toBe(SAM.toLowerCase())
-    expect(posted).toEqual([signedSave('sam', SAM, 'nonce1')])
+    expect(String(signed[0].typedData.message.payee).toLowerCase()).toBe(SAM.toLowerCase())
+    expect(posted).toEqual([signedSave('sam', SAM, ISSUED + 1)])
     await waitFor(() => expect(rows()).toEqual(['sam']))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Check the address' })).toBeNull())
 
@@ -339,7 +366,7 @@ describe('ContactsPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
 
     expect(await screen.findByText('sam.eth saved. Your assistant can now pay them.')).toBeInTheDocument()
-    expect(posted).toEqual([signedSave('sam.eth', SAM, 'nonce1')])
+    expect(posted).toEqual([signedSave('sam.eth', SAM, ISSUED + 1)])
   })
 
   it('keeps a typed name for a contact added by ENS name', async () => {
@@ -354,7 +381,7 @@ describe('ContactsPage', () => {
     await connectInDialog(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Save contact' }))
 
-    await waitFor(() => expect(posted).toEqual([signedSave('sammy', SAM, 'nonce1')]))
+    await waitFor(() => expect(posted).toEqual([signedSave('sammy', SAM, ISSUED + 1)]))
   })
 
   it.each([
@@ -394,7 +421,7 @@ describe('ContactsPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Replace address' }))
 
     expect(await screen.findByText("sam's address updated.")).toBeInTheDocument()
-    expect(posted).toEqual([signedSave('sam', NEW, 'nonce1')])
+    expect(posted).toEqual([signedSave('sam', NEW, ISSUED + 1)])
     const sam = document.querySelector<HTMLElement>('[data-contact="sam"]')!
     await waitFor(() => expect(within(sam).getByText(NEW)).toBeInTheDocument())
   })
@@ -482,7 +509,7 @@ describe('ContactsPage', () => {
 
     await user.click(await screen.findByRole('button', { name: "Remove o'neil & co?" }))
     const confirm = await screen.findByRole('alertdialog', { name: "Remove o'neil & co??" })
-    expect(within(confirm).getByText(/won't be able to send money to o'neil & co\?/)).toBeInTheDocument()
+    expect(within(confirm).getByText(/won't be able to pay o'neil & co\?/)).toBeInTheDocument()
     expect(deleted).toEqual([])
     await user.click(within(confirm).getByRole('button', { name: 'Remove' }))
 

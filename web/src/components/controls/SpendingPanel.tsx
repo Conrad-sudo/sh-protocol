@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Form, NumberInput, SegmentedControl, Text } from 'rsuite'
 import { formatUsd, formatWindow } from '../../lib/format'
 import { limitApplies, WINDOW_CHOICES } from '../../lib/spending'
+import { FieldError, FieldLabel } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
@@ -57,7 +58,17 @@ function LimitEditor({ wallet, tx, locked, start, ask, periodSecs }: ControlPane
   return (
     <Form fluid className="mf-control-form" disabled={locked} onSubmit={save}>
       <Form.Group controlId="daily-limit">
-        <Form.Label>Limit per period</Form.Label>
+        <FieldLabel
+          help={
+            !applies
+              ? 'No effect until a token counts toward it (below).'
+              : value === 0
+                ? '$0 stops the assistant spending.'
+                : 'The most the assistant can spend per period.'
+          }
+        >
+          Limit per period
+        </FieldLabel>
         <div className="mf-inline-field">
           <NumberInput
             id="daily-limit"
@@ -75,20 +86,7 @@ function LimitEditor({ wallet, tx, locked, start, ask, periodSecs }: ControlPane
             Save
           </TxButton>
         </div>
-        {!valid ? (
-          <Form.Text className="mf-error-text">Enter a whole number of dollars, $0 or more.</Form.Text>
-        ) : !applies ? (
-          <Form.Text>
-            Nothing counts toward the limit yet, so it has no effect. Set it here, then choose what counts below.
-          </Form.Text>
-        ) : value === 0 ? (
-          <Form.Text>A $0 limit stops the assistant spending without turning it off.</Form.Text>
-        ) : (
-          <Form.Text>
-            The most the assistant can spend per period, across the tokens that count toward it. Lowering it doesn't undo what's already
-            been spent.
-          </Form.Text>
-        )}
+        {!valid && <FieldError>Enter a whole number of dollars, $0 or more.</FieldError>}
       </Form.Group>
       <TxStatus tx={tx} txKey="daily-limit" />
     </Form>
@@ -128,7 +126,7 @@ function PeriodEditor({ tx, locked, start, ask, periodSecs }: ControlPanelProps 
   return (
     <Form fluid className="mf-control-form" disabled={locked} onSubmit={save}>
       <Form.Group controlId="window">
-        <Form.Label>Period</Form.Label>
+        <FieldLabel help="How often the limit refills.">Period</FieldLabel>
         <div className="mf-inline-field">
           <SegmentedControl
             aria-label="Period"
@@ -141,9 +139,6 @@ function PeriodEditor({ tx, locked, start, ask, periodSecs }: ControlPanelProps 
             Save
           </TxButton>
         </div>
-        <Form.Text>
-          The limit refills every {formatWindow(value)}. Changing it doesn't restart the current period.
-        </Form.Text>
       </Form.Group>
       <TxStatus tx={tx} txKey="window" />
     </Form>

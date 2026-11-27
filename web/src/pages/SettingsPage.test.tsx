@@ -44,8 +44,8 @@ describe('SettingsPage: chat history', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Delete all' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(/every network, including anything said on Telegram/)
-    expect(dialog).toHaveTextContent(/transaction history stay as they are/)
+    expect(dialog).toHaveTextContent(/every network, Telegram included/)
+    expect(dialog).toHaveTextContent(/contacts, limits and history stay/)
     await user.click(within(dialog).getByRole('button', { name: 'Delete all' }))
 
     expect(await screen.findByText('All chat history deleted.')).toBeInTheDocument()

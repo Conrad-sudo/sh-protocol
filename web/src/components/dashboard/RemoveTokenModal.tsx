@@ -43,8 +43,8 @@ export function RemoveTokenModal({ open, token, counts, wallet, chain, tx, onRem
     })
 
   const staysInWallet = token.custom
-    ? `It disappears from your dashboard and the assistant stops recognising it. Any ${name} in the wallet stays there, and you can add it again at any time.`
-    : `It disappears from your dashboard. Any ${name} in the wallet stays there, and you can add it back by its address at any time.`
+    ? `It leaves your dashboard and the assistant stops recognising it. Any ${name} stays in the wallet, and you can add it again any time.`
+    : `It leaves your dashboard. Any ${name} stays in the wallet, and you can add it back by its address any time.`
 
   return (
     // A short question: a small dialog on every screen, like ConfirmModal.
@@ -55,10 +55,7 @@ export function RemoveTokenModal({ open, token, counts, wallet, chain, tx, onRem
       <Modal.Body>
         {counts ? (
           <>
-            <Text>
-              {name} counts toward your spending limit, so it has to stop counting before it can come off your
-              dashboard.
-            </Text>
+            <Text>{name} counts toward your spending limit, so it must stop counting first.</Text>
             <Text weight="semibold" className="mf-settings-note">
               Step 1 of 2: stop counting {name}
             </Text>

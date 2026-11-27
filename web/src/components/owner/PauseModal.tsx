@@ -42,14 +42,11 @@ export function PauseModal({ mode, onClose, wallet, chain, tx }: PauseModalProps
       </Modal.Header>
       <Modal.Body>
         {pausing ? (
-          <Text>
-            Every transaction from the wallet stops, the assistant's and yours, until you unpause it. You can
-            still withdraw.
-          </Text>
+          <Text>Every transaction stops until you unpause it. You can still withdraw.</Text>
         ) : (
           <Text>
-            The assistant can spend again, within your limit. If you paused because something looked wrong,
-            turn the assistant off in Controls first.
+            The assistant can spend again, within your limit. If something looked wrong, revoke its devices in Controls
+            first.
           </Text>
         )}
         <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />

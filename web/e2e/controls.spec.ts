@@ -355,7 +355,7 @@ test("an account that isn't the owner", async ({ page }, testInfo) => {
   await mockServer(page, walletState(SEPOLIA, ADDRESS, { is_owner: false, paused: true }))
   await page.goto('/controls')
 
-  await expect(page.getByText(/so they're switched off here/)).toBeVisible()
+  await expect(page.getByText(/You signed in with another address/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Unpause' })).toBeDisabled()
   await expectNoSidewaysScroll(page)
   await snap(page, testInfo, 'controls-not-owner')
@@ -415,7 +415,7 @@ test('renewing a device before it runs out', async ({ page }, testInfo) => {
 
   await row.getByRole('button', { name: 'Renew iPhone' }).click()
   const confirm = page.getByRole('alertdialog')
-  await expect(confirm).toContainText('iPhone keeps approving the assistant\'s payments from this wallet for another 90 days')
+  await expect(confirm).toContainText('iPhone keeps approving the assistant\'s payments for another 90 days')
   await confirm.getByRole('button', { name: 'Renew' }).click()
   await expect(page.getByText(/^iPhone renewed until \w{3} \d{1,2}, \d{4}\.$/)).toBeVisible()
   await expect(row.getByText('Active', { exact: true })).toBeVisible()

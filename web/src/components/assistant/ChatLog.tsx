@@ -83,8 +83,8 @@ function Failure({ send, onRetry, onEdit, onCheck }: { send: ChatSend } & Omit<C
     // Sending again could repeat a payment the assistant already made, so look first.
     return (
       <Message type="warning" showIcon className="mf-chat-failure">
-        <strong>No reply arrived.</strong> {errorText(send.error)} Mitfah may still have handled your message, so
-        check before you send it again.
+        <strong>No reply arrived.</strong> {errorText(send.error)} Mitfah may have handled it: check before sending
+        again.
         <div className="mf-chat-failure-actions">
           <Button appearance="primary" size="sm" onClick={() => onCheck(send)}>
             Check for a reply

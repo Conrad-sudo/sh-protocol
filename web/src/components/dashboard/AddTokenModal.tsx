@@ -9,10 +9,12 @@ import type { OwnerActionHandle } from '../../hooks/useOwnerAction'
 import { useOwnerReadiness } from '../../hooks/useOwnerReadiness'
 import { useTokens } from '../../hooks/useTokens'
 import { addressProblem } from '../../lib/contacts'
+import { describedBy } from '../../lib/fields'
 import { formatTokenAmount } from '../../lib/format'
 import { limitApplies } from '../../lib/spending'
 import { errorText } from '../../lib/tx'
 import { CopyButton } from '../CopyButton'
+import { FieldError, FieldLabel } from '../Explained'
 import { FullAddress } from '../FullAddress'
 import { OwnerWalletBar } from '../owner/OwnerWalletBar'
 import { TxButton } from '../owner/TxButton'
@@ -156,15 +158,15 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
                 <strong>Pricing is available for {ticker}.</strong>{' '}
                 <Text as="span">
                   {followsNative
-                    ? `It counts toward your spending limit exactly when ${chain?.native_ticker ?? 'the native token'} does. You can switch that in Controls.`
-                    : `This wallet has no spending limit yet. Set one in Controls, then you can count ${ticker} toward it.`}
+                    ? `It counts toward your limit when ${chain?.native_ticker ?? 'the native token'} does. Switch that in Controls.`
+                    : `Set a spending limit in Controls first, then you can count ${ticker}.`}
                 </Text>
               </Message>
             ) : preview.listed ? (
               <>
                 <Message type="info" showIcon className="mf-settings-note">
-                  <strong>Pricing is available for {ticker}.</strong>{' '}
-                  <Text as="span">Your spending limit can be applied to {ticker}.</Text>
+                  <strong>Pricing is available for {ticker}</strong>
+                  <Text as="span">, so it can count toward your spending limit.</Text>
                 </Message>
                 <Checkbox
                   className="mf-settings-note"
@@ -175,8 +177,7 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
                   Count {ticker} toward my spending limit
                 </Checkbox>
                 <Text size="sm" muted>
-                  Counting it needs a signature from your owner wallet. If it doesn't count, the assistant can send or
-                  sell it without limit.
+                  Needs your owner wallet's signature. If it doesn't count, the assistant can move it without limit.
                 </Text>
                 {readiness !== 'ready' && (
                   <OwnerWalletBar wallet={wallet} readiness={readiness} fork={chain?.fork ?? false} />
@@ -193,13 +194,12 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
                 <Message type="warning" showIcon className="mf-settings-note">
                   <strong>Your spending limit can't cover {ticker}.</strong>{' '}
                   <Text as="span">
-                    Mitfah has no price for it, so the assistant can send or sell it without it counting toward your
-                    limit. Buying it counts the full amount you pay.
+                    Mitfah has no price for it, so the assistant can move it without limit. Buying it counts what you
+                    pay.
                   </Text>
                 </Message>
                 <Text size="sm" muted className="mf-settings-note">
-                  Anyone can create a token and give it any name. Only add tokens whose contract address you got from a
-                  source you trust.
+                  Anyone can make a token with any name. Only add an address from a source you trust.
                 </Text>
               </>
             )}
@@ -260,7 +260,7 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
         >
           <Modal.Body>
             <Form.Group controlId="token-address">
-              <Form.Label>Token contract address</Form.Label>
+              <FieldLabel help={`The token's address on ${networkName}, not a person's.`}>Token contract address</FieldLabel>
               <Input
                 id="token-address"
                 className="mf-mono"
@@ -272,14 +272,10 @@ export function AddTokenModal({ open, onClose, wallet, chain, networkName, tx, o
                   setAddress(value.trim())
                   lookup.reset()
                 }}
-                aria-describedby="token-address-help-text"
+                aria-describedby={describedBy('token-address', addressError)}
                 aria-invalid={!!addressError || lookup.isError}
               />
-              {addressError ? (
-                <Form.Text className="mf-error-text">{addressError}</Form.Text>
-              ) : (
-                <Form.Text>The token's address on {networkName}, not your own or a person's.</Form.Text>
-              )}
+              {addressError && <FieldError>{addressError}</FieldError>}
             </Form.Group>
             {lookup.isError && (
               // The server's own reason: not an ERC-20 (no symbol or decimals), or one Mitfah won't show.

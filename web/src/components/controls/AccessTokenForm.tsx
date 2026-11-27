@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Form, Input, Loader, Message, SelectPicker, Text } from 'rsuite'
 import { createToken, fetchTokenOptions } from '../../api/oauth'
 import type { ConnectionAccess, CreatedToken, PasskeyAssertionJSON, PasskeyPrompt, TokenDays } from '../../api/types'
+import { describedBy } from '../../lib/fields'
 import { formatDate } from '../../lib/format'
 import { isPasskeyError, passkeysSupported, signWithPasskey } from '../../lib/passkey'
 import { errorText } from '../../lib/tx'
 import { CopyButton } from '../CopyButton'
+import { FieldError, FieldLabel } from '../Explained'
 
 export const TOKEN_OPTIONS_KEY = ['token-options'] as const
 
@@ -36,7 +38,7 @@ export function accessText(access: ConnectionAccess) {
 /** Why a name can't be used, or null when it can. The server allows 1-40 characters. */
 function nameProblem(name: string): string | null {
   const trimmed = name.trim()
-  if (trimmed === '') return 'Give the token a name, such as “Trading bot”.'
+  if (trimmed === '') return 'Give the token a name, such as “Access token”.'
   if (trimmed.length > TOKEN_NAME_MAX) return `Use at most ${TOKEN_NAME_MAX} characters.`
   return null
 }
@@ -120,26 +122,30 @@ export function AccessTokenForm({ onCreated, onCancel }: AccessTokenFormProps) {
   return (
     <Form fluid className="mf-control-form" onSubmit={create}>
       <Form.Group controlId="token-name">
-        <Form.Label>Name</Form.Label>
+        <FieldLabel help="So you can tell your tokens apart.">Name</FieldLabel>
         <Input
           id="token-name"
           value={name}
           maxLength={TOKEN_NAME_MAX}
-          placeholder="Trading bot"
+          placeholder="Access token"
           autoComplete="off"
           disabled={make.isPending}
           onChange={setName}
-          aria-describedby="token-name-help-text"
+          aria-describedby={describedBy('token-name', tried && problem)}
           aria-invalid={tried && !!problem}
         />
-        {tried && problem ? (
-          <Form.Text className="mf-error-text">{problem}</Form.Text>
-        ) : (
-          <Form.Text>So you can tell your tokens apart. It shows wherever the token is used.</Form.Text>
-        )}
+        {tried && problem && <FieldError>{problem}</FieldError>}
       </Form.Group>
       <Form.Group controlId="token-access">
-        <Form.Label>What it can do</Form.Label>
+        <FieldLabel
+          help={
+            access === 'read'
+              ? 'Sees your wallets, balances, prices and contacts.'
+              : 'Also prepares transactions. Only your passkey sends them, except for a trading agent (below), which signs with its own key.'
+          }
+        >
+          What it can do
+        </FieldLabel>
         <SelectPicker
           id="token-access"
           aria-labelledby="token-access-label"
@@ -151,11 +157,6 @@ export function AccessTokenForm({ onCreated, onCancel }: AccessTokenFormProps) {
           onChange={value => value && setAccess(value)}
           disabled={make.isPending}
         />
-        <Form.Text>
-          {access === 'read'
-            ? 'See your wallets, balances, prices and contacts. Nothing else.'
-            : 'Also prepare transactions. Nothing is sent until you approve each one with your passkey, through a link, unless the script also holds the key of a trading agent you added: it can then trade as that agent, within its limit.'}
-        </Form.Text>
       </Form.Group>
       <Form.Group controlId="token-days">
         <Form.Label>Lasts</Form.Label>
@@ -203,20 +204,21 @@ export function AccessTokenForm({ onCreated, onCancel }: AccessTokenFormProps) {
 }
 
 /**
- * A token just made, shown this once with its copy button and how to use it. Mitfah keeps only its
- * hash, so after Done it can't be shown again.
+ * A token just made, this once, with how to use it: hidden, only its copy button holds it. Mitfah
+ * keeps only its hash, so after Done it can't be copied again.
  */
 export function CreatedTokenNote({ token, address, onDone }: { token: CreatedToken; address: string; onDone: () => void }) {
   return (
     <Message type="success" showIcon className="mf-settings-note">
       <Text>“{token.name}” is ready. Copy it now: Mitfah won't show it again.</Text>
       <div className="mf-connect-url">
-        <code>{token.token}</code>
+        {/* Never on the page itself: dots, and the copy button holds the token. */}
+        <code aria-label="Token, hidden">{'•'.repeat(32)}</code>
         <CopyButton value={token.token} label="Token" />
       </div>
       <Text size="sm">
-        Your script or agent connects to <code>{address}</code> and sends it as <code>Authorization: Bearer</code>{' '}
-        followed by the token. {accessText(token.access)}, until {formatDate(token.expires_at * 1_000)}.
+        Your agent sends it to <code>{address}</code> as <code>Authorization: Bearer</code> followed by the token.{' '}
+        {accessText(token.access)}, until {formatDate(token.expires_at * 1_000)}.
       </Text>
       <Button appearance="primary" size="sm" onClick={onDone}>
         Done

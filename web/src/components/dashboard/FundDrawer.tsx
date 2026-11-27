@@ -9,6 +9,7 @@ import { isValidAmount } from '../../lib/format'
 import { chainName, explorerUrl } from '../../wallet/chains'
 import { AmountInput } from '../AmountInput'
 import { CopyButton } from '../CopyButton'
+import { Explained } from '../Explained'
 import { ConnectDialog } from '../wallet/ConnectDialog'
 import { NetworkBanner } from '../wallet/NetworkBanner'
 
@@ -68,8 +69,7 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
             <CopyButton value={wallet.address} label="Wallet address" />
           </div>
           <Message type="warning" showIcon className="mf-settings-note">
-            Only send on {network}. Anything sent on another network can be lost. The wallet pays its
-            network fees in {ticker}.
+            Only send on {network}: anything sent on another network can be lost. Keep some {ticker} for network fees.
           </Message>
           {fork && (
             <Text size="sm" muted>
@@ -79,10 +79,11 @@ export function FundDrawer({ open, onClose, wallet, chain }: FundDrawerProps) {
         </section>
 
         <section className="mf-drawer-section" aria-labelledby="fund-send-title">
-          <h3 id="fund-send-title">Or send from your connected wallet</h3>
+          <Explained level={3} title="Or send from your connected wallet" titleId="fund-send-title">
+            {!isConnected && `Connect a browser wallet such as MetaMask to send ${ticker}.`}
+          </Explained>
           {!isConnected ? (
             <>
-              <Text muted>Connect a browser wallet such as MetaMask to send {ticker} from it.</Text>
               <Button appearance="primary" className="mf-step-action" onClick={() => setConnectOpen(true)}>
                 Connect wallet
               </Button>

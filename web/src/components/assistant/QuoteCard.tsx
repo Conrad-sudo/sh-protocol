@@ -101,8 +101,8 @@ export function QuoteCard({ chainId, busy, onShow }: QuoteCardProps) {
         </p>
         {noPasskey && (
           <p className="mf-quote-problem">
-            No device you added can approve payments from this wallet yet. <Link to="/controls">Add this device</Link>{' '}
-            in Controls, then tap Confirm.
+            No device can approve payments yet. <Link to="/controls">Add this device</Link> in Controls, then tap
+            Confirm.
           </p>
         )}
         {start.isError && !noPasskey && (
@@ -167,8 +167,8 @@ function Failure({ error, onClose }: { error: unknown; onClose: () => void }) {
     // The payment may have gone out, so tapping again (or asking again) could repeat it.
     return (
       <Message type="warning" showIcon closable onClose={onClose} className="mf-chat-failure">
-        <strong>No answer arrived.</strong> {errorText(error)} The transaction may still have been sent, so check{' '}
-        <Link to="/history">History</Link> before you try again.
+        <strong>No answer arrived.</strong> {errorText(error)} It may have been sent: check{' '}
+        <Link to="/history">History</Link> before trying again.
       </Message>
     )
   }

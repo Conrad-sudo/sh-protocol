@@ -525,7 +525,7 @@ describe('ControlsPage', () => {
     await renderRoutes(routes, '/controls')
 
     await connect(user)
-    expect(screen.getByText(/1 of 5 devices can approve payments\./)).toBeInTheDocument()
+    expect(screen.getByText(/1 of 5 in use\./)).toBeInTheDocument()
     const iphone = within(row('iPhone'))
     expect(iphone.getByText('Active')).toBeInTheDocument()
     expect(iphone.getByText(/^Approves payments until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
@@ -533,7 +533,7 @@ describe('ControlsPage', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Renew iPhone?')).toBeInTheDocument()
     expect(dialog).toHaveTextContent(
-      /iPhone keeps approving the assistant's payments from this wallet for another 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+      /iPhone keeps approving the assistant's payments for another 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
     )
     await user.click(within(dialog).getByRole('button', { name: 'Renew' }))
 
@@ -560,7 +560,7 @@ describe('ControlsPage', () => {
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Revoke iPhone' }))
     expect(await screen.findByText('iPhone can no longer approve payments on Sepolia.')).toBeInTheDocument()
-    expect(await screen.findByText(/No device can approve payments from this wallet yet/)).toBeInTheDocument()
+    expect(await screen.findByText(/None yet, so the assistant can't send anything/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Revoke all' })).toBeNull()
 
     // The passkey is still the account's, so the wallet offers it back.
@@ -569,7 +569,7 @@ describe('ControlsPage', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Add iPhone?')).toBeInTheDocument()
     expect(dialog).toHaveTextContent(
-      /iPhone will be able to approve the assistant's payments from this wallet for 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
+      /iPhone can approve the assistant's payments for 90 days, until \w{3} \d{1,2}, \d{4}, up to \$100\.00 every 24 hours\./,
     )
     await user.click(within(dialog).getByRole('button', { name: 'Add device' }))
     expect(await screen.findByText(/^iPhone can approve payments on Sepolia until \w{3} \d{1,2}, \d{4}\.$/)).toBeInTheDocument()
@@ -592,12 +592,12 @@ describe('ControlsPage', () => {
     const registered = formatDate(stranger.created_at * 1_000)
     const other = await waitFor(() => row('iPhone 2'))
     expect(within(other).getByText('Not on this wallet')).toBeInTheDocument()
-    expect(other).toHaveTextContent(`A passkey registered to your account on ${registered}.`)
+    expect(other).toHaveTextContent(`Registered to your account on ${registered}.`)
     expect(other).not.toHaveTextContent('One of your devices')
 
     await user.click(within(other).getByRole('button', { name: 'Add iPhone 2' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(`Only add it if you registered this passkey yourself, on ${registered}.`)
+    expect(dialog).toHaveTextContent(`Only add it if you made this passkey yourself, on ${registered}.`)
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(server.prepared).toEqual([])
 
@@ -642,7 +642,7 @@ describe('ControlsPage', () => {
 
     const iphone = within((await screen.findByRole('heading', { name: 'iPhone', level: 3 })).closest('.mf-control-row') as HTMLElement)
     expect(iphone.getByText('Expires soon')).toBeInTheDocument()
-    expect(iphone.getByText(/Stops approving payments in (1 d 23 h|2 d)\. Renew it to keep it working\./)).toBeInTheDocument()
+    expect(iphone.getByText(/Expires in (1 d 23 h|2 d)\. Renew it to keep it\./)).toBeInTheDocument()
     expect(iphone.getByRole('button', { name: 'Renew iPhone' })).toBeInTheDocument()
     expect(iphone.getByRole('button', { name: 'Revoke iPhone' })).toBeInTheDocument()
   })
@@ -653,9 +653,9 @@ describe('ControlsPage', () => {
 
     const iphone = within((await screen.findByRole('heading', { name: 'iPhone', level: 3 })).closest('.mf-control-row') as HTMLElement)
     expect(iphone.getByText('Expired')).toBeInTheDocument()
-    expect(iphone.getByText(/^Stopped approving payments on \w{3} \d{1,2}, \d{4}\. Renew it to use it again\.$/)).toBeInTheDocument()
+    expect(iphone.getByText(/^Expired on \w{3} \d{1,2}, \d{4}\. Renew it to use it again\.$/)).toBeInTheDocument()
     expect(iphone.getByRole('button', { name: 'Renew iPhone' })).toBeInTheDocument()
-    expect(screen.getByText(/0 of 5 devices can approve payments\./)).toBeInTheDocument()
+    expect(screen.getByText(/0 of 5 in use\./)).toBeInTheDocument()
   })
 
   it('offers only to revoke a key added outside Mitfah', async () => {
@@ -665,7 +665,7 @@ describe('ControlsPage', () => {
     const unknown = within(
       (await screen.findByRole('heading', { name: 'Unknown device', level: 3 })).closest('.mf-control-row') as HTMLElement,
     )
-    expect(unknown.getByText(/Added to this wallet outside Mitfah/)).toBeInTheDocument()
+    expect(unknown.getByText(/Added outside Mitfah/)).toBeInTheDocument()
     expect(unknown.getByRole('button', { name: 'Revoke Unknown device' })).toBeInTheDocument()
     expect(unknown.queryByRole('button', { name: /Renew|Rename/ })).toBeNull()
   })
@@ -688,7 +688,7 @@ describe('ControlsPage', () => {
     await user.click(screen.getByRole('button', { name: 'Add this device' }))
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent(
-      /Your browser will first ask you to create a passkey\. This device \(“Work laptop”\) will be able to approve the assistant's payments from this wallet for 90 days/,
+      /Your browser will first ask you to create a passkey\. This device \(“Work laptop”\) can approve the assistant's payments for 90 days/,
     )
     // Fetched while the dialog asks, so the confirming tap can open the browser's prompt at once.
     await waitFor(() => expect(server.optionsAsked()).toBe(1))
@@ -729,7 +729,7 @@ describe('ControlsPage', () => {
     expect(await screen.findByText(/^Work laptop can approve payments on Sepolia until/)).toBeInTheDocument()
 
     const others = within(screen.getByRole('region', { name: 'Add on your other wallets' }))
-    expect(others.getByText(/Also let “Work laptop” approve payments from your other wallets\?/)).toBeInTheDocument()
+    expect(others.getByText(/Also add “Work laptop” to your other wallets\?/)).toBeInTheDocument()
     await user.click(await others.findByRole('button', { name: `Add on ${chainName(BSC)}` }))
     expect(
       await screen.findByText(new RegExp(`^Work laptop can approve payments on ${chainName(BSC)} until`)),
@@ -781,9 +781,9 @@ describe('ControlsPage', () => {
     })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/5 of 5 devices can approve payments\./)).toBeInTheDocument()
+    expect(await screen.findByText(/5 of 5 in use\./)).toBeInTheDocument()
     const laptop = within(await waitFor(() => row('Work laptop')))
-    expect(laptop.getByText(/already trusts 5 devices, the most it can\. Revoke one to add Work laptop\./)).toBeInTheDocument()
+    expect(laptop.getByText(/A wallet can have 5 devices at most\. Revoke one to add Work laptop\./)).toBeInTheDocument()
     expect(laptop.getByRole('button', { name: 'Add Work laptop' })).toBeDisabled()
     expect(within(row('Add this device')).getByText('Wallet full')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add this device' })).toBeDisabled()
@@ -793,7 +793,7 @@ describe('ControlsPage', () => {
     stubServer({ wallets: [makeWalletState({ session: makeSession('off') })], passkeys: [] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/This browser can't make passkeys, so it can't approve payments\./)).toBeInTheDocument()
+    expect(await screen.findByText(/This browser can't make passkeys\. Use a phone or computer that can\./)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add this device' })).toBeDisabled()
     expect(screen.queryByLabelText('Name for this device')).toBeNull()
   })
@@ -848,7 +848,7 @@ describe('ControlsPage', () => {
     const limit = screen.getByLabelText('Limit per period')
     await user.clear(limit)
     await user.type(limit, '0')
-    expect(screen.getByText("A $0 limit stops the assistant spending without turning it off.")).toBeInTheDocument()
+    expect(screen.getByText('$0 stops the assistant spending.')).toBeInTheDocument()
     await user.click(within(limit.closest('form')!).getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText('Spending limit set to $0.00.')).toBeInTheDocument()
@@ -1116,10 +1116,10 @@ describe('ControlsPage', () => {
     const counted = screen.getByRole('list', { name: 'Counted tokens' })
     // Counting something against a $0 limit would stop the assistant spending it at all.
     expect(await within(counted).findByRole('button', { name: 'Count ETH and WETH toward the limit' })).toBeDisabled()
-    expect(screen.getByText(/^Set a spending limit above first\./)).toBeInTheDocument()
+    expect(screen.getByText(/^Set a spending limit first:/)).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Add a token' })).toHaveAttribute('aria-disabled', 'true')
     // The limit itself says why it does nothing yet, instead of "a $0 limit stops the assistant".
-    expect(screen.getByText(/^Nothing counts toward the limit yet, so it has no effect\./)).toBeInTheDocument()
+    expect(screen.getByText(/^No effect until a token counts toward it/)).toBeInTheDocument()
     expect(screen.queryByText(/A \$0 limit stops the assistant/)).toBeNull()
   })
 
@@ -1208,7 +1208,7 @@ describe('ControlsPage', () => {
     }
     expect(
       screen.getByText(
-        'The Uniswap V3 router and Uniswap V3 positions are trusted by default, as the assistant uses them to swap and to add or remove liquidity.',
+        'The Uniswap V3 router and Uniswap V3 positions are trusted by default: the assistant swaps and manages liquidity with them.',
       ),
     ).toBeInTheDocument()
     expect(screen.queryByText('None.')).toBeNull()
@@ -1238,7 +1238,7 @@ describe('ControlsPage', () => {
     expect(missing[1]).toHaveTextContent('Uniswap V3 positions')
     expect(
       screen.getByText(
-        'New wallets trust these from the start. Without them, the assistant can only swap and provide liquidity with tokens Mitfah can price.',
+        'New wallets trust these. Without them, the assistant can swap and add liquidity only with tokens Mitfah can price.',
       ),
     ).toBeInTheDocument()
     expect(screen.queryByText(/trusted by default/)).toBeNull()
@@ -1248,7 +1248,7 @@ describe('ControlsPage', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Trust this spender?')
     expect(dialog).toHaveTextContent(`Uniswap V3 positions (0x1238…DA52${POSITION_MANAGER})`)
-    expect(dialog).toHaveTextContent("will be allowed approvals for tokens Mitfah can't price")
+    expect(dialog).toHaveTextContent("may be approved for tokens Mitfah can't price")
     expect(dialog).toHaveTextContent('New wallets on this network trust it from the start.')
     await user.click(within(dialog).getByRole('button', { name: 'Trust spender' }))
 
@@ -1277,7 +1277,7 @@ describe('ControlsPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     expect(
       await screen.findByText(
-        'The PancakeSwap router is trusted by default, as the assistant uses it to swap and to add or remove liquidity.',
+        'The PancakeSwap router is trusted by default: the assistant swaps and manages liquidity with it.',
       ),
     ).toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Trusted spenders' })).toBeNull()
@@ -1482,7 +1482,7 @@ describe('ControlsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Remove Uniswap V3 router from the allowlist' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent("won't be able to call any contract until you add one or turn the list off")
+    expect(dialog).toHaveTextContent("can't call any contract until you add one or turn the list off")
     await user.click(within(dialog).getByRole('button', { name: 'Remove it' }))
     expect(await screen.findByText('Uniswap V3 router removed from the allowlist.')).toBeInTheDocument()
     expect(server.prepared).toEqual([
@@ -1497,7 +1497,7 @@ describe('ControlsPage', () => {
 
     await connect(user)
     await user.click(screen.getByRole('button', { name: 'Advanced' }))
-    expect(await screen.findByText(/created before Mitfah could show its list/)).toBeInTheDocument()
+    expect(await screen.findByText(/the wallet is older than this feature/)).toBeInTheDocument()
     expect(within(row('Contract allowlist')).getByText('On')).toBeInTheDocument()
     expect(screen.queryByLabelText('Add a contract')).toBeNull()
   })
@@ -1554,7 +1554,7 @@ describe('ControlsPage', () => {
     stubServer({ wallets: [makeWalletState({ is_owner: false })] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/so they're switched off here/)).toBeInTheDocument()
+    expect(await screen.findByText(/You signed in with another address/)).toBeInTheDocument()
     expect(screen.queryByText(/Connect your owner wallet/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Pause wallet' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Revoke iPhone' })).toBeDisabled()
@@ -1776,7 +1776,7 @@ describe('ControlsPage — recurring payments', () => {
     stubServer({ recurring: [{ ...NO_RECURRING, available: false, module: null }] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/This wallet can't make recurring payments/)).toBeInTheDocument()
+    expect(await screen.findByText(/This wallet was created before recurring payments existed/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set up payment' })).toBeNull()
   })
 })
@@ -1812,7 +1812,7 @@ describe('ControlsPage — trading agents', () => {
     // One the owner never named goes by its short address.
     const unnamed = within(await agentRow('0x5555…5555'))
     expect(unnamed.getByText('Expired')).toBeInTheDocument()
-    expect(unnamed.getByText(/^Stopped working on \w{3} \d{1,2}, \d{4}\./)).toBeInTheDocument()
+    expect(unnamed.getByText(/^Expired on \w{3} \d{1,2}, \d{4}\./)).toBeInTheDocument()
   })
 
   it('adds an agent after asking, and keeps its name with the confirm', async () => {
@@ -1830,8 +1830,8 @@ describe('ControlsPage — trading agents', () => {
 
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Add “Scalper” as a trading agent?')).toBeInTheDocument()
-    expect(dialog).toHaveTextContent(/without your passkey, on any exchange or protocol, up to \$25\.00 every 24 hours until/)
-    expect(dialog).toHaveTextContent(/already has in other protocols, such as pool positions or deposits, are outside the limit/)
+    expect(dialog).toHaveTextContent(/can trade without your passkey, on any exchange or protocol, up to \$25\.00 every 24 hours until/)
+    expect(dialog).toHaveTextContent(/Funds in other protocols, such as pool positions or deposits, are outside the limit/)
     expect(dialog).toHaveTextContent("Revoking its access token won't stop it.")
     await user.click(within(dialog).getByRole('button', { name: 'Add agent' }))
 
@@ -1852,7 +1852,7 @@ describe('ControlsPage — trading agents', () => {
     expect(screen.getByLabelText("Agent's name")).toHaveValue('')
   })
 
-  it("makes the agent's key in the browser, shows it once, and never sends it anywhere", async () => {
+  it("makes the agent's key in the browser, never shows it, and never sends it anywhere", async () => {
     const server = stubServer({ agents: [NO_AGENTS, withAgents(BOT)] })
     const user = userEvent.setup()
     await renderRoutes(routes, '/controls')
@@ -1861,16 +1861,23 @@ describe('ControlsPage — trading agents', () => {
     await user.type(await screen.findByLabelText("Agent's name"), 'Bot')
     await user.click(screen.getByRole('button', { name: 'No key yet? Make one here' }))
     const note = (await screen.findByText(/^Your agent's private key\./)).closest('.rs-message') as HTMLElement
-    const key = within(note).getByText(/^0x[0-9a-f]{64}$/).textContent as `0x${string}`
-    const address = privateKeyToAccount(key).address
-    expect(screen.getByLabelText("Agent's address")).toHaveValue(address)
-    expect(within(note).getByRole('button', { name: 'Copy private key' })).toBeInTheDocument()
+    // Hidden: only the copy button has it.
+    expect(note).not.toHaveTextContent(/0x[0-9a-f]{64}/)
     await user.type(screen.getByLabelText("Agent's limit per period"), '10')
 
     // Not added until the key is somewhere: an agent nobody holds the key of is no use.
     const add = screen.getByRole('button', { name: 'Add agent' })
     expect(add).toBeDisabled()
-    await user.click(within(note).getByRole('checkbox', { name: "I've put this key in my agent" }))
+    const saved = within(note).getByRole('checkbox', { name: "I've put this key in my agent" })
+    expect(saved).toBeDisabled() // Not before it is copied.
+    await user.click(within(note).getByRole('button', { name: 'Copy private key' }))
+    const key = (await navigator.clipboard.readText()) as `0x${string}`
+    expect(key).toMatch(/^0x[0-9a-f]{64}$/)
+    const address = privateKeyToAccount(key).address
+    expect(screen.getByLabelText("Agent's address")).toHaveValue(address)
+    await user.click(saved)
+    // The note closes, and the key goes with it.
+    expect(screen.queryByText(/^Your agent's private key\./)).toBeNull()
     expect(add).toBeEnabled()
     await user.click(add)
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Add agent' }))
@@ -1917,7 +1924,7 @@ describe('ControlsPage — trading agents', () => {
     await renderRoutes(routes, '/controls')
 
     await connect(user)
-    expect(await screen.findByText(/^Agents can trade only while the limit counts ETH/)).toBeInTheDocument()
+    expect(await screen.findByText(/^Agents need ETH to count toward the limit/)).toBeInTheDocument()
     expect(screen.queryByLabelText("Agent's name")).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Count ETH' }))
 
@@ -1934,7 +1941,7 @@ describe('ControlsPage — trading agents', () => {
     stubServer({ agents: [withAgents(BOT, two, three)] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText('This wallet has 3 agents, the most it can have. Remove one to add another.')).toBeInTheDocument()
+    expect(await screen.findByText('A wallet can have 3 agents at most. Remove one to add another.')).toBeInTheDocument()
     expect(screen.queryByLabelText("Agent's name")).toBeNull()
   })
 
@@ -1942,7 +1949,7 @@ describe('ControlsPage — trading agents', () => {
     stubServer({ agents: [{ ...NO_AGENTS, available: false, module: null, native_metered: null }] })
     await renderRoutes(routes, '/controls')
 
-    expect(await screen.findByText(/^This wallet can't have trading agents: it was created before they existed\./)).toBeInTheDocument()
+    expect(await screen.findByText(/^This wallet was created before trading agents existed\./)).toBeInTheDocument()
     expect(screen.queryByLabelText("Agent's name")).toBeNull()
   })
 

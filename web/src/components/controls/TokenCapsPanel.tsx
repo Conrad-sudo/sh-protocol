@@ -6,6 +6,7 @@ import { useTokens } from '../../hooks/useTokens'
 import { formatTokenAmount } from '../../lib/format'
 import { AddressText } from '../AddressText'
 import { AmountInput } from '../AmountInput'
+import { Explained, FieldError, FieldLabel } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { TxButton } from '../owner/TxButton'
@@ -30,7 +31,16 @@ export function TokenCapsPanel(props: ControlPanelProps) {
   const caps = wallet.spending.token_caps
 
   return (
-    <GlassPanel bordered header={<h2>Tokens with their own limit</h2>} className="mf-card">
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Tokens with their own limit">
+          Caps how many tokens can leave per period, whatever they're worth. Selling the token uses it too. A token
+          counted above can't have one.
+        </Explained>
+      }
+      className="mf-card"
+    >
       {caps.length > 0 && (
         <ul className="mf-token-list" aria-label="Tokens with their own limit">
           {caps.map(cap => {
@@ -82,12 +92,6 @@ export function TokenCapsPanel(props: ControlPanelProps) {
         </ul>
       )}
       <SetTokenCap key={caps.length} {...props} />
-      <Text size="sm" muted className="mf-settings-note">
-        A limit here counts how many tokens leave the wallet, not what they're worth, and it resets with the spending
-        period. Selling the token uses it even at a fair price. Buying the token with one that counts uses your
-        spending limit for the full amount paid. A token can't both count in USD and have its own limit, so stop
-        counting it above first. The native token and its wrapped form count in USD or not at all.
-      </Text>
     </GlassPanel>
   )
 }
@@ -184,7 +188,7 @@ function SetTokenCap({ wallet, tx, locked, start, ask }: ControlPanelProps) {
         />
       </Form.Group>
       <Form.Group controlId="token-cap-limit">
-        <Form.Label>Token limit per period</Form.Label>
+        <FieldLabel help="The most that can leave per period. 0 stops it moving.">Token limit per period</FieldLabel>
         <div className="mf-inline-field">
           <AmountInput
             id="token-cap-limit"
@@ -197,12 +201,10 @@ function SetTokenCap({ wallet, tx, locked, start, ask }: ControlPanelProps) {
             Set limit
           </TxButton>
         </div>
-        {tooPrecise ? (
-          <Form.Text className="mf-error-text">
+        {tooPrecise && (
+          <FieldError>
             {chosen?.label ?? 'This token'} can't be split into more than {decimals} decimal places.
-          </Form.Text>
-        ) : (
-          <Form.Text>The most that can leave per period. A limit of 0 stops the assistant moving it.</Form.Text>
+          </FieldError>
         )}
       </Form.Group>
       <TxStatus tx={tx} txKey="token-cap-set" />

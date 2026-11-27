@@ -29,8 +29,8 @@ export function OwnerWalletBar({
     case 'not-owner':
       return (
         <Message type="info" showIcon className="mf-owner-bar">
-          Changes to this wallet must be signed by its owner, <AddressText address={wallet.owner} />, and that isn't
-          the address you signed in with, so they're switched off here.
+          Only the owner, <AddressText address={wallet.owner} />, can change this wallet. You signed in with another
+          address.
         </Message>
       )
     case 'disconnected':

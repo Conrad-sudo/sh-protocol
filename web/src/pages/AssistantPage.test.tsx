@@ -515,7 +515,7 @@ describe('AssistantPage', () => {
 
     const suggestions = await screen.findByRole('list', { name: 'Suggestions' })
     expect(within(suggestions).getAllByRole('button')).toHaveLength(3)
-    expect(await screen.findByText('No one yet. Add a contact before asking it to pay someone.')).toBeInTheDocument()
+    expect(await screen.findByText('No one yet. Add a contact first.')).toBeInTheDocument()
   })
 
   it('offers to send again when the server refused the message', async () => {
@@ -557,7 +557,7 @@ describe('AssistantPage', () => {
 
     await user.type(await composer(), 'send 5 usdc to sam{Enter}')
     expect(await screen.findByText('No reply arrived.')).toBeInTheDocument()
-    expect(screen.getByText(/may still have handled your message/)).toBeInTheDocument()
+    expect(screen.getByText(/Mitfah may have handled it/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Check for a reply' }))
@@ -612,7 +612,7 @@ describe('AssistantPage', () => {
     stubServer({ wallet: makeWalletState({ paused: true }) })
     await renderRoutes(routes, '/assistant')
     expect(
-      await screen.findByText('Your wallet is paused, so the assistant can answer questions but can’t send anything.'),
+      await screen.findByText('Your wallet is paused: the assistant can answer, but not send.'),
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open Controls' })).toHaveAttribute('href', '/controls')
     cleanup()
@@ -621,7 +621,7 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
     expect(
       await screen.findByText(
-        'No device can approve payments from this wallet yet, so the assistant can answer questions but can’t send anything. Add this device in Controls.',
+        'No device can approve payments yet: the assistant can answer, but not send. Add this device in Controls.',
       ),
     ).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Open Controls' })).not.toBeInTheDocument()
@@ -632,7 +632,7 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
     expect(
       await screen.findByText(
-        'The assistant’s access has run out, so it can answer questions but can’t send anything. Renew it in Controls.',
+        'The assistant’s access has run out: it can answer, but not send. Renew it in Controls.',
       ),
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open Controls' })).toHaveAttribute('href', '/controls')
@@ -649,7 +649,7 @@ describe('AssistantPage', () => {
     stubServer({ wallet: makeWalletState({ spending }) })
     await renderRoutes(routes, '/assistant')
 
-    const notice = (await screen.findByText(/nothing caps what the assistant can spend/)).closest('.rs-message')
+    const notice = (await screen.findByText(/nothing caps what the assistant spends/)).closest('.rs-message')
     expect(notice).toHaveClass('rs-message-error')
     const aside = screen.getByRole('complementary', { name: 'What the assistant can do' })
     expect(within(aside).getByText('No limit')).toBeInTheDocument()
@@ -753,8 +753,8 @@ describe('AssistantPage', () => {
     expect(await within(log()).findByText('what can you do?')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Clear chat' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(/including anything said on Telegram/)
-    expect(dialog).toHaveTextContent(/transaction history stay as they are/)
+    expect(dialog).toHaveTextContent(/Telegram included/)
+    expect(dialog).toHaveTextContent(/history stay/)
     await user.click(within(dialog).getByRole('button', { name: 'Clear chat' }))
 
     expect(await screen.findByText('Chat cleared.')).toBeInTheDocument()
@@ -885,7 +885,7 @@ describe('AssistantPage', () => {
     await renderRoutes(routes, '/assistant')
 
     const card = await quoteCard()
-    expect(await within(card).findByText(/No device you added can approve payments from this wallet yet\./)).toBeInTheDocument()
+    expect(await within(card).findByText(/No device can approve payments yet\./)).toBeInTheDocument()
     expect(within(card).getByRole('link', { name: 'Add this device' })).toHaveAttribute('href', '/controls')
     expect(within(card).getByRole('button', { name: 'Confirm' })).toBeDisabled()
   })
@@ -1010,7 +1010,7 @@ describe('AssistantPage', () => {
 
     await confirmCard(user)
     expect(await screen.findByText('No answer arrived.')).toBeInTheDocument()
-    const warning = screen.getByText(/may still have been sent/)
+    const warning = screen.getByText(/It may have been sent/)
     expect(within(warning).getByRole('link', { name: 'History' })).toHaveAttribute('href', '/history')
     // The chat is read again, in case the server recorded what happened.
     await waitFor(() => expect(calls.history).toBe(2))

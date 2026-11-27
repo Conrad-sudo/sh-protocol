@@ -223,7 +223,7 @@ describe('OnboardingPage', () => {
     expect(within(limits).getByText('WETH counts with it.')).toBeInTheDocument()
     expect(within(limits).queryByLabelText('Spending limit')).toBeNull()
     expect(within(limits).queryByRole('radiogroup', { name: 'Period' })).toBeNull()
-    expect(within(limits).getByText(/You can skip it for now and set one any time in Controls\./)).toBeInTheDocument()
+    expect(within(limits).getByText(/You can set one later in Controls\./)).toBeInTheDocument()
     expect(within(limits).getByRole('button', { name: 'Continue' })).toBeEnabled()
 
     // Counting ETH brings the limit and its period: $250 a week. The month is offered too.
@@ -477,7 +477,7 @@ describe('OnboardingPage', () => {
 
     await toPasskeyStep(user)
     const passkey = await step('Create your passkey')
-    expect(within(passkey).getByText(/the assistant can't send anything until you add a device in Controls/)).toBeInTheDocument()
+    expect(within(passkey).getByText(/the assistant can't send until you add a device in Controls/)).toBeInTheDocument()
     await user.click(within(passkey).getByRole('button', { name: 'Skip for now' }))
 
     const review = await step('Check the details')
@@ -540,7 +540,7 @@ describe('OnboardingPage', () => {
     await within(limits).findByRole('combobox', { name: TOKEN_PICKER })
     await user.click(within(limits).getByRole('button', { name: 'Continue' }))
     const fund = await step('Prefund your Mitfah smart wallet')
-    expect(within(fund).getByText(/the assistant can't pay for anything until you add funds/)).toBeInTheDocument()
+    expect(within(fund).getByText(/Skip to start empty; add funds any time/)).toBeInTheDocument()
     await user.click(within(fund).getByRole('button', { name: 'Skip for now' }))
     await user.click(within(await step('Create your passkey')).getByRole('button', { name: 'Skip for now' }))
 
@@ -562,7 +562,7 @@ describe('OnboardingPage', () => {
 
     await toPasskeyStep(user)
     const passkey = await step('Your passkey')
-    expect(within(passkey).getByText(/This device already has a passkey, “iPhone”\./)).toBeInTheDocument()
+    expect(within(passkey).getByText(/This device's passkey, “iPhone”, will approve/)).toBeInTheDocument()
     await user.click(within(passkey).getByRole('button', { name: 'Continue' }))
     const review = await step('Check the details')
     expect(within(review).getByText("Assistant's access").nextElementSibling).toHaveTextContent(/approved with the passkey on “iPhone”/)

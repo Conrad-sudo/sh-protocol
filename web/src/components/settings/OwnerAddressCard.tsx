@@ -1,6 +1,7 @@
-import { Message, Text } from 'rsuite'
+import { Message } from 'rsuite'
 import { AddressText } from '../AddressText'
 import { CopyButton } from '../CopyButton'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
@@ -15,8 +16,9 @@ export function OwnerAddressCard({ ownerAddr }: { ownerAddr: string | null }) {
     <GlassPanel bordered header="Your wallet">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
-          <Text weight="medium">Address</Text>
-          <Text muted size="sm">You sign in with it, and it owns your Mitfah smart wallets.</Text>
+          <Explained level="label" title="Address">
+            You sign in with it, and it owns your wallets.
+          </Explained>
         </div>
         <div className="mf-settings-row-action">
           {ownerAddr ? (
@@ -31,8 +33,7 @@ export function OwnerAddressCard({ ownerAddr }: { ownerAddr: string | null }) {
       </div>
 
       <Message type="info" showIcon className="mf-settings-note">
-        Only this address can sign you in, pause your wallets, change their limits or withdraw. If you lose access to it,
-        Mitfah can't recover your account or your wallets for you.
+        Only this address can sign you in, change your wallets or withdraw. If you lose it, Mitfah can't recover them.
       </Message>
     </GlassPanel>
   )

@@ -30,10 +30,7 @@ export function SuggestedPrompts({ payTicker, swap, onAsk, onDraft, disabled }: 
   return (
     <div className="mf-chat-start">
       <h2 className="mf-chat-start-title">What can I help with?</h2>
-      <Text muted>
-        Ask about your balances and limit, or ask me to pay one of your contacts or swap one token for another. I’ll
-        ask you to confirm before I send anything.
-      </Text>
+      <Text muted>Ask about your balances, pay a contact or swap tokens. I’ll ask you to confirm before I send.</Text>
       <ul className="mf-prompts" aria-label="Suggestions">
         {questions.map(question => (
           <li key={question}>

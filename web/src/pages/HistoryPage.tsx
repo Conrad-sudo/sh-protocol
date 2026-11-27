@@ -31,7 +31,7 @@ import { chainName, explorerName, explorerUrl } from '../wallet/chains'
 
 const TITLE = 'History'
 const DESCRIPTION =
-  'Every transaction on your Mitfah wallet: what your assistant, a connected AI app or your trading agents sent, what you signed, and what happened outside Mitfah.'
+  "Every transaction on your wallet. On the explorer, those Mitfah sends come from Mitfah's address, with your transfer inside."
 
 const SOURCE: Record<Transaction['source'], string> = {
   assistant: 'By your assistant',
@@ -65,14 +65,14 @@ const GROUPS: { label: string; value: HistoryGroup }[] = [
 
 /** What an empty list says on each tab, when no filter is narrowing it. */
 const EMPTY: Record<Exclude<HistoryGroup, 'all'>, { title: string; body: string }> = {
-  in: { title: 'No incoming transactions yet', body: 'Money and tokens that reach your wallet will be listed here.' },
+  in: { title: 'No incoming transactions yet', body: 'Money and tokens that reach your wallet show here.' },
   out: {
     title: 'No outgoing transactions yet',
-    body: 'Payments, withdrawals, swaps and anything else that leaves your wallet will be listed here.',
+    body: 'Payments, withdrawals, swaps and anything else that leaves your wallet show here.',
   },
   none: {
     title: 'No wallet changes yet',
-    body: 'Changes that move no money, like a new spending limit or pausing the wallet, will be listed here.',
+    body: 'Changes that move no money, like a new limit or a pause, show here.',
   },
 }
 
@@ -145,7 +145,7 @@ export function HistoryPage() {
       <>
         <EmptyState icon={<HistoryIcon />} title={empty?.title ?? 'No transactions yet'}>
           {empty?.body ??
-            "Payments your assistant makes, changes you sign here, and anything else that reaches your wallet will be listed with their date, time and a link to the network's explorer."}
+            "Every transaction on your wallet shows here, with a link to the network's explorer."}
         </EmptyState>
         {checking}
       </>
@@ -176,10 +176,6 @@ export function HistoryPage() {
             Show older transactions
           </Button>
         )}
-        <Text size="sm" muted>
-          Mitfah submits the assistant's transactions for your wallet, so on the explorer they come from Mitfah's
-          address. Your transfer is inside the transaction.
-        </Text>
       </section>
     )
   }

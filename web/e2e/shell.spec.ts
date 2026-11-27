@@ -109,7 +109,7 @@ test('settings shows the address you sign in with', async ({ page }, testInfo) =
 
   const panel = page.locator('.rs-panel', { hasText: 'Your wallet' })
   await expect(panel.getByTitle(owner)).toContainText('0xf39F…2266')
-  await expect(panel.getByText('You sign in with it, and it owns your Mitfah smart wallets.')).toBeVisible()
+  await expect(panel.getByText('You sign in with it, and it owns your wallets.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Copy address' })).toBeVisible()
   // Wallet sign-in is the only kind: nothing about email, passwords or Google.
   await expect(page.getByText('Sign-in methods')).toHaveCount(0)

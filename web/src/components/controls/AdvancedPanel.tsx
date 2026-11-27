@@ -7,6 +7,7 @@ import { useNow } from '../../hooks/useNow'
 import { formatTimeLeft, formatTokenAmount, isValidAmount } from '../../lib/format'
 import { AddressText } from '../AddressText'
 import { AmountInput } from '../AmountInput'
+import { FieldError } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { TxButton } from '../owner/TxButton'
 import { TxStatus } from '../owner/TxStatus'
@@ -40,7 +41,7 @@ function defaultSpenders(chain: Chain | undefined): DefaultSpender[] {
 /** "The Uniswap V3 router and Uniswap V3 positions are trusted by default, …" */
 function trustedByDefault(names: string[]) {
   const one = names.length === 1
-  return `The ${names.join(' and ')} ${one ? 'is' : 'are'} trusted by default, as the assistant uses ${one ? 'it' : 'them'} to swap and to add or remove liquidity.`
+  return `The ${names.join(' and ')} ${one ? 'is' : 'are'} trusted by default: the assistant swaps and manages liquidity with ${one ? 'it' : 'them'}.`
 }
 
 /**
@@ -162,10 +163,8 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
                 })}
               </ul>
               <Text size="sm" muted>
-                {missingDefaults.length === 1
-                  ? 'New wallets trust it from the start. Without it,'
-                  : 'New wallets trust these from the start. Without them,'}{' '}
-                the assistant can only swap and provide liquidity with tokens Mitfah can price.
+                {missingDefaults.length === 1 ? 'New wallets trust it. Without it,' : 'New wallets trust these. Without them,'}{' '}
+                the assistant can swap and add liquidity only with tokens Mitfah can price.
               </Text>
             </>
           ) : null}
@@ -174,14 +173,14 @@ export function AdvancedPanel(props: ControlPanelProps & { chain: Chain | undefi
 
         <ControlRow
           title="Network fee cap"
-          help="The most one assistant operation may cost the wallet in network fees. Fees don't count toward your spending limit, so this caps them separately. Set it too low and the assistant's operations fail."
+          help="The most one assistant operation may cost in network fees. Too low, and its operations fail."
         >
           <GasCapEditor key={wallet.limits.max_op_gas_cost_wei} {...props} ticker={chain?.native_ticker ?? 'ETH'} />
         </ControlRow>
 
         <ControlRow
           title="Daily fee budget"
-          help="The most all the assistant's operations together may cost the wallet in network fees in a day. Once it's used up, the assistant stops until it refills."
+          help="The most the assistant may spend on network fees in a day. Once it's used up, the assistant waits for it to refill."
         >
           {wallet.limits.session_gas ? (
             <GasBudgetEditor
@@ -220,7 +219,7 @@ function trustConfirmation(spender: string, key: string, name?: string): Confirm
           ) : (
             <AddressText address={spender} />
           )}{' '}
-          will be allowed approvals for tokens Mitfah can't price, and moving those isn't counted toward your limit.
+          may be approved for tokens Mitfah can't price. Moving those doesn't count toward your limit.
         </Text>
         <Text className="mf-settings-note">
           {name
@@ -281,7 +280,7 @@ function AddSpender({ wallet, tx, locked, ask }: ControlPanelProps) {
             Trust
           </TxButton>
         </div>
-        {problem && <Form.Text className="mf-error-text">{problem}</Form.Text>}
+        {problem && <FieldError>{problem}</FieldError>}
       </Form.Group>
       <TxStatus tx={tx} txKey="spender-add" />
     </Form>
@@ -329,7 +328,7 @@ function GasCapEditor({ wallet, tx, locked, start, ask, ticker }: ControlPanelPr
             Save
           </TxButton>
         </div>
-        {!valid && <Form.Text className="mf-error-text">Enter an amount above zero, like 0.01.</Form.Text>}
+        {!valid && <FieldError>Enter an amount above zero, like 0.01.</FieldError>}
       </Form.Group>
       <TxStatus tx={tx} txKey="max-gas" />
     </Form>
@@ -397,7 +396,7 @@ function GasBudgetEditor({
             Save
           </TxButton>
         </div>
-        {!valid && <Form.Text className="mf-error-text">Enter an amount above zero, like 0.02.</Form.Text>}
+        {!valid && <FieldError>Enter an amount above zero, like 0.02.</FieldError>}
       </Form.Group>
       <TxStatus tx={tx} txKey="gas-budget" />
     </Form>

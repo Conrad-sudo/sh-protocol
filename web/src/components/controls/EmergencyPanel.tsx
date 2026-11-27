@@ -18,8 +18,8 @@ export function EmergencyPanel({ wallet, tx, locked, start, ask }: ControlPanelP
         status={wallet.paused ? <StatusTag tone="danger">Paused</StatusTag> : <StatusTag tone="success">Active</StatusTag>}
         help={
           wallet.paused
-            ? "Nothing can go out, including the assistant's spending. Withdrawals still work."
-            : "Pausing stops every transaction from the wallet, the assistant's and yours. Withdrawals still work."
+            ? 'Nothing can leave except your withdrawals.'
+            : 'Pausing stops every transaction except your withdrawals.'
         }
         action={
           wallet.paused ? (
@@ -34,8 +34,8 @@ export function EmergencyPanel({ wallet, tx, locked, start, ask }: ControlPanelP
                   title: 'Unpause this wallet?',
                   body: (
                     <Text>
-                      The assistant can spend again, within your limit. If you paused because something looked
-                      wrong, revoke its devices first.
+                      The assistant can spend again, within your limit. If something looked wrong, revoke its devices
+                      first.
                     </Text>
                   ),
                   confirmLabel: 'Unpause wallet',

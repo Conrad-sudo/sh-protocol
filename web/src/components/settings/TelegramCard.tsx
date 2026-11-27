@@ -7,6 +7,7 @@ import { createTelegramLink, telegramBotUrl, unlinkTelegram } from '../../api/te
 import type { Me } from '../../api/types'
 import { useMe } from '../../hooks/useMe'
 import { useNow } from '../../hooks/useNow'
+import { Explained } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { StatusTag } from '../StatusTag'
 
@@ -73,7 +74,7 @@ function WaitingForTelegram({ link, onRenew }: { link: PendingLink; onRenew: () 
         <Loader content="Waiting for Telegram…" />
       </div>
       <Text muted size="sm">
-        If the bot says this chat is already linked, it belongs to another Mitfah account. Unlink it there first.
+        If the bot says this chat is already linked, unlink it from your other Mitfah account first.
       </Text>
     </div>
   )
@@ -174,12 +175,11 @@ export function TelegramCard({ me }: { me: Me }) {
     <GlassPanel bordered header="Telegram" id="telegram" className="mf-anchor">
       <div className="mf-settings-row">
         <div className="mf-settings-row-label">
-          <Text weight="medium">Telegram bot</Text>
-          <Text muted size="sm">
+          <Explained level="label" title="Telegram bot">
             {linked
-              ? 'You can chat with your assistant in Telegram, and it warns you there when your limit runs low.'
+              ? 'Chat with your assistant in Telegram. It warns you there when your limit runs low.'
               : 'Chat with your assistant from Telegram too.'}
-          </Text>
+          </Explained>
         </div>
         {action && <div className="mf-settings-row-action">{action}</div>}
       </div>

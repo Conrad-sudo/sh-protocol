@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { useOutletContext } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Address } from 'viem'
@@ -9,6 +9,7 @@ import { passkeyLogin, passkeySignInOptions, siweAccount, siweLogin, siweNonce }
 import type { PasskeyAssertionJSON, TokenResponse } from '../api/types'
 import { useAuth } from '../auth/useAuth'
 import { AddressText } from '../components/AddressText'
+import { Explained } from '../components/Explained'
 import { PageMeta } from '../components/PageMeta'
 import { ConnectDialog } from '../components/wallet/ConnectDialog'
 import { isPasskeyError, PasskeyError, passkeysSupported, signInWithPasskey } from '../lib/passkey'
@@ -100,21 +101,23 @@ function SignIn() {
     },
   })
 
-  // "Sign in" until the check says the connected address is new.
-  const heading = (
-    <h1 className="mf-auth-title">
-      {connected && !checking && !returning ? 'Sign up with your wallet' : 'Sign in with your wallet'}
-    </h1>
+  // "Sign in" until the check says the connected address is new; what to do next beside it.
+  const heading = (explanation?: ReactNode) => (
+    <Explained
+      level={1}
+      title={connected && !checking && !returning ? 'Sign up with your wallet' : 'Sign in with your wallet'}
+      titleClassName="mf-auth-title"
+    >
+      {explanation}
+    </Explained>
   )
 
   if (!connected) {
     return (
       <>
-        {heading}
-        <Text muted>
-          Use the browser wallet that owns, or will own, your Mitfah smart wallet — such as MetaMask. First time? Signing
-          in creates your account.
-        </Text>
+        {heading(
+          'Use the browser wallet that owns, or will own, your Mitfah wallet, such as MetaMask. First time? Signing in creates your account.',
+        )}
         <Button appearance="primary" block size="lg" className="mf-step-action" onClick={() => setConnectOpen(true)}>
           Connect wallet
         </Button>
@@ -127,7 +130,7 @@ function SignIn() {
   if (checking) {
     return (
       <>
-        {heading}
+        {heading()}
         <Loader className="mf-step-action" content="Checking this address…" />
       </>
     )
@@ -135,23 +138,21 @@ function SignIn() {
 
   return (
     <div className="mf-verify">
-      {heading}
       {returning ? (
-        <>
-          <Text weight="semibold">Welcome back.</Text>
-          <Text>
-            Sign a message with <AddressText address={address} />.
-          </Text>
-        </>
+        heading(
+          <>
+            Welcome back. Sign a message with <AddressText address={address} />.
+          </>,
+        )
       ) : (
         <>
-          <Text>
-            Sign a message with <AddressText address={address} /> to prove it's yours. Signing is free and doesn't move
-            any funds.
-          </Text>
+          {heading(
+            <>
+              Sign a message with <AddressText address={address} /> to prove it's yours. It's free and moves no funds.
+            </>,
+          )}
           <Message type="info" showIcon className="mf-settings-note">
-            <strong>This address is your Mitfah account.</strong> It's how you sign in, and the only address that can
-            pause your smart wallet, change its limits or withdraw.
+            <strong>This address is your Mitfah account.</strong> Only it can sign in, change your wallet or withdraw.
           </Message>
         </>
       )}

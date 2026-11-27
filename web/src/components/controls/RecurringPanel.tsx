@@ -7,6 +7,7 @@ import { useNow } from '../../hooks/useNow'
 import { useRecurring } from '../../hooks/useRecurring'
 import { formatDate, formatDateTime, formatTokenAmount, isValidAmount } from '../../lib/format'
 import { AmountInput } from '../AmountInput'
+import { Explained, FieldError, FieldLabel } from '../Explained'
 import { GlassPanel } from '../Glass'
 import { QueryError } from '../QueryError'
 import { TxButton } from '../owner/TxButton'
@@ -48,6 +49,12 @@ function dayStart(value: string): number | null {
 
 type Payable = TokenBalance & { decimals: number }
 
+/** "0.00002 ETH": what the wallet pays Mitfah per payment, or null when it isn't known. */
+function feeText(recurring: RecurringPayments): string | null {
+  if (recurring.fee_per_payment_wei === null) return null
+  return `${formatTokenAmount(recurring.fee_per_payment_wei, 18)} ${recurring.native_ticker}`
+}
+
 /**
  * Payments the wallet makes by itself on a schedule: a fixed amount to one address, every so often.
  * The owner signs each schedule once, on the wallet's recurring payments module; Mitfah then pays
@@ -55,31 +62,35 @@ type Payable = TokenBalance & { decimals: number }
  */
 export function RecurringPanel(props: ControlPanelProps) {
   const recurring = useRecurring(props.wallet.chain_id)
+  const fee = recurring.data?.available ? feeText(recurring.data) : null
 
   return (
-    <GlassPanel bordered header={<h2>Recurring payments</h2>} className="mf-card">
+    <GlassPanel
+      bordered
+      header={
+        <Explained level={2} title="Recurring payments">
+          Mitfah pays each one when it's due, within your spending limit{fee ? `, for a fee of ${fee}` : ''}. A payment
+          that fails is tried again later, and never paid twice.
+        </Explained>
+      }
+      className="mf-card"
+    >
       {recurring.isPending ? (
         <Placeholder.Paragraph rows={2} active />
       ) : recurring.isError ? (
         <QueryError what="the recurring payments" onRetry={() => void recurring.refetch()} className="mf-settings-note" />
       ) : !recurring.data.available ? (
-        <Text muted>
-          This wallet can't make recurring payments: it was created before they existed, or their module was removed.
-        </Text>
+        <Text muted>This wallet was created before recurring payments existed, or their module was removed.</Text>
       ) : (
-        <Schedules {...props} recurring={recurring.data} />
+        <Schedules {...props} recurring={recurring.data} fee={fee} />
       )}
     </GlassPanel>
   )
 }
 
-function Schedules(props: ControlPanelProps & { recurring: RecurringPayments }) {
+function Schedules(props: ControlPanelProps & { recurring: RecurringPayments; fee: string | null }) {
   const { tx, locked, start, recurring } = props
   const live = recurring.schedules.filter(s => s.status === 'live')
-  const fee =
-    recurring.fee_per_payment_wei !== null
-      ? `${formatTokenAmount(recurring.fee_per_payment_wei, 18)} ${recurring.native_ticker}`
-      : null
 
   return (
     <>
@@ -119,12 +130,7 @@ function Schedules(props: ControlPanelProps & { recurring: RecurringPayments }) 
       ) : (
         <Text muted>No recurring payments yet.</Text>
       )}
-      <NewRecurringPayment {...props} fee={fee} />
-      <Text size="sm" muted className="mf-settings-note">
-        Mitfah sends each payment when it falls due, once per period. Each one counts toward the spending limit when its
-        token counts{fee ? `, and pays the wallet's fee of ${fee}` : ''}. One that can't go through (over the limit,
-        paused, not enough funds) is tried again later, and a missed period is never paid twice.
-      </Text>
+      <NewRecurringPayment {...props} />
     </>
   )
 }
@@ -224,8 +230,8 @@ function NewRecurringPayment({
       body: (
         <Text>
           The wallet will send {amount} {ticker} to {who} {everyText(intervalSecs)}, {starts},{' '}
-          {endAt !== null ? `until ${formatDate(endAt * 1000)}` : 'until you cancel it'}, without asking again. Each payment
-          counts toward the spending limit when {ticker} counts{fee ? ` and pays a fee of ${fee}` : ''}.
+          {endAt !== null ? `until ${formatDate(endAt * 1000)}` : 'until you cancel it'}, without asking again. Each
+          payment counts toward the spending limit if {ticker} counts{fee ? `, and costs a fee of ${fee}` : ''}.
         </Text>
       ),
       confirmLabel: 'Set up',
@@ -273,7 +279,7 @@ function NewRecurringPayment({
       <Form.Group controlId="recurring-amount">
         <Form.Label>Amount each time</Form.Label>
         <AmountInput id="recurring-amount" value={amount} onChange={setAmount} unit={ticker} disabled={locked} />
-        {amountError && <Form.Text className="mf-error-text">{amountError}</Form.Text>}
+        {amountError && <FieldError>{amountError}</FieldError>}
       </Form.Group>
       {people.length > 0 && (
         <Form.Group controlId="recurring-payee">
@@ -307,7 +313,7 @@ function NewRecurringPayment({
             onChange={value => setAddress(value.trim())}
             disabled={locked}
           />
-          {toError && <Form.Text className="mf-error-text">{toError}</Form.Text>}
+          {toError && <FieldError>{toError}</FieldError>}
         </Form.Group>
       )}
       {payee !== OTHER && people.length > 0 && toError && <Form.Text className="mf-error-text">{toError}</Form.Text>}
@@ -327,21 +333,16 @@ function NewRecurringPayment({
             disabled={locked}
           />
         </div>
-        {intervalError && <Form.Text className="mf-error-text">{intervalError}</Form.Text>}
+        {intervalError && <FieldError>{intervalError}</FieldError>}
       </Form.Group>
       <Form.Group controlId="recurring-start">
-        <Form.Label>First payment (optional)</Form.Label>
+        <FieldLabel help="Leave empty to pay now.">First payment (optional)</FieldLabel>
         <Input id="recurring-start" type="date" value={startDay} onChange={setStartDay} disabled={locked} />
-        <Form.Text>Leave empty to pay the first one now.</Form.Text>
       </Form.Group>
       <Form.Group controlId="recurring-end">
-        <Form.Label>Last payment (optional)</Form.Label>
+        <FieldLabel help="Leave empty to pay until you cancel.">Last payment (optional)</FieldLabel>
         <Input id="recurring-end" type="date" value={endDay} onChange={setEndDay} disabled={locked} />
-        {endError ? (
-          <Form.Text className="mf-error-text">{endError}</Form.Text>
-        ) : (
-          <Form.Text>Leave empty to keep paying until you cancel it.</Form.Text>
-        )}
+        {endError && <FieldError>{endError}</FieldError>}
       </Form.Group>
       <TxButton tx={tx} txKey={CREATE_KEY} type="submit" appearance="primary" disabled={locked || !valid}>
         Set up payment

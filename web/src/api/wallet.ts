@@ -1,8 +1,8 @@
 import { ApiError, apiFetch } from './client'
 import type {
-  Agents,
   AgentStop,
   AgentTxConfirmResult,
+  Agents,
   Allowlist,
   CustomToken,
   DeployConfirmResult,
@@ -15,6 +15,7 @@ import type {
   RecurringTxConfirmResult,
   SessionTxConfirmResult,
   Token,
+  VoidContactsResult,
   WalletState,
 } from './types'
 
@@ -133,7 +134,17 @@ function ownerActionRequest(chainId: number, action: OwnerAction): [string, obje
             '/api/wallet/agents/prepare',
             { chain_id, action: action.action, agent: action.agent, limit_usd: action.limitUsd, days: action.days },
           ]
+    case 'void-contacts':
+      return ['/api/contacts/void/prepare', { chain_id }]
   }
+}
+
+/** confirmOwnerTx for voiding the wallet's contact signatures: it goes to the spending-limit module. */
+export function confirmVoidContactsTx(body: { chain_id: number; tx_hash: string }, signal?: AbortSignal) {
+  return apiFetch<VoidContactsResult | { status: 'pending'; tx_hash: string; seen: boolean }>(
+    '/api/contacts/void/confirm',
+    { method: 'POST', body, signal },
+  )
 }
 
 /**

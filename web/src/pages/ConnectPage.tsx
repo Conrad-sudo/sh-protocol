@@ -123,12 +123,11 @@ function Allow({ id }: { id: string }) {
         <li>prepare payments, swaps and liquidity changes for you</li>
       </ul>
       <Message type="info" showIcon className="mf-settings-note">
-        <strong>It can't send anything by itself.</strong> Every transaction waits for your passkey on Mitfah's own
-        page. You can disconnect {app.name} in Controls at any time.
+        <strong>It can't send anything by itself.</strong> Every transaction waits for your passkey. Disconnect it in
+        Controls any time.
       </Message>
       <Message type="warning" showIcon className="mf-settings-note">
-        Only allow this if you started it yourself in {app.name} just now. If someone sent you the link that brought
-        you here, choose Deny.
+        Only allow this if you just started it in {app.name}. If someone sent you this link, choose Deny.
       </Message>
       {answer.isError && (
         <Message type="error" showIcon className="mf-settings-note">
