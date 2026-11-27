@@ -135,3 +135,25 @@ Automated payment services
 Enterprise model -API access, MCP ,payroll
 Send to me-sends to your owner wallet
 Metering all tokens should be option, even native tokens
+
+
+
+Connecting to an mcp
+
+using the mcp to build trade bots that give updates via telegram
+users can launch a trade bot that they give access to a passkey they set the rules which are enforced on-chain , the trade bot acts on their behalf and -this could be a sepearate product
+
+Right now giving the personal access token to an agent will allow an agent to connect to /mcp with it.
+
+an agent can read the wallet and prepare trades.
+
+An agent can buy a token the limit doesn't count, but can't sell it.
+
+moving the erc8004-related functions to a seperate module
+
+
+so here are my decisions:
+A. your pick
+B.your pick
+C.  your pick
+D. Not 
